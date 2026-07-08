@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { Toolbar } from './Toolbar';
 import { CanvasView } from './CanvasView';
+import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
 import { useAppStore } from '../store/appStore';
 
@@ -30,9 +31,7 @@ export function App() {
       <Toolbar />
       <div className="main-row">
         <CanvasView />
-        <div className="inspector">
-          <div className="inspector-placeholder">Select a node in the graph below.</div>
-        </div>
+        <InspectorPanel />
       </div>
       <NodeEditorPanel />
     </div>

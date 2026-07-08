@@ -48,11 +48,11 @@ try {
   const status = await page.textContent('[data-testid="ipc-status"]');
   check('toolbar shows version info from IPC', /electron \d/.test(status ?? ''), status);
 
-  // React Flow renders the placeholder chain
+  // React Flow renders the default graph (exact shape is ms4's concern)
   const nodeCount = await page.locator('.react-flow__node').count();
-  check('React Flow renders 2 nodes', nodeCount === 2, nodeCount);
+  check('React Flow renders an input→…→output chain', nodeCount >= 2, nodeCount);
   const edgeCount = await page.locator('.react-flow__edge').count();
-  check('React Flow renders 1 edge', edgeCount === 1, edgeCount);
+  check('React Flow renders its edges', edgeCount >= 1 && edgeCount === nodeCount - 1, { nodeCount, edgeCount });
 
   // layout shell
   check('canvas view present', (await page.locator('.canvas-view').count()) === 1);

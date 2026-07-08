@@ -1,32 +1,50 @@
-import { ReactFlow, Background, type Node, type Edge } from '@xyflow/react';
+import { useCallback } from 'react';
+import {
+  ReactFlow,
+  Background,
+  type Node,
+  type Edge,
+  type NodeMouseHandler,
+  type OnNodeDrag,
+} from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
+import { OPS, isOpKind } from '../engine/graph/ops';
 
-// Placeholder graph until GraphDoc lands (milestone 3+): a bare input→output
-// chain laid out the same way the real fallback layout will position nodes.
+/** Node editor rendering the GraphDoc; selection feeds the inspector. */
 export function NodeEditorPanel() {
   const fileName = useAppStore((s) => s.fileName);
+  const graph = useAppStore((s) => s.graph);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
+  const selectNode = useAppStore((s) => s.selectNode);
+  const moveNode = useAppStore((s) => s.moveNode);
 
-  const nodes: Node[] = [
-    {
-      id: 'in',
-      type: 'input',
-      data: { label: fileName ? `input — ${fileName}` : 'input' },
-      position: { x: 40, y: 60 },
-      sourcePosition: 'right',
-      deletable: false,
-    } as Node,
-    {
-      id: 'out',
-      type: 'output',
-      data: { label: 'output (sRGB)' },
-      position: { x: 260, y: 60 },
-      targetPosition: 'left',
-      deletable: false,
-    } as Node,
-  ];
+  const nodes: Node[] = graph.nodes.map((n) => ({
+    id: n.id,
+    type: n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : 'default',
+    data: {
+      label:
+        n.kind === 'input'
+          ? fileName
+            ? `input — ${fileName}`
+            : 'input'
+          : n.kind === 'output'
+            ? 'output (sRGB)'
+            : isOpKind(n.kind)
+              ? OPS[n.kind].label.toLowerCase()
+              : n.kind,
+    },
+    position: n.position,
+    selected: n.id === selectedNodeId,
+    sourcePosition: 'right',
+    targetPosition: 'left',
+    deletable: false,
+  })) as Node[];
 
-  const edges: Edge[] = [{ id: 'in-out', source: 'in', target: 'out' }];
+  const edges: Edge[] = graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+
+  const onNodeClick: NodeMouseHandler = useCallback((_ev, node) => selectNode(node.id), [selectNode]);
+  const onNodeDragStop: OnNodeDrag = useCallback((_ev, node) => moveNode(node.id, node.position), [moveNode]);
 
   return (
     <div className="node-editor">
@@ -37,6 +55,9 @@ export function NodeEditorPanel() {
         fitView
         fitViewOptions={{ maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
+        onNodeClick={onNodeClick}
+        onNodeDragStop={onNodeDragStop}
+        onPaneClick={() => selectNode(null)}
       >
         <Background gap={16} />
       </ReactFlow>

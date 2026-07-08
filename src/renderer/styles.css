@@ -119,6 +119,34 @@ button:disabled {
   line-height: 1.6;
 }
 
+.inspector-title {
+  padding: 12px 14px 6px;
+  font-weight: 600;
+  border-bottom: 1px solid #333;
+  margin-bottom: 8px;
+}
+
+.inspector-param {
+  display: block;
+  padding: 6px 14px;
+}
+
+.inspector-param-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #aaa;
+}
+
+.inspector-param-value {
+  color: #ddd;
+  font-variant-numeric: tabular-nums;
+}
+
+.inspector-param input[type='range'] {
+  width: 100%;
+}
+
 .node-editor {
   flex: 0 0 260px;
   background: #1a1a1a;

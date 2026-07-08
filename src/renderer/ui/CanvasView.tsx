@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
-import { PreviewRenderer } from '../engine/gpu/previewRenderer';
+import { GraphRenderer } from '../engine/gpu/graphRenderer';
+import { opChain, type GraphDoc } from '../engine/graph/graphDoc';
+import { OPS } from '../engine/graph/ops';
 
 declare global {
   interface Window {
@@ -11,23 +13,27 @@ declare global {
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
+      graphState(): GraphDoc;
+      updateNodeParam(nodeId: string, key: string, value: number): void;
     };
   }
 }
 
 /**
- * Preview area. Milestone 3: the linear preview is rendered by WebGPU
- * (rgba16float texture + exact sRGB encode in the fragment shader). The
- * verify harness compares the GPU readback against cpuReferenceMean(), which
- * runs the same encode on the CPU via engine/color/srgb.ts.
+ * Preview area. Milestone 4: the GraphDoc op chain runs as WebGPU passes over
+ * the linear preview, ending in the exact sRGB encode. The verify harness
+ * compares the GPU readback against cpuReferenceMean(), which executes the
+ * same chain on the CPU via the op registry's reference implementations.
  */
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const rendererRef = useRef<Promise<PreviewRenderer> | null>(null);
+  const rendererRef = useRef<Promise<GraphRenderer> | null>(null);
+  const lastImageRef = useRef<unknown>(null);
   const [gpuError, setGpuError] = useState<string | null>(null);
   const imageStatus = useAppStore((s) => s.imageStatus);
   const image = useAppStore((s) => s.image);
   const imageError = useAppStore((s) => s.imageError);
+  const graph = useAppStore((s) => s.graph);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -35,12 +41,16 @@ export function CanvasView() {
     let cancelled = false;
     void (async () => {
       try {
-        rendererRef.current ??= PreviewRenderer.create(canvas);
+        rendererRef.current ??= GraphRenderer.create(canvas);
         const renderer = await rendererRef.current;
         if (cancelled) return;
-        canvas.width = image.width;
-        canvas.height = image.height;
-        renderer.setImage(image);
+        if (lastImageRef.current !== image) {
+          canvas.width = image.width;
+          canvas.height = image.height;
+          renderer.setImage(image);
+          lastImageRef.current = image;
+        }
+        renderer.setGraph(opChain(graph));
         renderer.render();
         setGpuError(null);
       } catch (err) {
@@ -50,7 +60,7 @@ export function CanvasView() {
     return () => {
       cancelled = true;
     };
-  }, [image]);
+  }, [image, graph]);
 
   useEffect(() => {
     window.__debug = {
@@ -78,19 +88,28 @@ export function CanvasView() {
         return renderer.readbackMean();
       },
       cpuReferenceMean() {
-        const image = useAppStore.getState().image;
-        if (!image) return null;
-        const { data, width, height } = image;
+        const s = useAppStore.getState();
+        if (!s.image) return null;
+        const { data, width, height } = s.image;
+        const chain = opChain(s.graph);
         const n = width * height;
         let r = 0;
         let g = 0;
         let b = 0;
         for (let i = 0; i < n; i++) {
-          r += srgbEncode(data[i * 4]!);
-          g += srgbEncode(data[i * 4 + 1]!);
-          b += srgbEncode(data[i * 4 + 2]!);
+          let px: [number, number, number] = [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!];
+          for (const op of chain) px = OPS[op.kind].apply(px, op.uniform);
+          r += srgbEncode(px[0]);
+          g += srgbEncode(px[1]);
+          b += srgbEncode(px[2]);
         }
         return { r: r / n, g: g / n, b: b / n };
+      },
+      graphState() {
+        return useAppStore.getState().graph;
+      },
+      updateNodeParam(nodeId, key, value) {
+        useAppStore.getState().updateNodeParam(nodeId, key, value);
       },
     };
     return () => {

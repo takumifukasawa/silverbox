@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
+import { defaultGraphDoc, type GraphDoc } from '../engine/graph/graphDoc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -10,8 +11,13 @@ interface AppState {
   image: PreparedImage | null;
   fileName: string | null;
   imageError: string | null;
+  graph: GraphDoc;
+  selectedNodeId: string | null;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
+  selectNode(id: string | null): void;
+  updateNodeParam(nodeId: string, key: string, value: number): void;
+  moveNode(nodeId: string, position: { x: number; y: number }): void;
 }
 
 export function isJpegFileName(name: string): boolean {
@@ -23,6 +29,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   image: null,
   fileName: null,
   imageError: null,
+  graph: defaultGraphDoc(),
+  selectedNodeId: null,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -46,5 +54,29 @@ export const useAppStore = create<AppState>((set, get) => ({
     const result = await window.silverbox.openImageDialog();
     if (result.canceled) return;
     await get().openImageByPath(result.path);
+  },
+
+  selectNode(id) {
+    set({ selectedNodeId: id });
+  },
+
+  updateNodeParam(nodeId, key, value) {
+    set((s) => ({
+      graph: {
+        ...s.graph,
+        nodes: s.graph.nodes.map((n) =>
+          n.id === nodeId ? { ...n, params: { ...n.params, [key]: value } } : n
+        ),
+      },
+    }));
+  },
+
+  moveNode(nodeId, position) {
+    set((s) => ({
+      graph: {
+        ...s.graph,
+        nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
+      },
+    }));
   },
 }));
