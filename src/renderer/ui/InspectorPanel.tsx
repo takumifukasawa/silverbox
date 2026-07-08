@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import {
+  BLEND_KIND,
+  BLEND_PARAM_DEFS,
   CUSTOM_KIND,
   CUSTOM_PARAM_DEFS,
   DEFAULT_CUSTOM_CODE,
@@ -94,6 +96,16 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
         <div className="inspector-title">Custom (WGSL)</div>
         <CustomEditor node={node} />
         {CUSTOM_PARAM_DEFS.map((p) => (
+          <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
+        ))}
+      </>
+    );
+  }
+  if (node.kind === BLEND_KIND) {
+    return (
+      <>
+        <div className="inspector-title">Blend</div>
+        {BLEND_PARAM_DEFS.map((p) => (
           <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
         ))}
       </>

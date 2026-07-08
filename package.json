@@ -22,7 +22,8 @@
     "verify:ms10": "node scripts/verify-ms10-histogram.mjs",
     "verify:ms11": "node scripts/verify-ms11-undo.mjs",
     "verify:ms12": "node scripts/verify-ms12-tonecurve.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12"
+    "verify:ms13": "node scripts/verify-ms13-branch.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

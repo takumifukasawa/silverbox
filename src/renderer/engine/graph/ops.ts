@@ -174,3 +174,18 @@ export const DEFAULT_CUSTOM_CODE = `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
 export function packCustomUniform(params: Record<string, number>): [number, number, number, number] {
   return [params.p0 ?? 0, params.p1 ?? 0, params.p2 ?? 0, params.p3 ?? 0];
 }
+
+/**
+ * Blend node: two inputs (a = base, b = overlay), output = mix(a, b, amount)
+ * in linear space. Like custom, it lives outside OPS — it is the one node
+ * with a different execution shape (two sources), handled by the plan.
+ */
+export const BLEND_KIND = 'blend';
+
+export const BLEND_PARAM_DEFS: OpParamDef[] = [
+  { key: 'amount', label: 'Mix (a → b)', min: 0, max: 1, step: 0.01, default: 0.5 },
+];
+
+export function packBlendUniform(params: Record<string, number>): [number, number, number, number] {
+  return [params.amount ?? 0.5, 0, 0, 0];
+}

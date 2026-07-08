@@ -3,16 +3,17 @@ import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
 import {
+  buildPlan,
   defaultGraphDoc,
   defaultParams,
   nextId,
-  opChain,
   parseGraphDoc,
   serializeGraphDoc,
+  type AddableKind,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
 import type { GraphRenderer, HistogramData } from '../engine/gpu/graphRenderer';
-import { CUSTOM_KIND, DEFAULT_CUSTOM_CODE, type OpKind } from '../engine/graph/ops';
+import { BLEND_KIND, CUSTOM_KIND, DEFAULT_CUSTOM_CODE } from '../engine/graph/ops';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -55,8 +56,10 @@ interface AppState {
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
   moveNode(nodeId: string, position: { x: number; y: number }): void;
-  addOpNode(kind: OpKind | typeof CUSTOM_KIND): void;
+  addOpNode(kind: AddableKind): void;
   removeOpNode(nodeId: string): void;
+  /** Rewire an input: replaces whatever currently feeds (target, handle). */
+  connectEdge(source: string, target: string, targetHandle?: 'a' | 'b'): void;
   updateNodeCode(nodeId: string, code: string): void;
   setShaderErrors(errors: Record<string, string>): void;
   setRenderer(renderer: GraphRenderer): void;
@@ -164,7 +167,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   // Insert before the output node; the new node takes the output's spot and
-  // the output shifts right so the chain stays readable.
+  // the output shifts right so the chain stays readable. A blend node gets
+  // both inputs from the previous source (a self-blend is an identity) —
+  // rewiring 'b' onto another branch is what makes it useful.
   addOpNode(kind) {
     set((s) => {
       const g = s.graph;
@@ -182,10 +187,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       const nodes = g.nodes
         .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
         .concat(node);
-      const e1 = { id: nextId({ ...g, nodes }, 'e'), source: inEdge.source, target: id };
-      const e2 = { id: nextId({ ...g, nodes, edges: [...g.edges, e1] }, 'e'), source: id, target: out.id };
-      const edges = g.edges.filter((e) => e !== inEdge).concat(e1, e2);
-      return { ...pushHistory(s, null), graph: { ...g, nodes, edges }, graphDirty: true, selectedNodeId: id };
+      let scratch: GraphDoc = { ...g, nodes, edges: g.edges.filter((e) => e !== inEdge) };
+      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b') => {
+        const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+        scratch = { ...scratch, edges: [...scratch.edges, edge] };
+      };
+      if (kind === BLEND_KIND) {
+        addEdge(inEdge.source, id, 'a');
+        addEdge(inEdge.source, id, 'b');
+      } else {
+        addEdge(inEdge.source, id);
+      }
+      addEdge(id, out.id);
+      return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: id };
     });
   },
 
@@ -194,16 +208,56 @@ export const useAppStore = create<AppState>((set, get) => ({
       const g = s.graph;
       const node = g.nodes.find((n) => n.id === nodeId);
       if (!node || node.kind === 'input' || node.kind === 'output') return {};
-      const inEdge = g.edges.find((e) => e.target === nodeId);
-      const outEdge = g.edges.find((e) => e.source === nodeId);
-      const edges = g.edges.filter((e) => e !== inEdge && e !== outEdge);
-      if (inEdge && outEdge) edges.push({ id: nextId(g, 'e'), source: inEdge.source, target: outEdge.target });
+      // bypass: route the node's input (blend: its 'a' input) to every target
+      // it fed, preserving handles
+      const incoming = g.edges.filter((e) => e.target === nodeId);
+      const outgoing = g.edges.filter((e) => e.source === nodeId);
+      const bypass =
+        node.kind === BLEND_KIND ? incoming.find((e) => e.targetHandle === 'a')?.source : incoming[0]?.source;
+      let scratch: GraphDoc = {
+        ...g,
+        nodes: g.nodes.filter((n) => n.id !== nodeId),
+        edges: g.edges.filter((e) => e.source !== nodeId && e.target !== nodeId),
+      };
+      if (bypass) {
+        for (const e of outgoing) {
+          const edge = {
+            id: nextId(scratch, 'e'),
+            source: bypass,
+            target: e.target,
+            ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
+          };
+          scratch = { ...scratch, edges: [...scratch.edges, edge] };
+        }
+      }
       return {
         ...pushHistory(s, null),
-        graph: { ...g, nodes: g.nodes.filter((n) => n.id !== nodeId), edges },
+        graph: scratch,
         graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
       };
+    });
+  },
+
+  connectEdge(source, target, targetHandle) {
+    set((s) => {
+      const g = s.graph;
+      const edges = g.edges.filter(
+        (e) => !(e.target === target && (e.targetHandle ?? null) === (targetHandle ?? null))
+      );
+      const edge = {
+        id: nextId({ ...g, edges }, 'e'),
+        source,
+        target,
+        ...(targetHandle ? { targetHandle } : {}),
+      };
+      const graph = { ...g, edges: [...edges, edge] };
+      try {
+        buildPlan(graph); // reject cycles / invalid wiring outright
+      } catch {
+        return {};
+      }
+      return { ...pushHistory(s, null), graph, graphDirty: true };
     });
   },
 
@@ -278,7 +332,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const bytes = await window.silverbox.readFile(imagePath);
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
-      const { data, width, height } = await renderer.renderToPixels(full, opChain(graph));
+      const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph));
       const canvas = new OffscreenCanvas(width, height);
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable');

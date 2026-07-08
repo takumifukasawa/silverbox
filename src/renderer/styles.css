@@ -264,6 +264,30 @@ button:disabled {
   gap: 6px;
 }
 
+.blend-node {
+  position: relative;
+  background: #2d2d3d;
+  border: 1px solid #556;
+  border-radius: 4px;
+  padding: 10px 12px 10px 20px;
+  font-size: 12px;
+  min-width: 90px;
+  text-align: center;
+}
+
+.blend-node.selected {
+  border-color: #8ab4f8;
+}
+
+.blend-node-ports {
+  position: absolute;
+  left: 5px;
+  top: 4px;
+  font-size: 9px;
+  line-height: 1.7;
+  color: #889;
+}
+
 .node-editor-toolbar select {
   background: #3a3a3a;
   color: #e0e0e0;

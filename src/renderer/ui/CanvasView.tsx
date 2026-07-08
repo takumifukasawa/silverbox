@@ -2,8 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
-import { opChain, type GraphDoc } from '../engine/graph/graphDoc';
-import { OPS } from '../engine/graph/ops';
+import { buildPlan, cpuEvalPlan, type GraphDoc } from '../engine/graph/graphDoc';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 
 declare global {
@@ -69,7 +68,7 @@ export function CanvasView() {
           renderer.setImage(image);
           lastImageRef.current = image;
         }
-        const shaderErrors = await renderer.setGraph(opChain(graph));
+        const shaderErrors = await renderer.setGraph(buildPlan(graph));
         if (cancelled) return;
         useAppStore
           .getState()
@@ -121,18 +120,15 @@ export function CanvasView() {
         const s = useAppStore.getState();
         if (!s.image) return null;
         const { data, width, height } = s.image;
-        const chain = opChain(s.graph);
+        const plan = buildPlan(s.graph);
         // custom WGSL has no CPU mirror; the harness checks those by hand
-        if (chain.some((op) => op.type === 'custom')) return null;
+        if (plan.steps.some((op) => op.type === 'custom')) return null;
         const n = width * height;
         let r = 0;
         let g = 0;
         let b = 0;
         for (let i = 0; i < n; i++) {
-          let px: [number, number, number] = [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!];
-          for (const op of chain) {
-            if (op.type === 'builtin') px = OPS[op.kind].apply(px, op.uniform);
-          }
+          const px = cpuEvalPlan(plan, [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!]);
           r += srgbEncode(px[0]);
           g += srgbEncode(px[1]);
           b += srgbEncode(px[2]);

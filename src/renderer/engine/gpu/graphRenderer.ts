@@ -1,17 +1,17 @@
 /**
- * WebGPU graph renderer (milestone 4, grown from the milestone-3 preview
- * renderer).
+ * WebGPU graph renderer (milestone 4, DAG execution since milestone 13).
  *
  * The linear RGBA preview uploads once per image as an rgba16float texture.
- * Each op in the GraphDoc chain runs as one fullscreen render pass compiled
- * from its registry WGSL (ping-ponging between two rgba16float targets), and
- * a final pass applies the exact piecewise sRGB encode — the same curve as
+ * The RenderPlan executes step by step — ops and custom nodes as one-input
+ * fullscreen passes compiled from registry/user WGSL, blend as a two-input
+ * mix — each writing its own rgba16float texture so outputs can fan out.
+ * A final pass applies the exact piecewise sRGB encode — the same curve as
  * engine/color/srgb.ts — into the canvas. readbackMean() executes the whole
- * chain again into an offscreen rgba8unorm target and averages on the CPU,
+ * plan again into an offscreen rgba8unorm target and averages on the CPU,
  * so it never depends on a prior render() call.
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
-import type { ChainOp } from '../graph/graphDoc';
+import type { RenderPlan } from '../graph/graphDoc';
 import { DEFAULT_CUSTOM_CODE, OPS, type OpKind } from '../graph/ops';
 
 const FULLSCREEN_VS = /* wgsl */ `
@@ -49,6 +49,19 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+const BLEND_SHADER = /* wgsl */ `
+@group(0) @binding(0) var srcA: texture_2d<f32>;
+@group(0) @binding(1) var srcB: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: vec4f;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let a = textureLoad(srcA, vec2i(pos.xy), 0);
+  let b = textureLoad(srcB, vec2i(pos.xy), 0);
+  return vec4f(mix(a.rgb, b.rgb, params.x), 1.0);
+}
+`;
+
 let devicePromise: Promise<GPUDevice> | null = null;
 
 function getGpuDevice(): Promise<GPUDevice> {
@@ -61,9 +74,12 @@ function getGpuDevice(): Promise<GPUDevice> {
   return devicePromise;
 }
 
-interface ChainStep {
+interface ExecStep {
   pipeline: GPURenderPipeline;
   uniformBuffer: GPUBuffer;
+  src: number;
+  /** Present only on blend steps (second input). */
+  srcB?: number;
 }
 
 export interface ShaderError {
@@ -73,8 +89,10 @@ export interface ShaderError {
 
 export class GraphRenderer {
   private source: GPUTexture | null = null;
-  private pingPong: [GPUTexture, GPUTexture] | null = null;
-  private chain: ChainStep[] = [];
+  private stepTextures: GPUTexture[] = [];
+  private steps: ExecStep[] = [];
+  private outputIndex = -1;
+  private blendPipelineCache: GPURenderPipeline | null = null;
   private opPipelines = new Map<OpKind, GPURenderPipeline>();
   /** Custom-code pipelines keyed by source; null = failed to compile. */
   private customPipelines = new Map<string, Promise<GPURenderPipeline>>();
@@ -169,38 +187,57 @@ export class GraphRenderer {
       { bytesPerRow: width * 8, rowsPerImage: height },
       [width, height]
     );
-    if (this.pingPong) for (const t of this.pingPong) t.destroy();
-    const makeTarget = () =>
-      this.device.createTexture({
-        size: [width, height],
-        format: 'rgba16float',
-        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-      });
-    this.pingPong = [makeTarget(), makeTarget()];
+    for (const t of this.stepTextures) t.destroy();
+    this.stepTextures = [];
     this.width = width;
     this.height = height;
   }
 
+  private blendPipeline(): GPURenderPipeline {
+    if (!this.blendPipelineCache) {
+      const module = this.device.createShaderModule({ code: BLEND_SHADER });
+      this.blendPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.blendPipelineCache;
+  }
+
+  /** One rgba16float target per plan step so outputs can fan out. */
+  private ensureStepTextures(count: number): void {
+    while (this.stepTextures.length < count) {
+      this.stepTextures.push(
+        this.device.createTexture({
+          size: [this.width, this.height],
+          format: 'rgba16float',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        })
+      );
+    }
+  }
+
   /**
-   * Set the op chain to execute. Custom code compiles asynchronously; a node
-   * whose code fails to compile falls back to the identity pass and is
+   * Set the render plan to execute. Custom code compiles asynchronously; a
+   * node whose code fails to compile falls back to the identity pass and is
    * reported in the returned list. Only the newest call wins if several
    * overlap.
    */
-  setGraph(chain: ChainOp[]): Promise<ShaderError[]> {
-    const promise = this.applyGraph(chain);
+  setGraph(plan: RenderPlan): Promise<ShaderError[]> {
+    const promise = this.applyGraph(plan);
     this.graphReady = promise.catch(() => {});
     return promise;
   }
 
-  private async applyGraph(chain: ChainOp[]): Promise<ShaderError[]> {
-    const gen = ++this.setGraphGen;
-    const errors: ShaderError[] = [];
-    const steps = await Promise.all(
-      chain.map(async (op): Promise<ChainStep> => {
+  private async resolveSteps(plan: RenderPlan, errors: ShaderError[]): Promise<ExecStep[]> {
+    return Promise.all(
+      plan.steps.map(async (op): Promise<ExecStep> => {
         let pipeline: GPURenderPipeline;
         if (op.type === 'builtin') {
           pipeline = this.opPipeline(op.kind);
+        } else if (op.type === 'blend') {
+          pipeline = this.blendPipeline();
         } else {
           try {
             pipeline = await this.customPipeline(op.code);
@@ -214,15 +251,27 @@ export class GraphRenderer {
           usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
         this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
-        return { pipeline, uniformBuffer };
+        return {
+          pipeline,
+          uniformBuffer,
+          src: op.type === 'blend' ? op.srcA : op.src,
+          ...(op.type === 'blend' ? { srcB: op.srcB } : {}),
+        };
       })
     );
+  }
+
+  private async applyGraph(plan: RenderPlan): Promise<ShaderError[]> {
+    const gen = ++this.setGraphGen;
+    const errors: ShaderError[] = [];
+    const steps = await this.resolveSteps(plan, errors);
     if (gen !== this.setGraphGen) {
       for (const step of steps) step.uniformBuffer.destroy();
       return errors;
     }
-    for (const step of this.chain) step.uniformBuffer.destroy();
-    this.chain = steps;
+    for (const step of this.steps) step.uniformBuffer.destroy();
+    this.steps = steps;
+    this.outputIndex = plan.output;
     return errors;
   }
 
@@ -241,18 +290,45 @@ export class GraphRenderer {
     pass.end();
   }
 
-  /** Record the op chain; returns the view holding the final linear result. */
-  private addChainPasses(encoder: GPUCommandEncoder): GPUTextureView {
-    let current = this.source!.createView();
-    this.chain.forEach((step, i) => {
-      const target = this.pingPong![i % 2]!.createView();
-      this.addPass(encoder, target, step.pipeline, [
-        { binding: 0, resource: current },
-        { binding: 1, resource: { buffer: step.uniformBuffer } },
-      ]);
-      current = target;
+  /** Record a step's passes into per-step textures; shared by all consumers. */
+  private static recordSteps(
+    addPass: GraphRenderer['addPass'],
+    steps: ExecStep[],
+    outputIndex: number,
+    sourceView: GPUTextureView,
+    stepTextures: GPUTexture[],
+    encoder: GPUCommandEncoder
+  ): GPUTextureView {
+    const views = stepTextures.map((t) => t.createView());
+    const at = (i: number) => (i < 0 ? sourceView : views[i]!);
+    steps.forEach((step, i) => {
+      const entries: GPUBindGroupEntry[] =
+        step.srcB !== undefined
+          ? [
+              { binding: 0, resource: at(step.src) },
+              { binding: 1, resource: at(step.srcB) },
+              { binding: 2, resource: { buffer: step.uniformBuffer } },
+            ]
+          : [
+              { binding: 0, resource: at(step.src) },
+              { binding: 1, resource: { buffer: step.uniformBuffer } },
+            ];
+      addPass(encoder, views[i]!, step.pipeline, entries);
     });
-    return current;
+    return at(outputIndex);
+  }
+
+  /** Record the plan; returns the view holding the final linear result. */
+  private addChainPasses(encoder: GPUCommandEncoder): GPUTextureView {
+    this.ensureStepTextures(this.steps.length);
+    return GraphRenderer.recordSteps(
+      this.addPass.bind(this),
+      this.steps,
+      this.outputIndex,
+      this.source!.createView(),
+      this.stepTextures,
+      encoder
+    );
   }
 
   /** Execute the chain and draw to the canvas (canvas must match the image size). */
@@ -273,7 +349,7 @@ export class GraphRenderer {
    */
   async renderToPixels(
     image: PreparedImage,
-    chain: ChainOp[]
+    plan: RenderPlan
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     const { device } = this;
     const { data, width, height } = image;
@@ -295,53 +371,27 @@ export class GraphRenderer {
       return t;
     };
 
-    const errors: ShaderError[] = [];
-    const steps = await Promise.all(
-      chain.map(async (op) => {
-        let pipeline: GPURenderPipeline;
-        if (op.type === 'builtin') {
-          pipeline = this.opPipeline(op.kind);
-        } else {
-          try {
-            pipeline = await this.customPipeline(op.code);
-          } catch (err) {
-            errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
-            pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
-          }
-        }
-        const uniformBuffer = device.createBuffer({
-          size: 16,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
-        return { pipeline, uniformBuffer };
-      })
-    );
-
+    const steps = await this.resolveSteps(plan, []);
     try {
       const encoder = device.createCommandEncoder();
-      let current = source.createView();
-      if (steps.length > 0) {
-        const pingPong = [
-          makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT),
-          makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT),
-        ];
-        steps.forEach((step, i) => {
-          const target = pingPong[i % 2]!.createView();
-          this.addPass(encoder, target, step.pipeline, [
-            { binding: 0, resource: current },
-            { binding: 1, resource: { buffer: step.uniformBuffer } },
-          ]);
-          current = target;
-        });
-      }
+      const stepTextures = plan.steps.map(() =>
+        makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
+      );
+      const linear = GraphRenderer.recordSteps(
+        this.addPass.bind(this),
+        steps,
+        plan.output,
+        source.createView(),
+        stepTextures,
+        encoder
+      );
       const target = makeTarget('rgba8unorm', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
       const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
       const buffer = device.createBuffer({
         size: bytesPerRow * height,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: current }]);
+      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
       encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
       device.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ);
