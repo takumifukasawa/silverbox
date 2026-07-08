@@ -1,0 +1,19 @@
+{
+  "name": "silverbox",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Node-based, non-destructive RAW/JPEG development app with WGSL custom looks and git-native (JSON) graph documents.",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "verify:ms0": "node scripts/verify-ms0-decode.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "playwright": "^1.61.1",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "libraw-wasm": "1.6.0"
+  }
+}
