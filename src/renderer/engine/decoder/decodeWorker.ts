@@ -1,0 +1,209 @@
+/**
+ * Image preparation worker: file bytes → linear RGBA preview.
+ *
+ * RAW goes through libraw-wasm (which runs its own nested worker); JPEG is
+ * decoded with createImageBitmap. Both paths then linearize (exact inverse
+ * sRGB via LUT), box-downsample to the preview long edge in linear space, and
+ * apply EXIF orientation once — downstream code never re-orients.
+ */
+import { LibrawDecoder } from './librawDecoder';
+import type { CameraColorInfo, CaptureInfo } from './RawDecoder';
+import { buildDecodeLut16, buildDecodeLut8 } from '../color/srgb';
+
+export interface DecodeRequest {
+  id: number;
+  kind: 'raw' | 'jpg';
+  bytes: ArrayBuffer;
+  previewLongEdge: number;
+}
+
+export interface PreparedImage {
+  /** Linear RGBA float pixels (alpha = 1), orientation already applied. */
+  data: Float32Array;
+  width: number;
+  height: number;
+  /** Decoded (full) dimensions before downsampling, after orientation. */
+  fullWidth: number;
+  fullHeight: number;
+  flip: number;
+  color?: CameraColorInfo;
+  capture?: CaptureInfo;
+  decodeMs: number;
+}
+
+export type DecodeResponse =
+  | { id: number; ok: true; result: PreparedImage }
+  | { id: number; ok: false; error: string };
+
+const lut16 = buildDecodeLut16();
+const lut8 = buildDecodeLut8();
+
+/** Interleaved RGB u16 (gamma) → linear RGBA f32. */
+function linearizeRgb16(src: Uint16Array, pixels: number): Float32Array {
+  const out = new Float32Array(pixels * 4);
+  for (let i = 0, o = 0; i < pixels; i++, o += 4) {
+    out[o] = lut16[src[i * 3]!]!;
+    out[o + 1] = lut16[src[i * 3 + 1]!]!;
+    out[o + 2] = lut16[src[i * 3 + 2]!]!;
+    out[o + 3] = 1;
+  }
+  return out;
+}
+
+/** RGBA u8 (sRGB) → linear RGBA f32. */
+function linearizeRgba8(src: Uint8ClampedArray, pixels: number): Float32Array {
+  const out = new Float32Array(pixels * 4);
+  for (let i = 0, o = 0; i < pixels; i++, o += 4) {
+    out[o] = lut8[src[o]!]!;
+    out[o + 1] = lut8[src[o + 1]!]!;
+    out[o + 2] = lut8[src[o + 2]!]!;
+    out[o + 3] = 1;
+  }
+  return out;
+}
+
+/** Box-downsample linear RGBA so the long edge becomes `longEdge` (no-op if smaller). */
+function downsampleBox(
+  src: Float32Array,
+  w: number,
+  h: number,
+  longEdge: number
+): { data: Float32Array; width: number; height: number } {
+  const long = Math.max(w, h);
+  if (long <= longEdge) return { data: src, width: w, height: h };
+  const scale = longEdge / long;
+  const ow = Math.max(1, Math.round(w * scale));
+  const oh = Math.max(1, Math.round(h * scale));
+  const out = new Float32Array(ow * oh * 4);
+  for (let oy = 0; oy < oh; oy++) {
+    const y0 = Math.floor((oy * h) / oh);
+    const y1 = Math.max(y0 + 1, Math.floor(((oy + 1) * h) / oh));
+    for (let ox = 0; ox < ow; ox++) {
+      const x0 = Math.floor((ox * w) / ow);
+      const x1 = Math.max(x0 + 1, Math.floor(((ox + 1) * w) / ow));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let y = y0; y < y1; y++) {
+        for (let x = x0; x < x1; x++) {
+          const s = (y * w + x) * 4;
+          r += src[s]!;
+          g += src[s + 1]!;
+          b += src[s + 2]!;
+        }
+      }
+      const n = (y1 - y0) * (x1 - x0);
+      const o = (oy * ow + ox) * 4;
+      out[o] = r / n;
+      out[o + 1] = g / n;
+      out[o + 2] = b / n;
+      out[o + 3] = 1;
+    }
+  }
+  return { data: out, width: ow, height: oh };
+}
+
+/**
+ * Apply libraw `flip` (EXIF orientation): 0 none, 3 = 180°, 5 = 90° CCW,
+ * 6 = 90° CW. Returns possibly swapped dimensions.
+ */
+function applyFlip(
+  src: Float32Array,
+  w: number,
+  h: number,
+  flip: number
+): { data: Float32Array; width: number; height: number } {
+  if (flip === 0) return { data: src, width: w, height: h };
+  const rotates = flip === 5 || flip === 6;
+  const ow = rotates ? h : w;
+  const oh = rotates ? w : h;
+  const out = new Float32Array(src.length);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let ox: number;
+      let oy: number;
+      if (flip === 3) {
+        ox = w - 1 - x;
+        oy = h - 1 - y;
+      } else if (flip === 6) {
+        // 90° clockwise
+        ox = h - 1 - y;
+        oy = x;
+      } else if (flip === 5) {
+        // 90° counter-clockwise
+        ox = y;
+        oy = w - 1 - x;
+      } else {
+        ox = x;
+        oy = y;
+      }
+      const s = (y * w + x) * 4;
+      const d = (oy * ow + ox) * 4;
+      out[d] = src[s]!;
+      out[d + 1] = src[s + 1]!;
+      out[d + 2] = src[s + 2]!;
+      out[d + 3] = 1;
+    }
+  }
+  return { data: out, width: ow, height: oh };
+}
+
+async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number): Promise<PreparedImage> {
+  const t0 = performance.now();
+  const decoded = await new LibrawDecoder().decode(new Uint8Array(bytes));
+  const pixels = decoded.width * decoded.height;
+  const linear = linearizeRgb16(decoded.data, pixels);
+  const scaled = downsampleBox(linear, decoded.width, decoded.height, previewLongEdge);
+  const oriented = applyFlip(scaled.data, scaled.width, scaled.height, decoded.flip);
+  const rotated = decoded.flip === 5 || decoded.flip === 6;
+  return {
+    data: oriented.data,
+    width: oriented.width,
+    height: oriented.height,
+    fullWidth: rotated ? decoded.height : decoded.width,
+    fullHeight: rotated ? decoded.width : decoded.height,
+    flip: decoded.flip,
+    color: decoded.color,
+    capture: decoded.capture,
+    decodeMs: Math.round(performance.now() - t0),
+  };
+}
+
+async function prepareJpeg(bytes: ArrayBuffer, previewLongEdge: number): Promise<PreparedImage> {
+  const t0 = performance.now();
+  // imageOrientation:'from-image' applies EXIF orientation during decode.
+  const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), {
+    imageOrientation: 'from-image',
+  });
+  const { width, height } = bitmap;
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const rgba = ctx.getImageData(0, 0, width, height).data;
+  const linear = linearizeRgba8(rgba, width * height);
+  const scaled = downsampleBox(linear, width, height, previewLongEdge);
+  return {
+    data: scaled.data,
+    width: scaled.width,
+    height: scaled.height,
+    fullWidth: width,
+    fullHeight: height,
+    flip: 0, // orientation already applied by createImageBitmap
+    decodeMs: Math.round(performance.now() - t0),
+  };
+}
+
+self.onmessage = async (ev: MessageEvent<DecodeRequest>) => {
+  const { id, kind, bytes, previewLongEdge } = ev.data;
+  try {
+    const result =
+      kind === 'raw' ? await prepareRaw(bytes, previewLongEdge) : await prepareJpeg(bytes, previewLongEdge);
+    const response: DecodeResponse = { id, ok: true, result };
+    (self as unknown as Worker).postMessage(response, [result.data.buffer]);
+  } catch (err) {
+    const response: DecodeResponse = { id, ok: false, error: err instanceof Error ? err.message : String(err) };
+    (self as unknown as Worker).postMessage(response);
+  }
+};

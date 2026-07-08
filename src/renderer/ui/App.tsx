@@ -1,38 +1,35 @@
-import { useEffect, useState } from 'react';
-import type { PingResult } from '../../../shared/ipc';
+import { useEffect } from 'react';
+import { Toolbar } from './Toolbar';
+import { CanvasView } from './CanvasView';
 import { NodeEditorPanel } from './NodeEditorPanel';
+import { useAppStore } from '../store/appStore';
+
+declare global {
+  interface Window {
+    /** Verify-harness hook: open an image bypassing the native dialog. */
+    __openImageByPath: (path: string) => Promise<void>;
+  }
+}
 
 export function App() {
-  const [ping, setPing] = useState<PingResult | null>(null);
-  const [pingError, setPingError] = useState<string | null>(null);
-
   useEffect(() => {
-    window.silverbox
-      .ping()
-      .then(setPing)
-      .catch((err: Error) => setPingError(err.message));
+    window.__openImageByPath = (path: string) => useAppStore.getState().openImageByPath(path);
+    const onKeyDown = (ev: KeyboardEvent) => {
+      const cmd = ev.metaKey || ev.ctrlKey;
+      if (cmd && !ev.altKey && !ev.shiftKey && ev.key === 'o') {
+        ev.preventDefault();
+        void useAppStore.getState().openImageViaDialog();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
   return (
     <div className="app-layout">
-      <div className="toolbar">
-        <button disabled>Open RAW…</button>
-        <div className="toolbar-info">
-          {pingError ? (
-            <span style={{ color: '#e06c75' }}>ipc error: {pingError}</span>
-          ) : ping ? (
-            <span data-testid="ipc-status">
-              electron {ping.versions.electron} / chrome {ping.versions.chrome} / node {ping.versions.node}
-            </span>
-          ) : (
-            <span>connecting…</span>
-          )}
-        </div>
-      </div>
+      <Toolbar />
       <div className="main-row">
-        <div className="canvas-view">
-          <div className="canvas-overlay">Open a RAW file to start</div>
-        </div>
+        <CanvasView />
         <div className="inspector">
           <div className="inspector-placeholder">Select a node in the graph below.</div>
         </div>

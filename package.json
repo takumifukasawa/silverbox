@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "verify:ms0": "node scripts/verify-ms0-decode.mjs",
     "verify:ms1": "node scripts/verify-ms1-app.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1"
+    "verify:ms2": "node scripts/verify-ms2-decode-display.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

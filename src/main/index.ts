@@ -1,9 +1,12 @@
-import { app, BrowserWindow, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, dirname } from 'node:path';
-import { IPC, type PingResult } from '../../shared/ipc';
+import { join, dirname, basename } from 'node:path';
+import { IPC, type OpenImageDialogResult, type PingResult } from '../../shared/ipc';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const IMAGE_EXTENSIONS = ['arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'orf', 'rw2', 'dng', 'pef', 'srw', 'x3f', 'jpg', 'jpeg'];
 
 function registerIpc(): void {
   ipcMain.handle(IPC.ping, (): PingResult => {
@@ -15,6 +18,22 @@ function registerIpc(): void {
         node: process.versions.node ?? '',
       },
     };
+  });
+
+  ipcMain.handle(IPC.openImageDialog, async (): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showOpenDialog({
+      properties: ['openFile'],
+      filters: [{ name: 'Images (RAW / JPEG)', extensions: IMAGE_EXTENSIONS }],
+    });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return { canceled: true };
+    return { canceled: false, path, fileName: basename(path) };
+  });
+
+  ipcMain.handle(IPC.readFile, async (_ev, path: unknown): Promise<ArrayBuffer> => {
+    if (typeof path !== 'string') throw new Error('readFile: path must be a string');
+    const buf = await readFile(path);
+    return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
   });
 }
 
