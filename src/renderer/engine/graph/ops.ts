@@ -6,7 +6,9 @@
  * sRGB curve.
  */
 
-export type OpKind = 'exposure' | 'whitebalance' | 'contrast' | 'saturation';
+import { srgbDecode, srgbEncode } from '../color/srgb';
+
+export type OpKind = 'exposure' | 'whitebalance' | 'contrast' | 'tonecurve' | 'saturation';
 
 export interface OpParamDef {
   key: string;
@@ -70,6 +72,53 @@ export const OPS: Record<OpKind, OpDef> = {
       return [curve(r), curve(g), curve(b)];
     },
   },
+  tonecurve: {
+    kind: 'tonecurve',
+    label: 'Tone Curve',
+    // Region offsets applied in sRGB-encoded space (encode → curve → decode)
+    // as raised-cosine bumps; all zeros = exact identity. toneCurvePoint()
+    // below is the shared curve definition (CPU apply + inspector preview).
+    params: [
+      { key: 'shadows', label: 'Shadows', min: -1, max: 1, step: 0.01, default: 0 },
+      { key: 'darks', label: 'Darks', min: -1, max: 1, step: 0.01, default: 0 },
+      { key: 'lights', label: 'Lights', min: -1, max: 1, step: 0.01, default: 0 },
+      { key: 'highlights', label: 'Highlights', min: -1, max: 1, step: 0.01, default: 0 },
+    ],
+    packUniform: (params) => [
+      params.shadows ?? 0,
+      params.darks ?? 0,
+      params.lights ?? 0,
+      params.highlights ?? 0,
+    ],
+    wgsl: `fn tcBump(x: f32, c: f32, r: f32) -> f32 {
+  let t = abs(x - c) / r;
+  return select(0.0, 0.5 * (1.0 + cos(3.14159265358979 * t)), t < 1.0);
+}
+fn tcEncode(v: f32) -> f32 {
+  let c = clamp(v, 0.0, 1.0);
+  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+fn tcDecode(v: f32) -> f32 {
+  return select(pow((v + 0.055) / 1.055, 2.4), v / 12.92, v <= 0.04045);
+}
+fn tcCurve(x: f32, p: vec4f) -> f32 {
+  let y = x + 0.25 * (p.x * tcBump(x, 0.15, 0.25) + p.y * tcBump(x, 0.4, 0.3)
+    + p.z * tcBump(x, 0.65, 0.3) + p.w * tcBump(x, 0.9, 0.25));
+  return clamp(y, 0.0, 1.0);
+}
+fn applyOp(c: vec4f, p: vec4f) -> vec4f {
+  return vec4f(
+    tcDecode(tcCurve(tcEncode(c.r), p)),
+    tcDecode(tcCurve(tcEncode(c.g), p)),
+    tcDecode(tcCurve(tcEncode(c.b), p)),
+    c.a
+  );
+}`,
+    apply: ([r, g, b], p) => {
+      const f = (v: number) => srgbDecode(toneCurvePoint(srgbEncode(v), p));
+      return [f(r), f(g), f(b)];
+    },
+  },
   saturation: {
     kind: 'saturation',
     label: 'Saturation',
@@ -89,6 +138,16 @@ export const OPS: Record<OpKind, OpDef> = {
 
 export function isOpKind(kind: string): kind is OpKind {
   return kind in OPS;
+}
+
+/** The tone curve in encoded space; must mirror tcCurve/tcBump in the WGSL. */
+export function toneCurvePoint(x: number, p: [number, number, number, number]): number {
+  const bump = (c: number, r: number) => {
+    const t = Math.abs(x - c) / r;
+    return t < 1 ? 0.5 * (1 + Math.cos(Math.PI * t)) : 0;
+  };
+  const y = x + 0.25 * (p[0] * bump(0.15, 0.25) + p[1] * bump(0.4, 0.3) + p[2] * bump(0.65, 0.3) + p[3] * bump(0.9, 0.25));
+  return Math.min(Math.max(y, 0), 1);
 }
 
 /**

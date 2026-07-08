@@ -1,6 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { CUSTOM_KIND, CUSTOM_PARAM_DEFS, DEFAULT_CUSTOM_CODE, OPS, isOpKind, type OpParamDef } from '../engine/graph/ops';
+import {
+  CUSTOM_KIND,
+  CUSTOM_PARAM_DEFS,
+  DEFAULT_CUSTOM_CODE,
+  OPS,
+  isOpKind,
+  toneCurvePoint,
+  type OpParamDef,
+} from '../engine/graph/ops';
 import type { GraphNode } from '../engine/graph/graphDoc';
 import { HistogramPanel } from './HistogramPanel';
 
@@ -54,6 +62,28 @@ function CustomEditor({ node }: { node: GraphNode }) {
   );
 }
 
+/** x/y plot of the tone curve in encoded space (identity = the diagonal). */
+function CurvePreview({ node }: { node: GraphNode }) {
+  const uniform = OPS.tonecurve.packUniform(node.params ?? {});
+  const size = 120;
+  const points = Array.from({ length: 65 }, (_, i) => {
+    const x = i / 64;
+    return `${x * size},${(1 - toneCurvePoint(x, uniform)) * size}`;
+  }).join(' ');
+  return (
+    <svg
+      className="curve-preview"
+      data-testid="curve-preview"
+      viewBox={`0 0 ${size} ${size}`}
+      width={size}
+      height={size}
+    >
+      <line x1="0" y1={size} x2={size} y2="0" stroke="#444" strokeDasharray="3 3" />
+      <polyline points={points} fill="none" stroke="#8ab4f8" strokeWidth="1.5" />
+    </svg>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   if (!node) {
     return <div className="inspector-placeholder">Select a node in the graph below.</div>;
@@ -80,6 +110,7 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   return (
     <>
       <div className="inspector-title">{def.label}</div>
+      {node.kind === 'tonecurve' && <CurvePreview node={node} />}
       {def.params.map((p) => (
         <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
       ))}

@@ -183,6 +183,14 @@ button:disabled {
   width: 100%;
 }
 
+.curve-preview {
+  display: block;
+  margin: 8px 14px 4px;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+}
+
 .inspector-code {
   display: block;
   width: calc(100% - 28px);
