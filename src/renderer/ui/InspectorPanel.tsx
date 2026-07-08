@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { CUSTOM_KIND, CUSTOM_PARAM_DEFS, DEFAULT_CUSTOM_CODE, OPS, isOpKind, type OpParamDef } from '../engine/graph/ops';
 import type { GraphNode } from '../engine/graph/graphDoc';
+import { HistogramPanel } from './HistogramPanel';
 
 function ParamSlider({ nodeId, def, value }: { nodeId: string; def: OpParamDef; value: number }) {
   const updateNodeParam = useAppStore((s) => s.updateNodeParam);
@@ -53,49 +54,48 @@ function CustomEditor({ node }: { node: GraphNode }) {
   );
 }
 
-/** Parameter editor for the node selected in the graph. */
-export function InspectorPanel() {
-  const graph = useAppStore((s) => s.graph);
-  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
-
-  const node = graph.nodes.find((n) => n.id === selectedNodeId);
+function NodeContent({ node }: { node: GraphNode | undefined }) {
   if (!node) {
-    return (
-      <div className="inspector">
-        <div className="inspector-placeholder">Select a node in the graph below.</div>
-      </div>
-    );
+    return <div className="inspector-placeholder">Select a node in the graph below.</div>;
   }
-
   if (node.kind === CUSTOM_KIND) {
     return (
-      <div className="inspector">
+      <>
         <div className="inspector-title">Custom (WGSL)</div>
         <CustomEditor node={node} />
         {CUSTOM_PARAM_DEFS.map((p) => (
           <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
         ))}
-      </div>
+      </>
     );
   }
-
   if (!isOpKind(node.kind)) {
     return (
-      <div className="inspector">
-        <div className="inspector-placeholder">
-          {node.kind === 'input' ? 'Input: the decoded linear image.' : 'Output: sRGB-encoded display.'}
-        </div>
+      <div className="inspector-placeholder">
+        {node.kind === 'input' ? 'Input: the decoded linear image.' : 'Output: sRGB-encoded display.'}
       </div>
     );
   }
-
   const def = OPS[node.kind];
   return (
-    <div className="inspector">
+    <>
       <div className="inspector-title">{def.label}</div>
       {def.params.map((p) => (
         <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
       ))}
+    </>
+  );
+}
+
+/** Histogram + parameter editor for the node selected in the graph. */
+export function InspectorPanel() {
+  const graph = useAppStore((s) => s.graph);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
+  const node = graph.nodes.find((n) => n.id === selectedNodeId);
+  return (
+    <div className="inspector">
+      <HistogramPanel />
+      <NodeContent node={node} />
     </div>
   );
 }

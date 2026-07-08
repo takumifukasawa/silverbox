@@ -24,6 +24,7 @@ declare global {
       exportImageTo(path: string): void;
       exportState(): { status: string; error: string | null };
       canvasView(): ViewportState & { dpr: number };
+      histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
     };
   }
 }
@@ -47,6 +48,7 @@ export function CanvasView() {
   const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const statsTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -73,6 +75,13 @@ export function CanvasView() {
           .setShaderErrors(Object.fromEntries(shaderErrors.map((e) => [e.nodeId, e.message])));
         renderer.render();
         setGpuError(null);
+        // refresh the histogram once edits settle (slider drags fire rapidly)
+        clearTimeout(statsTimerRef.current);
+        statsTimerRef.current = window.setTimeout(() => {
+          void renderer.stats().then((stats) => {
+            if (stats) useAppStore.getState().setHistogram(stats);
+          });
+        }, 120);
       } catch (err) {
         if (!cancelled) setGpuError(err instanceof Error ? err.message : String(err));
       }
@@ -157,6 +166,9 @@ export function CanvasView() {
       },
       canvasView() {
         return { ...viewRef.current, dpr: devicePixelRatio };
+      },
+      histogramState() {
+        return useAppStore.getState().histogram;
       },
     };
     return () => {

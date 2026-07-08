@@ -359,8 +359,10 @@ export class GraphRenderer {
     }
   }
 
-  /** Execute the chain offscreen and average the encoded output on the CPU. */
-  async readbackMean(): Promise<{ r: number; g: number; b: number } | null> {
+  /** Run the chain + encode offscreen and hand the mapped RGBA8 rows to `use`. */
+  private async withEncodedPixels<T>(
+    use: (px: Uint8Array, bytesPerRow: number, width: number, height: number) => T
+  ): Promise<T | null> {
     await this.graphReady;
     if (!this.source) return null;
     const { device, width, height } = this;
@@ -380,23 +382,79 @@ export class GraphRenderer {
     encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
     device.queue.submit([encoder.finish()]);
     await buffer.mapAsync(GPUMapMode.READ);
-    const px = new Uint8Array(buffer.getMappedRange());
-    let r = 0;
-    let g = 0;
-    let b = 0;
-    for (let y = 0; y < height; y++) {
-      const row = y * bytesPerRow;
-      for (let x = 0; x < width; x++) {
-        const s = row + x * 4;
-        r += px[s]!;
-        g += px[s + 1]!;
-        b += px[s + 2]!;
-      }
+    try {
+      return use(new Uint8Array(buffer.getMappedRange()), bytesPerRow, width, height);
+    } finally {
+      buffer.unmap();
+      buffer.destroy();
+      target.destroy();
     }
-    buffer.unmap();
-    buffer.destroy();
-    target.destroy();
-    const n = width * height;
-    return { r: r / n / 255, g: g / n / 255, b: b / n / 255 };
   }
+
+  /** Execute the chain offscreen and average the encoded output on the CPU. */
+  readbackMean(): Promise<{ r: number; g: number; b: number } | null> {
+    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let y = 0; y < height; y++) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width; x++) {
+          const s = row + x * 4;
+          r += px[s]!;
+          g += px[s + 1]!;
+          b += px[s + 2]!;
+        }
+      }
+      const n = width * height;
+      return { r: r / n / 255, g: g / n / 255, b: b / n / 255 };
+    });
+  }
+
+  /** Histogram + clipping fractions of the encoded output (for the UI panel). */
+  stats(bins = 64): Promise<HistogramData | null> {
+    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
+      const r = new Uint32Array(bins);
+      const g = new Uint32Array(bins);
+      const b = new Uint32Array(bins);
+      const shift = Math.log2(256 / bins);
+      let shadow = 0;
+      let highlight = 0;
+      for (let y = 0; y < height; y++) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width; x++) {
+          const s = row + x * 4;
+          const vr = px[s]!;
+          const vg = px[s + 1]!;
+          const vb = px[s + 2]!;
+          r[vr >> shift]!++;
+          g[vg >> shift]!++;
+          b[vb >> shift]!++;
+          if (vr === 0 || vg === 0 || vb === 0) shadow++;
+          if (vr === 255 || vg === 255 || vb === 255) highlight++;
+        }
+      }
+      const n = width * height;
+      return {
+        bins,
+        r: Array.from(r),
+        g: Array.from(g),
+        b: Array.from(b),
+        shadowClip: shadow / n,
+        highlightClip: highlight / n,
+        pixels: n,
+      };
+    });
+  }
+}
+
+export interface HistogramData {
+  bins: number;
+  r: number[];
+  g: number[];
+  b: number[];
+  /** Fraction of pixels with any channel at 0 / 255 in the encoded output. */
+  shadowClip: number;
+  highlightClip: number;
+  pixels: number;
 }

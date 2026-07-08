@@ -11,7 +11,7 @@ import {
   serializeGraphDoc,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
-import type { GraphRenderer } from '../engine/gpu/graphRenderer';
+import type { GraphRenderer, HistogramData } from '../engine/gpu/graphRenderer';
 import { CUSTOM_KIND, DEFAULT_CUSTOM_CODE, type OpKind } from '../engine/graph/ops';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
@@ -33,6 +33,8 @@ interface AppState {
   renderer: GraphRenderer | null;
   exportStatus: 'idle' | 'working' | 'error';
   exportError: string | null;
+  /** Stats of the current render (updated debounced after each render). */
+  histogram: HistogramData | null;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -43,6 +45,7 @@ interface AppState {
   updateNodeCode(nodeId: string, code: string): void;
   setShaderErrors(errors: Record<string, string>): void;
   setRenderer(renderer: GraphRenderer): void;
+  setHistogram(histogram: HistogramData | null): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
   /** Develop at full resolution and write .jpg/.png (dialog when no path). */
@@ -66,6 +69,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   renderer: null,
   exportStatus: 'idle',
   exportError: null,
+  histogram: null,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -186,6 +190,10 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setRenderer(renderer) {
     set({ renderer });
+  },
+
+  setHistogram(histogram) {
+    set({ histogram });
   },
 
   async exportImage(path) {
