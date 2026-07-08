@@ -4,6 +4,7 @@ import { srgbEncode } from '../engine/color/srgb';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
 import { opChain, type GraphDoc } from '../engine/graph/graphDoc';
 import { OPS } from '../engine/graph/ops';
+import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 
 declare global {
   interface Window {
@@ -22,6 +23,7 @@ declare global {
       updateNodeCode(nodeId: string, code: string): void;
       exportImageTo(path: string): void;
       exportState(): { status: string; error: string | null };
+      canvasView(): ViewportState & { dpr: number };
     };
   }
 }
@@ -34,6 +36,7 @@ declare global {
  */
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<Promise<GraphRenderer> | null>(null);
   const lastImageRef = useRef<unknown>(null);
   const [gpuError, setGpuError] = useState<string | null>(null);
@@ -41,6 +44,9 @@ export function CanvasView() {
   const image = useAppStore((s) => s.image);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
+  const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
+  const viewRef = useRef(view);
+  viewRef.current = view;
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -149,6 +155,9 @@ export function CanvasView() {
         const s = useAppStore.getState();
         return { status: s.exportStatus, error: s.exportError };
       },
+      canvasView() {
+        return { ...viewRef.current, dpr: devicePixelRatio };
+      },
     };
     return () => {
       delete window.__debug;
@@ -158,11 +167,30 @@ export function CanvasView() {
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
   return (
     <div className="canvas-view">
-      <canvas
-        ref={canvasRef}
-        className="canvas-view-canvas"
+      <div
+        ref={containerRef}
+        className="canvas-viewport"
         style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
-      />
+      >
+        <canvas
+          ref={canvasRef}
+          className="canvas-view-canvas"
+          style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
+        />
+      </div>
+      {!overlayVisible && (
+        <div className="canvas-controls">
+          <button onClick={fit} data-testid="view-fit">
+            Fit
+          </button>
+          <button onClick={() => oneToOne()} data-testid="view-100">
+            100%
+          </button>
+          <span className="canvas-zoom-readout" data-testid="zoom-readout">
+            {Math.round(view.scale * devicePixelRatio * 100)}%
+          </span>
+        </div>
+      )}
       {overlayVisible && (
         <div className="canvas-overlay">
           {gpuError !== null ? (
