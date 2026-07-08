@@ -33,7 +33,12 @@ try {
   mkdirSync(join(projectRoot, 'test-artifacts'), { recursive: true });
 
   const openAndWait = async (path) => {
-    await page.evaluate((p) => window.__openImageByPath(p), path);
+    // fire-and-forget: a page.evaluate that stays in flight across the decode
+    // can be killed by a transient execution-context teardown during decode GC
+    // (waitForFunction below is resilient to that; a held evaluate is not)
+    await page.evaluate((p) => {
+      void window.__openImageByPath(p);
+    }, path);
     await page.waitForFunction(
       () => {
         const s = window.__debug?.imageState();
