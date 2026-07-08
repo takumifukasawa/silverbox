@@ -12,7 +12,7 @@
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { ChainOp } from '../graph/graphDoc';
-import { OPS, type OpKind } from '../graph/ops';
+import { DEFAULT_CUSTOM_CODE, OPS, type OpKind } from '../graph/ops';
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex
@@ -66,11 +66,21 @@ interface ChainStep {
   uniformBuffer: GPUBuffer;
 }
 
+export interface ShaderError {
+  nodeId: string;
+  message: string;
+}
+
 export class GraphRenderer {
   private source: GPUTexture | null = null;
   private pingPong: [GPUTexture, GPUTexture] | null = null;
   private chain: ChainStep[] = [];
   private opPipelines = new Map<OpKind, GPURenderPipeline>();
+  /** Custom-code pipelines keyed by source; null = failed to compile. */
+  private customPipelines = new Map<string, Promise<GPURenderPipeline>>();
+  private setGraphGen = 0;
+  /** Resolves when the most recent setGraph() has landed (readback waits on it). */
+  private graphReady: Promise<unknown> = Promise.resolve();
   private width = 0;
   private height = 0;
 
@@ -115,6 +125,33 @@ export class GraphRenderer {
     return pipeline;
   }
 
+  /** Compile user WGSL; rejects with the compiler messages on bad code. */
+  private customPipeline(code: string): Promise<GPURenderPipeline> {
+    let pipeline = this.customPipelines.get(code);
+    if (!pipeline) {
+      pipeline = (async () => {
+        this.device.pushErrorScope('validation');
+        const module = this.device.createShaderModule({ code: opShader(code) });
+        const info = await module.getCompilationInfo();
+        const errors = info.messages.filter((m) => m.type === 'error');
+        try {
+          if (errors.length > 0) {
+            throw new Error(errors.map((m) => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n'));
+          }
+          return await this.device.createRenderPipelineAsync({
+            layout: 'auto',
+            vertex: { module, entryPoint: 'vs' },
+            fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+          });
+        } finally {
+          void this.device.popErrorScope();
+        }
+      })();
+      this.customPipelines.set(code, pipeline);
+    }
+    return pipeline;
+  }
+
   /** Upload the linear preview as rgba16float (values are in [0,1] after decode). */
   setImage(image: PreparedImage): void {
     const { data, width, height } = image;
@@ -144,17 +181,49 @@ export class GraphRenderer {
     this.height = height;
   }
 
-  /** Set the op chain to execute; uniforms upload immediately. */
-  setGraph(chain: ChainOp[]): void {
+  /**
+   * Set the op chain to execute. Custom code compiles asynchronously; a node
+   * whose code fails to compile falls back to the identity pass and is
+   * reported in the returned list. Only the newest call wins if several
+   * overlap.
+   */
+  setGraph(chain: ChainOp[]): Promise<ShaderError[]> {
+    const promise = this.applyGraph(chain);
+    this.graphReady = promise.catch(() => {});
+    return promise;
+  }
+
+  private async applyGraph(chain: ChainOp[]): Promise<ShaderError[]> {
+    const gen = ++this.setGraphGen;
+    const errors: ShaderError[] = [];
+    const steps = await Promise.all(
+      chain.map(async (op): Promise<ChainStep> => {
+        let pipeline: GPURenderPipeline;
+        if (op.type === 'builtin') {
+          pipeline = this.opPipeline(op.kind);
+        } else {
+          try {
+            pipeline = await this.customPipeline(op.code);
+          } catch (err) {
+            errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
+            pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
+          }
+        }
+        const uniformBuffer = this.device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
+        return { pipeline, uniformBuffer };
+      })
+    );
+    if (gen !== this.setGraphGen) {
+      for (const step of steps) step.uniformBuffer.destroy();
+      return errors;
+    }
     for (const step of this.chain) step.uniformBuffer.destroy();
-    this.chain = chain.map((op) => {
-      const uniformBuffer = this.device.createBuffer({
-        size: 16,
-        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-      });
-      this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
-      return { pipeline: this.opPipeline(op.kind), uniformBuffer };
-    });
+    this.chain = steps;
+    return errors;
   }
 
   private addPass(
@@ -199,6 +268,7 @@ export class GraphRenderer {
 
   /** Execute the chain offscreen and average the encoded output on the CPU. */
   async readbackMean(): Promise<{ r: number; g: number; b: number } | null> {
+    await this.graphReady;
     if (!this.source) return null;
     const { device, width, height } = this;
     const target = device.createTexture({

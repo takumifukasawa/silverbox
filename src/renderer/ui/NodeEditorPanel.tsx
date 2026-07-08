@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
-import { OPS, isOpKind, type OpKind } from '../engine/graph/ops';
+import { CUSTOM_KIND, OPS, isOpKind, type OpKind } from '../engine/graph/ops';
 
 /**
  * Node editor rendering the GraphDoc. Selection feeds the inspector; ops can
@@ -25,7 +25,7 @@ export function NodeEditorPanel() {
   const moveNode = useAppStore((s) => s.moveNode);
   const addOpNode = useAppStore((s) => s.addOpNode);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
-  const [addKind, setAddKind] = useState<OpKind>('exposure');
+  const [addKind, setAddKind] = useState<OpKind | typeof CUSTOM_KIND>('exposure');
 
   const nodes: Node[] = graph.nodes.map((n) => ({
     id: n.id,
@@ -38,15 +38,17 @@ export function NodeEditorPanel() {
             : 'input'
           : n.kind === 'output'
             ? 'output (sRGB)'
-            : isOpKind(n.kind)
-              ? OPS[n.kind].label.toLowerCase()
-              : n.kind,
+            : n.kind === CUSTOM_KIND
+              ? 'custom (wgsl)'
+              : isOpKind(n.kind)
+                ? OPS[n.kind].label.toLowerCase()
+                : n.kind,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
     sourcePosition: 'right',
     targetPosition: 'left',
-    deletable: isOpKind(n.kind),
+    deletable: isOpKind(n.kind) || n.kind === CUSTOM_KIND,
   })) as Node[];
 
   const edges: Edge[] = graph.edges.map((e) => ({
@@ -68,12 +70,13 @@ export function NodeEditorPanel() {
   return (
     <div className="node-editor">
       <div className="node-editor-toolbar">
-        <select value={addKind} onChange={(ev) => setAddKind(ev.target.value as OpKind)}>
+        <select value={addKind} onChange={(ev) => setAddKind(ev.target.value as OpKind | typeof CUSTOM_KIND)}>
           {Object.values(OPS).map((op) => (
             <option key={op.kind} value={op.kind}>
               {op.label}
             </option>
           ))}
+          <option value={CUSTOM_KIND}>Custom (WGSL)</option>
         </select>
         <button onClick={() => addOpNode(addKind)}>Add node</button>
       </div>

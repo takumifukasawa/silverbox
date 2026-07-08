@@ -10,7 +10,7 @@ import {
   serializeGraphDoc,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
-import type { OpKind } from '../engine/graph/ops';
+import { CUSTOM_KIND, DEFAULT_CUSTOM_CODE, type OpKind } from '../engine/graph/ops';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -25,13 +25,17 @@ interface AppState {
   /** Graph differs from what the sidecar holds (or would hold). */
   graphDirty: boolean;
   selectedNodeId: string | null;
+  /** WGSL compile errors by node id (custom nodes render identity meanwhile). */
+  shaderErrors: Record<string, string>;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
   moveNode(nodeId: string, position: { x: number; y: number }): void;
-  addOpNode(kind: OpKind): void;
+  addOpNode(kind: OpKind | typeof CUSTOM_KIND): void;
   removeOpNode(nodeId: string): void;
+  updateNodeCode(nodeId: string, code: string): void;
+  setShaderErrors(errors: Record<string, string>): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
 }
@@ -49,6 +53,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   graph: defaultGraphDoc(),
   graphDirty: false,
   selectedNodeId: null,
+  shaderErrors: {},
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -119,7 +124,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const inEdge = g.edges.find((e) => e.target === out?.id);
       if (!out || !inEdge) return {};
       const id = nextId(g, kind);
-      const node = { id, kind, position: { ...out.position }, params: defaultParams(kind) };
+      const node = {
+        id,
+        kind,
+        position: { ...out.position },
+        params: defaultParams(kind),
+        ...(kind === CUSTOM_KIND ? { code: DEFAULT_CUSTOM_CODE } : {}),
+      };
       const nodes = g.nodes
         .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
         .concat(node);
@@ -145,6 +156,20 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
       };
     });
+  },
+
+  updateNodeCode(nodeId, code) {
+    set((s) => ({
+      graph: {
+        ...s.graph,
+        nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, code } : n)),
+      },
+      graphDirty: true,
+    }));
+  },
+
+  setShaderErrors(errors) {
+    set({ shaderErrors: errors });
   },
 
   async saveGraph() {

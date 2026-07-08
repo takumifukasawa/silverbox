@@ -4,9 +4,17 @@
  * it, and (in a later milestone) it is what gets saved to disk and versioned
  * in git. Node positions live here for that reason.
  */
-import { OPS, isOpKind, type OpKind } from './ops';
+import {
+  CUSTOM_KIND,
+  CUSTOM_PARAM_DEFS,
+  DEFAULT_CUSTOM_CODE,
+  OPS,
+  isOpKind,
+  packCustomUniform,
+  type OpKind,
+} from './ops';
 
-export type GraphNodeKind = 'input' | 'output' | OpKind;
+export type GraphNodeKind = 'input' | 'output' | OpKind | typeof CUSTOM_KIND;
 
 export interface GraphNode {
   id: string;
@@ -14,6 +22,8 @@ export interface GraphNode {
   position: { x: number; y: number };
   /** Op parameters, keyed by OpParamDef.key. Absent for input/output. */
   params?: Record<string, number>;
+  /** WGSL applyOp source; only for kind 'custom'. */
+  code?: string;
 }
 
 export interface GraphEdge {
@@ -28,8 +38,9 @@ export interface GraphDoc {
   edges: GraphEdge[];
 }
 
-export function defaultParams(kind: OpKind): Record<string, number> {
-  return Object.fromEntries(OPS[kind].params.map((p) => [p.key, p.default]));
+export function defaultParams(kind: OpKind | typeof CUSTOM_KIND): Record<string, number> {
+  const defs = kind === CUSTOM_KIND ? CUSTOM_PARAM_DEFS : OPS[kind].params;
+  return Object.fromEntries(defs.map((p) => [p.key, p.default]));
 }
 
 /** The default document: input → exposure → saturation → output, all neutral. */
@@ -64,11 +75,14 @@ export function parseGraphDoc(text: string): GraphDoc {
   if (!Array.isArray(doc.nodes) || !Array.isArray(doc.edges)) throw new Error('graph doc needs nodes and edges');
   for (const n of doc.nodes) {
     if (typeof n.id !== 'string') throw new Error('node id must be a string');
-    if (n.kind !== 'input' && n.kind !== 'output' && !isOpKind(n.kind)) {
+    if (n.kind !== 'input' && n.kind !== 'output' && n.kind !== CUSTOM_KIND && !isOpKind(n.kind)) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
     }
     if (typeof n.position?.x !== 'number' || typeof n.position?.y !== 'number') {
       throw new Error(`node ${n.id} needs a numeric position`);
+    }
+    if (n.code !== undefined && typeof n.code !== 'string') {
+      throw new Error(`node ${n.id} code must be a string`);
     }
     for (const v of Object.values(n.params ?? {})) {
       if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
@@ -92,11 +106,9 @@ export function nextId(doc: GraphDoc, prefix: string): string {
   }
 }
 
-export interface ChainOp {
-  nodeId: string;
-  kind: OpKind;
-  uniform: [number, number, number, number];
-}
+export type ChainOp =
+  | { nodeId: string; type: 'builtin'; kind: OpKind; uniform: [number, number, number, number] }
+  | { nodeId: string; type: 'custom'; code: string; uniform: [number, number, number, number] };
 
 /**
  * Extract the ordered op chain by walking edges from input to output.
@@ -121,8 +133,22 @@ export function opChain(doc: GraphDoc): ChainOp[] {
     if (seen.has(node.id)) throw new Error('graph contains a cycle');
     seen.add(node.id);
     if (node.kind !== 'output') {
-      if (!isOpKind(node.kind)) throw new Error(`unexpected node kind ${node.kind}`);
-      chain.push({ nodeId: node.id, kind: node.kind, uniform: OPS[node.kind].packUniform(node.params ?? {}) });
+      if (node.kind === CUSTOM_KIND) {
+        chain.push({
+          nodeId: node.id,
+          type: 'custom',
+          code: node.code ?? DEFAULT_CUSTOM_CODE,
+          uniform: packCustomUniform(node.params ?? {}),
+        });
+      } else {
+        if (!isOpKind(node.kind)) throw new Error(`unexpected node kind ${node.kind}`);
+        chain.push({
+          nodeId: node.id,
+          type: 'builtin',
+          kind: node.kind,
+          uniform: OPS[node.kind].packUniform(node.params ?? {}),
+        });
+      }
     }
     cur = node;
   }

@@ -15,7 +15,11 @@ declare global {
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
+      shaderErrors(): Record<string, string>;
+      /** In-page access to the decoded linear pixels for reference math. */
+      imageForVerify(): { data: Float32Array; width: number; height: number } | null;
       updateNodeParam(nodeId: string, key: string, value: number): void;
+      updateNodeCode(nodeId: string, code: string): void;
     };
   }
 }
@@ -51,7 +55,11 @@ export function CanvasView() {
           renderer.setImage(image);
           lastImageRef.current = image;
         }
-        renderer.setGraph(opChain(graph));
+        const shaderErrors = await renderer.setGraph(opChain(graph));
+        if (cancelled) return;
+        useAppStore
+          .getState()
+          .setShaderErrors(Object.fromEntries(shaderErrors.map((e) => [e.nodeId, e.message])));
         renderer.render();
         setGpuError(null);
       } catch (err) {
@@ -93,13 +101,17 @@ export function CanvasView() {
         if (!s.image) return null;
         const { data, width, height } = s.image;
         const chain = opChain(s.graph);
+        // custom WGSL has no CPU mirror; the harness checks those by hand
+        if (chain.some((op) => op.type === 'custom')) return null;
         const n = width * height;
         let r = 0;
         let g = 0;
         let b = 0;
         for (let i = 0; i < n; i++) {
           let px: [number, number, number] = [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!];
-          for (const op of chain) px = OPS[op.kind].apply(px, op.uniform);
+          for (const op of chain) {
+            if (op.type === 'builtin') px = OPS[op.kind].apply(px, op.uniform);
+          }
           r += srgbEncode(px[0]);
           g += srgbEncode(px[1]);
           b += srgbEncode(px[2]);
@@ -112,8 +124,18 @@ export function CanvasView() {
       graphDirty() {
         return useAppStore.getState().graphDirty;
       },
+      shaderErrors() {
+        return useAppStore.getState().shaderErrors;
+      },
+      imageForVerify() {
+        const image = useAppStore.getState().image;
+        return image ? { data: image.data, width: image.width, height: image.height } : null;
+      },
       updateNodeParam(nodeId, key, value) {
         useAppStore.getState().updateNodeParam(nodeId, key, value);
+      },
+      updateNodeCode(nodeId, code) {
+        useAppStore.getState().updateNodeCode(nodeId, code);
       },
     };
     return () => {

@@ -16,7 +16,8 @@
     "verify:ms4": "node scripts/verify-ms4-graph.mjs",
     "verify:ms5": "node scripts/verify-ms5-edit.mjs",
     "verify:ms6": "node scripts/verify-ms6-persist.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6"
+    "verify:ms7": "node scripts/verify-ms7-custom.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

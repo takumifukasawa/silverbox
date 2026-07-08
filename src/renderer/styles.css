@@ -147,6 +147,33 @@ button:disabled {
   width: 100%;
 }
 
+.inspector-code {
+  display: block;
+  width: calc(100% - 28px);
+  margin: 8px 14px 0;
+  min-height: 140px;
+  resize: vertical;
+  background: #1a1a1a;
+  color: #d4d4d4;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 8px;
+  font: 12px 'SF Mono', Menlo, monospace;
+  user-select: text;
+}
+
+.inspector-code-actions {
+  padding: 8px 14px;
+}
+
+.inspector-code-error {
+  margin: 8px 0 0;
+  color: #e06c75;
+  white-space: pre-wrap;
+  font-size: 11px;
+  user-select: text;
+}
+
 .node-editor {
   flex: 0 0 260px;
   background: #1a1a1a;
