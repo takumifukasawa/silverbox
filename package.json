@@ -4,14 +4,30 @@
   "private": true,
   "type": "module",
   "description": "Node-based, non-destructive RAW/JPEG development app with WGSL custom looks and git-native (JSON) graph documents.",
+  "main": "./out/main/index.js",
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "verify:ms0": "node scripts/verify-ms0-decode.mjs"
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "verify:ms0": "node scripts/verify-ms0-decode.mjs",
+    "verify:ms1": "node scripts/verify-ms1-app.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1"
   },
   "devDependencies": {
+    "@types/node": "^26.1.1",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.2.0",
+    "@xyflow/react": "^12.11.2",
+    "electron": "^43.1.0",
+    "electron-vite": "^5.0.0",
     "esbuild": "^0.28.1",
     "playwright": "^1.61.1",
-    "typescript": "^6.0.3"
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "typescript": "^6.0.3",
+    "vite": "^7.3.6",
+    "zustand": "^5.0.14"
   },
   "dependencies": {
     "libraw-wasm": "1.6.0"
