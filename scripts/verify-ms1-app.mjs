@@ -29,7 +29,7 @@ try {
   await page.waitForSelector('.app-layout', { timeout: 15_000 });
 
   console.log('verify-ms1-app:');
-  check('window title is Silver Box', (await page.title()) === 'Silver Box', await page.title());
+  check('window title is Silverbox', (await page.title()) === 'Silverbox', await page.title());
 
   // typed IPC round-trip (renderer → main → renderer)
   const ping = await page.evaluate(() => window.silverbox.ping());

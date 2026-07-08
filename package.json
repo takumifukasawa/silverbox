@@ -12,13 +12,15 @@
     "verify:ms0": "node scripts/verify-ms0-decode.mjs",
     "verify:ms1": "node scripts/verify-ms1-app.mjs",
     "verify:ms2": "node scripts/verify-ms2-decode-display.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2"
+    "verify:ms3": "node scripts/verify-ms3-webgpu.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
+    "@webgpu/types": "^0.1.71",
     "@xyflow/react": "^12.11.2",
     "electron": "^43.1.0",
     "electron-vite": "^5.0.0",
