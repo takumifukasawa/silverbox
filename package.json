@@ -14,7 +14,8 @@
     "verify:ms2": "node scripts/verify-ms2-decode-display.mjs",
     "verify:ms3": "node scripts/verify-ms3-webgpu.mjs",
     "verify:ms4": "node scripts/verify-ms4-graph.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4"
+    "verify:ms5": "node scripts/verify-ms5-edit.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

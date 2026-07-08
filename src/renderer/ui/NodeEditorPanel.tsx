@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -6,18 +6,26 @@ import {
   type Edge,
   type NodeMouseHandler,
   type OnNodeDrag,
+  type OnNodesDelete,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
-import { OPS, isOpKind } from '../engine/graph/ops';
+import { OPS, isOpKind, type OpKind } from '../engine/graph/ops';
 
-/** Node editor rendering the GraphDoc; selection feeds the inspector. */
+/**
+ * Node editor rendering the GraphDoc. Selection feeds the inspector; ops can
+ * be inserted before the output (toolbar) and removed (Delete/Backspace) —
+ * the chain rewires itself. Manual edge wiring comes with branching nodes.
+ */
 export function NodeEditorPanel() {
   const fileName = useAppStore((s) => s.fileName);
   const graph = useAppStore((s) => s.graph);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const selectNode = useAppStore((s) => s.selectNode);
   const moveNode = useAppStore((s) => s.moveNode);
+  const addOpNode = useAppStore((s) => s.addOpNode);
+  const removeOpNode = useAppStore((s) => s.removeOpNode);
+  const [addKind, setAddKind] = useState<OpKind>('exposure');
 
   const nodes: Node[] = graph.nodes.map((n) => ({
     id: n.id,
@@ -38,16 +46,37 @@ export function NodeEditorPanel() {
     selected: n.id === selectedNodeId,
     sourcePosition: 'right',
     targetPosition: 'left',
-    deletable: false,
+    deletable: isOpKind(n.kind),
   })) as Node[];
 
-  const edges: Edge[] = graph.edges.map((e) => ({ id: e.id, source: e.source, target: e.target }));
+  const edges: Edge[] = graph.edges.map((e) => ({
+    id: e.id,
+    source: e.source,
+    target: e.target,
+    deletable: false,
+  }));
 
   const onNodeClick: NodeMouseHandler = useCallback((_ev, node) => selectNode(node.id), [selectNode]);
   const onNodeDragStop: OnNodeDrag = useCallback((_ev, node) => moveNode(node.id, node.position), [moveNode]);
+  const onNodesDelete: OnNodesDelete = useCallback(
+    (deleted) => {
+      for (const node of deleted) removeOpNode(node.id);
+    },
+    [removeOpNode]
+  );
 
   return (
     <div className="node-editor">
+      <div className="node-editor-toolbar">
+        <select value={addKind} onChange={(ev) => setAddKind(ev.target.value as OpKind)}>
+          {Object.values(OPS).map((op) => (
+            <option key={op.kind} value={op.kind}>
+              {op.label}
+            </option>
+          ))}
+        </select>
+        <button onClick={() => addOpNode(addKind)}>Add node</button>
+      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -55,8 +84,10 @@ export function NodeEditorPanel() {
         fitView
         fitViewOptions={{ maxZoom: 1 }}
         proOptions={{ hideAttribution: true }}
+        deleteKeyCode={['Backspace', 'Delete']}
         onNodeClick={onNodeClick}
         onNodeDragStop={onNodeDragStop}
+        onNodesDelete={onNodesDelete}
         onPaneClick={() => selectNode(null)}
       >
         <Background gap={16} />

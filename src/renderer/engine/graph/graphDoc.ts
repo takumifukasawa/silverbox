@@ -50,6 +50,15 @@ export function defaultGraphDoc(): GraphDoc {
   };
 }
 
+/** Smallest `${prefix}-N` (N ≥ 1) not taken by any node or edge id. */
+export function nextId(doc: GraphDoc, prefix: string): string {
+  const taken = new Set([...doc.nodes.map((n) => n.id), ...doc.edges.map((e) => e.id)]);
+  for (let n = 1; ; n++) {
+    const id = `${prefix}-${n}`;
+    if (!taken.has(id)) return id;
+  }
+}
+
 export interface ChainOp {
   nodeId: string;
   kind: OpKind;

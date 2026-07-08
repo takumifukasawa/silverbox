@@ -6,7 +6,7 @@
  * sRGB curve.
  */
 
-export type OpKind = 'exposure' | 'saturation';
+export type OpKind = 'exposure' | 'whitebalance' | 'contrast' | 'saturation';
 
 export interface OpParamDef {
   key: string;
@@ -39,6 +39,36 @@ export const OPS: Record<OpKind, OpDef> = {
   return vec4f(c.rgb * p.x, c.a);
 }`,
     apply: ([r, g, b], p) => [r * p[0], g * p[0], b * p[0]],
+  },
+  whitebalance: {
+    kind: 'whitebalance',
+    label: 'White Balance',
+    // Relative gains with green anchored at 1 — as-shot WB is baked in at
+    // decode (useCameraWb), so gains of 1 are a true identity.
+    params: [
+      { key: 'rGain', label: 'R gain', min: 0.25, max: 4, step: 0.01, default: 1 },
+      { key: 'bGain', label: 'B gain', min: 0.25, max: 4, step: 0.01, default: 1 },
+    ],
+    packUniform: (params) => [params.rGain ?? 1, params.bGain ?? 1, 0, 0],
+    wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
+  return vec4f(c.rgb * vec3f(p.x, 1.0, p.y), c.a);
+}`,
+    apply: ([r, g, b], p) => [r * p[0], g, b * p[1]],
+  },
+  contrast: {
+    kind: 'contrast',
+    label: 'Contrast',
+    // Power curve pivoting on 0.18 mid-gray in linear; amount 1 = identity.
+    params: [{ key: 'amount', label: 'Contrast', min: 0.5, max: 2, step: 0.01, default: 1 }],
+    packUniform: (params) => [params.amount ?? 1, 0, 0, 0],
+    wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
+  let r = pow(max(c.rgb, vec3f(0.0)) / 0.18, vec3f(p.x)) * 0.18;
+  return vec4f(r, c.a);
+}`,
+    apply: ([r, g, b], p) => {
+      const curve = (v: number) => Math.pow(Math.max(v, 0) / 0.18, p[0]) * 0.18;
+      return [curve(r), curve(g), curve(b)];
+    },
   },
   saturation: {
     kind: 'saturation',
