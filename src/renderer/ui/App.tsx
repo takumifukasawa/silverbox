@@ -21,6 +21,10 @@ export function App() {
         ev.preventDefault();
         void useAppStore.getState().openImageViaDialog();
       }
+      if (cmd && !ev.altKey && !ev.shiftKey && ev.key === 's') {
+        ev.preventDefault();
+        void useAppStore.getState().saveGraph();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);

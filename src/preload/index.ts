@@ -5,6 +5,8 @@ const api: SilverboxApi = {
   ping: () => ipcRenderer.invoke(IPC.ping),
   openImageDialog: () => ipcRenderer.invoke(IPC.openImageDialog),
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
+  readSidecar: (path) => ipcRenderer.invoke(IPC.readSidecar, path),
+  writeSidecar: (path, content) => ipcRenderer.invoke(IPC.writeSidecar, path, content),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename } from 'node:path';
-import { IPC, type OpenImageDialogResult, type PingResult } from '../../shared/ipc';
+import { IPC, SIDECAR_SUFFIX, type OpenImageDialogResult, type PingResult } from '../../shared/ipc';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -34,6 +34,27 @@ function registerIpc(): void {
     if (typeof path !== 'string') throw new Error('readFile: path must be a string');
     const buf = await readFile(path);
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
+  });
+
+  const assertSidecarPath = (path: unknown): string => {
+    if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
+      throw new Error(`sidecar path must end with ${SIDECAR_SUFFIX}`);
+    }
+    return path;
+  };
+
+  ipcMain.handle(IPC.readSidecar, async (_ev, path: unknown): Promise<string | null> => {
+    try {
+      return await readFile(assertSidecarPath(path), 'utf8');
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  });
+
+  ipcMain.handle(IPC.writeSidecar, async (_ev, path: unknown, content: unknown): Promise<void> => {
+    if (typeof content !== 'string') throw new Error('writeSidecar: content must be a string');
+    await writeFile(assertSidecarPath(path), content, 'utf8');
   });
 }
 

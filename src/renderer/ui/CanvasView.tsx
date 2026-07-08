@@ -14,6 +14,7 @@ declare global {
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
+      graphDirty(): boolean;
       updateNodeParam(nodeId: string, key: string, value: number): void;
     };
   }
@@ -107,6 +108,9 @@ export function CanvasView() {
       },
       graphState() {
         return useAppStore.getState().graph;
+      },
+      graphDirty() {
+        return useAppStore.getState().graphDirty;
       },
       updateNodeParam(nodeId, key, value) {
         useAppStore.getState().updateNodeParam(nodeId, key, value);

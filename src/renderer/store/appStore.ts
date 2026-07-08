@@ -2,8 +2,16 @@ import { create } from 'zustand';
 import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
-import { defaultGraphDoc, defaultParams, nextId, type GraphDoc } from '../engine/graph/graphDoc';
+import {
+  defaultGraphDoc,
+  defaultParams,
+  nextId,
+  parseGraphDoc,
+  serializeGraphDoc,
+  type GraphDoc,
+} from '../engine/graph/graphDoc';
 import type { OpKind } from '../engine/graph/ops';
+import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -11,8 +19,11 @@ interface AppState {
   imageStatus: ImageStatus;
   image: PreparedImage | null;
   fileName: string | null;
+  imagePath: string | null;
   imageError: string | null;
   graph: GraphDoc;
+  /** Graph differs from what the sidecar holds (or would hold). */
+  graphDirty: boolean;
   selectedNodeId: string | null;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
@@ -21,6 +32,8 @@ interface AppState {
   moveNode(nodeId: string, position: { x: number; y: number }): void;
   addOpNode(kind: OpKind): void;
   removeOpNode(nodeId: string): void;
+  /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
+  saveGraph(): Promise<void>;
 }
 
 export function isJpegFileName(name: string): boolean {
@@ -31,8 +44,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   imageStatus: 'idle',
   image: null,
   fileName: null,
+  imagePath: null,
   imageError: null,
   graph: defaultGraphDoc(),
+  graphDirty: false,
   selectedNodeId: null,
 
   async openImageByPath(path: string) {
@@ -42,11 +57,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       set({ imageStatus: 'error', imageError: `unsupported file type: ${fileName}` });
       return;
     }
-    set({ imageStatus: 'loading', fileName, imageError: null });
+    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
     try {
       const bytes = await window.silverbox.readFile(path);
       const image = await loadImage(bytes, kind);
-      set({ imageStatus: 'ready', image });
+      // The graph belongs to the image: restore its sidecar, or start fresh.
+      // A malformed sidecar falls back to the default doc (and stays on disk
+      // untouched until the user saves over it).
+      let graph = defaultGraphDoc();
+      try {
+        const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
+        if (sidecar !== null) graph = parseGraphDoc(sidecar);
+      } catch (err) {
+        console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
+      }
+      set({ imageStatus: 'ready', image, graph, graphDirty: false, selectedNodeId: null });
     } catch (err) {
       set({ imageStatus: 'error', image: null, imageError: err instanceof Error ? err.message : String(err) });
     }
@@ -71,6 +96,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           n.id === nodeId ? { ...n, params: { ...n.params, [key]: value } } : n
         ),
       },
+      graphDirty: true,
     }));
   },
 
@@ -80,6 +106,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         ...s.graph,
         nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
       },
+      graphDirty: true,
     }));
   },
 
@@ -99,7 +126,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const e1 = { id: nextId({ ...g, nodes }, 'e'), source: inEdge.source, target: id };
       const e2 = { id: nextId({ ...g, nodes, edges: [...g.edges, e1] }, 'e'), source: id, target: out.id };
       const edges = g.edges.filter((e) => e !== inEdge).concat(e1, e2);
-      return { graph: { ...g, nodes, edges }, selectedNodeId: id };
+      return { graph: { ...g, nodes, edges }, graphDirty: true, selectedNodeId: id };
     });
   },
 
@@ -114,8 +141,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (inEdge && outEdge) edges.push({ id: nextId(g, 'e'), source: inEdge.source, target: outEdge.target });
       return {
         graph: { ...g, nodes: g.nodes.filter((n) => n.id !== nodeId), edges },
+        graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
       };
     });
+  },
+
+  async saveGraph() {
+    const { imagePath, graph } = get();
+    if (!imagePath) return;
+    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph));
+    set({ graphDirty: false });
   },
 }));

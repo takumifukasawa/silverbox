@@ -6,6 +6,7 @@ export function Toolbar() {
   const imageStatus = useAppStore((s) => s.imageStatus);
   const image = useAppStore((s) => s.image);
   const fileName = useAppStore((s) => s.fileName);
+  const graphDirty = useAppStore((s) => s.graphDirty);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const [ping, setPing] = useState<PingResult | null>(null);
 
@@ -24,6 +25,11 @@ export function Toolbar() {
         {image && fileName ? (
           <>
             <span style={{ color: '#fff', fontWeight: 'bold' }}>{fileName}</span>
+            {graphDirty && (
+              <span data-testid="dirty-indicator" title="unsaved graph changes (⌘S to save)" style={{ color: '#e5c07b' }}>
+                ●
+              </span>
+            )}
             <span>
               {image.fullWidth}×{image.fullHeight}
             </span>

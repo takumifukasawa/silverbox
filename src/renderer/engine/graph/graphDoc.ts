@@ -50,6 +50,39 @@ export function defaultGraphDoc(): GraphDoc {
   };
 }
 
+/** Serialize for the sidecar: pretty-printed and newline-terminated for git. */
+export function serializeGraphDoc(doc: GraphDoc): string {
+  return JSON.stringify(doc, null, 2) + '\n';
+}
+
+/** Parse + validate a sidecar; throws with a reason on anything malformed. */
+export function parseGraphDoc(text: string): GraphDoc {
+  const raw: unknown = JSON.parse(text);
+  if (typeof raw !== 'object' || raw === null) throw new Error('graph doc must be an object');
+  const doc = raw as GraphDoc;
+  if (doc.version !== 1) throw new Error(`unsupported graph doc version ${String(doc.version)}`);
+  if (!Array.isArray(doc.nodes) || !Array.isArray(doc.edges)) throw new Error('graph doc needs nodes and edges');
+  for (const n of doc.nodes) {
+    if (typeof n.id !== 'string') throw new Error('node id must be a string');
+    if (n.kind !== 'input' && n.kind !== 'output' && !isOpKind(n.kind)) {
+      throw new Error(`unknown node kind ${String(n.kind)}`);
+    }
+    if (typeof n.position?.x !== 'number' || typeof n.position?.y !== 'number') {
+      throw new Error(`node ${n.id} needs a numeric position`);
+    }
+    for (const v of Object.values(n.params ?? {})) {
+      if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
+    }
+  }
+  for (const e of doc.edges) {
+    if (typeof e.id !== 'string' || typeof e.source !== 'string' || typeof e.target !== 'string') {
+      throw new Error('edges need string id/source/target');
+    }
+  }
+  opChain(doc); // throws unless the graph is a valid input→…→output chain
+  return doc;
+}
+
 /** Smallest `${prefix}-N` (N ≥ 1) not taken by any node or edge id. */
 export function nextId(doc: GraphDoc, prefix: string): string {
   const taken = new Set([...doc.nodes.map((n) => n.id), ...doc.edges.map((e) => e.id)]);

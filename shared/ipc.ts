@@ -10,7 +10,12 @@ export const IPC = {
   ping: 'app:ping',
   openImageDialog: 'dialog:openImage',
   readFile: 'file:read',
+  readSidecar: 'sidecar:read',
+  writeSidecar: 'sidecar:write',
 } as const;
+
+/** Suffix of the GraphDoc sidecar written next to the image file. */
+export const SIDECAR_SUFFIX = '.silverbox.json';
 
 export interface PingResult {
   pid: number;
@@ -29,6 +34,10 @@ export interface SilverboxApi {
   openImageDialog(): Promise<OpenImageDialogResult>;
   /** Read a file's bytes (used after dialog / drag-and-drop resolves a path). */
   readFile(path: string): Promise<ArrayBuffer>;
+  /** Read a `.silverbox.json` sidecar; null if it does not exist. */
+  readSidecar(path: string): Promise<string | null>;
+  /** Write a `.silverbox.json` sidecar (main rejects other paths). */
+  writeSidecar(path: string, content: string): Promise<void>;
 }
 
 declare global {
