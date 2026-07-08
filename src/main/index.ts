@@ -56,6 +56,26 @@ function registerIpc(): void {
     if (typeof content !== 'string') throw new Error('writeSidecar: content must be a string');
     await writeFile(assertSidecarPath(path), content, 'utf8');
   });
+
+  ipcMain.handle(IPC.exportImageDialog, async (_ev, defaultPath: unknown): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showSaveDialog({
+      defaultPath: typeof defaultPath === 'string' ? defaultPath : undefined,
+      filters: [
+        { name: 'JPEG', extensions: ['jpg', 'jpeg'] },
+        { name: 'PNG', extensions: ['png'] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    return { canceled: false, path: result.filePath, fileName: basename(result.filePath) };
+  });
+
+  ipcMain.handle(IPC.writeImageFile, async (_ev, path: unknown, bytes: unknown): Promise<void> => {
+    if (typeof path !== 'string' || !/\.(jpg|jpeg|png)$/i.test(path)) {
+      throw new Error('writeImageFile: path must end with .jpg/.jpeg/.png');
+    }
+    if (!(bytes instanceof ArrayBuffer)) throw new Error('writeImageFile: bytes must be an ArrayBuffer');
+    await writeFile(path, Buffer.from(bytes));
+  });
 }
 
 function createWindow(): void {

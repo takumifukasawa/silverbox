@@ -6,10 +6,12 @@ import {
   defaultGraphDoc,
   defaultParams,
   nextId,
+  opChain,
   parseGraphDoc,
   serializeGraphDoc,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
+import type { GraphRenderer } from '../engine/gpu/graphRenderer';
 import { CUSTOM_KIND, DEFAULT_CUSTOM_CODE, type OpKind } from '../engine/graph/ops';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
@@ -27,6 +29,10 @@ interface AppState {
   selectedNodeId: string | null;
   /** WGSL compile errors by node id (custom nodes render identity meanwhile). */
   shaderErrors: Record<string, string>;
+  /** The live GraphRenderer (registered by CanvasView; used for export). */
+  renderer: GraphRenderer | null;
+  exportStatus: 'idle' | 'working' | 'error';
+  exportError: string | null;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -36,8 +42,11 @@ interface AppState {
   removeOpNode(nodeId: string): void;
   updateNodeCode(nodeId: string, code: string): void;
   setShaderErrors(errors: Record<string, string>): void;
+  setRenderer(renderer: GraphRenderer): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
+  /** Develop at full resolution and write .jpg/.png (dialog when no path). */
+  exportImage(path?: string): Promise<void>;
 }
 
 export function isJpegFileName(name: string): boolean {
@@ -54,6 +63,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   graphDirty: false,
   selectedNodeId: null,
   shaderErrors: {},
+  renderer: null,
+  exportStatus: 'idle',
+  exportError: null,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -170,6 +182,38 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   setShaderErrors(errors) {
     set({ shaderErrors: errors });
+  },
+
+  setRenderer(renderer) {
+    set({ renderer });
+  },
+
+  async exportImage(path) {
+    const { imagePath, fileName, graph, renderer, imageStatus, exportStatus } = get();
+    if (!imagePath || !fileName || !renderer || imageStatus !== 'ready' || exportStatus === 'working') return;
+    let target = path ?? null;
+    if (!target) {
+      const result = await window.silverbox.exportImageDialog(imagePath.replace(/\.[^.]+$/, '') + '.jpg');
+      if (result.canceled) return;
+      target = result.path;
+    }
+    set({ exportStatus: 'working', exportError: null });
+    try {
+      const bytes = await window.silverbox.readFile(imagePath);
+      const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
+      const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
+      const { data, width, height } = await renderer.renderToPixels(full, opChain(graph));
+      const canvas = new OffscreenCanvas(width, height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable');
+      ctx.putImageData(new ImageData(data, width, height), 0, 0);
+      const png = /\.png$/i.test(target);
+      const blob = await canvas.convertToBlob(png ? { type: 'image/png' } : { type: 'image/jpeg', quality: 0.92 });
+      await window.silverbox.writeImageFile(target, await blob.arrayBuffer());
+      set({ exportStatus: 'idle' });
+    } catch (err) {
+      set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
+    }
   },
 
   async saveGraph() {

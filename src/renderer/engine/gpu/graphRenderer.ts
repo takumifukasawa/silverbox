@@ -266,6 +266,99 @@ export class GraphRenderer {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  /**
+   * Run the chain over an arbitrary image (e.g. the full-resolution decode
+   * for export) and return tightly-packed sRGB RGBA8 pixels. Independent of
+   * the preview state; all GPU resources are transient.
+   */
+  async renderToPixels(
+    image: PreparedImage,
+    chain: ChainOp[]
+  ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
+    const { device } = this;
+    const { data, width, height } = image;
+    const source = device.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const half = new Float16Array(data.length);
+    half.set(data);
+    device.queue.writeTexture({ texture: source }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [
+      width,
+      height,
+    ]);
+    const temps: GPUTexture[] = [source];
+    const makeTarget = (format: GPUTextureFormat, usage: number) => {
+      const t = device.createTexture({ size: [width, height], format, usage });
+      temps.push(t);
+      return t;
+    };
+
+    const errors: ShaderError[] = [];
+    const steps = await Promise.all(
+      chain.map(async (op) => {
+        let pipeline: GPURenderPipeline;
+        if (op.type === 'builtin') {
+          pipeline = this.opPipeline(op.kind);
+        } else {
+          try {
+            pipeline = await this.customPipeline(op.code);
+          } catch (err) {
+            errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
+            pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
+          }
+        }
+        const uniformBuffer = device.createBuffer({
+          size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
+        return { pipeline, uniformBuffer };
+      })
+    );
+
+    try {
+      const encoder = device.createCommandEncoder();
+      let current = source.createView();
+      if (steps.length > 0) {
+        const pingPong = [
+          makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT),
+          makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT),
+        ];
+        steps.forEach((step, i) => {
+          const target = pingPong[i % 2]!.createView();
+          this.addPass(encoder, target, step.pipeline, [
+            { binding: 0, resource: current },
+            { binding: 1, resource: { buffer: step.uniformBuffer } },
+          ]);
+          current = target;
+        });
+      }
+      const target = makeTarget('rgba8unorm', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
+      const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
+      const buffer = device.createBuffer({
+        size: bytesPerRow * height,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: current }]);
+      encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
+      device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const padded = new Uint8Array(buffer.getMappedRange());
+      const out = new Uint8ClampedArray(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + width * 4), y * width * 4);
+      }
+      buffer.unmap();
+      buffer.destroy();
+      return { data: out, width, height };
+    } finally {
+      for (const t of temps) t.destroy();
+      for (const step of steps) step.uniformBuffer.destroy();
+    }
+  }
+
   /** Execute the chain offscreen and average the encoded output on the CPU. */
   async readbackMean(): Promise<{ r: number; g: number; b: number } | null> {
     await this.graphReady;

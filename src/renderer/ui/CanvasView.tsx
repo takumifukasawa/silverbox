@@ -20,6 +20,8 @@ declare global {
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
       updateNodeParam(nodeId: string, key: string, value: number): void;
       updateNodeCode(nodeId: string, code: string): void;
+      exportImageTo(path: string): void;
+      exportState(): { status: string; error: string | null };
     };
   }
 }
@@ -46,7 +48,10 @@ export function CanvasView() {
     let cancelled = false;
     void (async () => {
       try {
-        rendererRef.current ??= GraphRenderer.create(canvas);
+        rendererRef.current ??= GraphRenderer.create(canvas).then((r) => {
+          useAppStore.getState().setRenderer(r);
+          return r;
+        });
         const renderer = await rendererRef.current;
         if (cancelled) return;
         if (lastImageRef.current !== image) {
@@ -136,6 +141,13 @@ export function CanvasView() {
       },
       updateNodeCode(nodeId, code) {
         useAppStore.getState().updateNodeCode(nodeId, code);
+      },
+      exportImageTo(path) {
+        void useAppStore.getState().exportImage(path);
+      },
+      exportState() {
+        const s = useAppStore.getState();
+        return { status: s.exportStatus, error: s.exportError };
       },
     };
     return () => {

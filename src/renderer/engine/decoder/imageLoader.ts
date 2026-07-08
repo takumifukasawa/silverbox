@@ -27,10 +27,14 @@ function getWorker(): Worker {
   return worker;
 }
 
-/** Decode + prepare an image; transfers `bytes` to the worker (detached after call). */
-export function loadImage(bytes: ArrayBuffer, kind: 'raw' | 'jpg'): Promise<PreparedImage> {
+/**
+ * Decode + prepare an image; transfers `bytes` to the worker (detached after
+ * call). `longEdge` defaults to the preview size; pass Infinity-like values
+ * (e.g. Number.MAX_SAFE_INTEGER) to keep full resolution for export.
+ */
+export function loadImage(bytes: ArrayBuffer, kind: 'raw' | 'jpg', longEdge = PREVIEW_LONG_EDGE): Promise<PreparedImage> {
   const id = nextId++;
-  const req: DecodeRequest = { id, kind, bytes, previewLongEdge: PREVIEW_LONG_EDGE };
+  const req: DecodeRequest = { id, kind, bytes, previewLongEdge: longEdge };
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     getWorker().postMessage(req, [bytes]);

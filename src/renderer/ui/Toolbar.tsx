@@ -7,7 +7,9 @@ export function Toolbar() {
   const image = useAppStore((s) => s.image);
   const fileName = useAppStore((s) => s.fileName);
   const graphDirty = useAppStore((s) => s.graphDirty);
+  const exportStatus = useAppStore((s) => s.exportStatus);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
+  const exportImage = useAppStore((s) => s.exportImage);
   const [ping, setPing] = useState<PingResult | null>(null);
 
   useEffect(() => {
@@ -20,6 +22,13 @@ export function Toolbar() {
     <div className="toolbar">
       <button onClick={() => void openImageViaDialog()} disabled={imageStatus === 'loading'}>
         Open…
+      </button>
+      <button
+        onClick={() => void exportImage()}
+        disabled={imageStatus !== 'ready' || exportStatus === 'working'}
+        data-testid="export-button"
+      >
+        {exportStatus === 'working' ? 'Exporting…' : 'Export…'}
       </button>
       <div className="toolbar-info">
         {image && fileName ? (

@@ -12,6 +12,8 @@ export const IPC = {
   readFile: 'file:read',
   readSidecar: 'sidecar:read',
   writeSidecar: 'sidecar:write',
+  exportImageDialog: 'dialog:exportImage',
+  writeImageFile: 'file:writeImage',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
@@ -38,6 +40,10 @@ export interface SilverboxApi {
   readSidecar(path: string): Promise<string | null>;
   /** Write a `.silverbox.json` sidecar (main rejects other paths). */
   writeSidecar(path: string, content: string): Promise<void>;
+  /** Native save dialog for the developed image (.jpg/.png). */
+  exportImageDialog(defaultPath: string): Promise<OpenImageDialogResult>;
+  /** Write encoded image bytes (main rejects non-.jpg/.jpeg/.png paths). */
+  writeImageFile(path: string, bytes: ArrayBuffer): Promise<void>;
 }
 
 declare global {
