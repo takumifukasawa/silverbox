@@ -25,6 +25,7 @@ declare global {
       exportState(): { status: string; error: string | null };
       canvasView(): ViewportState & { dpr: number };
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
+      historyState(): { past: number; future: number };
     };
   }
 }
@@ -169,6 +170,10 @@ export function CanvasView() {
       },
       histogramState() {
         return useAppStore.getState().histogram;
+      },
+      historyState() {
+        const h = useAppStore.getState().history;
+        return { past: h.past.length, future: h.future.length };
       },
     };
     return () => {

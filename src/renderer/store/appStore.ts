@@ -17,6 +17,20 @@ import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
+interface GraphHistory {
+  past: GraphDoc[];
+  future: GraphDoc[];
+  /**
+   * Coalescing tag of the edit that produced the newest `past` entry —
+   * consecutive edits with the same tag (one slider drag) share one entry.
+   */
+  lastCoalesceKey: string | null;
+}
+
+const HISTORY_LIMIT = 100;
+
+const emptyHistory = (): GraphHistory => ({ past: [], future: [], lastCoalesceKey: null });
+
 interface AppState {
   imageStatus: ImageStatus;
   image: PreparedImage | null;
@@ -35,6 +49,7 @@ interface AppState {
   exportError: string | null;
   /** Stats of the current render (updated debounced after each render). */
   histogram: HistogramData | null;
+  history: GraphHistory;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -50,6 +65,20 @@ interface AppState {
   saveGraph(): Promise<void>;
   /** Develop at full resolution and write .jpg/.png (dialog when no path). */
   exportImage(path?: string): Promise<void>;
+  undo(): void;
+  redo(): void;
+}
+
+/** History advance for a graph mutation; `key` coalesces slider-drag runs. */
+function pushHistory(s: AppState, key: string | null): { history: GraphHistory } {
+  const coalesce = key !== null && key === s.history.lastCoalesceKey;
+  return {
+    history: {
+      past: coalesce ? s.history.past : [...s.history.past.slice(-(HISTORY_LIMIT - 1)), s.graph],
+      future: [],
+      lastCoalesceKey: key,
+    },
+  };
 }
 
 export function isJpegFileName(name: string): boolean {
@@ -70,6 +99,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   exportStatus: 'idle',
   exportError: null,
   histogram: null,
+  history: emptyHistory(),
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -92,7 +122,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (err) {
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
-      set({ imageStatus: 'ready', image, graph, graphDirty: false, selectedNodeId: null });
+      set({ imageStatus: 'ready', image, graph, graphDirty: false, selectedNodeId: null, history: emptyHistory() });
     } catch (err) {
       set({ imageStatus: 'error', image: null, imageError: err instanceof Error ? err.message : String(err) });
     }
@@ -111,6 +141,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateNodeParam(nodeId, key, value) {
     set((s) => ({
+      ...pushHistory(s, `param:${nodeId}:${key}`),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) =>
@@ -123,6 +154,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   moveNode(nodeId, position) {
     set((s) => ({
+      ...pushHistory(s, `move:${nodeId}`),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
@@ -153,7 +185,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const e1 = { id: nextId({ ...g, nodes }, 'e'), source: inEdge.source, target: id };
       const e2 = { id: nextId({ ...g, nodes, edges: [...g.edges, e1] }, 'e'), source: id, target: out.id };
       const edges = g.edges.filter((e) => e !== inEdge).concat(e1, e2);
-      return { graph: { ...g, nodes, edges }, graphDirty: true, selectedNodeId: id };
+      return { ...pushHistory(s, null), graph: { ...g, nodes, edges }, graphDirty: true, selectedNodeId: id };
     });
   },
 
@@ -167,6 +199,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const edges = g.edges.filter((e) => e !== inEdge && e !== outEdge);
       if (inEdge && outEdge) edges.push({ id: nextId(g, 'e'), source: inEdge.source, target: outEdge.target });
       return {
+        ...pushHistory(s, null),
         graph: { ...g, nodes: g.nodes.filter((n) => n.id !== nodeId), edges },
         graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
@@ -176,12 +209,47 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   updateNodeCode(nodeId, code) {
     set((s) => ({
+      ...pushHistory(s, null),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, code } : n)),
       },
       graphDirty: true,
     }));
+  },
+
+  undo() {
+    set((s) => {
+      const prev = s.history.past.at(-1);
+      if (!prev) return {};
+      return {
+        graph: prev,
+        history: {
+          past: s.history.past.slice(0, -1),
+          future: [s.graph, ...s.history.future],
+          lastCoalesceKey: null,
+        },
+        graphDirty: true,
+        selectedNodeId: prev.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+      };
+    });
+  },
+
+  redo() {
+    set((s) => {
+      const next = s.history.future[0];
+      if (!next) return {};
+      return {
+        graph: next,
+        history: {
+          past: [...s.history.past, s.graph],
+          future: s.history.future.slice(1),
+          lastCoalesceKey: null,
+        },
+        graphDirty: true,
+        selectedNodeId: next.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+      };
+    });
   },
 
   setShaderErrors(errors) {

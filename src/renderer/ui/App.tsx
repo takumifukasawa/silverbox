@@ -25,6 +25,14 @@ export function App() {
         ev.preventDefault();
         void useAppStore.getState().saveGraph();
       }
+      if (cmd && !ev.altKey && ev.key.toLowerCase() === 'z') {
+        // don't steal undo from text fields (the WGSL editor has its own)
+        const target = ev.target as HTMLElement | null;
+        if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) return;
+        ev.preventDefault();
+        if (ev.shiftKey) useAppStore.getState().redo();
+        else useAppStore.getState().undo();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
