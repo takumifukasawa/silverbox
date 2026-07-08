@@ -4,10 +4,26 @@
   "private": true,
   "type": "module",
   "description": "Node-based, non-destructive RAW/JPEG development app with WGSL custom looks and git-native (JSON) graph documents.",
+  "author": "takumifukasawa",
   "main": "./out/main/index.js",
+  "build": {
+    "appId": "dev.takumifukasawa.silverbox",
+    "productName": "Silverbox",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "mac": {
+      "identity": null
+    }
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
+    "package": "electron-vite build && electron-builder --dir",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
     "verify:ms0": "node scripts/verify-ms0-decode.mjs",
     "verify:ms1": "node scripts/verify-ms1-app.mjs",
@@ -23,7 +39,8 @@
     "verify:ms11": "node scripts/verify-ms11-undo.mjs",
     "verify:ms12": "node scripts/verify-ms12-tonecurve.mjs",
     "verify:ms13": "node scripts/verify-ms13-branch.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13"
+    "verify:ms14": "node scripts/verify-ms14-package.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:ms14"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
@@ -33,6 +50,7 @@
     "@webgpu/types": "^0.1.71",
     "@xyflow/react": "^12.11.2",
     "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.1",
     "playwright": "^1.61.1",
