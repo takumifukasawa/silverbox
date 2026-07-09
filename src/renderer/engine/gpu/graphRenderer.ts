@@ -507,6 +507,28 @@ export class GraphRenderer {
     });
   }
 
+  /** Strided RGB samples of the encoded output for the scope displays. */
+  scopeSamples(maxCols = 256, maxRows = 144): Promise<ScopeSamples | null> {
+    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
+      const strideX = Math.max(1, Math.ceil(width / maxCols));
+      const strideY = Math.max(1, Math.ceil(height / maxRows));
+      const cols = Math.ceil(width / strideX);
+      const rows = Math.ceil(height / strideY);
+      const data = new Uint8Array(cols * rows * 3);
+      let i = 0;
+      for (let y = 0; y < height; y += strideY) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width; x += strideX) {
+          const s = row + x * 4;
+          data[i++] = px[s]!;
+          data[i++] = px[s + 1]!;
+          data[i++] = px[s + 2]!;
+        }
+      }
+      return { cols, rows, data };
+    });
+  }
+
   /** 256-bin RGB + luma histogram and clipping fractions of the encoded output. */
   stats(): Promise<HistogramData | null> {
     return this.withEncodedPixels((px, bytesPerRow, width, height) => {
@@ -557,4 +579,12 @@ export interface HistogramData {
   shadowClip: number;
   highlightClip: number;
   pixels: number;
+}
+
+/** Strided RGB samples of the encoded output, row-major, for the scope displays. */
+export interface ScopeSamples {
+  cols: number;
+  rows: number;
+  /** RGB triplets, row-major; length === cols * rows * 3. */
+  data: Uint8Array;
 }

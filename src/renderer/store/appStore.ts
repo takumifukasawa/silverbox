@@ -14,7 +14,7 @@ import {
   type GraphDoc,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
-import type { GraphRenderer, HistogramData } from '../engine/gpu/graphRenderer';
+import type { GraphRenderer, HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
 import {
   buildCustomShaderWgsl,
@@ -65,6 +65,12 @@ interface AppState {
   exportError: string | null;
   /** Stats of the current render (updated debounced after each render). */
   histogram: HistogramData | null;
+  /** Selected scope display in the histogram panel; 'histogram' is the default. */
+  scopeMode: 'histogram' | 'waveform' | 'parade' | 'vectorscope';
+  setScopeMode(mode: 'histogram' | 'waveform' | 'parade' | 'vectorscope'): void;
+  /** Strided RGB samples for Wave/Parade/Vec, fetched only outside 'histogram' mode. */
+  scopeSamples: ScopeSamples | null;
+  setScopeSamples(samples: ScopeSamples | null): void;
   history: GraphHistory;
   /** Yellow toolbar notice when a sidecar existed but could not be used. */
   sidecarNotice: string | null;
@@ -260,6 +266,8 @@ export const useAppStore = create<AppState>((set, get) => {
   exportStatus: 'idle',
   exportError: null,
   histogram: null,
+  scopeMode: 'histogram',
+  scopeSamples: null,
   history: emptyHistory(),
   sidecarNotice: null,
   sidecarCreatedAt: null,
@@ -652,6 +660,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
   setHistogram(histogram) {
     set({ histogram });
+  },
+
+  setScopeMode(mode) {
+    set({ scopeMode: mode });
+  },
+
+  setScopeSamples(samples) {
+    set({ scopeSamples: samples });
   },
 
   async exportImage(path, opts) {

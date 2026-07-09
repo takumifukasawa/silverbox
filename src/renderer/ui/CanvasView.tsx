@@ -32,6 +32,11 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
+      scopeState(): {
+        mode: string;
+        samples: { cols: number; rows: number; length: number; meanLuma: number } | null;
+      };
+      setScopeMode(mode: 'histogram' | 'waveform' | 'parade' | 'vectorscope'): void;
     };
   }
 }
@@ -62,6 +67,19 @@ export function CanvasView() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
+  const scopeMode = useAppStore((s) => s.scopeMode);
+
+  // switching into a non-histogram mode fetches fresh samples immediately:
+  // edits made while the histogram was showing don't update scopeSamples, so
+  // an existing value may be stale — always refetch, never just reuse it
+  useEffect(() => {
+    if (scopeMode === 'histogram') return;
+    const renderer = useAppStore.getState().renderer;
+    if (!renderer || !renderer.hasImage) return;
+    void renderer.scopeSamples().then((samples) => {
+      useAppStore.getState().setScopeSamples(samples);
+    });
+  }, [scopeMode]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -108,6 +126,13 @@ export function CanvasView() {
           void renderer.stats().then((stats) => {
             if (stats) useAppStore.getState().setHistogram(stats);
           });
+          // scope samples are an extra readback — skip them in the default
+          // histogram mode, where nothing consumes them
+          if (useAppStore.getState().scopeMode !== 'histogram') {
+            void renderer.scopeSamples().then((samples) => {
+              useAppStore.getState().setScopeSamples(samples);
+            });
+          }
         }, 120);
       } catch (err) {
         if (!cancelled) setGpuError(err instanceof Error ? err.message : String(err));
@@ -221,6 +246,29 @@ export function CanvasView() {
       historyState() {
         const h = useAppStore.getState().history;
         return { past: h.past.length, future: h.future.length };
+      },
+      scopeState() {
+        const s = useAppStore.getState();
+        const samples = s.scopeSamples;
+        let meanLuma = 0;
+        if (samples) {
+          const n = samples.cols * samples.rows;
+          let sum = 0;
+          for (let i = 0; i < n; i++) {
+            const r = samples.data[i * 3]!;
+            const g = samples.data[i * 3 + 1]!;
+            const b = samples.data[i * 3 + 2]!;
+            sum += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+          }
+          meanLuma = n > 0 ? sum / n : 0;
+        }
+        return {
+          mode: s.scopeMode,
+          samples: samples ? { cols: samples.cols, rows: samples.rows, length: samples.data.length, meanLuma } : null,
+        };
+      },
+      setScopeMode(mode) {
+        useAppStore.getState().setScopeMode(mode);
       },
     };
     return () => {

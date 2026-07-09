@@ -662,6 +662,28 @@ button:disabled {
   pointer-events: none;
 }
 
+.scope-mode-row {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+  pointer-events: auto;
+}
+
+.scope-mode-row button {
+  padding: 2px 6px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #999;
+}
+
+.scope-mode-row button.active {
+  background: #454545;
+  border-color: #666;
+  color: #ddd;
+}
+
 .histogram-clip-row {
   display: flex;
   justify-content: space-between;
