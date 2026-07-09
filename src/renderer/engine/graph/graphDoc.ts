@@ -156,7 +156,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
       ...(e.targetHandle !== undefined ? { targetHandle: e.targetHandle } : {}),
     })) as unknown as GraphEdge[],
   };
-  for (const n of doc.nodes) {
+  doc.nodes.forEach((n, i) => {
     if (typeof n.id !== 'string') throw new Error('node id must be a string');
     if (
       n.kind !== 'input' &&
@@ -169,7 +169,9 @@ export function parseGraphDoc(text: string): SidecarDoc {
       throw new Error(`unknown node kind ${String(n.kind)}`);
     }
     if (typeof n.position?.x !== 'number' || typeof n.position?.y !== 'number') {
-      throw new Error(`node ${n.id} needs a numeric position`);
+      // position is layout-only and optional — hand-written docs fall back
+      // to a simple chain layout
+      n.position = { x: 40 + 220 * i, y: 60 };
     }
     for (const v of Object.values(n.params ?? {})) {
       if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
@@ -181,7 +183,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
     if (n.kind === CUSTOM_KIND) {
       n.shader = sanitizeCustomShader(n.shader, n.id);
     }
-  }
+  });
   for (const e of doc.edges) {
     if (typeof e.id !== 'string' || typeof e.source !== 'string' || typeof e.target !== 'string') {
       throw new Error('edges need string id/source/target');

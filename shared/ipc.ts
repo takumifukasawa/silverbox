@@ -44,6 +44,8 @@ export interface SilverboxApi {
   exportImageDialog(defaultPath: string): Promise<OpenImageDialogResult>;
   /** Encode + write the developed pixels via sharp in the main process. */
   exportEncode(req: ExportEncodeRequest): Promise<ExportEncodeResult>;
+  /** Filesystem path of a dropped File (webUtils; File.path is gone in Electron 32+). */
+  getPathForFile(file: File): string;
 }
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */
