@@ -274,6 +274,22 @@ button:disabled {
   accent-color: #6a9fe8;
 }
 
+/* WB gradient tracks: flat 6px groove with the color ramp inline-styled */
+.param-row input[type='range'].param-range--gradient {
+  appearance: none;
+  height: 6px;
+  border-radius: 3px;
+}
+
+.param-row input[type='range'].param-range--gradient::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #e6e6e6;
+  border: 1px solid #555;
+}
+
 .param-number {
   background: #1b1b1b;
   color: #ddd;

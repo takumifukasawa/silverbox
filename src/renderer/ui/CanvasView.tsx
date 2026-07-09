@@ -27,6 +27,7 @@ declare global {
       exportImageTo(path: string): void;
       exportState(): { status: string; error: string | null };
       canvasView(): ViewportState & { dpr: number };
+      wbState(): { asShot: { temp: number; tint: number }; mccamyCct: number };
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
     };
@@ -50,6 +51,7 @@ export function CanvasView() {
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
   const shaderRev = useAppStore((s) => s.shaderRev);
+  const wbModel = useAppStore((s) => s.wbModel);
   const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -77,7 +79,7 @@ export function CanvasView() {
         // in the node editor instead of killing the preview
         let plan;
         try {
-          plan = buildPlan(graph);
+          plan = buildPlan(graph, { wb: wbModel });
           useAppStore.getState().setGraphBroken(false);
         } catch {
           plan = { steps: [], output: -1 };
@@ -101,7 +103,7 @@ export function CanvasView() {
     return () => {
       cancelled = true;
     };
-  }, [image, graph, shaderRev]);
+  }, [image, graph, shaderRev, wbModel]);
 
   useEffect(() => {
     window.__debug = {
@@ -132,7 +134,7 @@ export function CanvasView() {
         const s = useAppStore.getState();
         if (!s.image) return null;
         const { data, width, height } = s.image;
-        const plan = buildPlan(s.graph);
+        const plan = buildPlan(s.graph, { wb: s.wbModel });
         // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
         if (!planHasCpuReference(plan)) return null;
         const n = width * height;
@@ -184,6 +186,10 @@ export function CanvasView() {
       },
       canvasView() {
         return { ...viewRef.current, dpr: devicePixelRatio };
+      },
+      wbState() {
+        const { wbModel: model } = useAppStore.getState();
+        return { asShot: model.asShot, mccamyCct: model.mccamyCct };
       },
       histogramState() {
         return useAppStore.getState().histogram;

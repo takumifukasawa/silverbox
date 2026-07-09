@@ -32,7 +32,15 @@ export interface OpParamDef {
   max: number;
   step: number;
   default: number;
+  /** UI hint: logarithmic slider travel (Kelvin temperature). */
+  scale?: 'log';
+  /** UI hint: CSS gradient for the slider track (WB color ramps). */
+  gradient?: string;
 }
+
+/** WB slider track ramps (UI spec §7): blue↔amber / green↔magenta. */
+export const TEMP_GRADIENT = 'linear-gradient(90deg, #4a7bd4, #e8e8e8 55%, #f0a832)';
+export const TINT_GRADIENT = 'linear-gradient(90deg, #57b45c, #e8e8e8 50%, #c95fc0)';
 
 export interface OpDef {
   kind: OpKind;
@@ -73,18 +81,20 @@ export const OPS: Record<OpKind, OpDef> = {
   whitebalance: {
     kind: 'whitebalance',
     label: 'White Balance',
-    // Relative gains with green anchored at 1 — as-shot WB is baked in at
-    // decode (useCameraWb), so gains of 1 are a true identity.
+    // Real Kelvin/Tint (REBUILD-SPEC §7). The uniform carries the RELATIVE
+    // gains the per-image model computes from these params (buildPlan wires
+    // that up — packUniform is unused for this op); temp 0 is the as-shot
+    // placeholder, resolved on image load.
     params: [
-      { key: 'rGain', label: 'R gain', min: 0.25, max: 4, step: 0.01, default: 1 },
-      { key: 'bGain', label: 'B gain', min: 0.25, max: 4, step: 0.01, default: 1 },
+      { key: 'temp', label: 'Temp', min: 2000, max: 50000, step: 1, default: 0, scale: 'log', gradient: TEMP_GRADIENT },
+      { key: 'tint', label: 'Tint', min: -150, max: 150, step: 1, default: 0, gradient: TINT_GRADIENT },
     ],
-    packUniform: (params) => [params.rGain ?? 1, params.bGain ?? 1, 0, 0],
+    packUniform: () => [1, 1, 1, 0],
     wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  return vec4f(c.rgb * vec3f(p.x, 1.0, p.y), c.a);
+  return vec4f(c.rgb * p.xyz, c.a);
 }`,
-    apply: ([r, g, b], p) => [r * p[0], g, b * p[1]],
-    isIdentity: (params) => (params.rGain ?? 1) === 1 && (params.bGain ?? 1) === 1,
+    apply: ([r, g, b], p) => [r * p[0], g * p[1], b * p[2]],
+    isIdentity: (params) => (params.temp ?? 0) === 0,
   },
   contrast: {
     kind: 'contrast',

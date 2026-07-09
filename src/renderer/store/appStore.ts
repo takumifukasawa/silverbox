@@ -27,6 +27,7 @@ import {
   type CustomShaderParams,
 } from '../engine/graph/customShaderNode';
 import { validateWgsl } from '../engine/shader/validateWgsl';
+import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -70,6 +71,8 @@ interface AppState {
   sidecarCreatedAt: string | null;
   /** Result line for the toolbar after a successful export. */
   exportInfo: { width: number; height: number; bytes: number } | null;
+  /** Per-image Kelvin/Tint model (as-shot estimate + relative gains). */
+  wbModel: WbModel;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -245,6 +248,7 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarNotice: null,
   sidecarCreatedAt: null,
   exportInfo: null,
+  wbModel: DEFAULT_WB_MODEL,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -274,6 +278,27 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
+      // per-image WB model; resolve the as-shot placeholder (temp 0) in the
+      // loaded/default doc so WB sliders always show real Kelvin values
+      const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz });
+      graph = {
+        ...graph,
+        nodes: graph.nodes.map((n) => {
+          if (n.kind === DEVELOP_KIND && n.develop && n.develop.basic.temp === 0) {
+            return {
+              ...n,
+              develop: {
+                ...n.develop,
+                basic: { ...n.develop.basic, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint },
+              },
+            };
+          }
+          if (n.kind === 'whitebalance' && (n.params?.temp ?? 0) === 0) {
+            return { ...n, params: { ...n.params, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint } };
+          }
+          return n;
+        }),
+      };
       // node ids of the previous doc must never alias into stale shaders
       clearCustomShaderArtifacts();
       shaderEpoch++;
@@ -288,6 +313,7 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarNotice,
         sidecarCreatedAt,
         exportInfo: null,
+        wbModel,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -355,10 +381,17 @@ export const useAppStore = create<AppState>((set, get) => {
       // Fresh custom nodes are seeded with the engine-authored identity
       // artifact — known valid, no async validation round-trip needed.
       if (kind === CUSTOM_KIND) seedDefaultCustomShaderArtifact(id);
+      // fresh WB atomics start at the image's as-shot values (= identity)
+      const params =
+        kind === 'whitebalance'
+          ? { temp: s.wbModel.asShot.temp, tint: s.wbModel.asShot.tint }
+          : kind === CUSTOM_KIND
+            ? undefined
+            : defaultParams(kind);
       const node =
         kind === CUSTOM_KIND
           ? { id, kind, position: { ...out.position }, shader: createDefaultCustomShaderParams() }
-          : { id, kind, position: { ...out.position }, params: defaultParams(kind) };
+          : { id, kind, position: { ...out.position }, params };
       const nodes = g.nodes
         .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
         .concat(node);
@@ -571,7 +604,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const bytes = await window.silverbox.readFile(imagePath);
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
-      const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph));
+      const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph, { wb: get().wbModel }));
       // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
       const cap = full.capture;
       const result = await window.silverbox.exportEncode({

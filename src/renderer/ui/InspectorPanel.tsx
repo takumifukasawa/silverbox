@@ -1,6 +1,16 @@
 import { useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, toneCurvePoint, type OpParamDef } from '../engine/graph/ops';
+import {
+  BLEND_KIND,
+  BLEND_PARAM_DEFS,
+  CUSTOM_KIND,
+  OPS,
+  TEMP_GRADIENT,
+  TINT_GRADIENT,
+  isOpKind,
+  toneCurvePoint,
+  type OpParamDef,
+} from '../engine/graph/ops';
 import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
 import { defaultDevelopParams, type DevelopParams } from '../engine/graph/developNode';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
@@ -8,22 +18,41 @@ import { ShaderEditor } from './ShaderEditor';
 
 /**
  * Common parameter row (UI spec §6): label / range / number in a grid;
- * double-clicking the row resets to the default.
+ * double-clicking the row resets to the default. `defaultValue` overrides
+ * the static def.default (WB resets to the image's as-shot values). A 'log'
+ * scale rides a hidden 0..1000 position axis (Kelvin travel); the number
+ * input always speaks real units.
  */
-function ParamSlider({ nodeId, def, value }: { nodeId: string; def: OpParamDef; value: number }) {
+function ParamSlider({
+  nodeId,
+  def,
+  value,
+  defaultValue,
+}: {
+  nodeId: string;
+  def: OpParamDef;
+  value: number;
+  defaultValue?: number;
+}) {
   const updateNodeParam = useAppStore((s) => s.updateNodeParam);
   const set = (v: number) => updateNodeParam(nodeId, def.key, Math.min(def.max, Math.max(def.min, v)));
-  const changed = value !== def.default;
+  const resetTo = defaultValue ?? def.default;
+  const changed = value !== resetTo;
+  const isLog = def.scale === 'log';
+  const toPos = (v: number) => (1000 * Math.log(v / def.min)) / Math.log(def.max / def.min);
+  const fromPos = (p: number) => Math.round(def.min * Math.exp((p / 1000) * Math.log(def.max / def.min)));
   return (
-    <div className="param-row" title="Double-click to reset" onDoubleClick={() => set(def.default)}>
+    <div className="param-row" title="Double-click to reset" onDoubleClick={() => set(resetTo)}>
       <span className={`param-label${changed ? ' changed' : ''}`}>{def.label}</span>
       <input
         type="range"
-        min={def.min}
-        max={def.max}
-        step={def.step}
-        value={value}
-        onChange={(ev) => set(Number(ev.target.value))}
+        className={def.gradient ? 'param-range--gradient' : undefined}
+        style={def.gradient ? { background: def.gradient } : undefined}
+        min={isLog ? 0 : def.min}
+        max={isLog ? 1000 : def.max}
+        step={isLog ? 1 : def.step}
+        value={isLog ? toPos(Math.max(def.min, value)) : value}
+        onChange={(ev) => set(isLog ? fromPos(Number(ev.target.value)) : Number(ev.target.value))}
       />
       <input
         type="number"
@@ -67,12 +96,31 @@ const DEVELOP_BASIC_DEFS: OpParamDef[] = [
 
 /** The aggregated Develop panel — Basic now; more sections per spec order. */
 function DevelopInspector({ node }: { node: GraphNode }) {
+  const wbModel = useAppStore((s) => s.wbModel);
   const params: DevelopParams = node.develop ?? defaultDevelopParams();
   const basic = params.basic as unknown as Record<string, number>;
+  const wbDefs: OpParamDef[] = [
+    { key: 'basic.temp', label: 'Temp', min: 2000, max: 50000, step: 1, default: 0, scale: 'log', gradient: TEMP_GRADIENT },
+    { key: 'basic.tint', label: 'Tint', min: -150, max: 150, step: 1, default: 0, gradient: TINT_GRADIENT },
+  ];
+  const wbDefault = (key: string) => (key === 'basic.temp' ? wbModel.asShot.temp : wbModel.asShot.tint);
+  const wbValue = (key: string) => {
+    const v = basic[key.split('.')[1]!] ?? 0;
+    return v !== 0 || key === 'basic.tint' ? v : wbDefault(key); // temp 0 = unresolved placeholder
+  };
   return (
     <>
       <div className="inspector-title">Develop</div>
       <Section title="Basic">
+        {wbDefs.map((def) => (
+          <ParamSlider
+            key={def.key}
+            nodeId={node.id}
+            def={def}
+            value={wbValue(def.key)}
+            defaultValue={wbDefault(def.key)}
+          />
+        ))}
         {DEVELOP_BASIC_DEFS.map((def) => (
           <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
         ))}
@@ -192,6 +240,7 @@ function CurvePreview({ node }: { node: GraphNode }) {
 }
 
 function NodeContent({ node }: { node: GraphNode | undefined }) {
+  const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
     return <div className="inspector-placeholder">Select a node in the graph below.</div>;
   }
@@ -219,12 +268,23 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
     );
   }
   const def = OPS[node.kind];
+  // the WB atomic resets to the image's as-shot values, not a fixed default
+  const dynamicDefault = (key: string): number | undefined => {
+    if (node.kind !== 'whitebalance') return undefined;
+    return key === 'temp' ? wbModel.asShot.temp : wbModel.asShot.tint;
+  };
   return (
     <>
       <div className="inspector-title">{def.label}</div>
       {node.kind === 'tonecurve' && <CurvePreview node={node} />}
       {def.params.map((p) => (
-        <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
+        <ParamSlider
+          key={p.key}
+          nodeId={node.id}
+          def={p}
+          value={node.params?.[p.key] ?? dynamicDefault(p.key) ?? p.default}
+          defaultValue={dynamicDefault(p.key)}
+        />
       ))}
     </>
   );

@@ -21,6 +21,7 @@ import {
   type CustomShaderParam,
   type CustomShaderParams,
 } from './customShaderNode';
+import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -318,6 +319,11 @@ export interface RenderPlan {
   output: number;
 }
 
+/** Per-compile context: the image's WB model (and later, render scale). */
+export interface CompileContext {
+  wb: WbModel;
+}
+
 /**
  * Compile the GraphDoc into an execution plan by resolving the output node's
  * ancestry. The graph is a DAG: ops and custom nodes take one input, blend
@@ -325,7 +331,8 @@ export interface RenderPlan {
  * the output are allowed but simply not executed. Throws on cycles, missing
  * connections, or unknown kinds.
  */
-export function buildPlan(doc: GraphDoc): RenderPlan {
+export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
+  const wb = ctx?.wb ?? DEFAULT_WB_MODEL;
   const byId = new Map(doc.nodes.map((n) => [n.id, n]));
   const incoming = new Map<string, GraphEdge[]>();
   for (const e of doc.edges) incoming.set(e.target, [...(incoming.get(e.target) ?? []), e]);
@@ -393,11 +400,30 @@ export function buildPlan(doc: GraphDoc): RenderPlan {
         }
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
-        const passes = developPasses(params);
+        const wbGains = wb.gains(params.basic.temp, params.basic.tint);
+        const passes = developPasses(params, wbGains);
         if (passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {
-          steps.push({ nodeId: id, type: 'passes', passes, src, cpu: (px) => cpuDevelop(px, params) });
+          steps.push({ nodeId: id, type: 'passes', passes, src, cpu: (px) => cpuDevelop(px, params, wbGains) });
+          index = steps.length - 1;
+        }
+      } else if (node.kind === 'whitebalance') {
+        // the atomic WB shares the per-image Kelvin/Tint model — the uniform
+        // carries the computed relative gains, and as-shot values skip
+        const params = node.params ?? {};
+        const g = wb.gains(params.temp ?? 0, params.tint ?? 0);
+        if (g[0] === 1 && g[1] === 1 && g[2] === 1) {
+          index = src;
+        } else {
+          const uniform: Vec4 = [g[0], g[1], g[2], 0];
+          steps.push({
+            nodeId: id,
+            type: 'passes',
+            passes: [{ shaderId: 'op/whitebalance', wgsl: opPassWgsl(OPS.whitebalance.wgsl), uniforms: vec4Buffer(uniform) }],
+            src,
+            cpu: (px) => OPS.whitebalance.apply(px, uniform),
+          });
           index = steps.length - 1;
         }
       } else {

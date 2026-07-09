@@ -204,14 +204,20 @@ function packColor(b: DevelopBasicParams): ArrayBuffer {
 
 /**
  * Passes for the current params — identity sections contribute none.
- * WB gains are [1,1,1] until the Kelvin/Tint model lands (temp 0 =
- * unresolved as-shot placeholder = inactive).
+ * `wbGains` comes from the per-image Kelvin/Tint model (exactly [1,1,1] at
+ * the as-shot values, so untouched WB never wakes the tone pass).
  */
-export function developPasses(params: DevelopParams): PassSpec[] {
+export function developPasses(params: DevelopParams, wbGains: [number, number, number]): PassSpec[] {
   const b = params.basic;
-  const wbGains: [number, number, number] = [1, 1, 1];
+  const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
   const toneActive =
-    b.ev !== 0 || b.contrast !== 0 || b.highlights !== 0 || b.shadows !== 0 || b.whites !== 0 || b.blacks !== 0;
+    wbActive ||
+    b.ev !== 0 ||
+    b.contrast !== 0 ||
+    b.highlights !== 0 ||
+    b.shadows !== 0 ||
+    b.whites !== 0 ||
+    b.blacks !== 0;
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
   const passes: PassSpec[] = [];
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
@@ -256,12 +262,19 @@ export function cpuDevelopTone(px: Rgb, b: DevelopBasicParams, wbGains: [number,
 }
 
 /** Mirror of developPasses() — apply the same active passes in order. */
-export function cpuDevelop(px: Rgb, params: DevelopParams): Rgb {
+export function cpuDevelop(px: Rgb, params: DevelopParams, wbGains: [number, number, number]): Rgb {
   const b = params.basic;
   let out = px;
+  const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
   const toneActive =
-    b.ev !== 0 || b.contrast !== 0 || b.highlights !== 0 || b.shadows !== 0 || b.whites !== 0 || b.blacks !== 0;
-  if (toneActive) out = cpuDevelopTone(out, b, [1, 1, 1]);
+    wbActive ||
+    b.ev !== 0 ||
+    b.contrast !== 0 ||
+    b.highlights !== 0 ||
+    b.shadows !== 0 ||
+    b.whites !== 0 ||
+    b.blacks !== 0;
+  if (toneActive) out = cpuDevelopTone(out, b, wbGains);
   if (b.saturation !== 0 || b.vibrance !== 0) {
     out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
   }

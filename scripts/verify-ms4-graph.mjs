@@ -100,10 +100,10 @@ try {
 
   console.log('verify-ms4 (inspector UI):');
   await page.locator('.react-flow__node[data-id="dev"]').click();
-  const slider = page.locator('.inspector input[type="range"]').first();
+  const slider = page.locator('.inspector input[type="range"]').nth(2); // Temp, Tint, then Exposure
   check(
     'clicking the Develop node shows the Basic sliders',
-    (await page.locator('.inspector input[type="range"]').count()) === 8,
+    (await page.locator('.inspector input[type="range"]').count()) === 10,
     await page.locator('.inspector input[type="range"]').count()
   );
 
@@ -115,8 +115,8 @@ try {
   check('arrow key on the slider updates the graph param', evAfterKey === 0.01, evAfterKey);
   check(
     'inspector number input shows the updated value',
-    (await page.locator('.param-row').first().locator('input[type="number"]').inputValue()) === '0.01',
-    await page.locator('.param-row').first().locator('input[type="number"]').inputValue()
+    (await page.locator('.param-row').nth(2).locator('input[type="number"]').inputValue()) === '0.01',
+    await page.locator('.param-row').nth(2).locator('input[type="number"]').inputValue()
   );
 
   console.log('screenshots: test-artifacts/ms4-exposure.png, ms4-grayscale.png');

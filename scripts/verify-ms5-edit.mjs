@@ -94,8 +94,7 @@ try {
   });
 
   console.log('verify-ms5 (white balance + contrast vs CPU reference):');
-  await page.evaluate(() => window.__debug.updateNodeParam('whitebalance-1', 'rGain', 1.5));
-  await page.evaluate(() => window.__debug.updateNodeParam('whitebalance-1', 'bGain', 0.7));
+  await page.evaluate(() => window.__debug.updateNodeParam('whitebalance-1', 'temp', 6500));
   await page.evaluate(() => window.__debug.updateNodeParam('contrast-1', 'amount', 40));
   const editedGpu = await page.evaluate(() => window.__debug.readbackMean());
   const editedCpu = await page.evaluate(() => window.__debug.cpuReferenceMean());
