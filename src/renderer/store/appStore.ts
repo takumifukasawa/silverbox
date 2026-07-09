@@ -74,6 +74,12 @@ interface AppState {
   exportInfo: { width: number; height: number; bytes: number } | null;
   /** Per-image Kelvin/Tint model (as-shot estimate + relative gains). */
   wbModel: WbModel;
+  /** Viewer-only: show the unedited decode instead of the graph result. */
+  showBefore: boolean;
+  toggleBefore(): void;
+  /** Viewer-only: display the render as luminance (tone/contrast check). */
+  grayscaleView: boolean;
+  toggleGrayscaleView(): void;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -257,6 +263,8 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarCreatedAt: null,
   exportInfo: null,
   wbModel: DEFAULT_WB_MODEL,
+  showBefore: false,
+  grayscaleView: false,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -609,6 +617,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
   setRenderer(renderer) {
     set({ renderer });
+  },
+
+  toggleBefore() {
+    set((s) => ({ showBefore: !s.showBefore }));
+  },
+
+  toggleGrayscaleView() {
+    set((s) => ({ grayscaleView: !s.grayscaleView }));
   },
 
   setHistogram(histogram) {

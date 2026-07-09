@@ -54,6 +54,10 @@ export function CanvasView() {
   const graph = useAppStore((s) => s.graph);
   const shaderRev = useAppStore((s) => s.shaderRev);
   const wbModel = useAppStore((s) => s.wbModel);
+  const showBefore = useAppStore((s) => s.showBefore);
+  const grayscaleView = useAppStore((s) => s.grayscaleView);
+  const toggleBefore = useAppStore((s) => s.toggleBefore);
+  const toggleGrayscaleView = useAppStore((s) => s.toggleGrayscaleView);
   const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -90,6 +94,10 @@ export function CanvasView() {
           plan = { steps: [], output: -1 };
           useAppStore.getState().setGraphBroken(true);
         }
+        // Before/After: show the unedited decode (readbacks follow, so the
+        // histogram describes what is on screen — LR behavior)
+        if (showBefore) plan = { steps: [], output: -1 };
+        renderer.viewMode = grayscaleView ? 'grayscale' : 'color';
         await renderer.setGraph(plan);
         if (cancelled) return;
         renderer.render();
@@ -108,7 +116,7 @@ export function CanvasView() {
     return () => {
       cancelled = true;
     };
-  }, [image, graph, shaderRev, wbModel]);
+  }, [image, graph, shaderRev, wbModel, showBefore, grayscaleView]);
 
   useEffect(() => {
     window.__debug = {
@@ -235,8 +243,29 @@ export function CanvasView() {
         />
       </div>
       {!overlayVisible && <HistogramPanel />}
+      {!overlayVisible && showBefore && (
+        <div className="before-badge" data-testid="before-badge">
+          Before
+        </div>
+      )}
       {!overlayVisible && (
         <div className="canvas-controls">
+          <button
+            onClick={toggleBefore}
+            data-testid="view-before"
+            className={showBefore ? 'active' : undefined}
+            title="Show the unedited image (\)"
+          >
+            A/B
+          </button>
+          <button
+            onClick={toggleGrayscaleView}
+            data-testid="view-grayscale"
+            className={grayscaleView ? 'active' : undefined}
+            title="Grayscale check view (G)"
+          >
+            BW
+          </button>
           <button onClick={fit} data-testid="view-fit">
             Fit
           </button>

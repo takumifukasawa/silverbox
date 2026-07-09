@@ -37,6 +37,25 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+// Viewer-only grayscale: encode, then show the Rec.709 luma of the encoded
+// image on all channels — a tone/contrast check that never touches
+// readbacks or export.
+const GRAYSCALE_ENCODE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+${FULLSCREEN_VS}
+fn srgbEncode(v: f32) -> f32 {
+  let c = clamp(v, 0.0, 1.0);
+  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let t = textureLoad(src, vec2i(pos.xy), 0);
+  let y = dot(vec3f(srgbEncode(t.r), srgbEncode(t.g), srgbEncode(t.b)), vec3f(0.2126, 0.7152, 0.0722));
+  return vec4f(y, y, y, 1.0);
+}
+`;
+
 const BLEND_SHADER = /* wgsl */ `
 @group(0) @binding(0) var srcA: texture_2d<f32>;
 @group(0) @binding(1) var srcB: texture_2d<f32>;
@@ -94,10 +113,14 @@ export class GraphRenderer {
   private width = 0;
   private height = 0;
 
+  /** Viewer-only display mode; readbacks/export always use the color encode. */
+  viewMode: 'color' | 'grayscale' = 'color';
+
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
     private readonly canvasEncodePipeline: GPURenderPipeline,
+    private readonly canvasGrayscalePipeline: GPURenderPipeline,
     private readonly readbackEncodePipeline: GPURenderPipeline
   ) {}
 
@@ -107,14 +130,21 @@ export class GraphRenderer {
     if (!context) throw new Error('webgpu canvas context unavailable');
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
-    const module = device.createShaderModule({ code: ENCODE_SHADER });
-    const makeEncodePipeline = (format: GPUTextureFormat) =>
-      device.createRenderPipeline({
+    const makeEncodePipeline = (code: string, format: GPUTextureFormat) => {
+      const module = device.createShaderModule({ code });
+      return device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
         fragment: { module, entryPoint: 'fs', targets: [{ format }] },
       });
-    return new GraphRenderer(device, context, makeEncodePipeline(canvasFormat), makeEncodePipeline('rgba8unorm'));
+    };
+    return new GraphRenderer(
+      device,
+      context,
+      makeEncodePipeline(ENCODE_SHADER, canvasFormat),
+      makeEncodePipeline(GRAYSCALE_ENCODE_SHADER, canvasFormat),
+      makeEncodePipeline(ENCODE_SHADER, 'rgba8unorm')
+    );
   }
 
   get hasImage(): boolean {
@@ -322,7 +352,8 @@ export class GraphRenderer {
     if (!this.source) return;
     const encoder = this.device.createCommandEncoder();
     const linear = this.addChainPasses(encoder);
-    this.addPass(encoder, this.context.getCurrentTexture().createView(), this.canvasEncodePipeline, [
+    const pipeline = this.viewMode === 'grayscale' ? this.canvasGrayscalePipeline : this.canvasEncodePipeline;
+    this.addPass(encoder, this.context.getCurrentTexture().createView(), pipeline, [
       { binding: 0, resource: linear },
     ]);
     this.device.queue.submit([encoder.finish()]);

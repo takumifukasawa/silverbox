@@ -222,6 +222,24 @@ button:disabled {
   font-size: 12px;
 }
 
+.canvas-controls button.active {
+  background: #4a6b9a;
+  border-color: #6a9fe8;
+}
+
+.before-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 3px 10px;
+  background: rgba(20, 20, 20, 0.72);
+  border: 1px solid #f0c674;
+  border-radius: 4px;
+  color: #f0c674;
+  font-size: 12px;
+  pointer-events: none;
+}
+
 .canvas-zoom-readout {
   color: #999;
   font-size: 12px;

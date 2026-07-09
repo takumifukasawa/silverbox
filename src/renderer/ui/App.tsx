@@ -33,6 +33,20 @@ export function App() {
         ev.preventDefault();
         void useAppStore.getState().saveGraph();
       }
+      if (!cmd && !ev.altKey && (ev.key === '\\' || ev.key.toLowerCase() === 'g')) {
+        // viewer toggles (LR-style \ = before/after); never steal from inputs
+        const target = ev.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
+        ) {
+          return;
+        }
+        if (useAppStore.getState().imageStatus !== 'ready') return;
+        ev.preventDefault();
+        if (ev.key === '\\') useAppStore.getState().toggleBefore();
+        else useAppStore.getState().toggleGrayscaleView();
+      }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
         const target = ev.target as HTMLElement | null;
