@@ -342,6 +342,60 @@ button:disabled {
   width: 100%;
 }
 
+/* ---- point tone-curve editor (UI spec §8) ---- */
+
+.tonecurve {
+  padding: 4px 14px 8px;
+}
+
+.tonecurve-toolbar {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.tonecurve-tab {
+  padding: 2px 8px;
+  font-size: 11px;
+  background: #2a2a2a;
+  border: 1px solid #444;
+}
+
+.tonecurve-tab.active {
+  background: #454545;
+  border-color: #666;
+}
+
+.tonecurve-dot {
+  font-size: 7px;
+  vertical-align: middle;
+  margin-left: 3px;
+}
+
+.tonecurve-reset {
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.tonecurve-svg {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 4px;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+.tonecurve-readout {
+  font-size: 10px;
+  color: #777;
+  margin-top: 4px;
+  min-height: 14px;
+}
+
 .curve-preview {
   display: block;
   margin: 8px 14px 4px;

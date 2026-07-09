@@ -15,6 +15,7 @@ import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
 import { defaultDevelopParams, type DevelopParams } from '../engine/graph/developNode';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
 import { ShaderEditor } from './ShaderEditor';
+import { ToneCurveEditor } from './ToneCurveEditor';
 
 /**
  * Common parameter row (UI spec §6): label / range / number in a grid;
@@ -124,6 +125,9 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         {DEVELOP_BASIC_DEFS.map((def) => (
           <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
         ))}
+      </Section>
+      <Section title="Tone Curve">
+        <ToneCurveEditor nodeId={node.id} params={params} />
       </Section>
     </>
   );

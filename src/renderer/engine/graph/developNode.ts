@@ -15,8 +15,9 @@
  * Identity invariant: a section at defaults contributes NO pass, so an
  * untouched Develop node is a true bit-exact pass-through.
  */
-import { srgbEncode } from '../color/srgb';
-import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_ENCODE } from './wgslCommon';
+import { srgbDecode, srgbEncode } from '../color/srgb';
+import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
+import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
   wgslContrast,
   wgslExposure,
@@ -159,6 +160,38 @@ ${wgslContrast('u.t0.x')}
 `,
 });
 
+// Point curves applied in DISPLAY (sRGB-encoded) space, LR-style 0–255 axes:
+// linear → encode → per-channel LUT → decode. The LUT is baked on the CPU
+// (engine/color/toneCurve.ts) with the per-channel curve composed first,
+// then the RGB master, so the shader does exactly one lookup per channel.
+// The pass only exists when the curve is non-identity, so the encode/decode
+// round-trip can never perturb a pass-through render.
+const TONECURVE_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct CurveLut {
+  // one vec4 per entry: x/y/z = R/G/B output (display-encoded, 0..1)
+  data: array<vec4f, ${TONE_CURVE_LUT_SIZE}>,
+}
+@group(0) @binding(1) var<uniform> u: CurveLut;
+`,
+  helpers:
+    WGSL_SRGB_ENCODE +
+    WGSL_SRGB_DECODE +
+    /* wgsl */ `
+fn curveLut(v: f32, ch: u32) -> f32 {
+  let f = clamp(v, 0.0, 1.0) * ${TONE_CURVE_LUT_SIZE - 1}.0;
+  let i0 = u32(f);
+  let i1 = min(i0 + 1u, ${TONE_CURVE_LUT_SIZE - 1}u);
+  return mix(u.data[i0][ch], u.data[i1][ch], f - f32(i0));
+}
+`,
+  body: /* wgsl */ `
+  // >1 highlights clamp into the curve domain — the white point governs them
+  let enc = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
+  c = srgbDecode(vec3f(curveLut(enc.x, 0u), curveLut(enc.y, 1u), curveLut(enc.z, 2u)));
+`,
+});
+
 const COLOR_WGSL = nodePassWgsl({
   uniformDecl: /* wgsl */ `
 struct ColorParams {
@@ -202,12 +235,18 @@ function packColor(b: DevelopBasicParams): ArrayBuffer {
   return buf;
 }
 
+export interface CompiledDevelop {
+  passes: PassSpec[];
+  cpu: (px: Rgb) => Rgb;
+}
+
 /**
- * Passes for the current params — identity sections contribute none.
- * `wbGains` comes from the per-image Kelvin/Tint model (exactly [1,1,1] at
- * the as-shot values, so untouched WB never wakes the tone pass).
+ * Compile the Develop node: passes for the active sections (identity
+ * sections contribute none) plus the matching CPU mirror. `wbGains` comes
+ * from the per-image Kelvin/Tint model (exactly [1,1,1] at as-shot). The
+ * tone-curve LUT is baked once and shared by the GPU pass and the mirror.
  */
-export function developPasses(params: DevelopParams, wbGains: [number, number, number]): PassSpec[] {
+export function compileDevelop(params: DevelopParams, wbGains: [number, number, number]): CompiledDevelop {
   const b = params.basic;
   const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
   const toneActive =
@@ -218,11 +257,41 @@ export function developPasses(params: DevelopParams, wbGains: [number, number, n
     b.shadows !== 0 ||
     b.whites !== 0 ||
     b.blacks !== 0;
+  const curveActive = !isIdentityToneCurve(params.toneCurve);
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
+
+  const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
   const passes: PassSpec[] = [];
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
+  if (lut) {
+    passes.push({ shaderId: 'develop/toneCurve', wgsl: TONECURVE_WGSL, uniforms: lut.buffer as ArrayBuffer });
+  }
   if (colorActive) passes.push({ shaderId: 'develop/color', wgsl: COLOR_WGSL, uniforms: packColor(b) });
-  return passes;
+
+  const cpu = (px: Rgb): Rgb => {
+    let out = px;
+    if (toneActive) out = cpuDevelopTone(out, b, wbGains);
+    if (lut) out = cpuToneCurve(out, lut);
+    if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
+    return out;
+  };
+  return { passes, cpu };
+}
+
+/** Mirror of the toneCurve pass: encode → LUT lookup (lerp) → decode. */
+function cpuToneCurve(px: Rgb, lut: Float32Array): Rgb {
+  const lookup = (v: number, ch: number): number => {
+    const f = Math.min(Math.max(v, 0), 1) * (TONE_CURVE_LUT_SIZE - 1);
+    const i0 = Math.floor(f);
+    const i1 = Math.min(i0 + 1, TONE_CURVE_LUT_SIZE - 1);
+    const a = lut[i0 * 4 + ch]!;
+    return a + (lut[i1 * 4 + ch]! - a) * (f - i0);
+  };
+  return [
+    srgbDecode(lookup(srgbEncode(px[0]), 0)),
+    srgbDecode(lookup(srgbEncode(px[1]), 1)),
+    srgbDecode(lookup(srgbEncode(px[2]), 2)),
+  ];
 }
 
 // --- CPU reference -----------------------------------------------------------
@@ -261,22 +330,3 @@ export function cpuDevelopTone(px: Rgb, b: DevelopBasicParams, wbGains: [number,
   return [Math.max(r + off, 0), Math.max(g + off, 0), Math.max(bl + off, 0)];
 }
 
-/** Mirror of developPasses() — apply the same active passes in order. */
-export function cpuDevelop(px: Rgb, params: DevelopParams, wbGains: [number, number, number]): Rgb {
-  const b = params.basic;
-  let out = px;
-  const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
-  const toneActive =
-    wbActive ||
-    b.ev !== 0 ||
-    b.contrast !== 0 ||
-    b.highlights !== 0 ||
-    b.shadows !== 0 ||
-    b.whites !== 0 ||
-    b.blacks !== 0;
-  if (toneActive) out = cpuDevelopTone(out, b, wbGains);
-  if (b.saturation !== 0 || b.vibrance !== 0) {
-    out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
-  }
-  return out;
-}

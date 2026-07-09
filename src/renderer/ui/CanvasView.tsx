@@ -28,6 +28,7 @@ declare global {
       exportState(): { status: string; error: string | null };
       canvasView(): ViewportState & { dpr: number };
       wbState(): { asShot: { temp: number; tint: number }; mccamyCct: number };
+      setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
     };
@@ -190,6 +191,9 @@ export function CanvasView() {
       wbState() {
         const { wbModel: model } = useAppStore.getState();
         return { asShot: model.asShot, mccamyCct: model.mccamyCct };
+      },
+      setToneCurvePoints(nodeId, channel, points) {
+        useAppStore.getState().setToneCurvePoints(nodeId, channel, points, Date.now());
       },
       histogramState() {
         return useAppStore.getState().histogram;

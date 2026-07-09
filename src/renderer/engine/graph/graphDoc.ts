@@ -5,13 +5,7 @@
  * in git. Node positions live here for that reason.
  */
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
-import {
-  cpuDevelop,
-  defaultDevelopParams,
-  developPasses,
-  type DevelopParams,
-  type PassSpec,
-} from './developNode';
+import { compileDevelop, defaultDevelopParams, type DevelopParams, type PassSpec } from './developNode';
 import {
   createDefaultCustomShaderParams,
   getCustomShaderArtifact,
@@ -22,6 +16,7 @@ import {
   type CustomShaderParams,
 } from './customShaderNode';
 import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
+import { sanitizeCurvePoints } from '../color/toneCurve';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -261,6 +256,11 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
     }
   };
   mergeSection(base as unknown as Record<string, unknown>, src, 'develop');
+  for (const ch of ['rgb', 'r', 'g', 'b'] as const) {
+    const sanitized = sanitizeCurvePoints(base.toneCurve[ch]);
+    if (!sanitized) throw new Error(`develop toneCurve.${ch} is invalid`);
+    base.toneCurve[ch] = sanitized;
+  }
   return base;
 }
 
@@ -401,11 +401,11 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const wbGains = wb.gains(params.basic.temp, params.basic.tint);
-        const passes = developPasses(params, wbGains);
-        if (passes.length === 0) {
+        const compiled = compileDevelop(params, wbGains);
+        if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {
-          steps.push({ nodeId: id, type: 'passes', passes, src, cpu: (px) => cpuDevelop(px, params, wbGains) });
+          steps.push({ nodeId: id, type: 'passes', passes: compiled.passes, src, cpu: compiled.cpu });
           index = steps.length - 1;
         }
       } else if (node.kind === 'whitebalance') {

@@ -28,6 +28,7 @@ import {
 } from '../engine/graph/customShaderNode';
 import { validateWgsl } from '../engine/shader/validateWgsl';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
+import { sanitizeCurvePoints } from '../engine/color/toneCurve';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -97,6 +98,13 @@ interface AppState {
   shaderRev: number;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
+  /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
+  setToneCurvePoints(
+    nodeId: string,
+    channel: 'rgb' | 'r' | 'g' | 'b',
+    points: [number, number][],
+    session: number
+  ): void;
   /** Declare a new GUI param; returns an error message or null. */
   addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
   removeShaderParam(nodeId: string, name: string): void;
@@ -499,6 +507,23 @@ export const useAppStore = create<AppState>((set, get) => {
 
   async applyShaderSource(nodeId, src) {
     await validateShaderSource(nodeId, src, { history: true });
+  },
+
+  setToneCurvePoints(nodeId, channel, points, session) {
+    const sanitized = sanitizeCurvePoints(points);
+    if (!sanitized) return;
+    set((s) => ({
+      ...pushHistory(s, `curve:${nodeId}:${channel}:${session}`),
+      graph: {
+        ...s.graph,
+        nodes: s.graph.nodes.map((n) => {
+          if (n.id !== nodeId || n.kind !== DEVELOP_KIND) return n;
+          const develop = n.develop ?? defaultDevelopParams();
+          return { ...n, develop: { ...develop, toneCurve: { ...develop.toneCurve, [channel]: sanitized } } };
+        }),
+      },
+      graphDirty: true,
+    }));
   },
 
   addShaderParam(nodeId, def) {
