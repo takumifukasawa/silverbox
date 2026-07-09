@@ -74,6 +74,72 @@ button:disabled {
   color: #999;
 }
 
+.add-node-menu {
+  position: relative;
+}
+
+.add-node-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+}
+
+.add-node-menu-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  background: #2e2e2e;
+  border: 1px solid #555;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+  min-width: 140px;
+}
+
+.add-node-menu-list button {
+  background: none;
+  border: none;
+  border-radius: 0;
+  text-align: left;
+  padding: 6px 12px;
+}
+
+.add-node-menu-list button:hover {
+  background: #4a4a4a;
+}
+
+.toolbar-export-opts {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: #999;
+  font-size: 12px;
+}
+
+.toolbar-export-opts label {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.toolbar-export-opts input {
+  width: 56px;
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.toolbar-error {
+  color: #e06c75;
+  font-size: 12px;
+}
+
 .main-row {
   flex: 1;
   display: flex;
@@ -254,6 +320,100 @@ button:disabled {
   border-radius: 4px;
 }
 
+/* ---- customShader inspector ---- */
+
+.shader-editor-block {
+  padding: 0 14px;
+}
+
+.shader-editor-note {
+  font-size: 10px;
+  color: #666;
+  margin: 4px 0 6px;
+}
+
+.shader-editor {
+  height: 260px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.shader-status-ok {
+  color: #7cb87c;
+  font-size: 11px;
+  padding: 6px 0;
+}
+
+.shader-error {
+  margin: 6px 0;
+  padding: 6px 8px;
+  background: #3a2226;
+  border: 1px solid #6b3038;
+  color: #e8a0a8;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  font: 11px 'SF Mono', Menlo, monospace;
+  user-select: text;
+}
+
+.shader-param-row {
+  display: grid;
+  grid-template-columns: 1fr 24px;
+  align-items: center;
+}
+
+.shader-param-row .param-row {
+  padding-right: 0;
+}
+
+.shader-param-remove {
+  background: none;
+  border: none;
+  color: #777;
+  padding: 0;
+  cursor: pointer;
+}
+
+.shader-param-remove:hover {
+  color: #e06c75;
+}
+
+.shader-add-param-row {
+  display: grid;
+  grid-template-columns: 1fr 44px 44px 44px auto;
+  gap: 6px;
+  padding: 6px 14px;
+}
+
+.shader-add-param-row input {
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 5px;
+  font: inherit;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.shader-add-param-row button {
+  padding: 3px 8px;
+  font-size: 12px;
+}
+
+.shader-add-error {
+  color: #e06c75;
+  font-size: 11px;
+  padding: 0 14px 4px;
+}
+
+.shader-hint {
+  font-size: 10px;
+  color: #666;
+  padding: 0 14px 6px;
+}
+
 .inspector-code {
   display: block;
   width: calc(100% - 28px);
@@ -273,18 +433,15 @@ button:disabled {
   padding: 8px 14px;
 }
 
-.histogram-panel {
-  padding: 12px 14px 4px;
-  border-bottom: 1px solid #333;
-  margin-bottom: 4px;
-}
-
-.histogram-canvas {
-  width: 100%;
-  height: 90px;
-  background: #1a1a1a;
+.histogram {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  padding: 4px;
+  background: rgba(20, 20, 20, 0.72);
   border: 1px solid #333;
   border-radius: 4px;
+  pointer-events: none;
 }
 
 .histogram-clip-row {

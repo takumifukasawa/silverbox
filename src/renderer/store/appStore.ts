@@ -15,7 +15,18 @@ import {
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import type { GraphRenderer, HistogramData } from '../engine/gpu/graphRenderer';
-import { BLEND_KIND, CUSTOM_KIND, DEFAULT_CUSTOM_CODE } from '../engine/graph/ops';
+import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
+import {
+  buildCustomShaderWgsl,
+  clearCustomShaderArtifacts,
+  createDefaultCustomShaderParams,
+  makeCustomShaderArtifact,
+  seedDefaultCustomShaderArtifact,
+  setCustomShaderArtifact,
+  WGSL_IDENT_RE,
+  type CustomShaderParams,
+} from '../engine/graph/customShaderNode';
+import { validateWgsl } from '../engine/shader/validateWgsl';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -62,14 +73,24 @@ interface AppState {
   removeOpNode(nodeId: string): void;
   /** Rewire an input: replaces whatever currently feeds (target, handle). */
   connectEdge(source: string, target: string, targetHandle?: 'a' | 'b'): void;
-  updateNodeCode(nodeId: string, code: string): void;
-  setShaderErrors(errors: Record<string, string>): void;
+  /**
+   * Bumped whenever a customShader artifact is (re)compiled — the render
+   * effect keys on it so validation results reach the screen even when the
+   * GraphDoc itself did not change.
+   */
+  shaderRev: number;
+  /** Validate `src` for a custom node; on success apply it (one undo step). */
+  applyShaderSource(nodeId: string, src: string): Promise<void>;
+  /** Declare a new GUI param; returns an error message or null. */
+  addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
+  removeShaderParam(nodeId: string, name: string): void;
+  updateShaderParam(nodeId: string, name: string, value: number): void;
   setRenderer(renderer: GraphRenderer): void;
   setHistogram(histogram: HistogramData | null): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
   /** Develop at full resolution and write .jpg/.png (dialog when no path). */
-  exportImage(path?: string): Promise<void>;
+  exportImage(path?: string, opts?: { quality?: number; maxDim?: number | null }): Promise<void>;
   undo(): void;
   redo(): void;
 }
@@ -90,7 +111,110 @@ export function isJpegFileName(name: string): boolean {
   return /\.(jpg|jpeg)$/i.test(name);
 }
 
-export const useAppStore = create<AppState>((set, get) => ({
+function getShader(graph: GraphDoc, nodeId: string): CustomShaderParams | null {
+  const node = graph.nodes.find((n) => n.id === nodeId);
+  return node?.kind === CUSTOM_KIND ? (node.shader ?? null) : null;
+}
+
+function withShader(
+  graph: GraphDoc,
+  nodeId: string,
+  fn: (shader: CustomShaderParams) => CustomShaderParams
+): GraphDoc {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((n) =>
+      n.id === nodeId && n.kind === CUSTOM_KIND ? { ...n, shader: fn(n.shader ?? createDefaultCustomShaderParams()) } : n
+    ),
+  };
+}
+
+export const useAppStore = create<AppState>((set, get) => {
+  /** Supersede stale validations: per-node sequence + a global epoch bumped on open/undo/redo. */
+  const validationSeq = new Map<string, number>();
+  let shaderEpoch = 0;
+
+  /**
+   * Validate `src` against the node's current param list on the dedicated
+   * device. Success commits the artifact and moves `src`/`lastValidSrc` in
+   * the doc (its own history entry when `opts.history`); failure publishes
+   * the error while the last valid shader keeps rendering.
+   */
+  const validateShaderSource = async (nodeId: string, src: string, opts: { history: boolean }): Promise<void> => {
+    const shader = getShader(get().graph, nodeId);
+    if (!shader) return;
+    const paramList = shader.params;
+    const { wgsl, userLineOffset } = buildCustomShaderWgsl(src, paramList.map((p) => p.name));
+    const seq = (validationSeq.get(nodeId) ?? 0) + 1;
+    validationSeq.set(nodeId, seq);
+    const epoch = shaderEpoch;
+
+    let error: string | null;
+    try {
+      error = await validateWgsl(wgsl, userLineOffset);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+    if (validationSeq.get(nodeId) !== seq || shaderEpoch !== epoch) return;
+    const now = getShader(get().graph, nodeId);
+    if (!now) return; // node deleted while validating
+
+    if (error === null) {
+      setCustomShaderArtifact(nodeId, makeCustomShaderArtifact(wgsl, paramList));
+      if (now.code.src !== src || now.code.lastValidSrc !== src) {
+        set((s) => ({
+          ...(opts.history ? pushHistory(s, null) : {}),
+          graph: withShader(s.graph, nodeId, (p) => ({ ...p, code: { src, lastValidSrc: src } })),
+          graphDirty: true,
+        }));
+      }
+      set((s) => {
+        const { [nodeId]: _cleared, ...rest } = s.shaderErrors;
+        return { shaderErrors: rest, shaderRev: s.shaderRev + 1 };
+      });
+    } else {
+      set((s) => ({ shaderErrors: { ...s.shaderErrors, [nodeId]: error } }));
+    }
+  };
+
+  /**
+   * Re-seed artifacts for every custom node of a (re)loaded / jumped-to doc:
+   * validate `lastValidSrc` and set ONLY the artifact (no doc mutation — this
+   * must never clobber a differing editing source). A doc saved mid-edit then
+   * gets its editing source surfaced through the normal path.
+   */
+  const revalidateShaders = (graph: GraphDoc): void => {
+    for (const node of graph.nodes) {
+      if (node.kind !== CUSTOM_KIND || !node.shader) continue;
+      const { code, params } = node.shader;
+      const nodeId = node.id;
+      const { wgsl, userLineOffset } = buildCustomShaderWgsl(code.lastValidSrc, params.map((p) => p.name));
+      const seq = (validationSeq.get(nodeId) ?? 0) + 1;
+      validationSeq.set(nodeId, seq);
+      const epoch = shaderEpoch;
+      void (async () => {
+        let error: string | null;
+        try {
+          error = await validateWgsl(wgsl, userLineOffset);
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+        }
+        if (validationSeq.get(nodeId) !== seq || shaderEpoch !== epoch) return;
+        if (!getShader(get().graph, nodeId)) return;
+        if (error === null) {
+          setCustomShaderArtifact(nodeId, makeCustomShaderArtifact(wgsl, params));
+          set((s) => ({ shaderRev: s.shaderRev + 1 }));
+        } else {
+          set((s) => ({ shaderErrors: { ...s.shaderErrors, [nodeId]: error } }));
+        }
+        if (code.src !== code.lastValidSrc) {
+          void validateShaderSource(nodeId, code.src, { history: false });
+        }
+      })();
+    }
+  };
+
+  return {
   imageStatus: 'idle',
   image: null,
   fileName: null,
@@ -127,7 +251,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       } catch (err) {
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
-      set({ imageStatus: 'ready', image, graph, graphDirty: false, selectedNodeId: null, history: emptyHistory() });
+      // node ids of the previous doc must never alias into stale shaders
+      clearCustomShaderArtifacts();
+      shaderEpoch++;
+      set({
+        imageStatus: 'ready',
+        image,
+        graph,
+        graphDirty: false,
+        selectedNodeId: null,
+        history: emptyHistory(),
+        shaderErrors: {},
+      });
+      revalidateShaders(graph);
     } catch (err) {
       set({ imageStatus: 'error', image: null, imageError: err instanceof Error ? err.message : String(err) });
     }
@@ -190,13 +326,13 @@ export const useAppStore = create<AppState>((set, get) => ({
       const inEdge = g.edges.find((e) => e.target === out?.id);
       if (!out || !inEdge) return {};
       const id = nextId(g, kind);
-      const node = {
-        id,
-        kind,
-        position: { ...out.position },
-        params: defaultParams(kind),
-        ...(kind === CUSTOM_KIND ? { code: DEFAULT_CUSTOM_CODE } : {}),
-      };
+      // Fresh custom nodes are seeded with the engine-authored identity
+      // artifact — known valid, no async validation round-trip needed.
+      if (kind === CUSTOM_KIND) seedDefaultCustomShaderArtifact(id);
+      const node =
+        kind === CUSTOM_KIND
+          ? { id, kind, position: { ...out.position }, shader: createDefaultCustomShaderParams() }
+          : { id, kind, position: { ...out.position }, params: defaultParams(kind) };
       const nodes = g.nodes
         .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
         .concat(node);
@@ -274,13 +410,50 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
-  updateNodeCode(nodeId, code) {
+  shaderRev: 0,
+
+  async applyShaderSource(nodeId, src) {
+    await validateShaderSource(nodeId, src, { history: true });
+  },
+
+  addShaderParam(nodeId, def) {
+    const shader = getShader(get().graph, nodeId);
+    if (!shader) return 'no such shader node';
+    if (!WGSL_IDENT_RE.test(def.name)) return `"${def.name}" is not a valid WGSL identifier`;
+    if (shader.params.some((p) => p.name === def.name)) return `param "${def.name}" already exists`;
+    if (![def.min, def.max, def.default].every(Number.isFinite) || def.min > def.max) return 'invalid range';
     set((s) => ({
       ...pushHistory(s, null),
-      graph: {
-        ...s.graph,
-        nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, code } : n)),
-      },
+      graph: withShader(s.graph, nodeId, (p) => ({
+        ...p,
+        params: [...p.params, { ...def, value: def.default }],
+      })),
+      graphDirty: true,
+    }));
+    // the uniform struct changed — recompile the current editing source
+    const code = getShader(get().graph, nodeId)?.code;
+    if (code) void validateShaderSource(nodeId, code.src, { history: false });
+    return null;
+  },
+
+  removeShaderParam(nodeId, name) {
+    if (!getShader(get().graph, nodeId)) return;
+    set((s) => ({
+      ...pushHistory(s, null),
+      graph: withShader(s.graph, nodeId, (p) => ({ ...p, params: p.params.filter((x) => x.name !== name) })),
+      graphDirty: true,
+    }));
+    const code = getShader(get().graph, nodeId)?.code;
+    if (code) void validateShaderSource(nodeId, code.src, { history: false });
+  },
+
+  updateShaderParam(nodeId, name, value) {
+    set((s) => ({
+      ...pushHistory(s, `shaderparam:${nodeId}:${name}`),
+      graph: withShader(s.graph, nodeId, (p) => ({
+        ...p,
+        params: p.params.map((x) => (x.name === name ? { ...x, value } : x)),
+      })),
       graphDirty: true,
     }));
   },
@@ -300,6 +473,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedNodeId: prev.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
       };
     });
+    // a jump may restore shader sources whose artifacts are stale
+    shaderEpoch++;
+    revalidateShaders(get().graph);
   },
 
   redo() {
@@ -317,10 +493,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         selectedNodeId: next.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
       };
     });
-  },
-
-  setShaderErrors(errors) {
-    set({ shaderErrors: errors });
+    shaderEpoch++;
+    revalidateShaders(get().graph);
   },
 
   setRenderer(renderer) {
@@ -331,7 +505,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ histogram });
   },
 
-  async exportImage(path) {
+  async exportImage(path, opts) {
     const { imagePath, fileName, graph, renderer, imageStatus, exportStatus } = get();
     if (!imagePath || !fileName || !renderer || imageStatus !== 'ready' || exportStatus === 'working') return;
     let target = path ?? null;
@@ -346,12 +520,26 @@ export const useAppStore = create<AppState>((set, get) => ({
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
       const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph));
-      const canvas = new OffscreenCanvas(width, height);
+      let canvas = new OffscreenCanvas(width, height);
       const ctx = canvas.getContext('2d');
       if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable');
       ctx.putImageData(new ImageData(data, width, height), 0, 0);
+      // optional long-edge resize (fit inside, never enlarged)
+      const maxDim = opts?.maxDim ?? null;
+      if (maxDim && maxDim > 0 && maxDim < Math.max(width, height)) {
+        const scale = maxDim / Math.max(width, height);
+        const rw = Math.max(1, Math.round(width * scale));
+        const rh = Math.max(1, Math.round(height * scale));
+        const resized = new OffscreenCanvas(rw, rh);
+        const rctx = resized.getContext('2d');
+        if (!rctx) throw new Error('OffscreenCanvas 2d context unavailable');
+        rctx.imageSmoothingQuality = 'high';
+        rctx.drawImage(canvas, 0, 0, rw, rh);
+        canvas = resized;
+      }
       const png = /\.png$/i.test(target);
-      const blob = await canvas.convertToBlob(png ? { type: 'image/png' } : { type: 'image/jpeg', quality: 0.92 });
+      const quality = Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))) / 100;
+      const blob = await canvas.convertToBlob(png ? { type: 'image/png' } : { type: 'image/jpeg', quality });
       await window.silverbox.writeImageFile(target, await blob.arrayBuffer());
       set({ exportStatus: 'idle' });
     } catch (err) {
@@ -365,4 +553,5 @@ export const useAppStore = create<AppState>((set, get) => ({
     await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph));
     set({ graphDirty: false });
   },
-}));
+  };
+});

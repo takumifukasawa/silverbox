@@ -54,6 +54,7 @@
     "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "esbuild": "^0.28.1",
+    "monaco-editor": "^0.55.1",
     "playwright": "^1.61.1",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",

@@ -89,8 +89,8 @@ try {
   await setDev('basic.ev', 1);
   const devEv = await gpuMean();
   await setDev('basic.ev', 0);
-  await page.locator('.node-editor-toolbar select').selectOption('exposure');
-  await page.locator('.node-editor-toolbar button').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-exposure"]').click();
   const atomicId = await page.evaluate(
     () => window.__debug.graphState().nodes.find((n) => n.kind === 'exposure')?.id
   );

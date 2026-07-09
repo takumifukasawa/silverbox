@@ -4,6 +4,7 @@ import { srgbEncode } from '../engine/color/srgb';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
 import { buildPlan, cpuEvalPlan, planHasCpuReference, type GraphDoc } from '../engine/graph/graphDoc';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
+import { HistogramPanel } from './HistogramPanel';
 
 declare global {
   interface Window {
@@ -19,7 +20,10 @@ declare global {
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
       updateNodeParam(nodeId: string, key: string, value: number): void;
-      updateNodeCode(nodeId: string, code: string): void;
+      applyShaderSource(nodeId: string, src: string): Promise<void>;
+      addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
+      updateShaderParam(nodeId: string, name: string, value: number): void;
+      removeShaderParam(nodeId: string, name: string): void;
       exportImageTo(path: string): void;
       exportState(): { status: string; error: string | null };
       canvasView(): ViewportState & { dpr: number };
@@ -45,6 +49,7 @@ export function CanvasView() {
   const image = useAppStore((s) => s.image);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
+  const shaderRev = useAppStore((s) => s.shaderRev);
   const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -68,11 +73,8 @@ export function CanvasView() {
           renderer.setImage(image);
           lastImageRef.current = image;
         }
-        const shaderErrors = await renderer.setGraph(buildPlan(graph));
+        await renderer.setGraph(buildPlan(graph));
         if (cancelled) return;
-        useAppStore
-          .getState()
-          .setShaderErrors(Object.fromEntries(shaderErrors.map((e) => [e.nodeId, e.message])));
         renderer.render();
         setGpuError(null);
         // refresh the histogram once edits settle (slider drags fire rapidly)
@@ -89,7 +91,7 @@ export function CanvasView() {
     return () => {
       cancelled = true;
     };
-  }, [image, graph]);
+  }, [image, graph, shaderRev]);
 
   useEffect(() => {
     window.__debug = {
@@ -151,8 +153,17 @@ export function CanvasView() {
       updateNodeParam(nodeId, key, value) {
         useAppStore.getState().updateNodeParam(nodeId, key, value);
       },
-      updateNodeCode(nodeId, code) {
-        useAppStore.getState().updateNodeCode(nodeId, code);
+      applyShaderSource(nodeId, src) {
+        return useAppStore.getState().applyShaderSource(nodeId, src);
+      },
+      addShaderParam(nodeId, def) {
+        return useAppStore.getState().addShaderParam(nodeId, def);
+      },
+      updateShaderParam(nodeId, name, value) {
+        useAppStore.getState().updateShaderParam(nodeId, name, value);
+      },
+      removeShaderParam(nodeId, name) {
+        useAppStore.getState().removeShaderParam(nodeId, name);
       },
       exportImageTo(path) {
         void useAppStore.getState().exportImage(path);
@@ -191,6 +202,7 @@ export function CanvasView() {
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
         />
       </div>
+      {!overlayVisible && <HistogramPanel />}
       {!overlayVisible && (
         <div className="canvas-controls">
           <button onClick={fit} data-testid="view-fit">

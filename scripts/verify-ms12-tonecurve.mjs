@@ -43,8 +43,8 @@ try {
   const neutral = await page.evaluate(() => window.__debug.readbackMean());
 
   console.log('verify-ms12 (identity default):');
-  await page.locator('.node-editor-toolbar select').selectOption('tonecurve');
-  await page.locator('.node-editor-toolbar button').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-tonecurve"]').click();
   check(
     'tone curve node shows sliders and the curve preview',
     (await page.locator('.inspector-title').textContent()) === 'Tone Curve' &&

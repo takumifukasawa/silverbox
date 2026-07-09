@@ -57,10 +57,10 @@ try {
   const neutralGpu = await page.evaluate(() => window.__debug.readbackMean());
 
   console.log('verify-ms5 (add via UI):');
-  await page.locator('.node-editor-toolbar select').selectOption('whitebalance');
-  await page.locator('.node-editor-toolbar button').click();
-  await page.locator('.node-editor-toolbar select').selectOption('contrast');
-  await page.locator('.node-editor-toolbar button').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-whitebalance"]').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-contrast"]').click();
   check(
     'chain is input→Develop→whitebalance→contrast→output',
     (await chainKinds()).join(',') === 'input,Develop,whitebalance,contrast,output',

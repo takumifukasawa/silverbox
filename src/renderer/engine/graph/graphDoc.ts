@@ -4,18 +4,7 @@
  * it, and (in a later milestone) it is what gets saved to disk and versioned
  * in git. Node positions live here for that reason.
  */
-import {
-  BLEND_KIND,
-  BLEND_PARAM_DEFS,
-  CUSTOM_KIND,
-  CUSTOM_PARAM_DEFS,
-  DEFAULT_CUSTOM_CODE,
-  OPS,
-  isOpKind,
-  packBlendUniform,
-  packCustomUniform,
-  type OpKind,
-} from './ops';
+import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
 import {
   cpuDevelop,
   defaultDevelopParams,
@@ -23,6 +12,15 @@ import {
   type DevelopParams,
   type PassSpec,
 } from './developNode';
+import {
+  createDefaultCustomShaderParams,
+  getCustomShaderArtifact,
+  packCustomShaderUniforms,
+  DEFAULT_CUSTOM_SHADER_SRC,
+  WGSL_IDENT_RE,
+  type CustomShaderParam,
+  type CustomShaderParams,
+} from './customShaderNode';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -42,8 +40,8 @@ export interface GraphNode {
   params?: Record<string, number>;
   /** Sectioned Develop parameters; only for kind 'Develop'. */
   develop?: DevelopParams;
-  /** WGSL applyOp source; only for kind 'custom'. */
-  code?: string;
+  /** customShader payload (code + GUI params); only for kind 'custom'. */
+  shader?: CustomShaderParams;
 }
 
 export interface GraphEdge {
@@ -62,8 +60,8 @@ export interface GraphDoc {
 
 export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND;
 
-export function defaultParams(kind: AddableKind): Record<string, number> {
-  const defs = kind === CUSTOM_KIND ? CUSTOM_PARAM_DEFS : kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
+export function defaultParams(kind: Exclude<AddableKind, typeof CUSTOM_KIND>): Record<string, number> {
+  const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
 }
 
@@ -110,15 +108,15 @@ export function parseGraphDoc(text: string): GraphDoc {
     if (typeof n.position?.x !== 'number' || typeof n.position?.y !== 'number') {
       throw new Error(`node ${n.id} needs a numeric position`);
     }
-    if (n.code !== undefined && typeof n.code !== 'string') {
-      throw new Error(`node ${n.id} code must be a string`);
-    }
     for (const v of Object.values(n.params ?? {})) {
       if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
     }
     if (n.kind === DEVELOP_KIND) {
       // fill missing sections/keys with identity defaults; reject bad numbers
       n.develop = mergeDevelopParams(n.develop);
+    }
+    if (n.kind === CUSTOM_KIND) {
+      n.shader = sanitizeCustomShader(n.shader, n.id);
     }
   }
   for (const e of doc.edges) {
@@ -131,6 +129,35 @@ export function parseGraphDoc(text: string): GraphDoc {
   }
   buildPlan(doc); // throws unless the output resolves through a valid DAG
   return doc;
+}
+
+/** Normalize an untrusted customShader payload; throws on structural garbage. */
+export function sanitizeCustomShader(raw: unknown, nodeId: string): CustomShaderParams {
+  const base = createDefaultCustomShaderParams();
+  if (typeof raw !== 'object' || raw === null) return base;
+  const src = raw as { code?: { src?: unknown; lastValidSrc?: unknown }; params?: unknown };
+  const code = typeof src.code?.src === 'string' ? src.code.src : DEFAULT_CUSTOM_SHADER_SRC;
+  const lastValid = typeof src.code?.lastValidSrc === 'string' ? src.code.lastValidSrc : code;
+  const params: CustomShaderParam[] = [];
+  if (src.params !== undefined) {
+    if (!Array.isArray(src.params)) throw new Error(`node ${nodeId} shader params must be an array`);
+    const seen = new Set<string>();
+    for (const p of src.params as Array<Record<string, unknown>>) {
+      const name = p?.name;
+      if (typeof name !== 'string' || !WGSL_IDENT_RE.test(name) || seen.has(name)) {
+        throw new Error(`node ${nodeId} has an invalid shader param name`);
+      }
+      seen.add(name);
+      const nums = [p.min, p.max, p.default, p.value].map((v) => {
+        if (typeof v !== 'number' || !Number.isFinite(v)) {
+          throw new Error(`node ${nodeId} shader param ${name} has a non-numeric field`);
+        }
+        return v;
+      }) as [number, number, number, number];
+      params.push({ name, min: nums[0], max: nums[1], default: nums[2], value: nums[3] });
+    }
+  }
+  return { code: { src: code, lastValidSrc: lastValid }, params };
 }
 
 /**
@@ -187,7 +214,6 @@ type Rgb = [number, number, number];
  */
 export type PlanStep =
   | { nodeId: string; type: 'passes'; passes: PassSpec[]; src: number; cpu: ((px: Rgb) => Rgb) | null }
-  | { nodeId: string; type: 'custom'; code: string; uniform: Vec4; src: number }
   | { nodeId: string; type: 'blend'; uniform: Vec4; srcA: number; srcB: number };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -273,14 +299,27 @@ export function buildPlan(doc: GraphDoc): RenderPlan {
       if (node.kind === 'output') {
         index = src;
       } else if (node.kind === CUSTOM_KIND) {
-        steps.push({
-          nodeId: id,
-          type: 'custom',
-          code: node.code ?? DEFAULT_CUSTOM_CODE,
-          uniform: packCustomUniform(node.params ?? {}),
-          src,
-        });
-        index = steps.length - 1;
+        // Only validated artifacts render (customShaderNode cache); a node
+        // that has none yet (e.g. mid-revalidation after load) passes through.
+        const artifact = getCustomShaderArtifact(id);
+        if (!artifact) {
+          index = src;
+        } else {
+          steps.push({
+            nodeId: id,
+            type: 'passes',
+            passes: [
+              {
+                shaderId: artifact.shaderId,
+                wgsl: artifact.wgsl,
+                uniforms: packCustomShaderUniforms(artifact, node.shader?.params ?? []),
+              },
+            ],
+            src,
+            cpu: null, // user WGSL has no CPU mirror
+          });
+          index = steps.length - 1;
+        }
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const passes = developPasses(params);
@@ -325,13 +364,11 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb): Rgb {
     if (step.type === 'passes') {
       if (!step.cpu) throw new Error(`step ${step.nodeId} has no CPU reference`);
       outputs.push(step.cpu(at(step.src)));
-    } else if (step.type === 'blend') {
+    } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
       const t = step.uniform[0];
       outputs.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
-    } else {
-      throw new Error('custom steps have no CPU reference');
     }
   }
   return at(plan.output);
@@ -339,5 +376,5 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb): Rgb {
 
 /** True when every step in the plan has a CPU mirror. */
 export function planHasCpuReference(plan: RenderPlan): boolean {
-  return plan.steps.every((s) => (s.type === 'passes' ? s.cpu !== null : s.type === 'blend'));
+  return plan.steps.every((s) => s.type !== 'passes' || s.cpu !== null);
 }

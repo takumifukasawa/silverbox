@@ -54,8 +54,8 @@ try {
     );
 
   console.log('verify-ms13 (self-blend is identity):');
-  await page.locator('.node-editor-toolbar select').selectOption('blend');
-  await page.locator('.node-editor-toolbar button').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-blend"]').click();
   check(
     'blend node lands with a/b fed by the previous source',
     (await edgeList()).join(',').includes('dev->blend-1:a') &&

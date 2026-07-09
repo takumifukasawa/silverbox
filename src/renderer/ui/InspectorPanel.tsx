@@ -1,19 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import {
-  BLEND_KIND,
-  BLEND_PARAM_DEFS,
-  CUSTOM_KIND,
-  CUSTOM_PARAM_DEFS,
-  DEFAULT_CUSTOM_CODE,
-  OPS,
-  isOpKind,
-  toneCurvePoint,
-  type OpParamDef,
-} from '../engine/graph/ops';
+import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, toneCurvePoint, type OpParamDef } from '../engine/graph/ops';
 import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
 import { defaultDevelopParams, type DevelopParams } from '../engine/graph/developNode';
-import { HistogramPanel } from './HistogramPanel';
+import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
+import { ShaderEditor } from './ShaderEditor';
 
 /**
  * Common parameter row (UI spec §6): label / range / number in a grid;
@@ -90,32 +81,90 @@ function DevelopInspector({ node }: { node: GraphNode }) {
   );
 }
 
-/** WGSL editor for a custom node: edit freely, compile on Apply. */
-function CustomEditor({ node }: { node: GraphNode }) {
-  const updateNodeCode = useAppStore((s) => s.updateNodeCode);
-  const error = useAppStore((s) => s.shaderErrors[node.id]);
-  const savedCode = node.code ?? DEFAULT_CUSTOM_CODE;
-  const [draft, setDraft] = useState(savedCode);
-  useEffect(() => setDraft(savedCode), [node.id, savedCode]);
+/** customShader inspector: GUI param declarations + the Monaco WGSL editor. */
+function CustomShaderInspector({ node }: { node: GraphNode }) {
+  const addShaderParam = useAppStore((s) => s.addShaderParam);
+  const removeShaderParam = useAppStore((s) => s.removeShaderParam);
+  const updateShaderParam = useAppStore((s) => s.updateShaderParam);
+  const [draft, setDraft] = useState({ name: '', min: '0', max: '1', default: '0' });
+  const [addError, setAddError] = useState<string | null>(null);
+  const shader = node.shader ?? createDefaultCustomShaderParams();
+
+  const add = () => {
+    const err = addShaderParam(node.id, {
+      name: draft.name.trim(),
+      min: Number(draft.min),
+      max: Number(draft.max),
+      default: Number(draft.default),
+    });
+    setAddError(err);
+    if (!err) setDraft({ name: '', min: '0', max: '1', default: '0' });
+  };
 
   return (
     <>
-      <textarea
-        className="inspector-code"
-        spellCheck={false}
-        value={draft}
-        onChange={(ev) => setDraft(ev.target.value)}
-      />
-      <div className="inspector-code-actions">
-        <button onClick={() => updateNodeCode(node.id, draft)} disabled={draft === savedCode}>
-          Apply
-        </button>
-        {error && (
-          <pre className="inspector-code-error" data-testid="shader-error">
-            {error}
-          </pre>
-        )}
-      </div>
+      <div className="inspector-title">customShader — {node.id}</div>
+      <Section title="Parameters">
+        {shader.params.map((p) => (
+          <div key={p.name} className="shader-param-row">
+            <div
+              className="param-row"
+              title="Double-click to reset"
+              onDoubleClick={() => updateShaderParam(node.id, p.name, p.default)}
+            >
+              <span className={`param-label${p.value !== p.default ? ' changed' : ''}`}>{p.name}</span>
+              <input
+                type="range"
+                min={p.min}
+                max={p.max}
+                step={(p.max - p.min) / 200 || 0.01}
+                value={p.value}
+                onChange={(ev) => updateShaderParam(node.id, p.name, Number(ev.target.value))}
+              />
+              <input
+                type="number"
+                className="param-number"
+                value={p.value}
+                step={(p.max - p.min) / 200 || 0.01}
+                onChange={(ev) => {
+                  const v = Number(ev.target.value);
+                  if (Number.isFinite(v)) updateShaderParam(node.id, p.name, Math.min(p.max, Math.max(p.min, v)));
+                }}
+              />
+            </div>
+            <button
+              className="shader-param-remove"
+              title={`remove ${p.name}`}
+              onClick={() => removeShaderParam(node.id, p.name)}
+            >
+              ✕
+            </button>
+          </div>
+        ))}
+        <div className="shader-add-param-row">
+          <input
+            placeholder="name"
+            value={draft.name}
+            data-testid="shader-param-name"
+            onChange={(ev) => setDraft({ ...draft, name: ev.target.value })}
+          />
+          <input value={draft.min} title="min" onChange={(ev) => setDraft({ ...draft, min: ev.target.value })} />
+          <input value={draft.max} title="max" onChange={(ev) => setDraft({ ...draft, max: ev.target.value })} />
+          <input
+            value={draft.default}
+            title="default"
+            onChange={(ev) => setDraft({ ...draft, default: ev.target.value })}
+          />
+          <button onClick={add} disabled={draft.name.trim() === ''} data-testid="shader-param-add">
+            +Add
+          </button>
+        </div>
+        {addError && <div className="shader-add-error">{addError}</div>}
+        <div className="shader-hint">Params become P.&lt;name&gt; (f32) in the shader body.</div>
+      </Section>
+      <Section title="Shader (WGSL)">
+        <ShaderEditor nodeId={node.id} src={shader.code.src} />
+      </Section>
     </>
   );
 }
@@ -150,15 +199,7 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
     return <DevelopInspector node={node} />;
   }
   if (node.kind === CUSTOM_KIND) {
-    return (
-      <>
-        <div className="inspector-title">Custom (WGSL)</div>
-        <CustomEditor node={node} />
-        {CUSTOM_PARAM_DEFS.map((p) => (
-          <ParamSlider key={p.key} nodeId={node.id} def={p} value={node.params?.[p.key] ?? p.default} />
-        ))}
-      </>
-    );
+    return <CustomShaderInspector node={node} />;
   }
   if (node.kind === BLEND_KIND) {
     return (
@@ -196,7 +237,6 @@ export function InspectorPanel() {
   const node = graph.nodes.find((n) => n.id === selectedNodeId);
   return (
     <div className="inspector">
-      <HistogramPanel />
       <NodeContent node={node} />
     </div>
   );

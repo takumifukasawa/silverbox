@@ -12,7 +12,6 @@
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderPlan } from '../graph/graphDoc';
-import { DEFAULT_CUSTOM_CODE, OPS, type OpKind } from '../graph/ops';
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex
@@ -35,17 +34,6 @@ fn srgbEncode(v: f32) -> f32 {
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
   return vec4f(srgbEncode(t.r), srgbEncode(t.g), srgbEncode(t.b), 1.0);
-}
-`;
-
-const opShader = (applyOp: string) => /* wgsl */ `
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> params: vec4f;
-${FULLSCREEN_VS}
-${applyOp}
-@fragment
-fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  return applyOp(textureLoad(src, vec2i(pos.xy), 0), params);
 }
 `;
 
@@ -88,10 +76,6 @@ interface ExecStep {
   srcB?: number;
 }
 
-export interface ShaderError {
-  nodeId: string;
-  message: string;
-}
 
 export class GraphRenderer {
   private source: GPUTexture | null = null;
@@ -104,7 +88,6 @@ export class GraphRenderer {
   /** Pipelines for plan passes, keyed by PassSpec.shaderId. */
   private passPipelines = new Map<string, GPURenderPipeline>();
   /** Custom-code pipelines keyed by source; null = failed to compile. */
-  private customPipelines = new Map<string, Promise<GPURenderPipeline>>();
   private setGraphGen = 0;
   /** Resolves when the most recent setGraph() has landed (readback waits on it). */
   private graphReady: Promise<unknown> = Promise.resolve();
@@ -149,33 +132,6 @@ export class GraphRenderer {
         fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
       });
       this.passPipelines.set(shaderId, pipeline);
-    }
-    return pipeline;
-  }
-
-  /** Compile user WGSL; rejects with the compiler messages on bad code. */
-  private customPipeline(code: string): Promise<GPURenderPipeline> {
-    let pipeline = this.customPipelines.get(code);
-    if (!pipeline) {
-      pipeline = (async () => {
-        this.device.pushErrorScope('validation');
-        const module = this.device.createShaderModule({ code: opShader(code) });
-        const info = await module.getCompilationInfo();
-        const errors = info.messages.filter((m) => m.type === 'error');
-        try {
-          if (errors.length > 0) {
-            throw new Error(errors.map((m) => `${m.lineNum}:${m.linePos} ${m.message}`).join('\n'));
-          }
-          return await this.device.createRenderPipelineAsync({
-            layout: 'auto',
-            vertex: { module, entryPoint: 'vs' },
-            fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
-          });
-        } finally {
-          void this.device.popErrorScope();
-        }
-      })();
-      this.customPipelines.set(code, pipeline);
     }
     return pipeline;
   }
@@ -232,12 +188,11 @@ export class GraphRenderer {
   }
 
   /**
-   * Set the render plan to execute. Custom code compiles asynchronously; a
-   * node whose code fails to compile falls back to the identity pass and is
-   * reported in the returned list. Only the newest call wins if several
-   * overlap.
+   * Set the render plan to execute. Every pass in the plan is pre-validated
+   * WGSL (custom shaders go through the validation device before they ever
+   * reach a plan). Only the newest call wins if several overlap.
    */
-  setGraph(plan: RenderPlan): Promise<ShaderError[]> {
+  setGraph(plan: RenderPlan): Promise<void> {
     const promise = this.applyGraph(plan);
     this.graphReady = promise.catch(() => {});
     return promise;
@@ -249,58 +204,44 @@ export class GraphRenderer {
     return buffer;
   }
 
-  private async resolveSteps(plan: RenderPlan, errors: ShaderError[]): Promise<ExecStep[]> {
-    return Promise.all(
-      plan.steps.map(async (op): Promise<ExecStep> => {
-        if (op.type === 'passes') {
-          const phases = op.passes.map((pass): ExecPhase => {
-            let uniformBuffer: GPUBuffer | null = null;
-            if (pass.uniforms.byteLength > 0) {
-              uniformBuffer = this.device.createBuffer({
-                size: pass.uniforms.byteLength,
-                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-              });
-              this.device.queue.writeBuffer(uniformBuffer, 0, pass.uniforms);
-            }
-            return { pipeline: this.passPipeline(pass.shaderId, pass.wgsl), uniformBuffer };
-          });
-          return { phases, src: op.src };
-        }
-        if (op.type === 'blend') {
-          return {
-            phases: [{ pipeline: this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
-            src: op.srcA,
-            srcB: op.srcB,
-          };
-        }
-        let pipeline: GPURenderPipeline;
-        try {
-          pipeline = await this.customPipeline(op.code);
-        } catch (err) {
-          errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
-          pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
-        }
-        return { phases: [{ pipeline, uniformBuffer: this.vec4Buffer(op.uniform) }], src: op.src };
-      })
-    );
+  private resolveSteps(plan: RenderPlan): ExecStep[] {
+    return plan.steps.map((op): ExecStep => {
+      if (op.type === 'passes') {
+        const phases = op.passes.map((pass): ExecPhase => {
+          let uniformBuffer: GPUBuffer | null = null;
+          if (pass.uniforms.byteLength > 0) {
+            uniformBuffer = this.device.createBuffer({
+              size: pass.uniforms.byteLength,
+              usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            });
+            this.device.queue.writeBuffer(uniformBuffer, 0, pass.uniforms);
+          }
+          return { pipeline: this.passPipeline(pass.shaderId, pass.wgsl), uniformBuffer };
+        });
+        return { phases, src: op.src };
+      }
+      return {
+        phases: [{ pipeline: this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
+        src: op.srcA,
+        srcB: op.srcB,
+      };
+    });
   }
 
   private static destroySteps(steps: ExecStep[]): void {
     for (const step of steps) for (const phase of step.phases) phase.uniformBuffer?.destroy();
   }
 
-  private async applyGraph(plan: RenderPlan): Promise<ShaderError[]> {
+  private async applyGraph(plan: RenderPlan): Promise<void> {
     const gen = ++this.setGraphGen;
-    const errors: ShaderError[] = [];
-    const steps = await this.resolveSteps(plan, errors);
+    const steps = this.resolveSteps(plan);
     if (gen !== this.setGraphGen) {
       GraphRenderer.destroySteps(steps);
-      return errors;
+      return;
     }
     GraphRenderer.destroySteps(this.steps);
     this.steps = steps;
     this.outputIndex = plan.output;
-    return errors;
   }
 
   private addPass(
@@ -416,7 +357,7 @@ export class GraphRenderer {
       return t;
     };
 
-    const steps = await this.resolveSteps(plan, []);
+    const steps = this.resolveSteps(plan);
     try {
       const encoder = device.createCommandEncoder();
       const stepTextures = plan.steps.map(() =>
@@ -510,13 +451,14 @@ export class GraphRenderer {
     });
   }
 
-  /** Histogram + clipping fractions of the encoded output (for the UI panel). */
-  stats(bins = 64): Promise<HistogramData | null> {
+  /** 256-bin RGB + luma histogram and clipping fractions of the encoded output. */
+  stats(): Promise<HistogramData | null> {
     return this.withEncodedPixels((px, bytesPerRow, width, height) => {
+      const bins = 256;
       const r = new Uint32Array(bins);
       const g = new Uint32Array(bins);
       const b = new Uint32Array(bins);
-      const shift = Math.log2(256 / bins);
+      const luma = new Uint32Array(bins);
       let shadow = 0;
       let highlight = 0;
       for (let y = 0; y < height; y++) {
@@ -526,9 +468,10 @@ export class GraphRenderer {
           const vr = px[s]!;
           const vg = px[s + 1]!;
           const vb = px[s + 2]!;
-          r[vr >> shift]!++;
-          g[vg >> shift]!++;
-          b[vb >> shift]!++;
+          r[vr]!++;
+          g[vg]!++;
+          b[vb]!++;
+          luma[Math.min(255, Math.round(0.2126 * vr + 0.7152 * vg + 0.0722 * vb))]!++;
           if (vr === 0 || vg === 0 || vb === 0) shadow++;
           if (vr === 255 || vg === 255 || vb === 255) highlight++;
         }
@@ -539,6 +482,7 @@ export class GraphRenderer {
         r: Array.from(r),
         g: Array.from(g),
         b: Array.from(b),
+        luma: Array.from(luma),
         shadowClip: shadow / n,
         highlightClip: highlight / n,
         pixels: n,
@@ -552,6 +496,7 @@ export interface HistogramData {
   r: number[];
   g: number[];
   b: number[];
+  luma: number[];
   /** Fraction of pixels with any channel at 0 / 255 in the encoded output. */
   shadowClip: number;
   highlightClip: number;

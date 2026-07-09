@@ -1,9 +1,11 @@
 /**
- * Milestone 7 verify: custom WGSL look node. Adds a custom node via the UI
- * (identity by default), applies a known shader through the real textarea and
- * checks the GPU against a hand-computed expectation, exercises the p0..p3
- * uniforms, confirms bad code reports an error and falls back to identity,
- * and round-trips the code through the sidecar.
+ * customShader verify (REBUILD-SPEC MS5, spec-aligned rework). The node uses
+ * the shade(color, uv) body-only API with Monaco + GUI-declared params:
+ * identity by default, a known desaturation body matches the hand-computed
+ * expectation, a broken edit shows a line-numbered error while the LAST
+ * VALID shader keeps rendering, GUI params drive the uniform (P.<name>),
+ * typing in Monaco auto-applies after the debounce, and the payload
+ * round-trips through the sidecar.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, existsSync, unlinkSync } from 'node:fs';
@@ -15,11 +17,6 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = 'test-assets/test.ARW';
 const SIDECAR = ARW_PATH + '.silverbox.json';
 const GPU_CPU_TOLERANCE = 1 / 255;
-
-// the known look: cool teal grade with a p0-controlled red gain
-const LOOK_CODE = `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  return vec4f(c.r * (0.5 + p.x), c.g, c.b * 2.0, c.a);
-}`;
 
 console.log('building…');
 execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
@@ -45,104 +42,164 @@ try {
   await page.waitForSelector('.app-layout', { timeout: 15_000 });
   mkdirSync(join(projectRoot, 'test-artifacts'), { recursive: true });
 
-  const openAndWait = async (path) => {
-    // fire-and-forget so no evaluate stays in flight across the decode (see ms2)
-    await page.evaluate((p) => {
-      void window.__openImageByPath(p);
-    }, path);
-    await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
-  };
+  // fire-and-forget so no evaluate stays in flight across the decode (see ms2)
+  await page.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, ARW_PATH);
+  await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  const neutral = await page.evaluate(() => window.__debug.readbackMean());
 
-  // srgbEncode-mean of the linear preview after the given per-channel gains,
-  // computed in the page from the store's pixels — the hand-written reference
-  // for the custom shader (all other nodes stay neutral).
-  const expectedMean = (gains) =>
-    page.evaluate(([gr, gg, gb]) => {
+  const shaderState = () =>
+    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.kind === 'custom')?.shader);
+  const gpuMean = () => page.evaluate(() => window.__debug.readbackMean());
+  // hand-computed reference: per-channel means after mapping each linear
+  // pixel through `fn` (JS mirror of the shader body), then sRGB-encoding
+  const expected = (fnBody) =>
+    page.evaluate((body) => {
       const encode = (v) => {
         const c = Math.min(Math.max(v, 0), 1);
         return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
       };
+      const fn = new Function('r', 'g', 'b', body);
       const { data, width, height } = window.__debug.imageForVerify();
       const n = width * height;
       let r = 0;
-      let g = 0;
-      let b = 0;
+      let gg = 0;
+      let bb = 0;
       for (let i = 0; i < n; i++) {
-        r += encode(data[i * 4] * gr);
-        g += encode(data[i * 4 + 1] * gg);
-        b += encode(data[i * 4 + 2] * gb);
+        const [x, y, z] = fn(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
+        r += encode(x);
+        gg += encode(y);
+        bb += encode(z);
       }
-      return { r: r / n, g: g / n, b: b / n };
-    }, gains);
+      return { r: r / n, g: gg / n, b: bb / n };
+    }, fnBody);
 
-  await openAndWait(ARW_PATH);
-  const neutralGpu = await page.evaluate(() => window.__debug.readbackMean());
-
-  console.log('verify-ms7 (add custom node, identity by default):');
-  await page.locator('.node-editor-toolbar select').selectOption('custom');
-  await page.locator('.node-editor-toolbar button').click();
-  check(
-    'custom node lands in the chain with the WGSL editor open',
-    (await page.locator('.inspector-title').textContent()) === 'Custom (WGSL)' &&
-      (await page.locator('.inspector-code').count()) === 1,
-    await page.locator('.inspector-title').textContent()
-  );
-  const identityGpu = await page.evaluate(() => window.__debug.readbackMean());
-  check('default custom code is identity', meansMatch(identityGpu, neutralGpu), { neutralGpu, identityGpu });
-
-  console.log('verify-ms7 (known look through the textarea):');
-  await page.locator('.inspector-code').fill(LOOK_CODE);
-  await page.locator('.inspector-code-actions button').click();
-  const lookGpu = await page.evaluate(() => window.__debug.readbackMean());
-  const lookExpected = await expectedMean([0.5, 1, 2]);
-  check('look render matches the hand-computed reference (within 1/255)', meansMatch(lookGpu, lookExpected), {
-    lookGpu,
-    lookExpected,
-  });
-
-  console.log('verify-ms7 (p0 uniform drives the shader):');
+  console.log('verify-ms7 (identity default):');
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-custom"]').click();
   const customId = await page.evaluate(
     () => window.__debug.graphState().nodes.find((n) => n.kind === 'custom')?.id
   );
-  await page.evaluate((id) => window.__debug.updateNodeParam(id, 'p0', 0.5), customId);
-  const p0Gpu = await page.evaluate(() => window.__debug.readbackMean());
-  const p0Expected = await expectedMean([1, 1, 2]);
-  check('p0=0.5 render matches the reference (within 1/255)', meansMatch(p0Gpu, p0Expected), {
-    p0Gpu,
-    p0Expected,
-  });
-  await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms7-look.png') });
+  check(
+    'custom node lands with the Monaco editor and compiled status',
+    (await page.locator('[data-testid="shader-editor"]').count()) === 1 &&
+      (await page.locator('[data-testid="shader-status-ok"]').count()) === 1,
+    customId
+  );
+  const identity = await gpuMean();
+  check('default shade body is identity', meansMatch(identity, neutral), { neutral, identity });
 
-  console.log('verify-ms7 (bad code falls back to identity with an error):');
-  await page.locator('.inspector-code').fill('fn applyOp( broken');
-  await page.locator('.inspector-code-actions button').click();
-  await page.waitForSelector('[data-testid="shader-error"]', { timeout: 10_000 });
-  check('inspector shows the compile error', true, true);
-  const brokenGpu = await page.evaluate(() => window.__debug.readbackMean());
-  check('broken shader renders identity', meansMatch(brokenGpu, neutralGpu), { neutralGpu, brokenGpu });
-
-  console.log('verify-ms7 (code persists through the sidecar):');
-  await page.locator('.inspector-code').fill(LOOK_CODE);
-  await page.locator('.inspector-code-actions button').click();
+  console.log('verify-ms7 (known shader vs hand-computed reference):');
+  await page.evaluate((id) => window.__debug.applyShaderSource(id, 'return vec3f(luma(color));'), customId);
   await page.waitForFunction(
-    () => Object.keys(window.__debug.shaderErrors()).length === 0,
+    (id) =>
+      window.__debug.graphState().nodes.find((n) => n.id === id)?.shader?.code?.lastValidSrc ===
+      'return vec3f(luma(color));',
+    customId,
     { timeout: 10_000 }
   );
-  await page.keyboard.press('Meta+s');
-  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
-  await openAndWait(ARW_PATH); // reopen (restores from sidecar)
-  const restoredCode = await page.evaluate(
-    () => window.__debug.graphState().nodes.find((n) => n.kind === 'custom')?.code
+  const desat = await gpuMean();
+  const desatExpected = await expected(
+    'const l = 0.2126*r + 0.7152*g + 0.0722*b; return [l, l, l];'
   );
-  check('reopened image restores the custom code', restoredCode === LOOK_CODE, restoredCode);
-  const restoredGpu = await page.evaluate(() => window.__debug.readbackMean());
-  const restoredExpected = await expectedMean([1, 1, 2]); // p0 was saved at 0.5
-  check('restored look renders like before the save (within 1/255)', meansMatch(restoredGpu, restoredExpected), {
-    restoredGpu,
-    restoredExpected,
+  check('luma desaturation matches the reference (within 1/255)', meansMatch(desat, desatExpected), {
+    desat,
+    desatExpected,
   });
 
-  console.log('screenshot: test-artifacts/ms7-look.png');
+  console.log('verify-ms7 (broken edit keeps the last valid shader):');
+  await page.evaluate((id) => window.__debug.applyShaderSource(id, 'return oops;'), customId);
+  await page.waitForSelector('[data-testid="shader-error"]', { timeout: 10_000 });
+  const errorText = await page.locator('[data-testid="shader-error"]').textContent();
+  check('error is line-numbered against the user body', /line 1/.test(errorText ?? ''), errorText);
+  const afterBroken = await gpuMean();
+  check('render still shows the last valid shader (desaturation)', meansMatch(afterBroken, desat), {
+    desat,
+    afterBroken,
+  });
+
+  console.log('verify-ms7 (GUI params drive P.<name>):');
+  const addError = await page.evaluate(
+    (id) => window.__debug.addShaderParam(id, { name: 'gain', min: 0, max: 4, default: 1 }),
+    customId
+  );
+  check('param declaration succeeds', addError === null, addError);
+  await page.evaluate((id) => window.__debug.applyShaderSource(id, 'return color * P.gain;'), customId);
+  await page.waitForFunction(
+    (id) => !window.__debug.shaderErrors()[id],
+    customId,
+    { timeout: 10_000 }
+  );
+  await page.evaluate((id) => window.__debug.updateShaderParam(id, 'gain', 2), customId);
+  const gained = await gpuMean();
+  const gainedExpected = await expected('return [2 * r, 2 * g, 2 * b];');
+  check('P.gain = 2 matches the reference (within 1/255)', meansMatch(gained, gainedExpected), {
+    gained,
+    gainedExpected,
+  });
+
+  console.log('verify-ms7 (editing in Monaco auto-applies after 400ms):');
+  // drive the editor model directly (same onDidChangeModelContent → debounce
+  // path as typing; raw synthetic keystrokes are flaky against Monaco)
+  await page.evaluate(() => {
+    const model = window.__monaco.editor.getModels()[0];
+    model.setValue('return color * 0.5;');
+  });
+  let typedState = null;
+  for (let i = 0; i < 40; i++) {
+    typedState = await page.evaluate(
+      (id) => {
+        const shader = window.__debug.graphState().nodes.find((n) => n.id === id)?.shader;
+        return {
+          code: shader?.code,
+          error: window.__debug.shaderErrors()[id] ?? null,
+          editor: document.querySelector('[data-testid="shader-editor"] .view-lines')?.textContent ?? null,
+        };
+      },
+      customId
+    );
+    if (typedState.code?.lastValidSrc === 'return color * 0.5;') break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check(
+    'debounced edit landed as src + lastValidSrc',
+    typedState?.code?.lastValidSrc === 'return color * 0.5;',
+    typedState
+  );
+  const halved = await gpuMean();
+  const halvedExpected = await expected('return [0.5 * r, 0.5 * g, 0.5 * b];');
+  check('typed shader renders (within 1/255)', meansMatch(halved, halvedExpected), { halved, halvedExpected });
+
+  console.log('verify-ms7 (sidecar round-trip):');
+  await page.keyboard.press('Meta+s');
+  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+  await page.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, ARW_PATH);
+  await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  const restoredShader = await shaderState();
+  check(
+    'reopen restores code and params',
+    restoredShader?.code?.lastValidSrc === 'return color * 0.5;' &&
+      restoredShader?.params?.[0]?.name === 'gain' &&
+      restoredShader?.params?.[0]?.value === 2,
+    restoredShader
+  );
+  // load-time revalidation is async — poll until the render reflects the shader
+  let restored = null;
+  for (let i = 0; i < 40; i++) {
+    restored = await gpuMean();
+    if (meansMatch(restored, halvedExpected)) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  check('restored shader renders like before the save', meansMatch(restored, halvedExpected), {
+    restored,
+    halvedExpected,
+  });
+
+  await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms7-customshader.png') });
+  console.log('screenshot: test-artifacts/ms7-customshader.png');
 } finally {
   await app.close();
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);

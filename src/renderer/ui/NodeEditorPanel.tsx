@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useCallback } from 'react';
 import {
   ReactFlow,
   Background,
@@ -15,7 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS, isOpKind } from '../engine/graph/ops';
-import { DEVELOP_KIND, type AddableKind } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND } from '../engine/graph/graphDoc';
 
 /** Blend node: two labeled inputs (a = base, b = overlay), one output. */
 function BlendNode({ data, selected }: NodeProps) {
@@ -49,7 +49,6 @@ export function NodeEditorPanel() {
   const addOpNode = useAppStore((s) => s.addOpNode);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const connectEdge = useAppStore((s) => s.connectEdge);
-  const [addKind, setAddKind] = useState<AddableKind>('exposure');
 
   const nodes: Node[] = graph.nodes.map((n) => ({
     id: n.id,
@@ -107,18 +106,6 @@ export function NodeEditorPanel() {
 
   return (
     <div className="node-editor">
-      <div className="node-editor-toolbar">
-        <select value={addKind} onChange={(ev) => setAddKind(ev.target.value as AddableKind)}>
-          {Object.values(OPS).map((op) => (
-            <option key={op.kind} value={op.kind}>
-              {op.label}
-            </option>
-          ))}
-          <option value={BLEND_KIND}>Blend</option>
-          <option value={CUSTOM_KIND}>Custom (WGSL)</option>
-        </select>
-        <button onClick={() => addOpNode(addKind)}>Add node</button>
-      </div>
       <ReactFlow
         nodes={nodes}
         edges={edges}

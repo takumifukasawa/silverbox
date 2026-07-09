@@ -32,7 +32,7 @@ fn srgbEncode1(v: f32) -> f32 {
   return 1.055 * pow(v, 1.0 / 2.4) - 0.055;
 }
 
-fn srgbEncode3(c: vec3f) -> vec3f {
+fn srgbEncode(c: vec3f) -> vec3f {
   return vec3f(srgbEncode1(c.x), srgbEncode1(c.y), srgbEncode1(c.z));
 }
 `;
@@ -46,7 +46,7 @@ fn srgbDecode1(v: f32) -> f32 {
   return pow((v + 0.055) / 1.055, 2.4);
 }
 
-fn srgbDecode3(c: vec3f) -> vec3f {
+fn srgbDecode(c: vec3f) -> vec3f {
   return vec3f(srgbDecode1(c.x), srgbDecode1(c.y), srgbDecode1(c.z));
 }
 `;

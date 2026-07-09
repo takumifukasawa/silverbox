@@ -210,29 +210,13 @@ export function toneCurvePoint(x: number, p: [number, number, number, number]): 
 }
 
 /**
- * Custom (WGSL) node: the user edits the applyOp body directly; p0..p3 are
- * free uniform knobs (params.x/y/z/w in the shader). Not part of OPS because
- * it has no CPU reference — cpuReferenceMean() reports chains containing one
- * as unsupported, and the verify harness checks known shaders by hand.
+ * Custom (WGSL) node kind: the user writes the body of `shade(color, uv)`;
+ * everything else (wrapper, GUI params, validation, artifact cache) lives in
+ * customShaderNode.ts. Not part of OPS because it has no CPU reference —
+ * cpuReferenceMean() reports chains containing one as unsupported and the
+ * verify harness checks known shaders by hand.
  */
 export const CUSTOM_KIND = 'custom';
-
-export const CUSTOM_PARAM_DEFS: OpParamDef[] = [0, 1, 2, 3].map((i) => ({
-  key: `p${i}`,
-  label: `p${i}`,
-  min: 0,
-  max: 1,
-  step: 0.01,
-  default: 0,
-}));
-
-export const DEFAULT_CUSTOM_CODE = `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  return c;
-}`;
-
-export function packCustomUniform(params: Record<string, number>): [number, number, number, number] {
-  return [params.p0 ?? 0, params.p1 ?? 0, params.p2 ?? 0, params.p3 ?? 0];
-}
 
 /**
  * Blend node: two inputs (a = base, b = overlay), output = mix(a, b, amount)

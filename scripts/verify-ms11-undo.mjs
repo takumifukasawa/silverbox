@@ -67,8 +67,8 @@ try {
   check('a fresh edit clears the redo stack', (await history()).future === 0, await history());
 
   console.log('verify-ms11 (undo structure edits):');
-  await page.locator('.node-editor-toolbar select').selectOption('whitebalance');
-  await page.locator('.node-editor-toolbar button').click();
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-whitebalance"]').click();
   check('added node appears', (await nodeCount()) === 4, await nodeCount());
   await page.keyboard.press('Meta+z');
   check('⌘Z removes the added node', (await nodeCount()) === 3, await nodeCount());
