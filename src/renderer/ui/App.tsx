@@ -25,10 +25,15 @@ export function App() {
         ev.preventDefault();
         void useAppStore.getState().saveGraph();
       }
-      if (cmd && !ev.altKey && ev.key.toLowerCase() === 'z') {
-        // don't steal undo from text fields (the WGSL editor has its own)
+      if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
+        // don't steal undo from text fields (Monaco has its own undo stack)
         const target = ev.target as HTMLElement | null;
-        if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT')) return;
+        if (
+          target &&
+          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
+        ) {
+          return;
+        }
         ev.preventDefault();
         if (ev.shiftKey) useAppStore.getState().redo();
         else useAppStore.getState().undo();

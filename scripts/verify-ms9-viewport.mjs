@@ -63,14 +63,12 @@ try {
   await page.locator('[data-testid="view-fit"]').click();
   check('Fit returns to fit mode', (await viewState()).mode === 'fit', await viewState());
 
-  console.log('verify-ms9 (double-click toggles):');
+  console.log('verify-ms9 (double-click resets to fit):');
   const cx = box.x + box.width / 2;
   const cy = box.y + box.height / 2;
+  await page.locator('[data-testid="view-100"]').click();
   await page.mouse.dblclick(cx, cy);
-  const afterDbl = await viewState();
-  check('double-click zooms to 1:1', Math.abs(afterDbl.scale - 1 / afterDbl.dpr) < 1e-6, afterDbl);
-  await page.mouse.dblclick(cx, cy);
-  check('double-click again returns to fit', (await viewState()).mode === 'fit', await viewState());
+  check('double-click resets to fit', (await viewState()).mode === 'fit', await viewState());
 
   console.log('verify-ms9 (wheel zoom + drag pan):');
   const beforeWheel = await viewState();

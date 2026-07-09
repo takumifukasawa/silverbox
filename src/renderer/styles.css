@@ -475,13 +475,25 @@ button:disabled {
   position: relative;
 }
 
-.node-editor-toolbar {
+.node-editor-banner {
   position: absolute;
   top: 8px;
   left: 8px;
+  right: 8px;
   z-index: 5;
-  display: flex;
-  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: rgba(60, 50, 20, 0.92);
+  border: 1px solid #f0c674;
+  color: #f0c674;
+  pointer-events: none;
+}
+
+.node-editor-banner--reject {
+  background: rgba(60, 25, 28, 0.92);
+  border-color: #e06c75;
+  color: #ff7a76;
 }
 
 .blend-node {
@@ -508,11 +520,3 @@ button:disabled {
   color: #889;
 }
 
-.node-editor-toolbar select {
-  background: #3a3a3a;
-  color: #e0e0e0;
-  border: 1px solid #555;
-  border-radius: 4px;
-  font: inherit;
-  padding: 4px 6px;
-}

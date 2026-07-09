@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import {
   ReactFlow,
   Background,
@@ -10,7 +10,6 @@ import {
   type Edge,
   type NodeMouseHandler,
   type OnNodeDrag,
-  type OnNodesDelete,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
@@ -49,6 +48,11 @@ export function NodeEditorPanel() {
   const addOpNode = useAppStore((s) => s.addOpNode);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const connectEdge = useAppStore((s) => s.connectEdge);
+  const removeEdge = useAppStore((s) => s.removeEdge);
+  const connectNotice = useAppStore((s) => s.connectNotice);
+  const graphBroken = useAppStore((s) => s.graphBroken);
+  // edge selection is transient UI state — the GraphDoc doesn't carry it
+  const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
   const nodes: Node[] = graph.nodes.map((n) => ({
     id: n.id,
@@ -84,17 +88,11 @@ export function NodeEditorPanel() {
     source: e.source,
     target: e.target,
     targetHandle: e.targetHandle,
-    deletable: false,
+    selected: e.id === selectedEdgeId,
   }));
 
   const onNodeClick: NodeMouseHandler = useCallback((_ev, node) => selectNode(node.id), [selectNode]);
   const onNodeDragStop: OnNodeDrag = useCallback((_ev, node) => moveNode(node.id, node.position), [moveNode]);
-  const onNodesDelete: OnNodesDelete = useCallback(
-    (deleted) => {
-      for (const node of deleted) removeOpNode(node.id);
-    },
-    [removeOpNode]
-  );
   const onConnect = useCallback(
     (conn: Connection) => {
       if (!conn.source || !conn.target) return;
@@ -103,9 +101,34 @@ export function NodeEditorPanel() {
     },
     [connectEdge]
   );
+  // one unified delete handler: node deletion rewires its neighbors itself,
+  // so the adjacent edges React Flow reports alongside must NOT be removed
+  // separately (their freed ids may already be reused by the bypass edge)
+  const onDelete = useCallback(
+    ({ nodes: deletedNodes, edges: deletedEdges }: { nodes: Node[]; edges: Edge[] }) => {
+      if (deletedNodes.length > 0) {
+        for (const node of deletedNodes) removeOpNode(node.id);
+      } else {
+        for (const edge of deletedEdges) removeEdge(edge.id);
+      }
+      setSelectedEdgeId(null);
+    },
+    [removeOpNode, removeEdge]
+  );
+  const onEdgeClick = useCallback((_ev: React.MouseEvent, edge: Edge) => setSelectedEdgeId(edge.id), []);
 
   return (
     <div className="node-editor">
+      {graphBroken && (
+        <div className="node-editor-banner" data-testid="broken-banner">
+          input → output path is broken — preview shows the unedited image (pass-through)
+        </div>
+      )}
+      {connectNotice && (
+        <div className="node-editor-banner node-editor-banner--reject" data-testid="reject-banner">
+          {connectNotice}
+        </div>
+      )}
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -117,9 +140,13 @@ export function NodeEditorPanel() {
         deleteKeyCode={['Backspace', 'Delete']}
         onNodeClick={onNodeClick}
         onNodeDragStop={onNodeDragStop}
-        onNodesDelete={onNodesDelete}
+        onDelete={onDelete}
+        onEdgeClick={onEdgeClick}
         onConnect={onConnect}
-        onPaneClick={() => selectNode(null)}
+        onPaneClick={() => {
+          selectNode(null);
+          setSelectedEdgeId(null);
+        }}
       >
         <Background gap={16} />
       </ReactFlow>

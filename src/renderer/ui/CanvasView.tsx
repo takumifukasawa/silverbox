@@ -73,7 +73,17 @@ export function CanvasView() {
           renderer.setImage(image);
           lastImageRef.current = image;
         }
-        await renderer.setGraph(buildPlan(graph));
+        // a broken input→output path renders as pass-through with a banner
+        // in the node editor instead of killing the preview
+        let plan;
+        try {
+          plan = buildPlan(graph);
+          useAppStore.getState().setGraphBroken(false);
+        } catch {
+          plan = { steps: [], output: -1 };
+          useAppStore.getState().setGraphBroken(true);
+        }
+        await renderer.setGraph(plan);
         if (cancelled) return;
         renderer.render();
         setGpuError(null);

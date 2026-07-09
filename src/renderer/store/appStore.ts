@@ -73,6 +73,13 @@ interface AppState {
   removeOpNode(nodeId: string): void;
   /** Rewire an input: replaces whatever currently feeds (target, handle). */
   connectEdge(source: string, target: string, targetHandle?: 'a' | 'b'): void;
+  /** Delete an edge (allowed to break the path — the preview passes through). */
+  removeEdge(edgeId: string): void;
+  /** Rejected-connection notice for the node editor (auto-clears after 4s). */
+  connectNotice: string | null;
+  /** True while input→output does not resolve (preview shows pass-through). */
+  graphBroken: boolean;
+  setGraphBroken(broken: boolean): void;
   /**
    * Bumped whenever a customShader artifact is (re)compiled — the render
    * effect keys on it so validation results reach the screen even when the
@@ -388,7 +395,11 @@ export const useAppStore = create<AppState>((set, get) => {
     });
   },
 
+  connectNotice: null,
+  graphBroken: false,
+
   connectEdge(source, target, targetHandle) {
+    let rejected: string | null = null;
     set((s) => {
       const g = s.graph;
       const edges = g.edges.filter(
@@ -403,11 +414,33 @@ export const useAppStore = create<AppState>((set, get) => {
       const graph = { ...g, edges: [...edges, edge] };
       try {
         buildPlan(graph); // reject cycles / invalid wiring outright
-      } catch {
+      } catch (err) {
+        rejected = err instanceof Error ? err.message : String(err);
         return {};
       }
-      return { ...pushHistory(s, null), graph, graphDirty: true };
+      return { ...pushHistory(s, null), graph, graphDirty: true, connectNotice: null };
     });
+    if (rejected) {
+      set({ connectNotice: rejected });
+      setTimeout(() => {
+        if (get().connectNotice === rejected) set({ connectNotice: null });
+      }, 4000);
+    }
+  },
+
+  removeEdge(edgeId) {
+    set((s) => {
+      if (!s.graph.edges.some((e) => e.id === edgeId)) return {};
+      return {
+        ...pushHistory(s, null),
+        graph: { ...s.graph, edges: s.graph.edges.filter((e) => e.id !== edgeId) },
+        graphDirty: true,
+      };
+    });
+  },
+
+  setGraphBroken(broken) {
+    if (get().graphBroken !== broken) set({ graphBroken: broken });
   },
 
   shaderRev: 0,

@@ -88,11 +88,9 @@ export function useCanvasViewport(
       zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, viewRef.current.scale * factor);
     };
 
-    const onDblClick = (ev: MouseEvent) => {
-      const rect = container.getBoundingClientRect();
-      const atOneToOne = Math.abs(viewRef.current.scale - 1 / devicePixelRatio) < 1e-3;
-      if (atOneToOne) fit();
-      else oneToOne(ev.clientX - rect.left, ev.clientY - rect.top);
+    // double-click resets to fit (UI spec §3); 1:1 stays on the 100% button
+    const onDblClick = () => {
+      fit();
     };
 
     let dragging: { x: number; y: number } | null = null;
