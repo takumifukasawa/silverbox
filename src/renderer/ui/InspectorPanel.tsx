@@ -11,26 +11,82 @@ import {
   toneCurvePoint,
   type OpParamDef,
 } from '../engine/graph/ops';
-import type { GraphNode } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
+import { defaultDevelopParams, type DevelopParams } from '../engine/graph/developNode';
 import { HistogramPanel } from './HistogramPanel';
 
+/**
+ * Common parameter row (UI spec §6): label / range / number in a grid;
+ * double-clicking the row resets to the default.
+ */
 function ParamSlider({ nodeId, def, value }: { nodeId: string; def: OpParamDef; value: number }) {
   const updateNodeParam = useAppStore((s) => s.updateNodeParam);
+  const set = (v: number) => updateNodeParam(nodeId, def.key, Math.min(def.max, Math.max(def.min, v)));
+  const changed = value !== def.default;
   return (
-    <label className="inspector-param">
-      <span className="inspector-param-label">
-        {def.label}
-        <span className="inspector-param-value">{value.toFixed(2)}</span>
-      </span>
+    <div className="param-row" title="Double-click to reset" onDoubleClick={() => set(def.default)}>
+      <span className={`param-label${changed ? ' changed' : ''}`}>{def.label}</span>
       <input
         type="range"
         min={def.min}
         max={def.max}
         step={def.step}
         value={value}
-        onChange={(ev) => updateNodeParam(nodeId, def.key, Number(ev.target.value))}
+        onChange={(ev) => set(Number(ev.target.value))}
       />
-    </label>
+      <input
+        type="number"
+        className="param-number"
+        min={def.min}
+        max={def.max}
+        step={def.step}
+        value={value}
+        onChange={(ev) => {
+          const v = Number(ev.target.value);
+          if (Number.isFinite(v)) set(v);
+        }}
+      />
+    </div>
+  );
+}
+
+/** Collapsible inspector section (UI spec §5). */
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="inspector-section">
+      <div className="inspector-section-header" onClick={() => setOpen((o) => !o)}>
+        <span className="inspector-section-caret">{open ? '▾' : '▸'}</span> {title}
+      </div>
+      {open && <div className="inspector-section-body">{children}</div>}
+    </div>
+  );
+}
+
+const DEVELOP_BASIC_DEFS: OpParamDef[] = [
+  { key: 'basic.ev', label: 'Exposure', min: -5, max: 5, step: 0.01, default: 0 },
+  { key: 'basic.contrast', label: 'Contrast', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.highlights', label: 'Highlights', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.shadows', label: 'Shadows', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.whites', label: 'Whites', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.blacks', label: 'Blacks', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.saturation', label: 'Saturation', min: -100, max: 100, step: 1, default: 0 },
+  { key: 'basic.vibrance', label: 'Vibrance', min: -100, max: 100, step: 1, default: 0 },
+];
+
+/** The aggregated Develop panel — Basic now; more sections per spec order. */
+function DevelopInspector({ node }: { node: GraphNode }) {
+  const params: DevelopParams = node.develop ?? defaultDevelopParams();
+  const basic = params.basic as unknown as Record<string, number>;
+  return (
+    <>
+      <div className="inspector-title">Develop</div>
+      <Section title="Basic">
+        {DEVELOP_BASIC_DEFS.map((def) => (
+          <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
+        ))}
+      </Section>
+    </>
   );
 }
 
@@ -89,6 +145,9 @@ function CurvePreview({ node }: { node: GraphNode }) {
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   if (!node) {
     return <div className="inspector-placeholder">Select a node in the graph below.</div>;
+  }
+  if (node.kind === DEVELOP_KIND) {
+    return <DevelopInspector node={node} />;
   }
   if (node.kind === CUSTOM_KIND) {
     return (

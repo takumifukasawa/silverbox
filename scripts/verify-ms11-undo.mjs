@@ -38,23 +38,23 @@ try {
 
   const history = () => page.evaluate(() => window.__debug.historyState());
   const evParam = () =>
-    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'exposure-1')?.params?.ev);
+    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev);
   const satParam = () =>
-    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'saturation-1')?.params?.amount);
+    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.saturation);
   const nodeCount = () => page.evaluate(() => window.__debug.graphState().nodes.length);
 
   console.log('verify-ms11 (coalescing):');
   check('history starts empty', JSON.stringify(await history()) === '{"past":0,"future":0}', await history());
   for (const v of [0.1, 0.2, 0.3]) {
-    await page.evaluate((x) => window.__debug.updateNodeParam('exposure-1', 'ev', x), v);
+    await page.evaluate((x) => window.__debug.updateNodeParam('dev', 'basic.ev', x), v);
   }
   check('a slider run coalesces into one entry', (await history()).past === 1, await history());
-  await page.evaluate(() => window.__debug.updateNodeParam('saturation-1', 'amount', 0.5));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.saturation', 50));
   check('a different param starts a new entry', (await history()).past === 2, await history());
 
   console.log('verify-ms11 (undo/redo params):');
   await page.keyboard.press('Meta+z');
-  check('⌘Z reverts the saturation edit', (await satParam()) === 1 && (await evParam()) === 0.3, {
+  check('⌘Z reverts the saturation edit', (await satParam()) === 0 && (await evParam()) === 0.3, {
     sat: await satParam(),
     ev: await evParam(),
   });
@@ -63,17 +63,17 @@ try {
   check('history is fully unwound', JSON.stringify(await history()) === '{"past":0,"future":2}', await history());
   await page.keyboard.press('Meta+Shift+z');
   check('⇧⌘Z restores the slider run', (await evParam()) === 0.3, await evParam());
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 1));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1));
   check('a fresh edit clears the redo stack', (await history()).future === 0, await history());
 
   console.log('verify-ms11 (undo structure edits):');
   await page.locator('.node-editor-toolbar select').selectOption('whitebalance');
   await page.locator('.node-editor-toolbar button').click();
-  check('added node appears', (await nodeCount()) === 5, await nodeCount());
+  check('added node appears', (await nodeCount()) === 4, await nodeCount());
   await page.keyboard.press('Meta+z');
-  check('⌘Z removes the added node', (await nodeCount()) === 4, await nodeCount());
+  check('⌘Z removes the added node', (await nodeCount()) === 3, await nodeCount());
   await page.keyboard.press('Meta+Shift+z');
-  check('⇧⌘Z re-adds it', (await nodeCount()) === 5, await nodeCount());
+  check('⇧⌘Z re-adds it', (await nodeCount()) === 4, await nodeCount());
   await page.keyboard.press('Meta+z');
 
   console.log('verify-ms11 (undone graph still renders correctly):');

@@ -80,7 +80,7 @@ try {
   console.log('verify-ms10 (clipping indicators):');
   const baseHighlight = hist.highlightClip;
   const overexposed = await histogramAfter(() =>
-    page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 4))
+    page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 4))
   );
   check('+4 EV clips highlights hard', overexposed.highlightClip > Math.max(0.2, baseHighlight), {
     before: baseHighlight,
@@ -93,7 +93,7 @@ try {
   );
 
   const underexposed = await histogramAfter(() =>
-    page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', -4))
+    page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', -4))
   );
   check('-4 EV clips shadows', underexposed.shadowClip > overexposed.shadowClip, {
     over: overexposed.shadowClip,

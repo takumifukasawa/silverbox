@@ -43,14 +43,14 @@ try {
   console.log('verify-ms4 (graph model):');
   const graph = await page.evaluate(() => window.__debug.graphState());
   check(
-    'default graph is input → exposure → saturation → output',
-    graph.nodes.map((n) => n.kind).join(',') === 'input,exposure,saturation,output' && graph.edges.length === 3,
+    'default graph is input → Develop → output',
+    graph.nodes.map((n) => n.kind).join(',') === 'input,Develop,output' && graph.edges.length === 2,
     graph.nodes.map((n) => n.kind)
   );
   check(
-    'React Flow renders 4 nodes and 3 edges',
-    (await page.locator('.react-flow__node').count()) === 4 &&
-      (await page.locator('.react-flow__edge').count()) === 3,
+    'React Flow renders 3 nodes and 2 edges',
+    (await page.locator('.react-flow__node').count()) === 3 &&
+      (await page.locator('.react-flow__edge').count()) === 2,
     { nodes: await page.locator('.react-flow__node').count(), edges: await page.locator('.react-flow__edge').count() }
   );
 
@@ -74,7 +74,7 @@ try {
   );
 
   console.log('verify-ms4 (exposure +1 EV):');
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 1));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1));
   const evGpu = await page.evaluate(() => window.__debug.readbackMean());
   const evCpu = await page.evaluate(() => window.__debug.cpuReferenceMean());
   check('+1 EV GPU matches CPU reference (within 1/255)', meansMatch(evGpu, evCpu), { evGpu, evCpu });
@@ -84,35 +84,39 @@ try {
   });
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms4-exposure.png') });
 
-  console.log('verify-ms4 (saturation 0):');
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 0));
-  await page.evaluate(() => window.__debug.updateNodeParam('saturation-1', 'amount', 0));
+  console.log('verify-ms4 (saturation −100):');
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.saturation', -100));
   const satGpu = await page.evaluate(() => window.__debug.readbackMean());
   const satCpu = await page.evaluate(() => window.__debug.cpuReferenceMean());
-  check('saturation-0 GPU matches CPU reference (within 1/255)', meansMatch(satGpu, satCpu), { satGpu, satCpu });
+  check('saturation −100 GPU matches CPU reference (within 1/255)', meansMatch(satGpu, satCpu), { satGpu, satCpu });
   check(
-    'saturation 0 renders grayscale (channel means converge)',
+    'saturation −100 renders grayscale (channel means converge)',
     satGpu && Math.abs(satGpu.r - satGpu.g) < 0.01 && Math.abs(satGpu.b - satGpu.g) < 0.01,
     satGpu
   );
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms4-grayscale.png') });
-  await page.evaluate(() => window.__debug.updateNodeParam('saturation-1', 'amount', 1));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.saturation', 0));
 
   console.log('verify-ms4 (inspector UI):');
-  await page.locator('.react-flow__node', { hasText: 'exposure' }).click();
-  const slider = page.locator('.inspector input[type="range"]');
-  check('clicking the exposure node shows its slider', (await slider.count()) === 1, await slider.count());
+  await page.locator('.react-flow__node[data-id="dev"]').click();
+  const slider = page.locator('.inspector input[type="range"]').first();
+  check(
+    'clicking the Develop node shows the Basic sliders',
+    (await page.locator('.inspector input[type="range"]').count()) === 8,
+    await page.locator('.inspector input[type="range"]').count()
+  );
 
   await slider.focus();
   await page.keyboard.press('ArrowRight');
   const evAfterKey = await page.evaluate(
-    () => window.__debug.graphState().nodes.find((n) => n.id === 'exposure-1')?.params?.ev
+    () => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev
   );
   check('arrow key on the slider updates the graph param', evAfterKey === 0.01, evAfterKey);
   check(
-    'inspector shows the updated value',
-    (await page.locator('.inspector-param-value').textContent()) === '0.01',
-    await page.locator('.inspector-param-value').textContent()
+    'inspector number input shows the updated value',
+    (await page.locator('.param-row').first().locator('input[type="number"]').inputValue()) === '0.01',
+    await page.locator('.param-row').first().locator('input[type="number"]').inputValue()
   );
 
   console.log('screenshots: test-artifacts/ms4-exposure.png, ms4-grayscale.png');

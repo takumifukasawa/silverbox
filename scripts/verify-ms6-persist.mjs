@@ -49,12 +49,12 @@ try {
     await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
   };
   const evParam = () =>
-    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'exposure-1')?.params?.ev);
+    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev);
 
   console.log('verify-ms6 (edit → dirty → ⌘S):');
   await openAndWait(ARW_PATH);
   check('freshly opened image is not dirty', !(await page.evaluate(() => window.__debug.graphDirty())), true);
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 0.5));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.5));
   check('editing a param marks the graph dirty', await page.evaluate(() => window.__debug.graphDirty()), false);
   check(
     'toolbar shows the dirty indicator',
@@ -74,7 +74,7 @@ try {
   check('sidecar file exists next to the image', existsSync(SIDECAR), SIDECAR);
   const saved = JSON.parse(readFileSync(SIDECAR, 'utf8'));
   check('sidecar is version 1 with the edited ev', saved.version === 1 &&
-    saved.nodes.find((n) => n.id === 'exposure-1')?.params?.ev === 0.5, saved);
+    saved.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.5, saved);
   check('sidecar is pretty-printed and newline-terminated',
     readFileSync(SIDECAR, 'utf8').includes('\n  "nodes"') && readFileSync(SIDECAR, 'utf8').endsWith('\n'), null);
 

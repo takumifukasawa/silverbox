@@ -46,7 +46,7 @@ try {
     void window.__openImageByPath(p);
   }, ARW_PATH);
   await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 0.5));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.5));
   const previewMean = await page.evaluate(() => window.__debug.readbackMean());
 
   const exportAndWait = async (outPath) => {

@@ -7,8 +7,23 @@
  */
 
 import { srgbDecode, srgbEncode } from '../color/srgb';
+import {
+  cpuBrightness,
+  cpuContrast,
+  cpuSaturationVibrance,
+  wgslBrightness,
+  wgslContrast,
+  wgslSaturationVibrance,
+} from './developOps';
 
-export type OpKind = 'exposure' | 'whitebalance' | 'contrast' | 'tonecurve' | 'saturation';
+export type OpKind =
+  | 'exposure'
+  | 'whitebalance'
+  | 'contrast'
+  | 'tonecurve'
+  | 'saturation'
+  | 'vibrance'
+  | 'brightness';
 
 export interface OpParamDef {
   key: string;
@@ -29,18 +44,31 @@ export interface OpDef {
   wgsl: string;
   /** CPU reference; must mirror `wgsl` exactly (linear in, linear out). */
   apply(rgb: [number, number, number], p: [number, number, number, number]): [number, number, number];
+  /** True at default params — the pass is skipped for bit-exact pass-through. */
+  isIdentity(params: Record<string, number>): boolean;
 }
+
+const LUMA_WGSL = `fn luma(c: vec3f) -> f32 {
+  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+}
+`;
 
 export const OPS: Record<OpKind, OpDef> = {
   exposure: {
     kind: 'exposure',
     label: 'Exposure',
-    params: [{ key: 'ev', label: 'Exposure (EV)', min: -4, max: 4, step: 0.01, default: 0 }],
-    packUniform: (params) => [Math.pow(2, params.ev ?? 0), 0, 0, 0],
+    // exp2 runs in-shader (like Develop's exposure stage) so atomic EV and
+    // Develop EV at the same value are the same WGSL operation.
+    params: [{ key: 'ev', label: 'Exposure (EV)', min: -5, max: 5, step: 0.01, default: 0 }],
+    packUniform: (params) => [params.ev ?? 0, 0, 0, 0],
     wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  return vec4f(c.rgb * p.x, c.a);
+  return vec4f(c.rgb * exp2(p.x), c.a);
 }`,
-    apply: ([r, g, b], p) => [r * p[0], g * p[0], b * p[0]],
+    apply: ([r, g, b], p) => {
+      const k = Math.pow(2, p[0]);
+      return [r * k, g * k, b * k];
+    },
+    isIdentity: (params) => (params.ev ?? 0) === 0,
   },
   whitebalance: {
     kind: 'whitebalance',
@@ -56,21 +84,22 @@ export const OPS: Record<OpKind, OpDef> = {
   return vec4f(c.rgb * vec3f(p.x, 1.0, p.y), c.a);
 }`,
     apply: ([r, g, b], p) => [r * p[0], g, b * p[1]],
+    isIdentity: (params) => (params.rGain ?? 1) === 1 && (params.bGain ?? 1) === 1,
   },
   contrast: {
     kind: 'contrast',
     label: 'Contrast',
-    // Power curve pivoting on 0.18 mid-gray in linear; amount 1 = identity.
-    params: [{ key: 'amount', label: 'Contrast', min: 0.5, max: 2, step: 0.01, default: 1 }],
-    packUniform: (params) => [params.amount ?? 1, 0, 0, 0],
-    wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  let r = pow(max(c.rgb, vec3f(0.0)) / 0.18, vec3f(p.x)) * 0.18;
-  return vec4f(r, c.a);
+    // Shared with Develop's contrast stage (developOps): mid-gray log-space
+    // power, LR-style ±100 scale, 0 = identity.
+    params: [{ key: 'amount', label: 'Contrast', min: -100, max: 100, step: 1, default: 0 }],
+    packUniform: (params) => [(params.amount ?? 0) / 100, 0, 0, 0],
+    wgsl: `fn applyOp(c0: vec4f, p: vec4f) -> vec4f {
+  var c = c0.rgb;
+${wgslContrast('p.x')}
+  return vec4f(c, c0.a);
 }`,
-    apply: ([r, g, b], p) => {
-      const curve = (v: number) => Math.pow(Math.max(v, 0) / 0.18, p[0]) * 0.18;
-      return [curve(r), curve(g), curve(b)];
-    },
+    apply: (px, p) => cpuContrast(px, p[0]),
+    isIdentity: (params) => (params.amount ?? 0) === 0,
   },
   tonecurve: {
     kind: 'tonecurve',
@@ -118,21 +147,51 @@ fn applyOp(c: vec4f, p: vec4f) -> vec4f {
       const f = (v: number) => srgbDecode(toneCurvePoint(srgbEncode(v), p));
       return [f(r), f(g), f(b)];
     },
+    isIdentity: (params) =>
+      (params.shadows ?? 0) === 0 &&
+      (params.darks ?? 0) === 0 &&
+      (params.lights ?? 0) === 0 &&
+      (params.highlights ?? 0) === 0,
   },
   saturation: {
     kind: 'saturation',
     label: 'Saturation',
-    params: [{ key: 'amount', label: 'Saturation', min: 0, max: 2, step: 0.01, default: 1 }],
-    packUniform: (params) => [params.amount ?? 1, 0, 0, 0],
-    // Rec.709 luma weights on linear RGB; amount 0 = grayscale, 1 = identity.
-    wgsl: `fn applyOp(c: vec4f, p: vec4f) -> vec4f {
-  let l = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722));
-  return vec4f(vec3f(l) + (c.rgb - vec3f(l)) * p.x, c.a);
+    // Shared with Develop's color stage: LR-style ±100, 0 = identity.
+    params: [{ key: 'amount', label: 'Saturation', min: -100, max: 100, step: 1, default: 0 }],
+    packUniform: (params) => [(params.amount ?? 0) / 100, 0, 0, 0],
+    wgsl: `${LUMA_WGSL}fn applyOp(c0: vec4f, p: vec4f) -> vec4f {
+  var c = c0.rgb;
+${wgslSaturationVibrance('p.x', '0.0')}
+  return vec4f(c, c0.a);
 }`,
-    apply: ([r, g, b], p) => {
-      const l = 0.2126 * r + 0.7152 * g + 0.0722 * b;
-      return [l + (r - l) * p[0], l + (g - l) * p[0], l + (b - l) * p[0]];
-    },
+    apply: (px, p) => cpuSaturationVibrance(px, p[0], 0),
+    isIdentity: (params) => (params.amount ?? 0) === 0,
+  },
+  vibrance: {
+    kind: 'vibrance',
+    label: 'Vibrance',
+    params: [{ key: 'amount', label: 'Vibrance', min: -100, max: 100, step: 1, default: 0 }],
+    packUniform: (params) => [(params.amount ?? 0) / 100, 0, 0, 0],
+    wgsl: `${LUMA_WGSL}fn applyOp(c0: vec4f, p: vec4f) -> vec4f {
+  var c = c0.rgb;
+${wgslSaturationVibrance('0.0', 'p.x')}
+  return vec4f(c, c0.a);
+}`,
+    apply: (px, p) => cpuSaturationVibrance(px, 0, p[0]),
+    isIdentity: (params) => (params.amount ?? 0) === 0,
+  },
+  brightness: {
+    kind: 'brightness',
+    label: 'Brightness',
+    params: [{ key: 'amount', label: 'Brightness', min: -100, max: 100, step: 1, default: 0 }],
+    packUniform: (params) => [(params.amount ?? 0) / 100, 0, 0, 0],
+    wgsl: `fn applyOp(c0: vec4f, p: vec4f) -> vec4f {
+  var c = c0.rgb;
+${wgslBrightness('p.x')}
+  return vec4f(c, c0.a);
+}`,
+    apply: (px, p) => cpuBrightness(px, p[0]),
+    isIdentity: (params) => (params.amount ?? 0) === 0,
   },
 };
 

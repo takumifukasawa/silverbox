@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
-import { buildPlan, cpuEvalPlan, type GraphDoc } from '../engine/graph/graphDoc';
+import { buildPlan, cpuEvalPlan, planHasCpuReference, type GraphDoc } from '../engine/graph/graphDoc';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 
 declare global {
@@ -121,8 +121,8 @@ export function CanvasView() {
         if (!s.image) return null;
         const { data, width, height } = s.image;
         const plan = buildPlan(s.graph);
-        // custom WGSL has no CPU mirror; the harness checks those by hand
-        if (plan.steps.some((op) => op.type === 'custom')) return null;
+        // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
+        if (!planHasCpuReference(plan)) return null;
         const n = width * height;
         let r = 0;
         let g = 0;

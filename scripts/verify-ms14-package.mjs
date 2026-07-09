@@ -69,11 +69,14 @@ try {
     { gpu, cpu }
   );
 
+  // the histogram fills in debounced after the first render
+  const histogramAlive = await page
+    .waitForSelector('[data-testid="histogram-canvas"]', { timeout: 10_000 })
+    .then(() => true, () => false);
   check(
     'node editor and inspector are alive',
-    (await page.locator('.react-flow__node').count()) >= 4 &&
-      (await page.locator('[data-testid="histogram-canvas"]').count()) === 1,
-    await page.locator('.react-flow__node').count()
+    (await page.locator('.react-flow__node').count()) >= 3 && histogramAlive,
+    { nodes: await page.locator('.react-flow__node').count(), histogramAlive }
   );
 } finally {
   await app.close();

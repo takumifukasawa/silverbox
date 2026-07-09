@@ -62,20 +62,20 @@ try {
   await page.locator('.node-editor-toolbar select').selectOption('contrast');
   await page.locator('.node-editor-toolbar button').click();
   check(
-    'chain is input→exposure→saturation→whitebalance→contrast→output',
-    (await chainKinds()).join(',') === 'input,exposure,saturation,whitebalance,contrast,output',
+    'chain is input→Develop→whitebalance→contrast→output',
+    (await chainKinds()).join(',') === 'input,Develop,whitebalance,contrast,output',
     await chainKinds()
   );
   // edges render a frame after nodes measure, so poll rather than snapshot
   const flowRendered = await page
     .waitForFunction(
       () =>
-        document.querySelectorAll('.react-flow__node').length === 6 &&
-        document.querySelectorAll('.react-flow__edge').length === 5,
+        document.querySelectorAll('.react-flow__node').length === 5 &&
+        document.querySelectorAll('.react-flow__edge').length === 4,
       { timeout: 5_000 }
     )
     .then(() => true, () => false);
-  check('React Flow renders 6 nodes / 5 edges', flowRendered, {
+  check('React Flow renders 5 nodes / 4 edges', flowRendered, {
     nodes: await page.locator('.react-flow__node').count(),
     edges: await page.locator('.react-flow__edge').count(),
   });
@@ -96,7 +96,7 @@ try {
   console.log('verify-ms5 (white balance + contrast vs CPU reference):');
   await page.evaluate(() => window.__debug.updateNodeParam('whitebalance-1', 'rGain', 1.5));
   await page.evaluate(() => window.__debug.updateNodeParam('whitebalance-1', 'bGain', 0.7));
-  await page.evaluate(() => window.__debug.updateNodeParam('contrast-1', 'amount', 1.4));
+  await page.evaluate(() => window.__debug.updateNodeParam('contrast-1', 'amount', 40));
   const editedGpu = await page.evaluate(() => window.__debug.readbackMean());
   const editedCpu = await page.evaluate(() => window.__debug.cpuReferenceMean());
   check('edited 4-op chain GPU matches CPU reference (within 1/255)', meansMatch(editedGpu, editedCpu), {
@@ -111,8 +111,8 @@ try {
   await page.locator('.react-flow__node', { hasText: 'white balance' }).click();
   await page.locator('.react-flow__node', { hasText: 'white balance' }).press('Backspace');
   check(
-    'chain is input→exposure→saturation→contrast→output after delete',
-    (await chainKinds()).join(',') === 'input,exposure,saturation,contrast,output',
+    'chain is input→Develop→contrast→output after delete',
+    (await chainKinds()).join(',') === 'input,Develop,contrast,output',
     await chainKinds()
   );
   const afterDeleteGpu = await page.evaluate(() => window.__debug.readbackMean());
@@ -121,7 +121,7 @@ try {
     afterDeleteGpu,
     afterDeleteCpu,
   });
-  await page.evaluate(() => window.__debug.updateNodeParam('contrast-1', 'amount', 1));
+  await page.evaluate(() => window.__debug.updateNodeParam('contrast-1', 'amount', 0));
   const restoredGpu = await page.evaluate(() => window.__debug.readbackMean());
   check('delete + neutral params restore the neutral render', meansMatch(restoredGpu, neutralGpu), {
     neutralGpu,

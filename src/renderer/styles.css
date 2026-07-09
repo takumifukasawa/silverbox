@@ -167,6 +167,69 @@ button:disabled {
   padding: 6px 14px;
 }
 
+/* ---- common param row (UI spec §6): label / range / number ---- */
+
+.param-row {
+  display: grid;
+  grid-template-columns: 78px 1fr 58px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 14px;
+}
+
+.param-label {
+  color: #aaa;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.param-label.changed {
+  color: #e8c66a;
+}
+
+.param-row input[type='range'] {
+  width: 100%;
+  accent-color: #6a9fe8;
+}
+
+.param-number {
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+  width: 100%;
+}
+
+.inspector-section {
+  border-bottom: 1px solid #191919;
+}
+
+.inspector-section-header {
+  padding: 8px 14px;
+  color: #ddd;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.inspector-section-header:hover {
+  background: #2b2b2b;
+}
+
+.inspector-section-caret {
+  color: #888;
+}
+
+.inspector-section-body {
+  padding: 2px 0 10px;
+}
+
 .inspector-param-label {
   display: flex;
   justify-content: space-between;

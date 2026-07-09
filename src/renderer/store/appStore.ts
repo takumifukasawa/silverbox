@@ -6,12 +6,14 @@ import {
   buildPlan,
   defaultGraphDoc,
   defaultParams,
+  DEVELOP_KIND,
   nextId,
   parseGraphDoc,
   serializeGraphDoc,
   type AddableKind,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
+import { defaultDevelopParams } from '../engine/graph/developNode';
 import type { GraphRenderer, HistogramData } from '../engine/gpu/graphRenderer';
 import { BLEND_KIND, CUSTOM_KIND, DEFAULT_CUSTOM_CODE } from '../engine/graph/ops';
 import { SIDECAR_SUFFIX } from '../../../shared/ipc';
@@ -142,14 +144,25 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedNodeId: id });
   },
 
+  // `key` is a flat param key for op nodes, or a dot path into the Develop
+  // sections (e.g. 'basic.ev') for Develop nodes.
   updateNodeParam(nodeId, key, value) {
     set((s) => ({
       ...pushHistory(s, `param:${nodeId}:${key}`),
       graph: {
         ...s.graph,
-        nodes: s.graph.nodes.map((n) =>
-          n.id === nodeId ? { ...n, params: { ...n.params, [key]: value } } : n
-        ),
+        nodes: s.graph.nodes.map((n) => {
+          if (n.id !== nodeId) return n;
+          if (n.kind === DEVELOP_KIND) {
+            const develop = structuredClone(n.develop ?? defaultDevelopParams());
+            const parts = key.split('.');
+            let obj = develop as unknown as Record<string, unknown>;
+            for (const part of parts.slice(0, -1)) obj = obj[part] as Record<string, unknown>;
+            obj[parts[parts.length - 1]!] = value;
+            return { ...n, develop };
+          }
+          return { ...n, params: { ...n.params, [key]: value } };
+        }),
       },
       graphDirty: true,
     }));

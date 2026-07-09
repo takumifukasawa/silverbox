@@ -15,7 +15,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS, isOpKind } from '../engine/graph/ops';
-import type { AddableKind } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND, type AddableKind } from '../engine/graph/graphDoc';
 
 /** Blend node: two labeled inputs (a = base, b = overlay), one output. */
 function BlendNode({ data, selected }: NodeProps) {
@@ -63,19 +63,21 @@ export function NodeEditorPanel() {
             : 'input'
           : n.kind === 'output'
             ? 'output (sRGB)'
-            : n.kind === CUSTOM_KIND
-              ? 'custom (wgsl)'
-              : n.kind === BLEND_KIND
-                ? 'blend'
-                : isOpKind(n.kind)
-                  ? OPS[n.kind].label.toLowerCase()
-                  : n.kind,
+            : n.kind === DEVELOP_KIND
+              ? 'Develop'
+              : n.kind === CUSTOM_KIND
+                ? 'custom (wgsl)'
+                : n.kind === BLEND_KIND
+                  ? 'blend'
+                  : isOpKind(n.kind)
+                    ? OPS[n.kind].label.toLowerCase()
+                    : n.kind,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
     sourcePosition: 'right',
     targetPosition: 'left',
-    deletable: isOpKind(n.kind) || n.kind === CUSTOM_KIND || n.kind === BLEND_KIND,
+    deletable: isOpKind(n.kind) || n.kind === CUSTOM_KIND || n.kind === BLEND_KIND || n.kind === DEVELOP_KIND,
   })) as Node[];
 
   const edges: Edge[] = graph.edges.map((e) => ({

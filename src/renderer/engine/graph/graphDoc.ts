@@ -16,8 +16,23 @@ import {
   packCustomUniform,
   type OpKind,
 } from './ops';
+import {
+  cpuDevelop,
+  defaultDevelopParams,
+  developPasses,
+  type DevelopParams,
+  type PassSpec,
+} from './developNode';
 
-export type GraphNodeKind = 'input' | 'output' | OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND;
+export const DEVELOP_KIND = 'Develop';
+
+export type GraphNodeKind =
+  | 'input'
+  | 'output'
+  | OpKind
+  | typeof CUSTOM_KIND
+  | typeof BLEND_KIND
+  | typeof DEVELOP_KIND;
 
 export interface GraphNode {
   id: string;
@@ -25,6 +40,8 @@ export interface GraphNode {
   position: { x: number; y: number };
   /** Op parameters, keyed by OpParamDef.key. Absent for input/output. */
   params?: Record<string, number>;
+  /** Sectioned Develop parameters; only for kind 'Develop'. */
+  develop?: DevelopParams;
   /** WGSL applyOp source; only for kind 'custom'. */
   code?: string;
 }
@@ -50,20 +67,18 @@ export function defaultParams(kind: AddableKind): Record<string, number> {
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
 }
 
-/** The default document: input → exposure → saturation → output, all neutral. */
+/** The default document (spec §3): input → Develop → output, all neutral. */
 export function defaultGraphDoc(): GraphDoc {
   return {
     version: 1,
     nodes: [
       { id: 'in', kind: 'input', position: { x: 20, y: 60 } },
-      { id: 'exposure-1', kind: 'exposure', position: { x: 200, y: 60 }, params: defaultParams('exposure') },
-      { id: 'saturation-1', kind: 'saturation', position: { x: 380, y: 60 }, params: defaultParams('saturation') },
-      { id: 'out', kind: 'output', position: { x: 560, y: 60 } },
+      { id: 'dev', kind: DEVELOP_KIND, position: { x: 220, y: 60 }, develop: defaultDevelopParams() },
+      { id: 'out', kind: 'output', position: { x: 420, y: 60 } },
     ],
     edges: [
-      { id: 'e0', source: 'in', target: 'exposure-1' },
-      { id: 'e1', source: 'exposure-1', target: 'saturation-1' },
-      { id: 'e2', source: 'saturation-1', target: 'out' },
+      { id: 'e0', source: 'in', target: 'dev' },
+      { id: 'e1', source: 'dev', target: 'out' },
     ],
   };
 }
@@ -87,6 +102,7 @@ export function parseGraphDoc(text: string): GraphDoc {
       n.kind !== 'output' &&
       n.kind !== CUSTOM_KIND &&
       n.kind !== BLEND_KIND &&
+      n.kind !== DEVELOP_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -99,6 +115,10 @@ export function parseGraphDoc(text: string): GraphDoc {
     }
     for (const v of Object.values(n.params ?? {})) {
       if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
+    }
+    if (n.kind === DEVELOP_KIND) {
+      // fill missing sections/keys with identity defaults; reject bad numbers
+      n.develop = mergeDevelopParams(n.develop);
     }
   }
   for (const e of doc.edges) {
@@ -113,6 +133,38 @@ export function parseGraphDoc(text: string): GraphDoc {
   return doc;
 }
 
+/**
+ * Deep-merge untrusted Develop params over the identity defaults: unknown
+ * keys are dropped, missing keys filled, and non-finite numbers rejected
+ * loudly (a typo must not silently zero a section).
+ */
+export function mergeDevelopParams(raw: unknown): DevelopParams {
+  const base = defaultDevelopParams();
+  if (typeof raw !== 'object' || raw === null) return base;
+  const src = raw as Record<string, unknown>;
+  const num = (v: unknown, fallback: number, path: string): number => {
+    if (v === undefined) return fallback;
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`develop param ${path} must be a finite number`);
+    return v;
+  };
+  const mergeSection = <T extends Record<string, unknown>>(target: T, source: unknown, path: string): void => {
+    if (typeof source !== 'object' || source === null) return;
+    for (const key of Object.keys(target)) {
+      const t = target[key];
+      const s = (source as Record<string, unknown>)[key];
+      if (typeof t === 'number') {
+        (target as Record<string, unknown>)[key] = num(s, t, `${path}.${key}`);
+      } else if (Array.isArray(t)) {
+        if (s !== undefined) (target as Record<string, unknown>)[key] = s; // curve points; sanitized at use
+      } else if (typeof t === 'object' && t !== null) {
+        mergeSection(t as Record<string, unknown>, s, `${path}.${key}`);
+      }
+    }
+  };
+  mergeSection(base as unknown as Record<string, unknown>, src, 'develop');
+  return base;
+}
+
 /** Smallest `${prefix}-N` (N ≥ 1) not taken by any node or edge id. */
 export function nextId(doc: GraphDoc, prefix: string): string {
   const taken = new Set([...doc.nodes.map((n) => n.id), ...doc.edges.map((e) => e.id)]);
@@ -123,12 +175,44 @@ export function nextId(doc: GraphDoc, prefix: string): string {
 }
 
 type Vec4 = [number, number, number, number];
+type Rgb = [number, number, number];
 
-/** One executable step; `src*` index a previous step's output (-1 = the decoded input). */
+/**
+ * One executable step; `src*` index a previous step's output (-1 = the
+ * decoded input). 'passes' steps run 1..n fullscreen passes sequentially
+ * (ops = 1, Develop = its active sections); `cpu` is the whole-step CPU
+ * mirror, or null when no reference exists. Identity nodes never become
+ * steps at all — buildPlan resolves them to their source, which is what
+ * makes untouched nodes bit-exact pass-throughs.
+ */
 export type PlanStep =
-  | { nodeId: string; type: 'builtin'; kind: OpKind; uniform: Vec4; src: number }
+  | { nodeId: string; type: 'passes'; passes: PassSpec[]; src: number; cpu: ((px: Rgb) => Rgb) | null }
   | { nodeId: string; type: 'custom'; code: string; uniform: Vec4; src: number }
   | { nodeId: string; type: 'blend'; uniform: Vec4; srcA: number; srcB: number };
+
+/** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
+export function opPassWgsl(applyOp: string): string {
+  return /* wgsl */ `
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  var p = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
+  return vec4f(p[i], 0.0, 1.0);
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> params: vec4f;
+${applyOp}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return applyOp(textureLoad(src, vec2i(pos.xy), 0), params);
+}
+`;
+}
+
+function vec4Buffer(v: Vec4): ArrayBuffer {
+  const buf = new ArrayBuffer(16);
+  new Float32Array(buf).set(v);
+  return buf;
+}
 
 export interface RenderPlan {
   /** Topologically ordered: every step only reads earlier outputs. */
@@ -175,8 +259,14 @@ export function buildPlan(doc: GraphDoc): RenderPlan {
       if (!ea || !eb || ins.length !== 2) throw new Error(`blend ${id} needs exactly inputs a and b`);
       const srcA = resolve(ea.source);
       const srcB = resolve(eb.source);
-      steps.push({ nodeId: id, type: 'blend', uniform: packBlendUniform(node.params ?? {}), srcA, srcB });
-      index = steps.length - 1;
+      const uniform = packBlendUniform(node.params ?? {});
+      if (uniform[0] === 0) {
+        // amount 0 = pure input a — identity, no step
+        index = srcA;
+      } else {
+        steps.push({ nodeId: id, type: 'blend', uniform, srcA, srcB });
+        index = steps.length - 1;
+      }
     } else {
       if (ins.length !== 1) throw new Error(`node ${id} needs exactly one input (has ${ins.length})`);
       const src = resolve(ins[0]!.source);
@@ -191,16 +281,32 @@ export function buildPlan(doc: GraphDoc): RenderPlan {
           src,
         });
         index = steps.length - 1;
+      } else if (node.kind === DEVELOP_KIND) {
+        const params = node.develop ?? defaultDevelopParams();
+        const passes = developPasses(params);
+        if (passes.length === 0) {
+          index = src; // untouched Develop = bit-exact pass-through
+        } else {
+          steps.push({ nodeId: id, type: 'passes', passes, src, cpu: (px) => cpuDevelop(px, params) });
+          index = steps.length - 1;
+        }
       } else {
         if (!isOpKind(node.kind)) throw new Error(`unexpected node kind ${node.kind}`);
-        steps.push({
-          nodeId: id,
-          type: 'builtin',
-          kind: node.kind,
-          uniform: OPS[node.kind].packUniform(node.params ?? {}),
-          src,
-        });
-        index = steps.length - 1;
+        const op = OPS[node.kind];
+        const params = node.params ?? {};
+        if (op.isIdentity(params)) {
+          index = src; // default-valued op = bit-exact pass-through
+        } else {
+          const uniform = op.packUniform(params);
+          steps.push({
+            nodeId: id,
+            type: 'passes',
+            passes: [{ shaderId: `op/${node.kind}`, wgsl: opPassWgsl(op.wgsl), uniforms: vec4Buffer(uniform) }],
+            src,
+            cpu: (px) => op.apply(px, uniform),
+          });
+          index = steps.length - 1;
+        }
       }
     }
     visiting.delete(id);
@@ -211,13 +317,14 @@ export function buildPlan(doc: GraphDoc): RenderPlan {
   return { steps, output: resolve(output.id) };
 }
 
-/** CPU reference for one pixel; caller must ensure the plan has no custom steps. */
-export function cpuEvalPlan(plan: RenderPlan, px: [number, number, number]): [number, number, number] {
-  const outputs: [number, number, number][] = [];
+/** CPU reference for one pixel; caller must ensure every step has a mirror. */
+export function cpuEvalPlan(plan: RenderPlan, px: Rgb): Rgb {
+  const outputs: Rgb[] = [];
   const at = (i: number) => (i < 0 ? px : outputs[i]!);
   for (const step of plan.steps) {
-    if (step.type === 'builtin') {
-      outputs.push(OPS[step.kind].apply(at(step.src), step.uniform));
+    if (step.type === 'passes') {
+      if (!step.cpu) throw new Error(`step ${step.nodeId} has no CPU reference`);
+      outputs.push(step.cpu(at(step.src)));
     } else if (step.type === 'blend') {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -228,4 +335,9 @@ export function cpuEvalPlan(plan: RenderPlan, px: [number, number, number]): [nu
     }
   }
   return at(plan.output);
+}
+
+/** True when every step in the plan has a CPU mirror. */
+export function planHasCpuReference(plan: RenderPlan): boolean {
+  return plan.steps.every((s) => (s.type === 'passes' ? s.cpu !== null : s.type === 'blend'));
 }

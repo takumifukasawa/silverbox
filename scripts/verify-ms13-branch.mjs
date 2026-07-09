@@ -58,8 +58,8 @@ try {
   await page.locator('.node-editor-toolbar button').click();
   check(
     'blend node lands with a/b fed by the previous source',
-    (await edgeList()).join(',').includes('saturation-1->blend-1:a') &&
-      (await edgeList()).join(',').includes('saturation-1->blend-1:b'),
+    (await edgeList()).join(',').includes('dev->blend-1:a') &&
+      (await edgeList()).join(',').includes('dev->blend-1:b'),
     await edgeList()
   );
   await page.evaluate(() => window.__debug.updateNodeParam('blend-1', 'amount', 0.7));
@@ -67,8 +67,8 @@ try {
   check('self-blend renders identity at any amount', meansMatch(selfBlend, neutral), { neutral, selfBlend });
 
   console.log('verify-ms13 (rewire b onto a branch by dragging):');
-  // drag from exposure-1's source handle onto blend-1's 'b' input handle
-  const srcHandle = page.locator('.react-flow__node[data-id="exposure-1"] .react-flow__handle.source');
+  // drag from the input node's source handle onto blend-1's 'b' input handle
+  const srcHandle = page.locator('.react-flow__node[data-id="in"] .react-flow__handle.source');
   const dstHandle = page.locator('.react-flow__node[data-id="blend-1"] .react-flow__handle[data-handleid="b"]');
   const src = await srcHandle.boundingBox();
   const dst = await dstHandle.boundingBox();
@@ -77,16 +77,16 @@ try {
   await page.mouse.move(dst.x + dst.width / 2, dst.y + dst.height / 2, { steps: 8 });
   await page.mouse.up();
   check(
-    'edge b now comes from exposure-1',
-    (await edgeList()).join(',').includes('exposure-1->blend-1:b') &&
-      !(await edgeList()).join(',').includes('saturation-1->blend-1:b'),
+    'edge b now comes from the input',
+    (await edgeList()).join(',').includes('in->blend-1:b') &&
+      !(await edgeList()).join(',').includes('dev->blend-1:b'),
     await edgeList()
   );
 
   console.log('verify-ms13 (branched render matches CPU reference):');
-  await page.evaluate(() => window.__debug.updateNodeParam('exposure-1', 'ev', 1.5));
-  await page.evaluate(() => window.__debug.updateNodeParam('saturation-1', 'amount', 0));
-  await page.evaluate(() => window.__debug.updateNodeParam('blend-1', 'amount', 0.3));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1.5));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.saturation', -100));
+  await page.evaluate(() => window.__debug.updateNodeParam('blend-1', 'amount', 0.5));
   const branchedGpu = await page.evaluate(() => window.__debug.readbackMean());
   const branchedCpu = await page.evaluate(() => window.__debug.cpuReferenceMean());
   check('branched GPU matches CPU reference (within 1/255)', meansMatch(branchedGpu, branchedCpu), {
@@ -102,9 +102,9 @@ try {
 
   console.log('verify-ms13 (cycles are rejected):');
   const edgesBefore = await edgeList();
-  // try to feed blend-1's output back into exposure-1 — a cycle
+  // try to feed blend-1's output back into the Develop node — a cycle
   const blendSrc = page.locator('.react-flow__node[data-id="blend-1"] .react-flow__handle.source');
-  const expTarget = page.locator('.react-flow__node[data-id="exposure-1"] .react-flow__handle.target');
+  const expTarget = page.locator('.react-flow__node[data-id="dev"] .react-flow__handle.target');
   const bs = await blendSrc.boundingBox();
   const et = await expTarget.boundingBox();
   await page.mouse.move(bs.x + bs.width / 2, bs.y + bs.height / 2);
@@ -125,7 +125,7 @@ try {
   await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
   check(
     'reopen restores the branch (including targetHandle)',
-    (await edgeList()).join(',').includes('exposure-1->blend-1:b'),
+    (await edgeList()).join(',').includes('in->blend-1:b'),
     await edgeList()
   );
   const restoredGpu = await page.evaluate(() => window.__debug.readbackMean());
@@ -139,7 +139,7 @@ try {
   await page.locator('.react-flow__node[data-id="blend-1"]').press('Backspace');
   check(
     'chain rewires saturation → output',
-    (await edgeList()).join(',').includes('saturation-1->out'),
+    (await edgeList()).join(',').includes('dev->out'),
     await edgeList()
   );
   const bypassGpu = await page.evaluate(() => window.__debug.readbackMean());

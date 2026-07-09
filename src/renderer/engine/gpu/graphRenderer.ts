@@ -74,9 +74,15 @@ function getGpuDevice(): Promise<GPUDevice> {
   return devicePromise;
 }
 
-interface ExecStep {
+interface ExecPhase {
   pipeline: GPURenderPipeline;
-  uniformBuffer: GPUBuffer;
+  /** null when the pass declares no uniform. */
+  uniformBuffer: GPUBuffer | null;
+}
+
+interface ExecStep {
+  /** Sequential fullscreen passes; the last one writes the step's output. */
+  phases: ExecPhase[];
   src: number;
   /** Present only on blend steps (second input). */
   srcB?: number;
@@ -90,10 +96,13 @@ export interface ShaderError {
 export class GraphRenderer {
   private source: GPUTexture | null = null;
   private stepTextures: GPUTexture[] = [];
+  /** Intra-step ping-pong target for multi-pass steps. */
+  private scratchTexture: GPUTexture | null = null;
   private steps: ExecStep[] = [];
   private outputIndex = -1;
   private blendPipelineCache: GPURenderPipeline | null = null;
-  private opPipelines = new Map<OpKind, GPURenderPipeline>();
+  /** Pipelines for plan passes, keyed by PassSpec.shaderId. */
+  private passPipelines = new Map<string, GPURenderPipeline>();
   /** Custom-code pipelines keyed by source; null = failed to compile. */
   private customPipelines = new Map<string, Promise<GPURenderPipeline>>();
   private setGraphGen = 0;
@@ -129,16 +138,17 @@ export class GraphRenderer {
     return this.source !== null;
   }
 
-  private opPipeline(kind: OpKind): GPURenderPipeline {
-    let pipeline = this.opPipelines.get(kind);
+  /** Pipeline for a plan pass — compiled once per shaderId. */
+  private passPipeline(shaderId: string, wgsl: string): GPURenderPipeline {
+    let pipeline = this.passPipelines.get(shaderId);
     if (!pipeline) {
-      const module = this.device.createShaderModule({ code: opShader(OPS[kind].wgsl) });
+      const module = this.device.createShaderModule({ code: wgsl });
       pipeline = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
         fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
       });
-      this.opPipelines.set(kind, pipeline);
+      this.passPipelines.set(shaderId, pipeline);
     }
     return pipeline;
   }
@@ -189,6 +199,8 @@ export class GraphRenderer {
     );
     for (const t of this.stepTextures) t.destroy();
     this.stepTextures = [];
+    this.scratchTexture?.destroy();
+    this.scratchTexture = null;
     this.width = width;
     this.height = height;
   }
@@ -205,17 +217,18 @@ export class GraphRenderer {
     return this.blendPipelineCache;
   }
 
+  private makeStepTexture(): GPUTexture {
+    return this.device.createTexture({
+      size: [this.width, this.height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+  }
+
   /** One rgba16float target per plan step so outputs can fan out. */
-  private ensureStepTextures(count: number): void {
-    while (this.stepTextures.length < count) {
-      this.stepTextures.push(
-        this.device.createTexture({
-          size: [this.width, this.height],
-          format: 'rgba16float',
-          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
-        })
-      );
-    }
+  private ensureStepTextures(count: number, needScratch: boolean): void {
+    while (this.stepTextures.length < count) this.stepTextures.push(this.makeStepTexture());
+    if (needScratch && !this.scratchTexture) this.scratchTexture = this.makeStepTexture();
   }
 
   /**
@@ -230,35 +243,50 @@ export class GraphRenderer {
     return promise;
   }
 
+  private vec4Buffer(v: [number, number, number, number]): GPUBuffer {
+    const buffer = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(buffer, 0, new Float32Array(v));
+    return buffer;
+  }
+
   private async resolveSteps(plan: RenderPlan, errors: ShaderError[]): Promise<ExecStep[]> {
     return Promise.all(
       plan.steps.map(async (op): Promise<ExecStep> => {
-        let pipeline: GPURenderPipeline;
-        if (op.type === 'builtin') {
-          pipeline = this.opPipeline(op.kind);
-        } else if (op.type === 'blend') {
-          pipeline = this.blendPipeline();
-        } else {
-          try {
-            pipeline = await this.customPipeline(op.code);
-          } catch (err) {
-            errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
-            pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
-          }
+        if (op.type === 'passes') {
+          const phases = op.passes.map((pass): ExecPhase => {
+            let uniformBuffer: GPUBuffer | null = null;
+            if (pass.uniforms.byteLength > 0) {
+              uniformBuffer = this.device.createBuffer({
+                size: pass.uniforms.byteLength,
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+              });
+              this.device.queue.writeBuffer(uniformBuffer, 0, pass.uniforms);
+            }
+            return { pipeline: this.passPipeline(pass.shaderId, pass.wgsl), uniformBuffer };
+          });
+          return { phases, src: op.src };
         }
-        const uniformBuffer = this.device.createBuffer({
-          size: 16,
-          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-        });
-        this.device.queue.writeBuffer(uniformBuffer, 0, new Float32Array(op.uniform));
-        return {
-          pipeline,
-          uniformBuffer,
-          src: op.type === 'blend' ? op.srcA : op.src,
-          ...(op.type === 'blend' ? { srcB: op.srcB } : {}),
-        };
+        if (op.type === 'blend') {
+          return {
+            phases: [{ pipeline: this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
+            src: op.srcA,
+            srcB: op.srcB,
+          };
+        }
+        let pipeline: GPURenderPipeline;
+        try {
+          pipeline = await this.customPipeline(op.code);
+        } catch (err) {
+          errors.push({ nodeId: op.nodeId, message: err instanceof Error ? err.message : String(err) });
+          pipeline = await this.customPipeline(DEFAULT_CUSTOM_CODE);
+        }
+        return { phases: [{ pipeline, uniformBuffer: this.vec4Buffer(op.uniform) }], src: op.src };
       })
     );
+  }
+
+  private static destroySteps(steps: ExecStep[]): void {
+    for (const step of steps) for (const phase of step.phases) phase.uniformBuffer?.destroy();
   }
 
   private async applyGraph(plan: RenderPlan): Promise<ShaderError[]> {
@@ -266,10 +294,10 @@ export class GraphRenderer {
     const errors: ShaderError[] = [];
     const steps = await this.resolveSteps(plan, errors);
     if (gen !== this.setGraphGen) {
-      for (const step of steps) step.uniformBuffer.destroy();
+      GraphRenderer.destroySteps(steps);
       return errors;
     }
-    for (const step of this.steps) step.uniformBuffer.destroy();
+    GraphRenderer.destroySteps(this.steps);
     this.steps = steps;
     this.outputIndex = plan.output;
     return errors;
@@ -290,43 +318,60 @@ export class GraphRenderer {
     pass.end();
   }
 
-  /** Record a step's passes into per-step textures; shared by all consumers. */
+  /**
+   * Record every step's passes; shared by all consumers. Each step ends in
+   * its own texture (so outputs can fan out); multi-phase steps ping-pong
+   * through the scratch texture so the LAST phase lands on the step texture.
+   */
   private static recordSteps(
     addPass: GraphRenderer['addPass'],
     steps: ExecStep[],
     outputIndex: number,
     sourceView: GPUTextureView,
     stepTextures: GPUTexture[],
+    scratch: GPUTexture | null,
     encoder: GPUCommandEncoder
   ): GPUTextureView {
     const views = stepTextures.map((t) => t.createView());
+    const scratchView = scratch?.createView() ?? null;
     const at = (i: number) => (i < 0 ? sourceView : views[i]!);
     steps.forEach((step, i) => {
-      const entries: GPUBindGroupEntry[] =
-        step.srcB !== undefined
-          ? [
-              { binding: 0, resource: at(step.src) },
-              { binding: 1, resource: at(step.srcB) },
-              { binding: 2, resource: { buffer: step.uniformBuffer } },
-            ]
-          : [
-              { binding: 0, resource: at(step.src) },
-              { binding: 1, resource: { buffer: step.uniformBuffer } },
-            ];
-      addPass(encoder, views[i]!, step.pipeline, entries);
+      if (step.srcB !== undefined) {
+        const phase = step.phases[0]!;
+        addPass(encoder, views[i]!, phase.pipeline, [
+          { binding: 0, resource: at(step.src) },
+          { binding: 1, resource: at(step.srcB) },
+          { binding: 2, resource: { buffer: phase.uniformBuffer! } },
+        ]);
+        return;
+      }
+      const n = step.phases.length;
+      let input = at(step.src);
+      step.phases.forEach((phase, j) => {
+        // choose targets so phase n-1 writes the step texture
+        const target = (n - 1 - j) % 2 === 0 ? views[i]! : scratchView!;
+        const entries: GPUBindGroupEntry[] = [{ binding: 0, resource: input }];
+        if (phase.uniformBuffer) entries.push({ binding: 1, resource: { buffer: phase.uniformBuffer } });
+        addPass(encoder, target, phase.pipeline, entries);
+        input = target;
+      });
     });
     return at(outputIndex);
   }
 
   /** Record the plan; returns the view holding the final linear result. */
   private addChainPasses(encoder: GPUCommandEncoder): GPUTextureView {
-    this.ensureStepTextures(this.steps.length);
+    this.ensureStepTextures(
+      this.steps.length,
+      this.steps.some((s) => s.phases.length > 1)
+    );
     return GraphRenderer.recordSteps(
       this.addPass.bind(this),
       this.steps,
       this.outputIndex,
       this.source!.createView(),
       this.stepTextures,
+      this.scratchTexture,
       encoder
     );
   }
@@ -377,12 +422,16 @@ export class GraphRenderer {
       const stepTextures = plan.steps.map(() =>
         makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
       );
+      const scratch = steps.some((s) => s.phases.length > 1)
+        ? makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
+        : null;
       const linear = GraphRenderer.recordSteps(
         this.addPass.bind(this),
         steps,
         plan.output,
         source.createView(),
         stepTextures,
+        scratch,
         encoder
       );
       const target = makeTarget('rgba8unorm', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
@@ -405,7 +454,7 @@ export class GraphRenderer {
       return { data: out, width, height };
     } finally {
       for (const t of temps) t.destroy();
-      for (const step of steps) step.uniformBuffer.destroy();
+      GraphRenderer.destroySteps(steps);
     }
   }
 
