@@ -86,10 +86,33 @@ export interface DetailParams {
   noiseColor: { amount: number };
 }
 
+/** One color-grading wheel: hue 0–360°, saturation 0–100, luminance −100..+100. */
+export interface GradingWheel {
+  hue: number;
+  sat: number;
+  lum: number;
+}
+
+export const GRADING_REGIONS = ['shadows', 'midtones', 'highlights', 'global'] as const;
+export type GradingRegion = (typeof GRADING_REGIONS)[number];
+
+/** 3-way color grading (+ global): LR "Color Grading" / lift-gamma-gain style. */
+export interface GradingParams {
+  shadows: GradingWheel;
+  midtones: GradingWheel;
+  highlights: GradingWheel;
+  global: GradingWheel;
+  /** 0–100: widens the shadow/highlight crossover overlap (default 50). */
+  blending: number;
+  /** −100..+100: shifts both crossovers toward shadows/highlights. */
+  balance: number;
+}
+
 export interface DevelopParams {
   basic: DevelopBasicParams;
   toneCurve: ToneCurveParams;
   hsl: Record<HslBand, HslBandParams>;
+  grading: GradingParams;
   detail: DetailParams;
 }
 
@@ -118,6 +141,14 @@ export function defaultDevelopParams(): DevelopParams {
     },
     toneCurve: { rgb: identityCurvePoints(), r: identityCurvePoints(), g: identityCurvePoints(), b: identityCurvePoints() },
     hsl: Object.fromEntries(HSL_BANDS.map((b) => [b, { h: 0, s: 0, l: 0 }])) as Record<HslBand, HslBandParams>,
+    grading: {
+      shadows: { hue: 0, sat: 0, lum: 0 },
+      midtones: { hue: 0, sat: 0, lum: 0 },
+      highlights: { hue: 0, sat: 0, lum: 0 },
+      global: { hue: 0, sat: 0, lum: 0 },
+      blending: 50,
+      balance: 0,
+    },
     detail: { sharpen: { amount: 0, radius: 1.0, masking: 0 }, noiseLuminance: { amount: 0 }, noiseColor: { amount: 0 } },
   };
 }
@@ -138,6 +169,11 @@ export function isIdentityHsl(hsl: Record<HslBand, HslBandParams>): boolean {
 
 export function isIdentityDetail(d: DetailParams): boolean {
   return d.sharpen.amount === 0 && d.noiseLuminance.amount === 0 && d.noiseColor.amount === 0;
+}
+
+/** Hue never matters at sat 0; blending/balance only shape active wheels. */
+export function isIdentityGrading(g: GradingParams): boolean {
+  return GRADING_REGIONS.every((r) => g[r].sat === 0 && g[r].lum === 0);
 }
 
 // --- GPU passes --------------------------------------------------------------
@@ -277,6 +313,111 @@ function packColor(b: DevelopBasicParams): ArrayBuffer {
   f[0] = b.saturation / 100;
   f[1] = b.vibrance / 100;
   return buf;
+}
+
+// --- 3-way color grading (roadmap Phase 1) ------------------------------------
+//
+// Applied in DISPLAY (sRGB-encoded) space after HSL / saturation: region
+// weights come from the encoded luminance (shadows below ~0.33, highlights
+// above ~0.67, midtones between; `balance` shifts both crossovers, `blending`
+// widens them), each wheel contributes a ZERO-LUMA chroma offset (its hue's
+// RGB direction minus its own luma, scaled by sat) plus an exposure-like
+// luminance gain. The chroma offset is anchored at pure black/white so
+// endpoints never tint. Uniform layout: wheels[i] = (offset.rgb, lum stops),
+// packed on the CPU so the CPU mirror shares the exact same numbers.
+
+/** Full-strength chroma offset magnitude (encoded units) at sat 100. */
+const GRADING_SAT_SCALE = 0.3;
+/** Full-strength luminance gain in stops at lum ±100. */
+const GRADING_LUM_STOPS = 0.8;
+
+const GRADING_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct GradingParams {
+  // shadows/midtones/highlights/global: xyz = chroma offset, w = lum stops
+  wheels: array<vec4f, 4>,
+  // x = crossover shift (balance), y = crossover half-width (blending)
+  ctrl: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: GradingParams;
+`,
+  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_LUMA,
+  body: /* wgsl */ `
+  {
+    let enc = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
+    let ys = luma(enc);
+    let shift = u.ctrl.x;
+    let spread = u.ctrl.y;
+    let wS = 1.0 - smoothstep(0.33 + shift - spread, 0.33 + shift + spread, ys);
+    let wH = smoothstep(0.67 + shift - spread, 0.67 + shift + spread, ys);
+    let wM = clamp(1.0 - wS - wH, 0.0, 1.0);
+    let offset = u.wheels[0].xyz * wS + u.wheels[1].xyz * wM + u.wheels[2].xyz * wH + u.wheels[3].xyz;
+    let stops = u.wheels[0].w * wS + u.wheels[1].w * wM + u.wheels[2].w * wH + u.wheels[3].w;
+    // anchor: pure black/white never tint
+    let anchor = smoothstep(0.0, 0.05, ys) * (1.0 - smoothstep(0.95, 1.0, ys));
+    c = srgbDecode(clamp(enc * exp2(stops) + offset * anchor, vec3f(0.0), vec3f(1.0)));
+  }
+`,
+});
+
+/** Hue (degrees) → unit-ish RGB direction with zero Rec.709 luma. */
+function gradingChromaOffset(hue: number, sat: number): [number, number, number] {
+  // hue → saturated RGB (hsl2rgb at s=1, l=0.5), then remove its luma
+  const ch = 1;
+  const hp = (((hue % 360) + 360) % 360) / 60;
+  const x = ch * (1 - Math.abs((hp % 2) - 1));
+  let rgb: [number, number, number] = [ch, x, 0];
+  if (hp >= 1 && hp < 2) rgb = [x, ch, 0];
+  else if (hp >= 2 && hp < 3) rgb = [0, ch, x];
+  else if (hp >= 3 && hp < 4) rgb = [0, x, ch];
+  else if (hp >= 4 && hp < 5) rgb = [x, 0, ch];
+  else if (hp >= 5) rgb = [ch, 0, x];
+  const y = lumaCpu(rgb[0], rgb[1], rgb[2]);
+  const k = (sat / 100) * GRADING_SAT_SCALE;
+  return [(rgb[0] - y) * k, (rgb[1] - y) * k, (rgb[2] - y) * k];
+}
+
+function packGrading(g: GradingParams): Float32Array {
+  const f = new Float32Array(4 * 4 + 4);
+  GRADING_REGIONS.forEach((region, i) => {
+    const wheel = g[region];
+    const off = gradingChromaOffset(wheel.hue, wheel.sat);
+    f[i * 4] = off[0];
+    f[i * 4 + 1] = off[1];
+    f[i * 4 + 2] = off[2];
+    f[i * 4 + 3] = (wheel.lum / 100) * GRADING_LUM_STOPS;
+  });
+  f[16] = (g.balance / 100) * 0.15; // crossover shift
+  f[17] = 0.08 + (g.blending / 100) * 0.25; // crossover half-width
+  return f;
+}
+
+/** Mirror of the grading pass; consumes the same packed uniform. */
+function cpuGrading(px: Rgb, u: Float32Array): Rgb {
+  const enc: Rgb = [
+    srgbEncode(Math.min(Math.max(px[0], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[1], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[2], 0), 1)),
+  ];
+  const ys = lumaCpu(enc[0], enc[1], enc[2]);
+  const shift = u[16]!;
+  const spread = u[17]!;
+  const wS = 1 - smoothstepCpu(0.33 + shift - spread, 0.33 + shift + spread, ys);
+  const wH = smoothstepCpu(0.67 + shift - spread, 0.67 + shift + spread, ys);
+  const wM = Math.min(Math.max(1 - wS - wH, 0), 1);
+  const w = [wS, wM, wH, 1];
+  let stops = 0;
+  const offset: Rgb = [0, 0, 0];
+  for (let i = 0; i < 4; i++) {
+    offset[0] += u[i * 4]! * w[i]!;
+    offset[1] += u[i * 4 + 1]! * w[i]!;
+    offset[2] += u[i * 4 + 2]! * w[i]!;
+    stops += u[i * 4 + 3]! * w[i]!;
+  }
+  const anchor = smoothstepCpu(0, 0.05, ys) * (1 - smoothstepCpu(0.95, 1, ys));
+  const gain = Math.pow(2, stops);
+  const out = enc.map((v, i) => Math.min(Math.max(v * gain + offset[i]! * anchor, 0), 1)) as Rgb;
+  return [srgbDecode(out[0]), srgbDecode(out[1]), srgbDecode(out[2])];
 }
 
 // --- Detail: NR → sharpen in encoded luma/chroma space (spec §10) ------------
@@ -484,6 +625,7 @@ export function compileDevelop(
   const curveActive = !isIdentityToneCurve(params.toneCurve);
   const hslActive = !isIdentityHsl(params.hsl);
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
+  const gradingActive = !isIdentityGrading(params.grading);
   const d = params.detail;
   const nrActive = d.noiseLuminance.amount > 0 || d.noiseColor.amount > 0;
   const sharpenActive = d.sharpen.amount > 0;
@@ -492,6 +634,7 @@ export function compileDevelop(
 
   const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
   const hslBands = hslActive ? packHsl(params.hsl) : null;
+  const grading = gradingActive ? packGrading(params.grading) : null;
   const passes: PassSpec[] = [];
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
   if (lut) {
@@ -501,6 +644,9 @@ export function compileDevelop(
     passes.push({ shaderId: 'develop/hsl', wgsl: HSL_WGSL, uniforms: hslBands.buffer as ArrayBuffer });
   }
   if (colorActive) passes.push({ shaderId: 'develop/color', wgsl: COLOR_WGSL, uniforms: packColor(b) });
+  if (grading) {
+    passes.push({ shaderId: 'develop/grading', wgsl: GRADING_WGSL, uniforms: grading.buffer as ArrayBuffer });
+  }
   if (detailActive) {
     // NR → sharpen bracketed by the luma/chroma encode/decode passes
     passes.push({ shaderId: 'develop/detailEnc', wgsl: DETAIL_ENC_WGSL, uniforms: new ArrayBuffer(0) });
@@ -519,6 +665,7 @@ export function compileDevelop(
         if (lut) out = cpuToneCurve(out, lut);
         if (hslBands) out = cpuHsl(out, hslBands);
         if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
+        if (grading) out = cpuGrading(out, grading);
         return out;
       };
   return { passes, cpu };

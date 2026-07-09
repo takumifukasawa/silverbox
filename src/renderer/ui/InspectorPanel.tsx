@@ -14,11 +14,13 @@ import {
 import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
 import {
   defaultDevelopParams,
+  GRADING_REGIONS,
   HSL_BAND_CENTER_DEG,
   HSL_BANDS,
   type DevelopParams,
   type HslBand,
 } from '../engine/graph/developNode';
+import { ColorWheel } from './ColorWheel';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
 import { ShaderEditor } from './ShaderEditor';
 import { ToneCurveEditor } from './ToneCurveEditor';
@@ -192,6 +194,23 @@ function DevelopInspector({ node }: { node: GraphNode }) {
       </Section>
       <Section title="HSL">
         <HslSection node={node} params={params} />
+      </Section>
+      <Section title="Color Grading">
+        <div className="grading-wheels">
+          {GRADING_REGIONS.map((region) => (
+            <ColorWheel key={region} nodeId={node.id} region={region} wheel={params.grading[region]} />
+          ))}
+        </div>
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'grading.blending', label: 'Blending', min: 0, max: 100, step: 1, default: 50 }}
+          value={params.grading.blending}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'grading.balance', label: 'Balance', min: -100, max: 100, step: 1, default: 0 }}
+          value={params.grading.balance}
+        />
       </Section>
       <Section title="Detail">
         <div className="detail-group-label">Sharpening</div>

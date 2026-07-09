@@ -111,6 +111,8 @@ interface AppState {
     points: [number, number][],
     session: number
   ): void;
+  /** Set several Develop params at once (a wheel drag = hue+sat, 1 undo). */
+  updateNodeParamsBatch(nodeId: string, entries: [string, number][], coalesceKey: string): void;
   /** Declare a new GUI param; returns an error message or null. */
   addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
   removeShaderParam(nodeId: string, name: string): void;
@@ -515,6 +517,27 @@ export const useAppStore = create<AppState>((set, get) => {
 
   async applyShaderSource(nodeId, src) {
     await validateShaderSource(nodeId, src, { history: true });
+  },
+
+  updateNodeParamsBatch(nodeId, entries, coalesceKey) {
+    set((s) => ({
+      ...pushHistory(s, coalesceKey),
+      graph: {
+        ...s.graph,
+        nodes: s.graph.nodes.map((n) => {
+          if (n.id !== nodeId || n.kind !== DEVELOP_KIND) return n;
+          const develop = structuredClone(n.develop ?? defaultDevelopParams());
+          for (const [key, value] of entries) {
+            const parts = key.split('.');
+            let obj = develop as unknown as Record<string, unknown>;
+            for (const part of parts.slice(0, -1)) obj = obj[part] as Record<string, unknown>;
+            obj[parts[parts.length - 1]!] = value;
+          }
+          return { ...n, develop };
+        }),
+      },
+      graphDirty: true,
+    }));
   },
 
   setToneCurvePoints(nodeId, channel, points, session) {

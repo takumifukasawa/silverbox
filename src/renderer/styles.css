@@ -379,6 +379,65 @@ button:disabled {
   width: 100%;
 }
 
+/* ---- color grading wheels ---- */
+
+.grading-wheels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  justify-items: center;
+  padding: 6px 14px;
+}
+
+.grading-wheel-block {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.grading-wheel-label {
+  font-size: 10px;
+  color: #999;
+  text-transform: capitalize;
+}
+
+.grading-wheel {
+  position: relative;
+  border-radius: 50%;
+  border: 1px solid #444;
+  cursor: crosshair;
+  touch-action: none;
+  background:
+    radial-gradient(circle, #808080 0%, rgba(128, 128, 128, 0) 72%),
+    conic-gradient(
+      from 90deg,
+      #f00 0deg,
+      #ff0 60deg,
+      #0f0 120deg,
+      #0ff 180deg,
+      #00f 240deg,
+      #f0f 300deg,
+      #f00 360deg
+    );
+}
+
+.grading-wheel-knob {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border-radius: 50%;
+  background: #e6e6e6;
+  border: 1px solid #141414;
+  pointer-events: none;
+}
+
+.grading-lum {
+  width: 84px;
+  accent-color: #6a9fe8;
+}
+
 /* ---- Detail section (UI spec §10) ---- */
 
 .detail-group-label {
