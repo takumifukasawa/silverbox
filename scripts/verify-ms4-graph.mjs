@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 // rgba16float chain passes + 8-bit readback quantization; means stay well
 // inside 1/255 per channel (see verify-ms3).

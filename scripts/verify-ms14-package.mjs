@@ -12,7 +12,7 @@ import { arch, tmpdir } from 'node:os';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const APP_DIR = join(projectRoot, 'dist', arch() === 'arm64' ? 'mac-arm64' : 'mac');
 const EXECUTABLE = join(APP_DIR, 'Silverbox.app', 'Contents', 'MacOS', 'Silverbox');
 const GPU_CPU_TOLERANCE = 1 / 255;

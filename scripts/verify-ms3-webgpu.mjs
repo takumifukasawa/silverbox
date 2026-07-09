@@ -12,8 +12,8 @@ import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
-const JPG_PATH = 'test-assets/test.JPG';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
+const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 
 // rgba16float quantizes the linear input (~11-bit mantissa) and the 8-bit
 // readback target quantizes the output, so allow 1/255 per channel on means.

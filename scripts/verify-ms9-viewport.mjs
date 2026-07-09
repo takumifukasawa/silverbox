@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 console.log('building…');
 execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });

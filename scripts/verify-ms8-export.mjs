@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const OUT_JPG = join(projectRoot, 'test-artifacts', 'ms8-export.jpg');
 const OUT_PNG = join(projectRoot, 'test-artifacts', 'ms8-export.png');
 // JPEG quantization + preview-vs-full-res sampling differences

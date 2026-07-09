@@ -12,7 +12,7 @@ import { mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const SIDECAR = ARW_PATH + '.silverbox.json';
 const GPU_CPU_TOLERANCE = 1 / 255;
 

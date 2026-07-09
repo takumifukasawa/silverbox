@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = 'test-assets/test.ARW';
+const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 console.log('building…');

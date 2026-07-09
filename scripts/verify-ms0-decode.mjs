@@ -12,7 +12,7 @@ import { build } from 'esbuild';
 import { chromium } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const RAW_PATH = 'test-assets/test.ARW';
+const RAW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const PORT = 8934;
 
 // --- bundle the browser entry (libraw-wasm stays external; resolved via importmap) ---
