@@ -629,7 +629,10 @@ export const useAppStore = create<AppState>((set, get) => {
       const bytes = await window.silverbox.readFile(imagePath);
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
-      const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph, { wb: get().wbModel }));
+      const { data, width, height } = await renderer.renderToPixels(
+        full,
+        buildPlan(graph, { wb: get().wbModel, renderScale: 1 })
+      );
       // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
       const cap = full.capture;
       const result = await window.silverbox.exportEncode({

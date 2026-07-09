@@ -319,9 +319,11 @@ export interface RenderPlan {
   output: number;
 }
 
-/** Per-compile context: the image's WB model (and later, render scale). */
+/** Per-compile context: the image's WB model + render/full resolution ratio. */
 export interface CompileContext {
   wb: WbModel;
+  /** renderLongEdge / fullLongEdge (≤1 preview, 1 export); scales Detail kernels. */
+  renderScale?: number;
 }
 
 /**
@@ -333,6 +335,7 @@ export interface CompileContext {
  */
 export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   const wb = ctx?.wb ?? DEFAULT_WB_MODEL;
+  const renderScale = ctx?.renderScale ?? 1;
   const byId = new Map(doc.nodes.map((n) => [n.id, n]));
   const incoming = new Map<string, GraphEdge[]>();
   for (const e of doc.edges) incoming.set(e.target, [...(incoming.get(e.target) ?? []), e]);
@@ -401,7 +404,7 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const wbGains = wb.gains(params.basic.temp, params.basic.tint);
-        const compiled = compileDevelop(params, wbGains);
+        const compiled = compileDevelop(params, wbGains, renderScale);
         if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {

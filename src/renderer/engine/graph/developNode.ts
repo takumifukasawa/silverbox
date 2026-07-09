@@ -279,9 +279,184 @@ function packColor(b: DevelopBasicParams): ArrayBuffer {
   return buf;
 }
 
+// --- Detail: NR → sharpen in encoded luma/chroma space (spec §10) ------------
+//
+// Runs LAST in the Develop chain, in DISPLAY (sRGB-encoded) space — noise
+// statistics and sharpening halos are perceptually more uniform there. Luma
+// and chroma separate with an invertible transform (Y = Rec.709 luma of the
+// ENCODED rgb, Cb = b′−Y, Cr = r′−Y), so luminance NR / sharpening never
+// shift hue and color NR never softens luminance detail. Encoding once up
+// front keeps the kernel passes to loads+MACs (no pow per tap).
+//
+// RESOLUTION SCALING: kernel radii/sigmas are defined in FULL-RESOLUTION
+// pixels and multiplied by renderScale (= renderLongEdge/fullLongEdge, ≤1
+// for the preview, 1 for export), so preview and export agree in look as far
+// as the preview's resolution allows.
+
+const DETAIL_LUMA = 'vec3f(0.2126, 0.7152, 0.0722)';
+const NR_LUM_SIGMA_FULL = 2.0;
+const NR_CHROMA_SIGMA_FULL = 4.0;
+/** Floor for any scaled sigma — keeps a visible effect on tiny previews. */
+const DETAIL_SIGMA_MIN = 0.4;
+/** Kernel radius caps (render px) — perf guard for full-res export. */
+const NR_KERNEL_RADIUS_MAX = 10;
+const SHARPEN_KERNEL_RADIUS_MAX = 8;
+
+const DETAIL_ENC_WGSL = nodePassWgsl({
+  helpers: WGSL_SRGB_ENCODE,
+  body: /* wgsl */ `
+  // >1 highlights clamp into the display domain (ToneCurve/HSL convention)
+  let e = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
+  let y = dot(e, ${DETAIL_LUMA});
+  c = vec3f(y, e.b - y, e.r - y);
+`,
+});
+
+const DETAIL_DEC_WGSL = nodePassWgsl({
+  helpers: WGSL_SRGB_DECODE,
+  body: /* wgsl */ `
+  let r = c.x + c.z;
+  let b = c.x + c.y;
+  let g = (c.x - 0.2126 * r - 0.0722 * b) / 0.7152;
+  c = srgbDecode(clamp(vec3f(r, g, b), vec3f(0.0), vec3f(1.0)));
+`,
+});
+
+// Luminance NR: bilateral on Y — spatial gaussian × range gaussian on the
+// luma difference, so noise (small ΔY) averages while edges survive; amount
+// drives BOTH the range sigma and the blend with the original. Color NR:
+// gaussian on Cb/Cr with a loose luma-edge guard. Y untouched by color NR
+// and Cb/Cr by luminance NR.
+const DETAIL_NR_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct NrParams {
+  // x = 1/(2σ²) luma spatial, y = 1/(2σ²) chroma spatial,
+  // z = kernel radius (whole render px), w = 1/(2σ²) luma range
+  p0: vec4f,
+  // x = luma blend, y = chroma blend, z = 1/(2σ²) chroma luma-edge guard
+  p1: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: NrParams;
+`,
+  body: /* wgsl */ `
+  {
+    let p = vec2i(in.pos.xy);
+    let dims = vec2i(textureDimensions(src));
+    let v0 = c0;
+    let R = i32(u.p0.z);
+    var sumY = 0.0;
+    var wY = 0.0;
+    var sumC = vec2f(0.0);
+    var wC = 0.0;
+    for (var dy = -R; dy <= R; dy++) {
+      for (var dx = -R; dx <= R; dx++) {
+        let q = clamp(p + vec2i(dx, dy), vec2i(0), dims - vec2i(1));
+        let v = textureLoad(src, q, 0);
+        let d2 = f32(dx * dx + dy * dy);
+        let dl = v.x - v0.x;
+        let wl = exp(-d2 * u.p0.x - dl * dl * u.p0.w);
+        sumY += v.x * wl;
+        wY += wl;
+        let wc = exp(-d2 * u.p0.y - dl * dl * u.p1.z);
+        sumC += v.yz * wc;
+        wC += wc;
+      }
+    }
+    c = vec3f(mix(v0.x, sumY / wY, u.p1.x), mix(v0.yz, sumC / wC, u.p1.y));
+  }
+`,
+});
+
+// Sharpen: unsharp mask on Y — y′ = y + amount·mask·(y − gauss(y, σ)). The
+// same loop accumulates the gaussian-derivative gradient of the smoothed
+// luma; σ-normalized it measures the local EDGE HEIGHT, which drives the
+// Masking term (0 = everywhere, 100 = strong edges only, LR Masking).
+const DETAIL_SHARPEN_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct SharpenParams {
+  // x = 1/(2σ²), y = kernel radius (render px), z = amount, w = masking 0..1
+  p0: vec4f,
+  // x = 1/σ (gradient normalization)
+  p1: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: SharpenParams;
+`,
+  body: /* wgsl */ `
+  {
+    let p = vec2i(in.pos.xy);
+    let dims = vec2i(textureDimensions(src));
+    let v0 = c0;
+    let R = i32(u.p0.y);
+    var sum = 0.0;
+    var wsum = 0.0;
+    var g = vec2f(0.0);
+    for (var dy = -R; dy <= R; dy++) {
+      for (var dx = -R; dx <= R; dx++) {
+        let q = clamp(p + vec2i(dx, dy), vec2i(0), dims - vec2i(1));
+        let y = textureLoad(src, q, 0).x;
+        let w = exp(-f32(dx * dx + dy * dy) * u.p0.x);
+        sum += y * w;
+        wsum += w;
+        g += vec2f(f32(dx), f32(dy)) * (y * w);
+      }
+    }
+    let blur = sum / wsum;
+    // σ-normalized gradient of the smoothed luma ≈ 0.4 × edge height
+    let grad = length(g) / wsum * u.p1.x;
+    var mask = 1.0;
+    if (u.p0.w > 0.0) {
+      // flat-area noise gradients sit ≲0.005 after smoothing, real edges
+      // ≳0.03 — masking 100 zeroes the former, keeps the latter
+      let t = 0.05 * u.p0.w;
+      mask = smoothstep(0.25 * t, 1.5 * t, grad);
+    }
+    c = vec3f(clamp(v0.x + u.p0.z * mask * (v0.x - blur), 0.0, 1.0), v0.yz);
+  }
+`,
+});
+
+const inv2s2 = (sigma: number): number => 1 / (2 * sigma * sigma);
+
+function packNr(d: DetailParams, scale: number): ArrayBuffer {
+  const aL = Math.min(1, d.noiseLuminance.amount / 100);
+  const aC = Math.min(1, d.noiseColor.amount / 100);
+  const sLum = Math.max(DETAIL_SIGMA_MIN, NR_LUM_SIGMA_FULL * scale);
+  const sChroma = Math.max(DETAIL_SIGMA_MIN, NR_CHROMA_SIGMA_FULL * scale);
+  // the kernel radius covers only the ACTIVE component(s)
+  const sMax = Math.max(aL > 0 ? sLum : 0, aC > 0 ? sChroma : 0);
+  const radius = Math.min(NR_KERNEL_RADIUS_MAX, Math.max(1, Math.ceil(2 * sMax)));
+  // range sigma (encoded-luma units): how much local contrast reads as noise
+  const sigmaRange = 0.02 + 0.1 * aL;
+  const buf = new ArrayBuffer(32);
+  const f = new Float32Array(buf);
+  f[0] = inv2s2(sLum);
+  f[1] = inv2s2(sChroma);
+  f[2] = radius;
+  f[3] = inv2s2(sigmaRange);
+  f[4] = aL;
+  f[5] = aC;
+  f[6] = inv2s2(0.25); // loose luma-edge guard for chroma smoothing
+  return buf;
+}
+
+function packSharpen(d: DetailParams, scale: number): ArrayBuffer {
+  const s = d.sharpen;
+  const sigma = Math.max(DETAIL_SIGMA_MIN, s.radius * scale);
+  const radius = Math.min(SHARPEN_KERNEL_RADIUS_MAX, Math.max(1, Math.ceil(2.5 * sigma)));
+  const buf = new ArrayBuffer(32);
+  const f = new Float32Array(buf);
+  f[0] = inv2s2(sigma);
+  f[1] = radius;
+  f[2] = s.amount / 100; // slider 100 → +1× the highpass
+  f[3] = Math.min(1, Math.max(0, s.masking / 100));
+  f[4] = 1 / sigma;
+  return buf;
+}
+
 export interface CompiledDevelop {
   passes: PassSpec[];
-  cpu: (px: Rgb) => Rgb;
+  /** null when Detail is active — spatial kernels have no per-pixel mirror. */
+  cpu: ((px: Rgb) => Rgb) | null;
 }
 
 /**
@@ -289,8 +464,13 @@ export interface CompiledDevelop {
  * sections contribute none) plus the matching CPU mirror. `wbGains` comes
  * from the per-image Kelvin/Tint model (exactly [1,1,1] at as-shot). The
  * tone-curve LUT is baked once and shared by the GPU pass and the mirror.
+ * `renderScale` (renderLongEdge/fullLongEdge) scales the Detail kernels.
  */
-export function compileDevelop(params: DevelopParams, wbGains: [number, number, number]): CompiledDevelop {
+export function compileDevelop(
+  params: DevelopParams,
+  wbGains: [number, number, number],
+  renderScale: number
+): CompiledDevelop {
   const b = params.basic;
   const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
   const toneActive =
@@ -304,6 +484,11 @@ export function compileDevelop(params: DevelopParams, wbGains: [number, number, 
   const curveActive = !isIdentityToneCurve(params.toneCurve);
   const hslActive = !isIdentityHsl(params.hsl);
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
+  const d = params.detail;
+  const nrActive = d.noiseLuminance.amount > 0 || d.noiseColor.amount > 0;
+  const sharpenActive = d.sharpen.amount > 0;
+  const detailActive = !isIdentityDetail(d);
+  const scale = Math.min(1, Math.max(1e-4, renderScale));
 
   const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
   const hslBands = hslActive ? packHsl(params.hsl) : null;
@@ -316,15 +501,26 @@ export function compileDevelop(params: DevelopParams, wbGains: [number, number, 
     passes.push({ shaderId: 'develop/hsl', wgsl: HSL_WGSL, uniforms: hslBands.buffer as ArrayBuffer });
   }
   if (colorActive) passes.push({ shaderId: 'develop/color', wgsl: COLOR_WGSL, uniforms: packColor(b) });
+  if (detailActive) {
+    // NR → sharpen bracketed by the luma/chroma encode/decode passes
+    passes.push({ shaderId: 'develop/detailEnc', wgsl: DETAIL_ENC_WGSL, uniforms: new ArrayBuffer(0) });
+    if (nrActive) passes.push({ shaderId: 'develop/detailNr', wgsl: DETAIL_NR_WGSL, uniforms: packNr(d, scale) });
+    if (sharpenActive) {
+      passes.push({ shaderId: 'develop/detailSharpen', wgsl: DETAIL_SHARPEN_WGSL, uniforms: packSharpen(d, scale) });
+    }
+    passes.push({ shaderId: 'develop/detailDec', wgsl: DETAIL_DEC_WGSL, uniforms: new ArrayBuffer(0) });
+  }
 
-  const cpu = (px: Rgb): Rgb => {
-    let out = px;
-    if (toneActive) out = cpuDevelopTone(out, b, wbGains);
-    if (lut) out = cpuToneCurve(out, lut);
-    if (hslBands) out = cpuHsl(out, hslBands);
-    if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
-    return out;
-  };
+  const cpu = detailActive
+    ? null // spatial kernels have no per-pixel CPU mirror
+    : (px: Rgb): Rgb => {
+        let out = px;
+        if (toneActive) out = cpuDevelopTone(out, b, wbGains);
+        if (lut) out = cpuToneCurve(out, lut);
+        if (hslBands) out = cpuHsl(out, hslBands);
+        if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
+        return out;
+      };
   return { passes, cpu };
 }
 

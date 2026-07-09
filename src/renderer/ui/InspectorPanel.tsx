@@ -193,6 +193,38 @@ function DevelopInspector({ node }: { node: GraphNode }) {
       <Section title="HSL">
         <HslSection node={node} params={params} />
       </Section>
+      <Section title="Detail">
+        <div className="detail-group-label">Sharpening</div>
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.sharpen.amount', label: 'Amount', min: 0, max: 150, step: 1, default: 0 }}
+          value={params.detail.sharpen.amount}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.sharpen.radius', label: 'Radius', min: 0.5, max: 3, step: 0.1, default: 1 }}
+          value={params.detail.sharpen.radius}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.sharpen.masking', label: 'Masking', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.detail.sharpen.masking}
+        />
+        <div className="detail-group-label">Noise Reduction</div>
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.noiseLuminance.amount', label: 'Luminance', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.detail.noiseLuminance.amount}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.noiseColor.amount', label: 'Color', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.detail.noiseColor.amount}
+        />
+        <div className="detail-hint">
+          Preview is downsampled — judge sharpening/NR at 100% zoom or in the exported file.
+        </div>
+      </Section>
     </>
   );
 }

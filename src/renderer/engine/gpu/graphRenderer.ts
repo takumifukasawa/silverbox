@@ -451,6 +451,31 @@ export class GraphRenderer {
     });
   }
 
+  /**
+   * High-frequency energy of the encoded output: mean |horizontal gradient|
+   * of luma and of the r−b chroma difference. Sharpening raises the luma
+   * number, noise reduction lowers it (chroma NR lowers the chroma one) —
+   * deterministic, so the verify harness can assert strict inequalities.
+   */
+  readbackSharpness(): Promise<{ luma: number; chroma: number } | null> {
+    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
+      let sumL = 0;
+      let sumC = 0;
+      for (let y = 0; y < height; y++) {
+        const row = y * bytesPerRow;
+        for (let x = 0; x < width - 1; x++) {
+          const s = row + x * 4;
+          const l0 = 0.2126 * px[s]! + 0.7152 * px[s + 1]! + 0.0722 * px[s + 2]!;
+          const l1 = 0.2126 * px[s + 4]! + 0.7152 * px[s + 5]! + 0.0722 * px[s + 6]!;
+          sumL += Math.abs(l1 - l0);
+          sumC += Math.abs(px[s + 4]! - px[s + 6]! - (px[s]! - px[s + 2]!));
+        }
+      }
+      const n = (width - 1) * height;
+      return { luma: sumL / n / 255, chroma: sumC / n / 255 };
+    });
+  }
+
   /** 256-bin RGB + luma histogram and clipping fractions of the encoded output. */
   stats(): Promise<HistogramData | null> {
     return this.withEncodedPixels((px, bytesPerRow, width, height) => {

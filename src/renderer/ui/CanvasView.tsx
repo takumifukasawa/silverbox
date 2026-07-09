@@ -13,6 +13,7 @@ declare global {
       rendererKind(): 'webgpu';
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
+      readbackSharpness(): Promise<{ luma: number; chroma: number } | null>;
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
@@ -80,7 +81,10 @@ export function CanvasView() {
         // in the node editor instead of killing the preview
         let plan;
         try {
-          plan = buildPlan(graph, { wb: wbModel });
+          plan = buildPlan(graph, {
+            wb: wbModel,
+            renderScale: Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight),
+          });
           useAppStore.getState().setGraphBroken(false);
         } catch {
           plan = { steps: [], output: -1 };
@@ -131,11 +135,19 @@ export function CanvasView() {
         if (!renderer || !renderer.hasImage) return null;
         return renderer.readbackMean();
       },
+      async readbackSharpness() {
+        const renderer = rendererRef.current ? await rendererRef.current : null;
+        if (!renderer || !renderer.hasImage) return null;
+        return renderer.readbackSharpness();
+      },
       cpuReferenceMean() {
         const s = useAppStore.getState();
         if (!s.image) return null;
         const { data, width, height } = s.image;
-        const plan = buildPlan(s.graph, { wb: s.wbModel });
+        const plan = buildPlan(s.graph, {
+          wb: s.wbModel,
+          renderScale: Math.max(width, height) / Math.max(s.image.fullWidth, s.image.fullHeight),
+        });
         // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
         if (!planHasCpuReference(plan)) return null;
         const n = width * height;
