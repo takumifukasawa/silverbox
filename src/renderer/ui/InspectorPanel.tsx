@@ -12,7 +12,13 @@ import {
   type OpParamDef,
 } from '../engine/graph/ops';
 import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
-import { defaultDevelopParams, type DevelopParams } from '../engine/graph/developNode';
+import {
+  defaultDevelopParams,
+  HSL_BAND_CENTER_DEG,
+  HSL_BANDS,
+  type DevelopParams,
+  type HslBand,
+} from '../engine/graph/developNode';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
 import { ShaderEditor } from './ShaderEditor';
 import { ToneCurveEditor } from './ToneCurveEditor';
@@ -95,6 +101,61 @@ const DEVELOP_BASIC_DEFS: OpParamDef[] = [
   { key: 'basic.vibrance', label: 'Vibrance', min: -100, max: 100, step: 1, default: 0 },
 ];
 
+const HSL_CHANNELS = [
+  { key: 'h', label: 'Hue' },
+  { key: 's', label: 'Saturation' },
+  { key: 'l', label: 'Luminance' },
+] as const;
+
+/** Per-band track ramp: hue = reachable rotation, sat = gray→vivid, lum = dark→bright. */
+function hslTrackGradient(band: HslBand, channel: 'h' | 's' | 'l'): string {
+  const c = HSL_BAND_CENTER_DEG[band];
+  if (channel === 'h') {
+    return `linear-gradient(90deg, hsl(${(c + 330) % 360},80%,55%), hsl(${c},80%,55%), hsl(${(c + 30) % 360},80%,55%))`;
+  }
+  if (channel === 's') {
+    return `linear-gradient(90deg, hsl(${c},0%,55%), hsl(${c},90%,55%))`;
+  }
+  return `linear-gradient(90deg, hsl(${c},60%,20%), hsl(${c},60%,80%))`;
+}
+
+/** LR-style HSL section: 3 sub-tabs × 8 band sliders with band-color tracks. */
+function HslSection({ node, params }: { node: GraphNode; params: DevelopParams }) {
+  const [channel, setChannel] = useState<'h' | 's' | 'l'>('h');
+  return (
+    <>
+      <div className="hsl-tabs">
+        {HSL_CHANNELS.map((ch) => (
+          <button
+            key={ch.key}
+            className={`hsl-tab${ch.key === channel ? ' active' : ''}`}
+            data-testid={`hsl-tab-${ch.key}`}
+            onClick={() => setChannel(ch.key)}
+          >
+            {ch.label}
+          </button>
+        ))}
+      </div>
+      {HSL_BANDS.map((band) => (
+        <ParamSlider
+          key={`${band}.${channel}`}
+          nodeId={node.id}
+          def={{
+            key: `hsl.${band}.${channel}`,
+            label: band,
+            min: -100,
+            max: 100,
+            step: 1,
+            default: 0,
+            gradient: hslTrackGradient(band, channel),
+          }}
+          value={params.hsl[band][channel]}
+        />
+      ))}
+    </>
+  );
+}
+
 /** The aggregated Develop panel — Basic now; more sections per spec order. */
 function DevelopInspector({ node }: { node: GraphNode }) {
   const wbModel = useAppStore((s) => s.wbModel);
@@ -128,6 +189,9 @@ function DevelopInspector({ node }: { node: GraphNode }) {
       </Section>
       <Section title="Tone Curve">
         <ToneCurveEditor nodeId={node.id} params={params} />
+      </Section>
+      <Section title="HSL">
+        <HslSection node={node} params={params} />
       </Section>
     </>
   );

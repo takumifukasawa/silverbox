@@ -19,12 +19,15 @@ import { srgbDecode, srgbEncode } from '../color/srgb';
 import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
 import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
+  cpuContrast,
+  cpuHslBandsEncoded,
+  cpuSaturationVibrance,
+  WGSL_HSL_HELPERS,
   wgslContrast,
   wgslExposure,
+  wgslHslBands,
   wgslSaturationVibrance,
   wgslWhiteBalance,
-  cpuContrast,
-  cpuSaturationVibrance,
 } from './developOps';
 
 // --- params schema -----------------------------------------------------------
@@ -60,6 +63,22 @@ export interface HslBandParams {
   s: number;
   l: number;
 }
+
+/**
+ * Band center hues in degrees (Lightroom-like, NON-uniform: warm bands 30°
+ * apart, cool bands 60°). Shared by the shader weighting and the UI track
+ * gradients so they can never drift. Order matches HSL_BANDS.
+ */
+export const HSL_BAND_CENTER_DEG: Record<HslBand, number> = {
+  red: 0,
+  orange: 30,
+  yellow: 60,
+  green: 120,
+  aqua: 180,
+  blue: 240,
+  purple: 270,
+  magenta: 300,
+};
 
 export interface DetailParams {
   sharpen: { amount: number; radius: number; masking: number };
@@ -192,6 +211,21 @@ fn curveLut(v: f32, ch: u32) -> f32 {
 `,
 });
 
+// 8-band HSL in display space, between ToneCurve and saturation/vibrance
+// (spec §6 order). All-zero = identity = skipped, so the RGB↔HSL round-trip
+// never touches a pass-through render.
+const HSL_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct HslParams {
+  // one vec4 per band in HSL_BANDS order: xyz = hue/sat/lum (−1..1), w unused
+  bands: array<vec4f, 8>,
+}
+@group(0) @binding(1) var<uniform> u: HslParams;
+`,
+  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_HSL_HELPERS,
+  body: wgslHslBands('u.bands'),
+});
+
 const COLOR_WGSL = nodePassWgsl({
   uniformDecl: /* wgsl */ `
 struct ColorParams {
@@ -227,6 +261,16 @@ function packTone(b: DevelopBasicParams, wbGains: [number, number, number]): Arr
   return buf;
 }
 
+function packHsl(hsl: Record<HslBand, HslBandParams>): Float32Array {
+  const f = new Float32Array(8 * 4);
+  HSL_BANDS.forEach((band, i) => {
+    f[i * 4] = hsl[band].h / 100;
+    f[i * 4 + 1] = hsl[band].s / 100;
+    f[i * 4 + 2] = hsl[band].l / 100;
+  });
+  return f;
+}
+
 function packColor(b: DevelopBasicParams): ArrayBuffer {
   const buf = new ArrayBuffer(16);
   const f = new Float32Array(buf);
@@ -258,13 +302,18 @@ export function compileDevelop(params: DevelopParams, wbGains: [number, number, 
     b.whites !== 0 ||
     b.blacks !== 0;
   const curveActive = !isIdentityToneCurve(params.toneCurve);
+  const hslActive = !isIdentityHsl(params.hsl);
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
 
   const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
+  const hslBands = hslActive ? packHsl(params.hsl) : null;
   const passes: PassSpec[] = [];
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
   if (lut) {
     passes.push({ shaderId: 'develop/toneCurve', wgsl: TONECURVE_WGSL, uniforms: lut.buffer as ArrayBuffer });
+  }
+  if (hslBands) {
+    passes.push({ shaderId: 'develop/hsl', wgsl: HSL_WGSL, uniforms: hslBands.buffer as ArrayBuffer });
   }
   if (colorActive) passes.push({ shaderId: 'develop/color', wgsl: COLOR_WGSL, uniforms: packColor(b) });
 
@@ -272,10 +321,22 @@ export function compileDevelop(params: DevelopParams, wbGains: [number, number, 
     let out = px;
     if (toneActive) out = cpuDevelopTone(out, b, wbGains);
     if (lut) out = cpuToneCurve(out, lut);
+    if (hslBands) out = cpuHsl(out, hslBands);
     if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
     return out;
   };
   return { passes, cpu };
+}
+
+/** Mirror of the HSL pass: encode → band adjust → decode. */
+function cpuHsl(px: Rgb, bands: Float32Array): Rgb {
+  const enc: Rgb = [
+    srgbEncode(Math.min(Math.max(px[0], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[1], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[2], 0), 1)),
+  ];
+  const out = cpuHslBandsEncoded(enc, bands);
+  return [srgbDecode(out[0]), srgbDecode(out[1]), srgbDecode(out[2])];
 }
 
 /** Mirror of the toneCurve pass: encode → LUT lookup (lerp) → decode. */

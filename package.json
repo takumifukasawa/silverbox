@@ -48,7 +48,8 @@
     "verify:editing": "node scripts/verify-editing.mjs",
     "verify:wb": "node scripts/verify-wb.mjs",
     "verify:tonecurve": "node scripts/verify-tonecurve.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:ms14"
+    "verify:hsl": "node scripts/verify-hsl.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:hsl && npm run verify:ms14"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

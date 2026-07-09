@@ -342,6 +342,29 @@ button:disabled {
   width: 100%;
 }
 
+/* ---- HSL section (UI spec §9) ---- */
+
+.hsl-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px 14px 6px;
+}
+
+.hsl-tab {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  background: #2a2a2a;
+  border: 1px solid #444;
+  color: #999;
+}
+
+.hsl-tab.active {
+  background: #454545;
+  border-color: #666;
+  color: #ddd;
+}
+
 /* ---- point tone-curve editor (UI spec §8) ---- */
 
 .tonecurve {

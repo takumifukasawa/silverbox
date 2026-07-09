@@ -104,13 +104,14 @@ try {
 
   console.log('verify-develop (inspector UI):');
   await page.locator('.react-flow__node[data-id="dev"]').click();
+  const basicSection = page.locator('.inspector-section').filter({ hasText: 'Basic' }).first();
   check(
     'Develop inspector shows the Basic section with 10 rows (incl. Temp/Tint)',
     (await page.locator('.inspector-title').textContent()) === 'Develop' &&
-      (await page.locator('.param-row').count()) === 10,
-    { title: await page.locator('.inspector-title').textContent(), rows: await page.locator('.param-row').count() }
+      (await basicSection.locator('.param-row').count()) === 10,
+    { title: await page.locator('.inspector-title').textContent(), rows: await basicSection.locator('.param-row').count() }
   );
-  const evRow = page.locator('.param-row').nth(2); // Temp, Tint, then Exposure
+  const evRow = basicSection.locator('.param-row').nth(2); // Temp, Tint, then Exposure
   await evRow.locator('input[type="number"]').fill('2');
   const evAfterNumber = await page.evaluate(
     () => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev
