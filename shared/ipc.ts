@@ -13,7 +13,7 @@ export const IPC = {
   readSidecar: 'sidecar:read',
   writeSidecar: 'sidecar:write',
   exportImageDialog: 'dialog:exportImage',
-  writeImageFile: 'file:writeImage',
+  exportEncode: 'export:encode',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
@@ -42,8 +42,40 @@ export interface SilverboxApi {
   writeSidecar(path: string, content: string): Promise<void>;
   /** Native save dialog for the developed image (.jpg/.png). */
   exportImageDialog(defaultPath: string): Promise<OpenImageDialogResult>;
-  /** Write encoded image bytes (main rejects non-.jpg/.jpeg/.png paths). */
-  writeImageFile(path: string, bytes: ArrayBuffer): Promise<void>;
+  /** Encode + write the developed pixels via sharp in the main process. */
+  exportEncode(req: ExportEncodeRequest): Promise<ExportEncodeResult>;
+}
+
+/** EXIF fields copied from the decode metadata into the exported JPEG. */
+export interface ExportExifMeta {
+  cameraMake?: string;
+  cameraModel?: string;
+  isoSpeed?: number;
+  shutter?: number;
+  aperture?: number;
+  focalLength?: number;
+  timestampIso?: string;
+}
+
+export interface ExportEncodeRequest {
+  /** Tightly packed display-encoded sRGB RGBA8 pixels. */
+  data: ArrayBuffer;
+  width: number;
+  height: number;
+  /** Output path; extension picks the format (.jpg/.jpeg/.png). */
+  outPath: string;
+  /** JPEG quality 1–100 (ignored for PNG). */
+  quality: number;
+  /** Long-edge resize in px; null = full resolution. */
+  maxDim: number | null;
+  meta?: ExportExifMeta;
+}
+
+export interface ExportEncodeResult {
+  path: string;
+  width: number;
+  height: number;
+  bytes: number;
 }
 
 declare global {

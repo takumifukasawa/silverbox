@@ -1,8 +1,16 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename } from 'node:path';
-import { IPC, SIDECAR_SUFFIX, type OpenImageDialogResult, type PingResult } from '../../shared/ipc';
+import {
+  IPC,
+  SIDECAR_SUFFIX,
+  type ExportEncodeRequest,
+  type ExportEncodeResult,
+  type OpenImageDialogResult,
+  type PingResult,
+} from '../../shared/ipc';
+import { encodeExport } from './imageExport';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -54,7 +62,17 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.writeSidecar, async (_ev, path: unknown, content: unknown): Promise<void> => {
     if (typeof content !== 'string') throw new Error('writeSidecar: content must be a string');
-    await writeFile(assertSidecarPath(path), content, 'utf8');
+    const target = assertSidecarPath(path);
+    // Atomic write: a crash mid-save must not leave a truncated sidecar. The
+    // temp dir lives next to the target so rename() stays on one filesystem.
+    const tmpDir = await mkdtemp(join(dirname(target), '.silverbox-save-'));
+    const tmpFile = join(tmpDir, basename(target));
+    try {
+      await writeFile(tmpFile, content, 'utf8');
+      await rename(tmpFile, target);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
   });
 
   ipcMain.handle(IPC.exportImageDialog, async (_ev, defaultPath: unknown): Promise<OpenImageDialogResult> => {
@@ -69,12 +87,8 @@ function registerIpc(): void {
     return { canceled: false, path: result.filePath, fileName: basename(result.filePath) };
   });
 
-  ipcMain.handle(IPC.writeImageFile, async (_ev, path: unknown, bytes: unknown): Promise<void> => {
-    if (typeof path !== 'string' || !/\.(jpg|jpeg|png)$/i.test(path)) {
-      throw new Error('writeImageFile: path must end with .jpg/.jpeg/.png');
-    }
-    if (!(bytes instanceof ArrayBuffer)) throw new Error('writeImageFile: bytes must be an ArrayBuffer');
-    await writeFile(path, Buffer.from(bytes));
+  ipcMain.handle(IPC.exportEncode, async (_ev, req: ExportEncodeRequest): Promise<ExportEncodeResult> => {
+    return encodeExport(req);
   });
 }
 

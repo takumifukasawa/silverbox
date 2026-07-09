@@ -64,6 +64,12 @@ interface AppState {
   /** Stats of the current render (updated debounced after each render). */
   histogram: HistogramData | null;
   history: GraphHistory;
+  /** Yellow toolbar notice when a sidecar existed but could not be used. */
+  sidecarNotice: string | null;
+  /** createdAt carried through sidecar round-trips (set on first save). */
+  sidecarCreatedAt: string | null;
+  /** Result line for the toolbar after a successful export. */
+  exportInfo: { width: number; height: number; bytes: number } | null;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -236,6 +242,9 @@ export const useAppStore = create<AppState>((set, get) => {
   exportError: null,
   histogram: null,
   history: emptyHistory(),
+  sidecarNotice: null,
+  sidecarCreatedAt: null,
+  exportInfo: null,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -250,12 +259,19 @@ export const useAppStore = create<AppState>((set, get) => {
       const image = await loadImage(bytes, kind);
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
-      // untouched until the user saves over it).
+      // untouched until the user saves over it) with a toolbar notice.
       let graph = defaultGraphDoc();
+      let sidecarNotice: string | null = null;
+      let sidecarCreatedAt: string | null = null;
       try {
         const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
-        if (sidecar !== null) graph = parseGraphDoc(sidecar);
+        if (sidecar !== null) {
+          const parsed = parseGraphDoc(sidecar);
+          graph = parsed.graph;
+          sidecarCreatedAt = parsed.createdAt ?? null;
+        }
       } catch (err) {
+        sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
       // node ids of the previous doc must never alias into stale shaders
@@ -269,6 +285,9 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedNodeId: null,
         history: emptyHistory(),
         shaderErrors: {},
+        sidecarNotice,
+        sidecarCreatedAt,
+        exportInfo: null,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -547,44 +566,51 @@ export const useAppStore = create<AppState>((set, get) => {
       if (result.canceled) return;
       target = result.path;
     }
-    set({ exportStatus: 'working', exportError: null });
+    set({ exportStatus: 'working', exportError: null, exportInfo: null });
     try {
       const bytes = await window.silverbox.readFile(imagePath);
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
       const { data, width, height } = await renderer.renderToPixels(full, buildPlan(graph));
-      let canvas = new OffscreenCanvas(width, height);
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('OffscreenCanvas 2d context unavailable');
-      ctx.putImageData(new ImageData(data, width, height), 0, 0);
-      // optional long-edge resize (fit inside, never enlarged)
-      const maxDim = opts?.maxDim ?? null;
-      if (maxDim && maxDim > 0 && maxDim < Math.max(width, height)) {
-        const scale = maxDim / Math.max(width, height);
-        const rw = Math.max(1, Math.round(width * scale));
-        const rh = Math.max(1, Math.round(height * scale));
-        const resized = new OffscreenCanvas(rw, rh);
-        const rctx = resized.getContext('2d');
-        if (!rctx) throw new Error('OffscreenCanvas 2d context unavailable');
-        rctx.imageSmoothingQuality = 'high';
-        rctx.drawImage(canvas, 0, 0, rw, rh);
-        canvas = resized;
-      }
-      const png = /\.png$/i.test(target);
-      const quality = Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))) / 100;
-      const blob = await canvas.convertToBlob(png ? { type: 'image/png' } : { type: 'image/jpeg', quality });
-      await window.silverbox.writeImageFile(target, await blob.arrayBuffer());
-      set({ exportStatus: 'idle' });
+      // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
+      const cap = full.capture;
+      const result = await window.silverbox.exportEncode({
+        data: data.buffer,
+        width,
+        height,
+        outPath: target,
+        quality: Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))),
+        maxDim: opts?.maxDim ?? null,
+        meta: {
+          ...(cap?.cameraMake ? { cameraMake: cap.cameraMake } : {}),
+          ...(cap?.cameraModel ? { cameraModel: cap.cameraModel } : {}),
+          ...(cap?.isoSpeed ? { isoSpeed: cap.isoSpeed } : {}),
+          ...(cap?.shutter ? { shutter: cap.shutter } : {}),
+          ...(cap?.aperture ? { aperture: cap.aperture } : {}),
+          ...(cap?.focalLength ? { focalLength: cap.focalLength } : {}),
+          ...(cap?.timestamp ? { timestampIso: new Date(cap.timestamp).toISOString() } : {}),
+        },
+      });
+      set({
+        exportStatus: 'idle',
+        exportInfo: { width: result.width, height: result.height, bytes: result.bytes },
+      });
     } catch (err) {
       set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
     }
   },
 
   async saveGraph() {
-    const { imagePath, graph } = get();
-    if (!imagePath) return;
-    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph));
-    set({ graphDirty: false });
+    const { imagePath, fileName, image, graph, sidecarCreatedAt } = get();
+    if (!imagePath || !fileName) return;
+    const source = {
+      fileName,
+      ...(image?.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+      kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
+    };
+    const createdAt = sidecarCreatedAt ?? new Date().toISOString();
+    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph, source, createdAt));
+    set({ graphDirty: false, sidecarCreatedAt: createdAt });
   },
   };
 });

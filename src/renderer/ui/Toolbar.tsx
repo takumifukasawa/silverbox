@@ -49,6 +49,7 @@ function ExportControls() {
   const imageStatus = useAppStore((s) => s.imageStatus);
   const exportStatus = useAppStore((s) => s.exportStatus);
   const exportError = useAppStore((s) => s.exportError);
+  const exportInfo = useAppStore((s) => s.exportInfo);
   const exportImage = useAppStore((s) => s.exportImage);
   const [quality, setQuality] = useState('90');
   const [maxDim, setMaxDim] = useState('');
@@ -99,6 +100,11 @@ function ExportControls() {
           export failed: {exportError}
         </span>
       )}
+      {exportInfo && (
+        <span className="toolbar-dim" data-testid="export-info">
+          exported {exportInfo.width}×{exportInfo.height} ({(exportInfo.bytes / 1024 / 1024).toFixed(1)}MB)
+        </span>
+      )}
     </>
   );
 }
@@ -111,6 +117,7 @@ export function Toolbar() {
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const graph = useAppStore((s) => s.graph);
   const history = useAppStore((s) => s.history);
+  const sidecarNotice = useAppStore((s) => s.sidecarNotice);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
@@ -162,6 +169,11 @@ export function Toolbar() {
       </button>
       <ExportControls />
       <div className="toolbar-info">
+        {sidecarNotice && (
+          <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
+            {sidecarNotice}
+          </span>
+        )}
         {image && fileName ? (
           <>
             <span style={{ color: '#fff', fontWeight: 'bold' }}>{fileName}</span>

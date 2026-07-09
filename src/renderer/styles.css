@@ -140,6 +140,20 @@ button:disabled {
   font-size: 12px;
 }
 
+.toolbar-warn {
+  color: #f0c674;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 340px;
+}
+
+.toolbar-dim {
+  color: #777;
+  font-size: 12px;
+}
+
 .main-row {
   flex: 1;
   display: flex;

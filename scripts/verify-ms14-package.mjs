@@ -5,10 +5,10 @@
  * matching the CPU reference, and the sidecar surface.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { arch } from 'node:os';
+import { arch, tmpdir } from 'node:os';
 import { _electron as electron } from 'playwright';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -78,6 +78,19 @@ try {
     (await page.locator('.react-flow__node').count()) >= 3 && histogramAlive,
     { nodes: await page.locator('.react-flow__node').count(), histogramAlive }
   );
+
+  // sharp is asar-unpacked native code — exporting is exactly what breaks
+  // when packaging goes wrong, so smoke-test it in the packaged app
+  const outPath = join(tmpdir(), `silverbox-ms14-export-${Date.now()}.jpg`);
+  await page.evaluate((p) => window.__debug.exportImageTo(p), outPath);
+  await page.waitForFunction(() => window.__debug.exportState().status !== 'working', { timeout: 300_000 });
+  const exportState = await page.evaluate(() => window.__debug.exportState());
+  check(
+    'packaged app exports a JPEG through sharp',
+    exportState.status === 'idle' && existsSync(outPath) && statSync(outPath).size > 500_000,
+    { exportState, size: existsSync(outPath) ? statSync(outPath).size : 'missing' }
+  );
+  if (existsSync(outPath)) unlinkSync(outPath);
 } finally {
   await app.close();
 }

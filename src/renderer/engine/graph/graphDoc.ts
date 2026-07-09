@@ -81,18 +81,85 @@ export function defaultGraphDoc(): GraphDoc {
   };
 }
 
-/** Serialize for the sidecar: pretty-printed and newline-terminated for git. */
-export function serializeGraphDoc(doc: GraphDoc): string {
-  return JSON.stringify(doc, null, 2) + '\n';
+/** Provenance block persisted with the graph (spec §3). */
+export interface SidecarSource {
+  fileName: string;
+  cameraModel?: string;
+  kind: 'raw' | 'jpg';
+}
+
+/** The parsed sidecar: the graph plus its wrapper metadata. */
+export interface SidecarDoc {
+  graph: GraphDoc;
+  source?: SidecarSource;
+  createdAt?: string;
+}
+
+export const SIDECAR_SCHEMA_VERSION = 2;
+
+/**
+ * Serialize for the sidecar (spec §3): a schemaVersion-2 wrapper with the
+ * source block and timestamps around the graph. Nodes serialize their kind
+ * as `type` and edges as from/to — the spec's field names. Pretty-printed
+ * and newline-terminated for git.
+ */
+export function serializeGraphDoc(doc: GraphDoc, source: SidecarSource | null, createdAt: string | null): string {
+  const now = new Date().toISOString();
+  const wrapper = {
+    schemaVersion: SIDECAR_SCHEMA_VERSION,
+    ...(source ? { source } : {}),
+    createdAt: createdAt ?? now,
+    updatedAt: now,
+    graph: {
+      nodes: doc.nodes.map((n) => ({
+        id: n.id,
+        type: n.kind,
+        position: n.position,
+        ...(n.params ? { params: n.params } : {}),
+        ...(n.develop ? { develop: n.develop } : {}),
+        ...(n.shader ? { shader: n.shader } : {}),
+      })),
+      edges: doc.edges.map((e) => ({
+        id: e.id,
+        from: e.source,
+        to: e.target,
+        ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
+      })),
+    },
+  };
+  return JSON.stringify(wrapper, null, 2) + '\n';
 }
 
 /** Parse + validate a sidecar; throws with a reason on anything malformed. */
-export function parseGraphDoc(text: string): GraphDoc {
+export function parseGraphDoc(text: string): SidecarDoc {
   const raw: unknown = JSON.parse(text);
   if (typeof raw !== 'object' || raw === null) throw new Error('graph doc must be an object');
-  const doc = raw as GraphDoc;
-  if (doc.version !== 1) throw new Error(`unsupported graph doc version ${String(doc.version)}`);
-  if (!Array.isArray(doc.nodes) || !Array.isArray(doc.edges)) throw new Error('graph doc needs nodes and edges');
+  const wrapper = raw as {
+    schemaVersion?: unknown;
+    source?: SidecarSource;
+    createdAt?: unknown;
+    graph?: { nodes?: unknown; edges?: unknown };
+  };
+  if (wrapper.schemaVersion !== SIDECAR_SCHEMA_VERSION) {
+    throw new Error(`unsupported sidecar schemaVersion ${String(wrapper.schemaVersion)}`);
+  }
+  const rawNodes = wrapper.graph?.nodes;
+  const rawEdges = wrapper.graph?.edges;
+  if (!Array.isArray(rawNodes) || !Array.isArray(rawEdges)) throw new Error('graph doc needs nodes and edges');
+  const doc: GraphDoc = {
+    version: 1,
+    nodes: rawNodes.map((n: Record<string, unknown>) => ({
+      ...(n as object),
+      kind: n.type,
+      type: undefined,
+    })) as unknown as GraphNode[],
+    edges: rawEdges.map((e: Record<string, unknown>) => ({
+      id: e.id,
+      source: e.from,
+      target: e.to,
+      ...(e.targetHandle !== undefined ? { targetHandle: e.targetHandle } : {}),
+    })) as unknown as GraphEdge[],
+  };
   for (const n of doc.nodes) {
     if (typeof n.id !== 'string') throw new Error('node id must be a string');
     if (
@@ -128,7 +195,11 @@ export function parseGraphDoc(text: string): GraphDoc {
     }
   }
   buildPlan(doc); // throws unless the output resolves through a valid DAG
-  return doc;
+  return {
+    graph: doc,
+    ...(wrapper.source ? { source: wrapper.source } : {}),
+    ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
+  };
 }
 
 /** Normalize an untrusted customShader payload; throws on structural garbage. */

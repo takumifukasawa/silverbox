@@ -73,10 +73,17 @@ try {
   );
   check('sidecar file exists next to the image', existsSync(SIDECAR), SIDECAR);
   const saved = JSON.parse(readFileSync(SIDECAR, 'utf8'));
-  check('sidecar is version 1 with the edited ev', saved.version === 1 &&
-    saved.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.5, saved);
+  check(
+    'sidecar is schemaVersion 2 with source block and the edited ev',
+    saved.schemaVersion === 2 &&
+      saved.source?.fileName === 'DSC02993.ARW' &&
+      saved.source?.kind === 'raw' &&
+      typeof saved.createdAt === 'string' &&
+      saved.graph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.5,
+    saved
+  );
   check('sidecar is pretty-printed and newline-terminated',
-    readFileSync(SIDECAR, 'utf8').includes('\n  "nodes"') && readFileSync(SIDECAR, 'utf8').endsWith('\n'), null);
+    readFileSync(SIDECAR, 'utf8').includes('\n    "nodes"') && readFileSync(SIDECAR, 'utf8').endsWith('\n'), null);
 
   console.log('verify-ms6 (graph is per-image):');
   await openAndWait(JPG_PATH);

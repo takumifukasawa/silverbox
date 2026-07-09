@@ -5,7 +5,7 @@
  * edited) preview readback.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, existsSync, statSync, unlinkSync } from 'node:fs';
+import { mkdirSync, existsSync, statSync, unlinkSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
@@ -92,6 +92,12 @@ try {
     exported: jpg.mean,
     previewMean,
   });
+  const jpgBytes = readFileSync(OUT_JPG);
+  check(
+    'JPEG carries EXIF camera model and an ICC profile',
+    jpgBytes.includes('ILCE-7CM2') && jpgBytes.includes('ICC_PROFILE'),
+    { exif: jpgBytes.includes('ILCE-7CM2'), icc: jpgBytes.includes('ICC_PROFILE') }
+  );
 
   console.log('verify-ms8 (PNG export):');
   const pngState = await exportAndWait(OUT_PNG);

@@ -8,7 +8,7 @@ const api: SilverboxApi = {
   readSidecar: (path) => ipcRenderer.invoke(IPC.readSidecar, path),
   writeSidecar: (path, content) => ipcRenderer.invoke(IPC.writeSidecar, path, content),
   exportImageDialog: (defaultPath) => ipcRenderer.invoke(IPC.exportImageDialog, defaultPath),
-  writeImageFile: (path, bytes) => ipcRenderer.invoke(IPC.writeImageFile, path, bytes),
+  exportEncode: (req) => ipcRenderer.invoke(IPC.exportEncode, req),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);
