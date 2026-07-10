@@ -70,6 +70,12 @@ offset (value decided in the Lightroom calibration session).
 
 ## Nice to have
 
+- **Embedded-preview-first opening**: show the ARW's embedded JPEG within
+  ~100ms while the real decode runs, then swap — the Lightroom trick;
+  near-zero perceived load time
+- **Folder filmstrip** (NOT a catalog): open a folder, thumbnail strip from
+  embedded previews, click to switch images; no database — and ratings, if
+  they come, live in the sidecar so they stay git-native
 - **Per-node preview** (UE-material-editor style): inspect any node's
   output in the preview / as node thumbnails — the renderer already keeps
   per-step textures
