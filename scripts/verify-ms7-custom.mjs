@@ -56,9 +56,16 @@ try {
     page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.kind === 'custom')?.shader);
   const gpuMean = () => page.evaluate(() => window.__debug.readbackMean());
   // hand-computed reference: per-channel means after mapping each linear
-  // pixel through `fn` (JS mirror of the shader body), then sRGB-encoding
+  // working-space pixel through `fn` (JS mirror of the shader body), then the
+  // exit transform — WORK_TO_SRGB then the sRGB curve (Rec.2020 migration:
+  // the working space is linear Rec.2020; mirrors workingSpace.ts).
   const expected = (fnBody) =>
     page.evaluate((body) => {
+      const M = [
+        [1.6605, -0.5876, -0.0728],
+        [-0.1246, 1.1329, -0.0083],
+        [-0.0182, -0.1006, 1.1187],
+      ];
       const encode = (v) => {
         const c = Math.min(Math.max(v, 0), 1);
         return c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
@@ -71,9 +78,9 @@ try {
       let bb = 0;
       for (let i = 0; i < n; i++) {
         const [x, y, z] = fn(data[i * 4], data[i * 4 + 1], data[i * 4 + 2]);
-        r += encode(x);
-        gg += encode(y);
-        bb += encode(z);
+        r += encode(M[0][0] * x + M[0][1] * y + M[0][2] * z);
+        gg += encode(M[1][0] * x + M[1][1] * y + M[1][2] * z);
+        bb += encode(M[2][0] * x + M[2][1] * y + M[2][2] * z);
       }
       return { r: r / n, g: gg / n, b: bb / n };
     }, fnBody);

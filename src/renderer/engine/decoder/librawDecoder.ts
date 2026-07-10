@@ -2,11 +2,26 @@ import LibRaw from 'libraw-wasm';
 import type { CameraColorInfo, DecodedImage, RawDecoder } from './RawDecoder';
 
 /**
+ * libraw `-o` output color space: 8 = linear Rec.2020, the engine's working
+ * space (see engine/color/workingSpace.ts). Surfaced by the __debug
+ * workingSpaceInfo() hook so the verify harness can assert the decode target.
+ */
+export const DECODE_OUTPUT_COLOR = 8;
+
+/**
  * RAW decoder backed by libraw-wasm (runs in its own Web Worker).
  *
  * Settings: camera as-shot WB baked in (useCameraWb) and 16-bit output, so the
  * white-balance node later applies only a *relative* gain — as-shot Kelvin/Tint
- * is a true identity pass.
+ * is a true identity pass. `outputColor` targets linear Rec.2020 (the working
+ * space); the gamma-encoded 16-bit output is linearized downstream by the exact
+ * sRGB LUT exactly as before (transfer handling is primaries-independent).
+ *
+ * `noAutoBright: true` pins the overall exposure: LibRaw's default auto-bright
+ * gain is computed from a histogram of the *already color-converted* output, so
+ * it is colorspace-DEPENDENT (the spike measured this) — leaving it on would
+ * make brightness silently depend on the working space. Pinning it keeps the
+ * decode deterministic and scene-referred.
  *
  * One LibRaw instance is shared across decodes and never disposed: the wasm
  * worker keeps a single persistent LibRaw object that recycles on open, and
@@ -23,7 +38,7 @@ export class LibrawDecoder implements RawDecoder {
     const raw = sharedRaw;
     {
       // open() transfers the buffer to the worker; `bytes` is detached after this.
-      await raw.open(bytes, { useCameraWb: true, outputBps: 16 });
+      await raw.open(bytes, { useCameraWb: true, outputBps: 16, outputColor: DECODE_OUTPUT_COLOR, noAutoBright: true });
 
       const meta = await raw.metadata(true);
       if (!meta) throw new Error('libraw: no metadata');

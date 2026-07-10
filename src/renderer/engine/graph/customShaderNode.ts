@@ -39,7 +39,7 @@ export interface CustomShaderParams {
 }
 
 export const DEFAULT_CUSTOM_SHADER_SRC = `// Body of: fn shade(color: vec3f, uv: vec2f) -> vec3f
-// color is LINEAR RGB (working space). Return the new color.
+// color is LINEAR Rec.2020 (working space). Return the new color.
 // GUI params: P.<name>   helpers: luma(c), srgbEncode(c), srgbEncode1(v)
 return color;
 `;

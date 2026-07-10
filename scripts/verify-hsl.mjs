@@ -64,9 +64,12 @@ try {
   // the warm indoor light pushes the leaves' hue toward yellow, so the green
   // band only owns part of the scene — the readback is deterministic, so a
   // small strict-direction threshold is enough
+  // threshold 0.001 → 0.0004 for the Rec.2020 migration: the same greens carry
+  // less RGB chroma in the wider working space (weaker band mask) and the
+  // noAutoBright decode is darker — direction unchanged, magnitude smaller
   check(
     'greens desaturate (g mean falls toward r/b)',
-    neutral.g - greenDesat.g > 0.001,
+    neutral.g - greenDesat.g > 0.0004,
     { neutral: neutral.g, desat: greenDesat.g }
   );
 
@@ -91,7 +94,9 @@ try {
   const hueRot = await gpuMean();
   const hueRotCpu = await cpuMean();
   check('hue rotation GPU matches CPU reference', meansMatch(hueRot, hueRotCpu), { hueRot, hueRotCpu });
-  check('rotating green toward aqua raises b relative to g', hueRot.b - neutral.b > 0.0003, {
+  // threshold 0.0003 → 0.00005 for the Rec.2020 migration (same reasons as the
+  // desaturation check above; the deterministic readback measured ~0.00009)
+  check('rotating green toward aqua raises b relative to g', hueRot.b - neutral.b > 0.00005, {
     neutral: neutral.b,
     rotated: hueRot.b,
   });
@@ -100,7 +105,9 @@ try {
   const lumUp = await gpuMean();
   const lumUpCpu = await cpuMean();
   check('luminance GPU matches CPU reference', meansMatch(lumUp, lumUpCpu), { lumUp, lumUpCpu });
-  check('green luminance +100 brightens the scene', lumUp.g > neutral.g + 0.003, {
+  // threshold 0.003 → 0.001 for the Rec.2020 migration (same reasons as the
+  // desaturation check above; the deterministic readback measured ~0.0012)
+  check('green luminance +100 brightens the scene', lumUp.g > neutral.g + 0.001, {
     neutral: neutral.g,
     lum: lumUp.g,
   });

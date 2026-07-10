@@ -66,7 +66,10 @@ try {
     lightsGpu,
     lightsCpu,
   });
-  check('raising lights brightens the image', lightsGpu.g > neutral.g + 0.02, {
+  // threshold 0.02 → 0.002 for the Rec.2020 migration: noAutoBright pins the
+  // decode darker, so far fewer pixels sit in the Lights band (direction and
+  // GPU/CPU parity are unchanged; only the mean's magnitude shrank)
+  check('raising lights brightens the image', lightsGpu.g > neutral.g + 0.002, {
     neutral: neutral.g,
     lights: lightsGpu.g,
   });

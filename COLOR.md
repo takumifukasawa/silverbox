@@ -3,7 +3,10 @@
 The concrete decisions behind [DESIGN.md](DESIGN.md) principle 6
 ("scene-referred color, output-referred late"), recorded with their
 rationale so they don't get relitigated by accident. Status: decided
-2026-07; the working-space migration is in progress (spike → migration).
+2026-07; the working-space migration to linear Rec.2020 is COMPLETE
+(engine/color/workingSpace.ts is the single definition point; decode uses
+libraw outputColor 8 with noAutoBright pinned; the exit encode applies
+WORK_TO_SRGB then the sRGB curve; verify:cst guards it).
 
 ## The two axes, and where we stand
 

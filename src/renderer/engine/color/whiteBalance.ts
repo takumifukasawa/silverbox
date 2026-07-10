@@ -26,6 +26,8 @@
  *    4x3. Single fixed matrix (no dual-illuminant interpolation).
  */
 
+import { SRGB_TO_WORK } from './workingSpace';
+
 export const WB_TEMP_RANGE = { min: 2000, max: 50000 } as const;
 export const WB_TINT_RANGE = { min: -150, max: 150 } as const;
 
@@ -140,6 +142,20 @@ function mulMat3Vec3(m: Mat3, v: Vec3): Vec3 {
   ];
 }
 
+function mulMat3Mat3(a: readonly (readonly number[])[], b: readonly (readonly number[])[]): Mat3 {
+  const out: number[][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
+  for (let i = 0; i < 3; i++) {
+    for (let j = 0; j < 3; j++) {
+      out[i]![j] = a[i]![0]! * b[0]![j]! + a[i]![1]! * b[1]![j]! + a[i]![2]! * b[2]![j]!;
+    }
+  }
+  return out;
+}
+
 function invertMat3(m: Mat3): Mat3 | null {
   const [a, b, c] = m[0] as [number, number, number];
   const [d, e, f] = m[1] as [number, number, number];
@@ -157,12 +173,22 @@ function invertMat3(m: Mat3): Mat3 | null {
   ];
 }
 
-/** XYZ → linear sRGB (D65) — the fallback "camera" when cam_xyz is absent. */
+/** XYZ → linear sRGB (D65). */
 const XYZ_TO_SRGB: Mat3 = [
   [3.2404542, -1.5371385, -0.4985314],
   [-0.969266, 1.8760108, 0.041556],
   [0.0556434, -0.2040259, 1.0572252],
 ];
+
+/**
+ * XYZ → linear Rec.2020 (D65) — the fallback "camera" when cam_xyz is absent
+ * (e.g. JPG). Targets the WORKING-SPACE primaries so the WB gains it produces
+ * are correct in the space the image actually lives in. Composed from the
+ * working-space matrix so there is no second set of magic numbers; both sRGB
+ * and Rec.2020 share the D65 white, so a neutral still lands on the locus
+ * (the JPG as-shot estimate stays near 6500 K — verified).
+ */
+const XYZ_TO_REC2020: Mat3 = mulMat3Mat3(SRGB_TO_WORK, XYZ_TO_SRGB);
 
 // --- forward model: (temp, tint) → camera multipliers ---------------------------
 
@@ -264,13 +290,14 @@ function pickCamXyz(meta: WbMeta): Mat3 {
     // all-zero rows happen when libraw has no color profile for the camera
     if (top.some((row) => row.some((v) => v !== 0)) && invertMat3(top)) return top;
   }
-  return XYZ_TO_SRGB;
+  return XYZ_TO_REC2020;
 }
 
 /**
  * Build the per-image WB model. Never throws: missing / degenerate metadata
- * falls back to "camera = sRGB, neutral = D65" (as-shot ≈ 6500 K; D65 sits
- * slightly green of the locus, so tint lands mildly positive).
+ * falls back to "camera = Rec.2020 (the working space), neutral = D65" (as-shot
+ * ≈ 6500 K; D65 sits slightly green of the locus, so tint lands mildly
+ * positive).
  */
 export function createWbModel(meta: WbMeta): WbModel {
   const camXyz = pickCamXyz(meta);

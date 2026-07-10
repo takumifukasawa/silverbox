@@ -16,6 +16,7 @@
  * untouched Develop node is a true bit-exact pass-through.
  */
 import { srgbDecode, srgbEncode } from '../color/srgb';
+import { WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
 import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
@@ -470,7 +471,8 @@ function cpuGrading(px: Rgb, u: Float32Array): Rgb {
 // for the preview, 1 for export), so preview and export agree in look as far
 // as the preview's resolution allows.
 
-const DETAIL_LUMA = 'vec3f(0.2126, 0.7152, 0.0722)';
+const DETAIL_LUMA = WGSL_WORKING_LUMA;
+const [DETAIL_WR, DETAIL_WG, DETAIL_WB] = WORKING_LUMA;
 const NR_LUM_SIGMA_FULL = 2.0;
 const NR_CHROMA_SIGMA_FULL = 4.0;
 /** Floor for any scaled sigma — keeps a visible effect on tiny previews. */
@@ -494,7 +496,7 @@ const DETAIL_DEC_WGSL = nodePassWgsl({
   body: /* wgsl */ `
   let r = c.x + c.z;
   let b = c.x + c.y;
-  let g = (c.x - 0.2126 * r - 0.0722 * b) / 0.7152;
+  let g = (c.x - ${DETAIL_WR} * r - ${DETAIL_WB} * b) / ${DETAIL_WG};
   c = srgbDecode(clamp(vec3f(r, g, b), vec3f(0.0), vec3f(1.0)));
 `,
 });

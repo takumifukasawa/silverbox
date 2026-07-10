@@ -3,8 +3,9 @@
  *
  * Every node pass is a fullscreen-triangle fragment pass over same-sized
  * rgba16float textures; texels are fetched with textureLoad (exact 1:1, no
- * sampler). The working space inside the pipeline is linear sRGB.
+ * sampler). The working space inside the pipeline is linear Rec.2020.
  */
+import { WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 
 /** Fullscreen triangle vertex stage with uv (for custom shaders). */
 export const FULLSCREEN_VS_UV = /* wgsl */ `
@@ -51,10 +52,10 @@ fn srgbDecode(c: vec3f) -> vec3f {
 }
 `;
 
-/** Rec.709 / sRGB luminance of a linear RGB color. */
+/** Luminance of an RGB color, using the shared WORKING_LUMA weights. */
 export const WGSL_LUMA = /* wgsl */ `
 fn luma(c: vec3f) -> f32 {
-  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+  return dot(c, ${WGSL_WORKING_LUMA});
 }
 `;
 
@@ -96,5 +97,5 @@ export function smoothstepCpu(edge0: number, edge1: number, x: number): number {
 }
 
 export function lumaCpu(r: number, g: number, b: number): number {
-  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return WORKING_LUMA[0] * r + WORKING_LUMA[1] * g + WORKING_LUMA[2] * b;
 }

@@ -12,6 +12,7 @@
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderPlan } from '../graph/graphDoc';
+import { WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -39,6 +40,12 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 }
 `;
 
+// The EXIT: convert the linear Rec.2020 working color to linear sRGB primaries
+// (WORK_TO_SRGB), then apply the exact sRGB curve. srgbEncode clamps to [0,1]
+// first — that clamp IS the gamut clip (colors outside sRGB go negative after
+// the matrix), and it belongs here at the exit, not in the working chain.
+// Shared verbatim by the canvas present, the grayscale view and the rgba8unorm
+// readback used by stats/scopes/export, so all exits stay in lockstep.
 // All targets match the image size, so pos.xy maps 1:1 in every pass.
 const ENCODE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -51,13 +58,14 @@ fn srgbEncode(v: f32) -> f32 {
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
-  return vec4f(srgbEncode(t.r), srgbEncode(t.g), srgbEncode(t.b), 1.0);
+  let s = ${WGSL_WORK_TO_SRGB} * t.rgb;
+  return vec4f(srgbEncode(s.r), srgbEncode(s.g), srgbEncode(s.b), 1.0);
 }
 `;
 
-// Viewer-only grayscale: encode, then show the Rec.709 luma of the encoded
-// image on all channels — a tone/contrast check that never touches
-// readbacks or export.
+// Viewer-only grayscale: convert to sRGB + encode (same exit), then show the
+// WORKING_LUMA luma of the encoded image on all channels — a tone/contrast
+// check that never touches readbacks or export.
 const GRAYSCALE_ENCODE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 ${FULLSCREEN_VS}
@@ -69,7 +77,8 @@ fn srgbEncode(v: f32) -> f32 {
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
-  let y = dot(vec3f(srgbEncode(t.r), srgbEncode(t.g), srgbEncode(t.b)), vec3f(0.2126, 0.7152, 0.0722));
+  let s = ${WGSL_WORK_TO_SRGB} * t.rgb;
+  let y = dot(vec3f(srgbEncode(s.r), srgbEncode(s.g), srgbEncode(s.b)), ${WGSL_WORKING_LUMA});
   return vec4f(y, y, y, 1.0);
 }
 `;
@@ -763,8 +772,8 @@ export class GraphRenderer {
         const row = y * bytesPerRow;
         for (let x = 0; x < width - 1; x++) {
           const s = row + x * 4;
-          const l0 = 0.2126 * px[s]! + 0.7152 * px[s + 1]! + 0.0722 * px[s + 2]!;
-          const l1 = 0.2126 * px[s + 4]! + 0.7152 * px[s + 5]! + 0.0722 * px[s + 6]!;
+          const l0 = WORKING_LUMA[0] * px[s]! + WORKING_LUMA[1] * px[s + 1]! + WORKING_LUMA[2] * px[s + 2]!;
+          const l1 = WORKING_LUMA[0] * px[s + 4]! + WORKING_LUMA[1] * px[s + 5]! + WORKING_LUMA[2] * px[s + 6]!;
           sumL += Math.abs(l1 - l0);
           sumC += Math.abs(px[s + 4]! - px[s + 6]! - (px[s]! - px[s + 2]!));
         }
@@ -816,7 +825,7 @@ export class GraphRenderer {
           r[vr]!++;
           g[vg]!++;
           b[vb]!++;
-          luma[Math.min(255, Math.round(0.2126 * vr + 0.7152 * vg + 0.0722 * vb))]!++;
+          luma[Math.min(255, Math.round(WORKING_LUMA[0] * vr + WORKING_LUMA[1] * vg + WORKING_LUMA[2] * vb))]!++;
           if (vr === 0 || vg === 0 || vb === 0) shadow++;
           if (vr === 255 || vg === 255 || vb === 255) highlight++;
         }

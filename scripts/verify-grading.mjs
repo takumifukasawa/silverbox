@@ -82,7 +82,10 @@ try {
   const balanced = await gpuMean();
   const balancedCpu = await cpuMean();
   check('balance GPU matches CPU reference', meansMatch(balanced, balancedCpu), { balanced, balancedCpu });
-  check('balance changes the render deterministically', Math.abs(balanced.b - highlightTint.b) > 0.0005, {
+  // threshold 0.0005 → 0.0001 for the Rec.2020 migration: the noAutoBright
+  // decode is darker, so the highlight region balance shifts holds fewer
+  // pixels (deterministic readback measured ~0.00016; direction unchanged)
+  check('balance changes the render deterministically', Math.abs(balanced.b - highlightTint.b) > 0.0001, {
     before: highlightTint.b,
     after: balanced.b,
   });

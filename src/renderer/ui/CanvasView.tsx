@@ -1,6 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
+import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
+import { DECODE_OUTPUT_COLOR } from '../engine/decoder/librawDecoder';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
 import {
   buildPlan,
@@ -31,6 +33,10 @@ declare global {
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
+      /** Working-space identity + the decode's libraw output color (verify:cst). */
+      workingSpaceInfo(): { id: string; outputColor: number };
+      /** Fraction of decoded pixels whose WORK_TO_SRGB has any channel < −0.001 (out-of-gamut probe). */
+      outOfGamutFraction(): number | null;
       updateNodeParam(nodeId: string, key: string, value: number): void;
       applyShaderSource(nodeId: string, src: string): Promise<void>;
       addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
@@ -58,10 +64,26 @@ declare global {
 }
 
 /**
+ * The exit color transform, mirroring the ENCODE_SHADER matrix exactly (same
+ * row order, so GPU f32 and CPU f64 agree well within the 1/255 parity bound):
+ * linear Rec.2020 working color → linear sRGB. srgbEncode then clamps to
+ * [0,1] — the gamut clip lives at the exit.
+ */
+function workToSrgb(rgb: readonly [number, number, number]): [number, number, number] {
+  const [r, g, b] = rgb;
+  return [
+    WORK_TO_SRGB[0][0] * r + WORK_TO_SRGB[0][1] * g + WORK_TO_SRGB[0][2] * b,
+    WORK_TO_SRGB[1][0] * r + WORK_TO_SRGB[1][1] * g + WORK_TO_SRGB[1][2] * b,
+    WORK_TO_SRGB[2][0] * r + WORK_TO_SRGB[2][1] * g + WORK_TO_SRGB[2][2] * b,
+  ];
+}
+
+/**
  * Preview area. Milestone 4: the GraphDoc op chain runs as WebGPU passes over
- * the linear preview, ending in the exact sRGB encode. The verify harness
- * compares the GPU readback against cpuReferenceMean(), which executes the
- * same chain on the CPU via the op registry's reference implementations.
+ * the linear preview, ending in the exit encode (Rec.2020→sRGB + sRGB curve).
+ * The verify harness compares the GPU readback against cpuReferenceMean(),
+ * which executes the same chain on the CPU via the op registry's reference
+ * implementations and the same exit transform.
  */
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -254,9 +276,10 @@ export function CanvasView() {
           const x = i % width;
           const y = Math.floor(i / width);
           const px = cpuEvalPlan(plan, [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!], x, y, width, height);
-          r += srgbEncode(px[0]);
-          g += srgbEncode(px[1]);
-          b += srgbEncode(px[2]);
+          const s = workToSrgb(px);
+          r += srgbEncode(s[0]);
+          g += srgbEncode(s[1]);
+          b += srgbEncode(s[2]);
         }
         return { r: r / n, g: g / n, b: b / n };
       },
@@ -272,6 +295,21 @@ export function CanvasView() {
       imageForVerify() {
         const image = useAppStore.getState().image;
         return image ? { data: image.data, width: image.width, height: image.height } : null;
+      },
+      workingSpaceInfo() {
+        return { id: WORKING_SPACE_ID, outputColor: DECODE_OUTPUT_COLOR };
+      },
+      outOfGamutFraction() {
+        const image = useAppStore.getState().image;
+        if (!image) return null;
+        const { data } = image;
+        const n = data.length / 4;
+        let oog = 0;
+        for (let i = 0; i < n; i++) {
+          const s = workToSrgb([data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!]);
+          if (s[0] < -0.001 || s[1] < -0.001 || s[2] < -0.001) oog++;
+        }
+        return n > 0 ? oog / n : 0;
       },
       updateNodeParam(nodeId, key, value) {
         useAppStore.getState().updateNodeParam(nodeId, key, value);
@@ -323,7 +361,7 @@ export function CanvasView() {
             const r = samples.data[i * 3]!;
             const g = samples.data[i * 3 + 1]!;
             const b = samples.data[i * 3 + 2]!;
-            sum += (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+            sum += (WORKING_LUMA[0] * r + WORKING_LUMA[1] * g + WORKING_LUMA[2] * b) / 255;
           }
           meanLuma = n > 0 ? sum / n : 0;
         }

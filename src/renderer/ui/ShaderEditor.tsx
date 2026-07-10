@@ -60,7 +60,7 @@ export function ShaderEditor({ nodeId, src }: { nodeId: string; src: string }) {
   return (
     <div className="shader-editor-block">
       <div className="shader-editor-note">
-        fn shade(color, uv) → vec3f — color is linear RGB. Applies 400ms after typing stops (⌘⏎ to apply now).
+        fn shade(color, uv) → vec3f — color is linear Rec.2020 (working space). Applies 400ms after typing stops (⌘⏎ to apply now).
       </div>
       <div ref={hostRef} className="shader-editor" data-testid="shader-editor" />
       {error ? (

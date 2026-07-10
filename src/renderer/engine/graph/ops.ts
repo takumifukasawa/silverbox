@@ -7,6 +7,7 @@
  */
 
 import { srgbDecode, srgbEncode } from '../color/srgb';
+import { WGSL_WORKING_LUMA } from '../color/workingSpace';
 import {
   cpuBrightness,
   cpuContrast,
@@ -57,7 +58,7 @@ export interface OpDef {
 }
 
 const LUMA_WGSL = `fn luma(c: vec3f) -> f32 {
-  return dot(c, vec3f(0.2126, 0.7152, 0.0722));
+  return dot(c, ${WGSL_WORKING_LUMA});
 }
 `;
 

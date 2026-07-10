@@ -1,14 +1,19 @@
 /**
- * Image preparation worker: file bytes → linear RGBA preview.
+ * Image preparation worker: file bytes → linear Rec.2020 RGBA preview.
  *
- * RAW goes through libraw-wasm (which runs its own nested worker); JPEG is
- * decoded with createImageBitmap. Both paths then linearize (exact inverse
- * sRGB via LUT), box-downsample to the preview long edge in linear space, and
- * apply EXIF orientation once — downstream code never re-orients.
+ * RAW goes through libraw-wasm (decoded straight to linear Rec.2020 via
+ * outputColor; the gamma-encoded 16-bit output is inverted by the exact sRGB
+ * LUT — transfer handling is primaries-independent). JPEG is decoded with
+ * createImageBitmap to sRGB, linearized (exact inverse sRGB via LUT), then
+ * matrixed sRGB→Rec.2020 so it enters the SAME working space (the exit's
+ * Rec.2020→sRGB round-trips it back, so a JPEG still displays as itself). Both
+ * paths box-downsample in linear space and apply EXIF orientation once —
+ * downstream code never re-orients.
  */
 import { LibrawDecoder } from './librawDecoder';
 import type { CameraColorInfo, CaptureInfo } from './RawDecoder';
 import { buildDecodeLut16, buildDecodeLut8 } from '../color/srgb';
+import { SRGB_TO_WORK } from '../color/workingSpace';
 
 export interface DecodeRequest {
   id: number;
@@ -50,13 +55,20 @@ function linearizeRgb16(src: Uint16Array, pixels: number): Float32Array {
   return out;
 }
 
-/** RGBA u8 (sRGB) → linear RGBA f32. */
+// sRGB→Rec.2020 primaries (row-major), hoisted so the per-pixel loop indexes
+// plain locals instead of the readonly tuple.
+const S2W = SRGB_TO_WORK;
+
+/** RGBA u8 (sRGB) → linear Rec.2020 RGBA f32 (working space). */
 function linearizeRgba8(src: Uint8ClampedArray, pixels: number): Float32Array {
   const out = new Float32Array(pixels * 4);
   for (let i = 0, o = 0; i < pixels; i++, o += 4) {
-    out[o] = lut8[src[o]!]!;
-    out[o + 1] = lut8[src[o + 1]!]!;
-    out[o + 2] = lut8[src[o + 2]!]!;
+    const r = lut8[src[o]!]!;
+    const g = lut8[src[o + 1]!]!;
+    const b = lut8[src[o + 2]!]!;
+    out[o] = S2W[0][0] * r + S2W[0][1] * g + S2W[0][2] * b;
+    out[o + 1] = S2W[1][0] * r + S2W[1][1] * g + S2W[1][2] * b;
+    out[o + 2] = S2W[2][0] * r + S2W[2][1] * g + S2W[2][2] * b;
     out[o + 3] = 1;
   }
   return out;
