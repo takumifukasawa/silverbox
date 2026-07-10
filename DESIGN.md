@@ -161,6 +161,13 @@ resolution (the Lightroom/darktable model) — keeping full-resolution
 textures in the interactive chain at all times would trade responsiveness
 and VRAM for accuracy nobody is looking at.
 
+And the **UI thread is sacred**: interaction responsiveness must never be
+hostage to rendering load. Decode already lives in a worker; the direction
+of travel is a worker-owned renderer (OffscreenCanvas) that receives
+documents and returns compact results, with heavy per-pixel analysis
+(histograms, scopes) moving into compute shaders — so the main thread's
+only jobs are the UI and the document.
+
 ## Non-goals (deliberate, revisitable)
 
 - **No catalog/DAM** for now. Silverbox develops one image at a time;
