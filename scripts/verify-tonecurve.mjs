@@ -57,6 +57,10 @@ try {
   console.log('verify-tonecurve (editor + drag builds a midtone lift):');
   await page.locator('.react-flow__node[data-id="dev"]').click();
   const svg = page.locator('[data-testid="curve-editor"]');
+  // the toolbar can wrap to multiple rows (export controls), pushing the
+  // editor below the fold of the scrolling inspector — mouse coordinates
+  // only work on-screen
+  await svg.scrollIntoViewIfNeeded();
   const box = await svg.boundingBox();
   check('curve editor is visible in the Develop panel', !!box, box);
   const pastBefore = await historyPast();

@@ -10,6 +10,8 @@ const api: SilverboxApi = {
   exportImageDialog: (defaultPath) => ipcRenderer.invoke(IPC.exportImageDialog, defaultPath),
   exportEncode: (req) => ipcRenderer.invoke(IPC.exportEncode, req),
   getPathForFile: (file) => webUtils.getPathForFile(file),
+  settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
+  settingsUpdate: (partial) => ipcRenderer.invoke(IPC.settingsUpdate, partial),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

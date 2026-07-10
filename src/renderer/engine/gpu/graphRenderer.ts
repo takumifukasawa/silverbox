@@ -12,8 +12,9 @@
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
 import { orientedDims, type RenderPlan } from '../graph/graphDoc';
-import { WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
+import { WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 import { WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
+import type { ExportColorSpace } from '../../../../shared/ipc';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -41,17 +42,20 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 }
 `;
 
-// The EXIT: convert the linear Rec.2020 working color to linear sRGB primaries
-// (WORK_TO_SRGB), then apply the exact sRGB curve. srgbEncode clamps to [0,1]
-// first — that clamp IS the gamut clip (colors outside sRGB go negative after
-// the matrix), and it belongs here at the exit, not in the working chain.
-// Shared verbatim by the canvas present, the grayscale view and the rgba8unorm
-// readback used by stats/scopes/export, so all exits stay in lockstep.
+// The EXIT: convert the linear Rec.2020 working color to linear display
+// primaries (WORK_TO_SRGB or, for the export-only P3 variant, WORK_TO_P3),
+// then apply the exact sRGB transfer curve — Display P3 shares sRGB's curve,
+// only the primaries matrix differs, so `matrixWgsl` is the sole parameter.
+// srgbEncode clamps to [0,1] first — that clamp IS the gamut clip (colors
+// outside the target gamut go negative after the matrix), and it belongs
+// here at the exit, not in the working chain. The sRGB instantiation below
+// (ENCODE_SHADER) is shared verbatim by the canvas present, the grayscale
+// view and the rgba8unorm readback used by stats/scopes/export, so all of
+// those exits stay in lockstep; the P3 instantiation (ENCODE_SHADER_P3) is
+// used ONLY by the export path (renderToPixels), never by the preview.
 // All targets match the image size, so pos.xy maps 1:1 in every pass.
-// srgbEncode below clamps to [0,1] first (WGSL_SRGB_ENCODE's srgbEncode1 does
-// not) — that clamp IS the gamut clip (colors outside sRGB go negative after
-// the matrix), and it belongs here at the exit, not in the shared snippet.
-const ENCODE_SHADER = /* wgsl */ `
+function buildEncodeShader(matrixWgsl: string): string {
+  return /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 ${FULLSCREEN_VS}
 ${WGSL_SRGB_ENCODE}
@@ -59,10 +63,15 @@ ${WGSL_SRGB_ENCODE}
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
-  let s = clamp(${WGSL_WORK_TO_SRGB} * t.rgb, vec3f(0.0), vec3f(1.0));
+  let s = clamp(${matrixWgsl} * t.rgb, vec3f(0.0), vec3f(1.0));
   return vec4f(srgbEncode(s), 1.0);
 }
 `;
+}
+
+const ENCODE_SHADER = buildEncodeShader(WGSL_WORK_TO_SRGB);
+/** Export-only color-space variant (registered under shader id 'encode/p3'); the preview never uses this. */
+const ENCODE_SHADER_P3 = buildEncodeShader(WGSL_WORK_TO_P3);
 
 // Viewer-only grayscale: convert to sRGB + encode (same exit), then show the
 // WORKING_LUMA luma of the encoded image on all channels — a tone/contrast
@@ -275,6 +284,8 @@ export class GraphRenderer {
   private resampleUniform: GPUBuffer | null = null;
   private resamplePipelineCache: GPURenderPipeline | null = null;
   private resampleSamplerCache: GPUSampler | null = null;
+  /** Export-only encode pipelines, keyed by shader id ('encode/srgb' | 'encode/p3'); the preview's own pipelines are separate fixed fields above. */
+  private exportEncodePipelines = new Map<string, GPURenderPipeline>();
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -373,6 +384,28 @@ export class GraphRenderer {
       });
     }
     return this.resamplePipelineCache;
+  }
+
+  /**
+   * Export-only encode pipeline for `colorSpace`, compiled once per id and
+   * cached under it ('encode/srgb' | 'encode/p3') — used ONLY by
+   * renderToPixels. The preview/readback paths (render, withEncodedPixels and
+   * everything built on it) keep using the fixed `readbackEncodePipeline` /
+   * canvas pipelines untouched, so this cache can never affect their output.
+   */
+  private exportEncodePipeline(colorSpace: ExportColorSpace): GPURenderPipeline {
+    const shaderId = colorSpace === 'p3' ? 'encode/p3' : 'encode/srgb';
+    let pipeline = this.exportEncodePipelines.get(shaderId);
+    if (!pipeline) {
+      const module = this.device.createShaderModule({ code: colorSpace === 'p3' ? ENCODE_SHADER_P3 : ENCODE_SHADER });
+      pipeline = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      });
+      this.exportEncodePipelines.set(shaderId, pipeline);
+    }
+    return pipeline;
   }
 
   /** Clamp-to-edge bilinear sampler — the resample pass's only non-integer-coordinate read. */
@@ -656,12 +689,15 @@ export class GraphRenderer {
 
   /**
    * Run the chain over an arbitrary image (e.g. the full-resolution decode
-   * for export) and return tightly-packed sRGB RGBA8 pixels. Independent of
-   * the preview state; all GPU resources are transient.
+   * for export) and return tightly-packed RGBA8 pixels display-encoded in
+   * `colorSpace` (default 'srgb'; the canvas preview always stays sRGB —
+   * only this export path selects the P3 variant). Independent of the
+   * preview state; all GPU resources are transient.
    */
   async renderToPixels(
     image: PreparedImage,
-    plan: RenderPlan
+    plan: RenderPlan,
+    colorSpace: ExportColorSpace = 'srgb'
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     const { device } = this;
     const { data, width: srcWidth, height: srcHeight } = image;
@@ -726,7 +762,9 @@ export class GraphRenderer {
         size: bytesPerRow * height,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
-      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
+      this.addPass(encoder, target.createView(), this.exportEncodePipeline(colorSpace), [
+        { binding: 0, resource: linear },
+      ]);
       encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
       device.queue.submit([encoder.finish()]);
       await buffer.mapAsync(GPUMapMode.READ);

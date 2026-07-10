@@ -17,6 +17,10 @@ process.env.SILVERBOX_TEST = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
+// autosave (default on) persists sidecars across suite scripts — isolate
+const { rmSync: rmSidecarSync } = await import('node:fs');
+rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+
 // rgba16float chain passes + 8-bit readback quantization; means stay well
 // inside 1/255 per channel (see verify-ms3).
 const GPU_CPU_TOLERANCE = 1 / 255;

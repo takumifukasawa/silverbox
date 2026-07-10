@@ -59,7 +59,8 @@
     "verify:lens": "node scripts/verify-lens.mjs",
     "verify:cst": "node scripts/verify-cst.mjs",
     "verify:polish": "node scripts/verify-polish.mjs",
-    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:hsl && npm run verify:detail && npm run verify:dnd && npm run verify:view && npm run verify:grading && npm run verify:scopes && npm run verify:effects && npm run verify:crop && npm run verify:lens && npm run verify:cst && npm run verify:polish && npm run verify:ms14"
+    "verify:exportsettings": "node scripts/verify-exportsettings.mjs",
+    "verify": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:hsl && npm run verify:detail && npm run verify:dnd && npm run verify:view && npm run verify:grading && npm run verify:scopes && npm run verify:effects && npm run verify:crop && npm run verify:lens && npm run verify:cst && npm run verify:polish && npm run verify:exportsettings && npm run verify:ms14"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

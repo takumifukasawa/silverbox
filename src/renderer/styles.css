@@ -67,7 +67,11 @@ button:disabled {
   display: flex;
   gap: 14px;
   align-items: baseline;
-  min-width: 0;
+  /* Enough room for the sidecar notices to stay visible (non-zero width) —
+     with more export controls sharing the wrapping toolbar row, a `min-width:
+     0` here could squeeze this flex-basis-0 item down to 0px instead of
+     wrapping to its own line. */
+  min-width: 260px;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -145,6 +149,20 @@ button:disabled {
 
 .toolbar-export-opts input {
   width: 56px;
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.toolbar-export-opts input[type='text'] {
+  width: 92px;
+}
+
+.toolbar-export-opts select {
   background: #1b1b1b;
   color: #ddd;
   border: 1px solid #333;

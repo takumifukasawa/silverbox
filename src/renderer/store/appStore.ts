@@ -33,7 +33,13 @@ import {
 import { validateWgsl } from '../engine/shader/validateWgsl';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
-import { SIDECAR_SUFFIX } from '../../../shared/ipc';
+import {
+  DEFAULT_SETTINGS,
+  SIDECAR_SUFFIX,
+  type ExportColorSpace,
+  type ExportMetadataPolicy,
+  type Settings,
+} from '../../../shared/ipc';
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
@@ -154,9 +160,31 @@ interface AppState {
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
   /** Develop at full resolution and write .jpg/.png (dialog when no path). */
-  exportImage(path?: string, opts?: { quality?: number; maxDim?: number | null }): Promise<void>;
+  exportImage(
+    path?: string,
+    opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
+  ): Promise<void>;
   undo(): void;
   redo(): void;
+  /** `<userData>/settings.json`, loaded at boot; DEFAULT_SETTINGS until that IPC round-trip resolves. */
+  settings: Settings;
+  /** Merge `partial` into the persisted settings via IPC; updates local state with the sanitized result. */
+  updateSettings(partial: Partial<Settings>): Promise<void>;
+}
+
+// --- Sidecar autosave (settings.autosaveSidecar, default ON) ---------------
+//
+// Debounced 1000ms after the LAST graph mutation (⌘S saves immediately and
+// cancels this timer instead of racing it). Declared at module scope, above
+// the store, so both `openImageByPath` (cancel on image switch) and the
+// post-creation subscriber below (schedule on mutation) close over the same
+// timer handle without a definition-order problem.
+let autosaveTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelAutosaveTimer(): void {
+  if (autosaveTimer !== null) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+  }
 }
 
 /** History advance for a graph mutation; `key` coalesces slider-drag runs. */
@@ -305,8 +333,12 @@ export const useAppStore = create<AppState>((set, get) => {
   cropMode: false,
   wbPicking: false,
   developClipboard: null,
+  settings: DEFAULT_SETTINGS,
 
   async openImageByPath(path: string) {
+    // a pending autosave from whatever image was open belongs to THAT
+    // image/path; never let it fire against the one we're about to open
+    cancelAutosaveTimer();
     const fileName = path.split('/').pop() ?? path;
     const kind = isRawFileName(fileName) ? 'raw' : isJpegFileName(fileName) ? 'jpg' : null;
     if (!kind) {
@@ -316,7 +348,7 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
     try {
       const bytes = await window.silverbox.readFile(path);
-      const image = await loadImage(bytes, kind);
+      const image = await loadImage(bytes, kind, get().settings.previewLongEdge);
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
       // untouched until the user saves over it) with a toolbar notice.
@@ -797,9 +829,11 @@ export const useAppStore = create<AppState>((set, get) => {
       const bytes = await window.silverbox.readFile(imagePath);
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
+      const colorSpace = opts?.colorSpace ?? 'srgb';
       const { data, width, height } = await renderer.renderToPixels(
         full,
-        buildPlan(graph, { wb: get().wbModel, renderScale: 1 })
+        buildPlan(graph, { wb: get().wbModel, renderScale: 1 }),
+        colorSpace
       );
       // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
       const cap = full.capture;
@@ -810,6 +844,8 @@ export const useAppStore = create<AppState>((set, get) => {
         outPath: target,
         quality: Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))),
         maxDim: opts?.maxDim ?? null,
+        metadata: opts?.metadata ?? 'all',
+        colorSpace,
         meta: {
           ...(cap?.cameraMake ? { cameraMake: cap.cameraMake } : {}),
           ...(cap?.cameraModel ? { cameraModel: cap.cameraModel } : {}),
@@ -830,6 +866,9 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async saveGraph() {
+    // an explicit save (⌘S, or autosave's own timer firing) always cancels
+    // any still-pending autosave — nothing left to race it afterward
+    cancelAutosaveTimer();
     const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarUnreadable } = get();
     if (!imagePath || !fileName || sidecarUnreadable) return;
     const source = {
@@ -841,5 +880,40 @@ export const useAppStore = create<AppState>((set, get) => {
     await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph, source, createdAt));
     set({ graphDirty: false, sidecarCreatedAt: createdAt });
   },
+
+  async updateSettings(partial) {
+    const settings = await window.silverbox.settingsUpdate(partial);
+    set({ settings });
+    // turning autosave off must not leave a stale timer to fire once more
+    if (!settings.autosaveSidecar) cancelAutosaveTimer();
+  },
   };
+});
+
+// Boot: load persisted settings into the store once `window.silverbox` (the
+// preload bridge) exists — always true in the real app; guarded for safety
+// under any non-Electron test harness that imports this module directly.
+if (typeof window !== 'undefined' && window.silverbox) {
+  void window.silverbox.settingsGet().then((settings) => {
+    useAppStore.setState({ settings });
+  });
+}
+
+// Sidecar autosave (settings.autosaveSidecar, default ON): any graph mutation
+// (graph replaced by reference + graphDirty:true) reschedules a 1000ms
+// debounce that saves once edits settle. Subscribing here, after the store
+// exists, is the only point that can see "the graph object changed" without
+// threading a scheduling call through every one of the many graph-mutating
+// actions above.
+let lastAutosaveGraph: GraphDoc | null = null;
+useAppStore.subscribe((state) => {
+  if (state.graph === lastAutosaveGraph) return;
+  lastAutosaveGraph = state.graph;
+  if (!state.graphDirty || !state.settings.autosaveSidecar) return;
+  if (!state.imagePath || !state.fileName || state.sidecarUnreadable) return;
+  cancelAutosaveTimer();
+  autosaveTimer = setTimeout(() => {
+    autosaveTimer = null;
+    void useAppStore.getState().saveGraph();
+  }, 1000);
 });

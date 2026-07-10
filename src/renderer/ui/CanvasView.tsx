@@ -22,6 +22,7 @@ import {
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
+import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
 declare global {
   interface Window {
@@ -34,6 +35,7 @@ declare global {
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
+      sidecarState(): { notice: string | null; unreadable: boolean };
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
@@ -46,8 +48,15 @@ declare global {
       addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
       updateShaderParam(nodeId: string, name: string, value: number): void;
       removeShaderParam(nodeId: string, name: string): void;
-      exportImageTo(path: string): void;
+      exportImageTo(
+        path: string,
+        opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
+      ): void;
       exportState(): { status: string; error: string | null };
+      /** Current `<userData>/settings.json` state (loaded at boot / after any settingsUpdate). */
+      settingsState(): Settings;
+      /** Merge `partial` into settings via IPC (mirrors the store action). */
+      updateSettings(partial: Partial<Settings>): Promise<void>;
       canvasView(): ViewportState & { dpr: number };
       wbState(): { asShot: { temp: number; tint: number }; mccamyCct: number };
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
@@ -309,6 +318,10 @@ export function CanvasView() {
       graphDirty() {
         return useAppStore.getState().graphDirty;
       },
+      sidecarState() {
+        const s = useAppStore.getState();
+        return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable };
+      },
       shaderErrors() {
         return useAppStore.getState().shaderErrors;
       },
@@ -346,12 +359,18 @@ export function CanvasView() {
       removeShaderParam(nodeId, name) {
         useAppStore.getState().removeShaderParam(nodeId, name);
       },
-      exportImageTo(path) {
-        void useAppStore.getState().exportImage(path);
+      exportImageTo(path, opts) {
+        void useAppStore.getState().exportImage(path, opts);
       },
       exportState() {
         const s = useAppStore.getState();
         return { status: s.exportStatus, error: s.exportError };
+      },
+      settingsState() {
+        return useAppStore.getState().settings;
+      },
+      updateSettings(partial) {
+        return useAppStore.getState().updateSettings(partial);
       },
       canvasView() {
         return { ...viewRef.current, dpr: devicePixelRatio };

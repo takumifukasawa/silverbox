@@ -9,8 +9,10 @@ import {
   type ExportEncodeResult,
   type OpenImageDialogResult,
   type PingResult,
+  type Settings,
 } from '../../shared/ipc';
 import { encodeExport } from './imageExport';
+import { readSettings, updateSettings } from './settings';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -90,6 +92,15 @@ function registerIpc(): void {
   ipcMain.handle(IPC.exportEncode, async (_ev, req: ExportEncodeRequest): Promise<ExportEncodeResult> => {
     return encodeExport(req);
   });
+
+  ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => readSettings());
+
+  ipcMain.handle(IPC.settingsUpdate, async (_ev, partial: unknown): Promise<Settings> => {
+    if (typeof partial !== 'object' || partial === null) {
+      throw new Error('settingsUpdate: partial must be an object');
+    }
+    return updateSettings(partial as Partial<Settings>);
+  });
 }
 
 /**
@@ -125,8 +136,11 @@ function createWindow(): void {
   }
 }
 
-void app.whenReady().then(() => {
+void app.whenReady().then(async () => {
   if (testMode && process.platform === 'darwin') app.setActivationPolicy('accessory');
+  // Load (and, on first run, create) settings.json before the renderer can
+  // possibly ask for it over IPC.
+  await readSettings();
   registerIpc();
   createWindow();
 

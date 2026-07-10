@@ -45,6 +45,26 @@ export const SRGB_TO_WORK: Mat3 = [
 ];
 
 /**
+ * Rec.2020 (linear) → Display P3 (linear), D65, row-major — the export
+ * color-space EXIT variant (Toolbar's "export-colorspace" = P3). Display P3
+ * shares sRGB's transfer curve, only the primaries differ, so this matrix is
+ * used exactly where WORK_TO_SRGB is, with the same sRGB curve afterward.
+ *
+ * Derived by composing published D65 chromaticity-to-XYZ matrices — Rec.2020
+ * primaries (0.708,0.292)/(0.170,0.797)/(0.131,0.046) → XYZ, then XYZ →
+ * Display P3 primaries (0.680,0.320)/(0.265,0.690)/(0.150,0.060), both against
+ * the D65 white point (0.3127,0.3290) — and rounded to 4 places. Verified
+ * numerically (both before and after rounding): WORK_TO_P3 · [1,1,1] =
+ * [1.0000, 1.0000, 1.0000], i.e. the shared D65 white maps to itself within
+ * 1e-4 (the unrounded product was within 1e-15).
+ */
+export const WORK_TO_P3: Mat3 = [
+  [1.3436, -0.2822, -0.0614],
+  [-0.0653, 1.0758, -0.0105],
+  [0.0028, -0.0196, 1.0168],
+];
+
+/**
  * Luma weights used by ops and scopes (grayscale view, saturation/vibrance,
  * grading, detail luma/chroma split, waveform/vectorscope math).
  *
@@ -72,6 +92,9 @@ function wgslMat3(m: Mat3): string {
 
 /** `WORK_TO_SRGB` as an inline WGSL mat3x3f expression. */
 export const WGSL_WORK_TO_SRGB = wgslMat3(WORK_TO_SRGB);
+
+/** `WORK_TO_P3` as an inline WGSL mat3x3f expression. */
+export const WGSL_WORK_TO_P3 = wgslMat3(WORK_TO_P3);
 
 /** `WORKING_LUMA` as an inline WGSL vec3f expression. */
 export const WGSL_WORKING_LUMA = `vec3f(${f(WORKING_LUMA[0])}, ${f(WORKING_LUMA[1])}, ${f(WORKING_LUMA[2])})`;

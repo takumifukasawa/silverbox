@@ -16,7 +16,12 @@ process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
+
+// autosave (default on) persists sidecars across suite scripts — isolate
+const { rmSync: rmSidecarSync } = await import('node:fs');
+rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
+rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
 
 // rgba16float quantizes the linear input (~11-bit mantissa) and the 8-bit
 // readback target quantizes the output, so allow 1/255 per channel on means.

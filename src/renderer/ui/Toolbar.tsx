@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import type { PingResult } from '../../../shared/ipc';
+import { useEffect, useRef, useState } from 'react';
+import type { ExportColorSpace, ExportMetadataPolicy, ExportPreset, PingResult } from '../../../shared/ipc';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
 import type { AddableKind } from '../engine/graph/graphDoc';
@@ -51,13 +51,49 @@ function ExportControls() {
   const exportError = useAppStore((s) => s.exportError);
   const exportInfo = useAppStore((s) => s.exportInfo);
   const exportImage = useAppStore((s) => s.exportImage);
+  const settings = useAppStore((s) => s.settings);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const [quality, setQuality] = useState('90');
   const [maxDim, setMaxDim] = useState('');
+  const [metadata, setMetadata] = useState<ExportMetadataPolicy>('all');
+  const [colorSpace, setColorSpace] = useState<ExportColorSpace>('srgb');
+  const [presetName, setPresetName] = useState('');
+
+  // Seed the controls from settings.export exactly once, when settingsGet's
+  // IPC round-trip lands (the store starts on DEFAULT_SETTINGS synchronously,
+  // then replaces it) — a plain [] dependency would re-seed on every later
+  // settingsUpdate (e.g. applying a preset should NOT get overwritten right
+  // back by a stale effect run).
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current) return;
+    seededRef.current = true;
+    setQuality(String(settings.export.quality));
+    setMaxDim(settings.export.maxDim != null ? String(settings.export.maxDim) : '');
+    setMetadata(settings.export.metadata);
+    setColorSpace(settings.export.colorSpace);
+  }, [settings]);
 
   const exporting = exportStatus === 'working';
   const q = Math.min(100, Math.max(1, Math.round(Number(quality) || 90)));
   const dim = Math.round(Number(maxDim));
   const maxDimValue = maxDim.trim() !== '' && Number.isFinite(dim) && dim > 0 ? dim : null;
+
+  const applyPreset = (preset: ExportPreset) => {
+    setQuality(String(preset.quality));
+    setMaxDim(preset.maxDim != null ? String(preset.maxDim) : '');
+    setMetadata(preset.metadata);
+    setColorSpace(preset.colorSpace);
+    setPresetName(preset.name);
+  };
+
+  const savePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const preset: ExportPreset = { name, quality: q, maxDim: maxDimValue, metadata, colorSpace };
+    const exportPresets = [...settings.exportPresets.filter((p) => p.name !== name), preset];
+    void updateSettings({ exportPresets });
+  };
 
   return (
     <>
@@ -86,9 +122,70 @@ function ExportControls() {
             onChange={(ev) => setMaxDim(ev.target.value)}
           />
         </label>
+        <label title="EXIF metadata carried into the export ('all' | 'minimal' | 'none' — the color-space ICC profile is always attached regardless)">
+          metadata
+          <select
+            value={metadata}
+            data-testid="export-metadata"
+            disabled={exporting}
+            onChange={(ev) => setMetadata(ev.target.value as ExportMetadataPolicy)}
+          >
+            <option value="all">all</option>
+            <option value="minimal">minimal</option>
+            <option value="none">none</option>
+          </select>
+        </label>
+        <label title="Export color space / ICC profile">
+          space
+          <select
+            value={colorSpace}
+            data-testid="export-colorspace"
+            disabled={exporting}
+            onChange={(ev) => setColorSpace(ev.target.value as ExportColorSpace)}
+          >
+            <option value="srgb">sRGB</option>
+            <option value="p3">Display P3</option>
+          </select>
+        </label>
+        <label title="Apply a saved export preset (quality/long edge/metadata/color space)">
+          preset
+          <select
+            value={settings.exportPresets.some((p) => p.name === presetName) ? presetName : ''}
+            data-testid="export-preset"
+            disabled={exporting || settings.exportPresets.length === 0}
+            onChange={(ev) => {
+              const preset = settings.exportPresets.find((p) => p.name === ev.target.value);
+              if (preset) applyPreset(preset);
+            }}
+          >
+            <option value="">–</option>
+            {settings.exportPresets.map((p) => (
+              <option key={p.name} value={p.name}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <input
+          type="text"
+          placeholder="preset name"
+          value={presetName}
+          data-testid="export-preset-name"
+          disabled={exporting}
+          onChange={(ev) => setPresetName(ev.target.value)}
+        />
+        <button
+          type="button"
+          onClick={savePreset}
+          disabled={exporting || presetName.trim() === ''}
+          data-testid="export-save-preset"
+          title="Save the current quality/long edge/metadata/color space as a named preset"
+        >
+          Save preset
+        </button>
       </span>
       <button
-        onClick={() => void exportImage(undefined, { quality: q, maxDim: maxDimValue })}
+        onClick={() => void exportImage(undefined, { quality: q, maxDim: maxDimValue, metadata, colorSpace })}
         disabled={imageStatus !== 'ready' || exporting}
         data-testid="export-button"
         title="Render the graph at full resolution and export"
