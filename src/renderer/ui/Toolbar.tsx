@@ -253,6 +253,8 @@ export function Toolbar() {
   const cropMode = useAppStore((s) => s.cropMode);
   const toggleCropMode = useAppStore((s) => s.toggleCropMode);
   const addLocalAdjustment = useAppStore((s) => s.addLocalAdjustment);
+  const maskOverlay = useAppStore((s) => s.maskOverlay);
+  const toggleMaskOverlay = useAppStore((s) => s.toggleMaskOverlay);
   const [ping, setPing] = useState<PingResult | null>(null);
 
   useEffect(() => {
@@ -262,6 +264,7 @@ export function Toolbar() {
   const cap = image?.capture;
   const selected = graph.nodes.find((n) => n.id === selectedNodeId);
   const deletable = selected && selected.kind !== 'input' && selected.kind !== 'output';
+  const selectedIsMask = selected?.kind === MASK_KIND;
 
   return (
     <div className="toolbar">
@@ -309,6 +312,15 @@ export function Toolbar() {
         title="Add a Develop + Mask + Blend rig feeding the active output, and select the mask"
       >
         + Local Adjustment
+      </button>
+      <button
+        onClick={toggleMaskOverlay}
+        disabled={!selectedIsMask}
+        data-testid="mask-overlay-toggle"
+        className={maskOverlay ? 'active' : undefined}
+        title="Show the selected mask as a red overlay (O) — enabled while a mask node is selected"
+      >
+        Mask overlay
       </button>
       <button
         onClick={() => selectedNodeId && removeOpNode(selectedNodeId)}

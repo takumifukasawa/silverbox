@@ -720,25 +720,34 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!inEdge) return {};
       const sourceId = inEdge.source;
 
+      // Layout (spec-aligned left-to-right reading order): the Blend takes
+      // the OUTPUT's old slot; the output itself shifts right ~200px to make
+      // room. Develop sits above the blend, Mask below it — so the chain
+      // reads source → (D above / M below) → blend → output, not blend
+      // stranded to the right of a stationary output (#pointer-drag-lag's
+      // sibling UX bug — the old layout had Blend land right of Output).
+      const outX = activeOutput.position.x;
+      const outY = activeOutput.position.y;
+
       const devId = nextId(g, 'dev');
       const devNode: GraphNode = {
         id: devId,
         kind: DEVELOP_KIND,
-        position: { x: activeOutput.position.x, y: activeOutput.position.y - 130 },
+        position: { x: outX, y: outY - 130 },
         develop: defaultDevelopParams(),
       };
       const maskId = nextId({ ...g, nodes: [...g.nodes, devNode] }, 'mask');
       const maskNode: GraphNode = {
         id: maskId,
         kind: MASK_KIND,
-        position: { x: activeOutput.position.x, y: activeOutput.position.y + 130 },
+        position: { x: outX, y: outY + 130 },
         mask: defaultMaskParams(),
       };
       const blendId = nextId({ ...g, nodes: [...g.nodes, devNode, maskNode] }, 'blend');
       const blendNode: GraphNode = {
         id: blendId,
         kind: BLEND_KIND,
-        position: { x: activeOutput.position.x + 200, y: activeOutput.position.y },
+        position: { x: outX, y: outY },
         // Masked blend: `amount` now acts as an adjustment strength (spec
         // §3), defaulting to 1 (full D within the mask, none outside) — the
         // Lightroom-style local-adjustment behavior, distinct from a plain
@@ -749,7 +758,12 @@ export const useAppStore = create<AppState>((set, get) => {
 
       let scratch: GraphDoc = {
         ...g,
-        nodes: [...g.nodes, devNode, maskNode, blendNode],
+        nodes: [
+          ...g.nodes.map((n) => (n.id === activeOutput.id ? { ...n, position: { x: outX + 200, y: outY } } : n)),
+          devNode,
+          maskNode,
+          blendNode,
+        ],
         edges: g.edges.filter((e) => e.id !== inEdge.id),
       };
       const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {

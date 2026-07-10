@@ -18,6 +18,34 @@ export function pickDropFile(files: File[]): File | null {
   return files.find((f) => isRawFileName(f.name)) ?? files[0] ?? null;
 }
 
+/** <input> types that actually accept free text/numeric entry — everything
+ *  else (range, checkbox, radio, color, button…) is a plain control and must
+ *  NOT block window-level shortcuts just because it happens to hold focus. */
+const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'number', 'search', 'email', 'password', 'tel', 'url']);
+
+/**
+ * Single source of truth for "is the keydown target a text-entry surface" —
+ * used to guard every window-level shortcut below. Previously each handler
+ * inlined its own `tagName === 'INPUT'` check, which blocked shortcuts for
+ * ANY input (including the crop angle range slider and checkboxes) rather
+ * than just genuine text entry — that's why ⌘Z/O "sometimes" didn't fire: it
+ * depended on which control last held focus, not on whether the user was
+ * actually typing (#46/undo-focus).
+ */
+export function isTextEntry(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  if (el.isContentEditable) return true;
+  if (el.tagName === 'TEXTAREA') return true;
+  if (el.tagName === 'INPUT') {
+    const type = (el as HTMLInputElement).type || 'text';
+    return TEXT_ENTRY_INPUT_TYPES.has(type);
+  }
+  // Monaco renders into plain <div>/<textarea> nodes inside .shader-editor —
+  // its own undo stack and keybindings must own the keystroke, not ours.
+  return !!el.closest?.('.shader-editor');
+}
+
 export function App() {
   const [dropActive, setDropActive] = useState(false);
 
@@ -35,13 +63,7 @@ export function App() {
       }
       if (!cmd && !ev.altKey && (ev.key === '\\' || ev.key.toLowerCase() === 'g')) {
         // viewer toggles (LR-style \ = before/after); never steal from inputs
-        const target = ev.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
-        ) {
-          return;
-        }
+        if (isTextEntry(ev.target)) return;
         if (useAppStore.getState().imageStatus !== 'ready') return;
         ev.preventDefault();
         if (ev.key === '\\') useAppStore.getState().toggleBefore();
@@ -49,36 +71,18 @@ export function App() {
       }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
-        const target = ev.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
-        ) {
-          return;
-        }
+        if (isTextEntry(ev.target)) return;
         ev.preventDefault();
         if (ev.shiftKey) useAppStore.getState().redo();
         else useAppStore.getState().undo();
       }
       if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'c' || ev.key === 'C')) {
-        const target = ev.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
-        ) {
-          return;
-        }
+        if (isTextEntry(ev.target)) return;
         ev.preventDefault();
         useAppStore.getState().copyDevelopSettings();
       }
       if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'v' || ev.key === 'V')) {
-        const target = ev.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
-        ) {
-          return;
-        }
+        if (isTextEntry(ev.target)) return;
         ev.preventDefault();
         useAppStore.getState().pasteDevelopSettings();
       }
@@ -92,13 +96,7 @@ export function App() {
         // masks milestone: 'O' toggles the LR-style red mask overlay, but
         // only while the selection is actually a mask node — off = normal
         // render, mask stays selected (spec §5).
-        const target = ev.target as HTMLElement | null;
-        if (
-          target &&
-          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
-        ) {
-          return;
-        }
+        if (isTextEntry(ev.target)) return;
         const s = useAppStore.getState();
         const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
         if (node?.kind !== 'mask') return;
@@ -106,8 +104,13 @@ export function App() {
         s.toggleMaskOverlay();
       }
     };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    // Capture phase + window target: these shortcuts must fire regardless of
+    // which panel currently holds focus (node editor pane, canvas, inspector)
+    // — capture guarantees we see the event before any descendant has a
+    // chance to stopPropagation() it (React Flow's own pane/selection
+    // handling included), so only isTextEntry's explicit guard opts out.
+    window.addEventListener('keydown', onKeyDown, { capture: true });
+    return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, []);
 
   // Drag & drop open (UI spec §14): window-level handlers, Files-only, a

@@ -233,6 +233,13 @@ button:disabled {
   transform-origin: 0 0;
 }
 
+/* WB / colorKey eyedropper: signal picking mode on the canvas itself — it
+   sits on top of .canvas-viewport's own grab/grabbing pan cursor, so the
+   more specific rule here must win regardless of hover/active state. */
+.canvas-view-canvas--picking {
+  cursor: crosshair;
+}
+
 .canvas-controls {
   position: absolute;
   right: 10px;
@@ -325,13 +332,22 @@ button:disabled {
 
 .crop-handle {
   position: absolute;
-  width: 10px;
-  height: 10px;
-  margin: -5px;
+  width: 12px;
+  height: 12px;
+  margin: -6px;
   background: #fff;
   border: 1px solid #333;
   border-radius: 2px;
   touch-action: none;
+}
+
+/* Enlarge the GRABBABLE area well past the visible 12px dot (≥20px hit target)
+   without changing how big the handle looks — an invisible ::after padding
+   hitbox, same trick used below for React Flow's own handles. */
+.crop-handle::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
 }
 
 .crop-handle-nw {
@@ -988,6 +1004,24 @@ button:disabled {
   background: rgba(60, 25, 28, 0.92);
   border-color: #e06c75;
   color: #ff7a76;
+}
+
+/* React Flow's default handle dot is 6px — too small to reliably grab for
+   wiring edges. Bump the visible dot to 12px and, same trick as
+   .crop-handle above, add an invisible ::after padding hitbox that reaches
+   well past it (≥20px) without changing how big it looks. pointer-events is
+   set explicitly (not inherited) so the enlarged area stays clickable even
+   though the base .react-flow__handle rule sets pointer-events: none at rest. */
+.react-flow__handle {
+  width: 12px;
+  height: 12px;
+}
+
+.react-flow__handle::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
+  pointer-events: auto;
 }
 
 .blend-node {

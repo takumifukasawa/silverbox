@@ -79,6 +79,8 @@ export class RenderWorkerClient {
   private gen = 0;
   /** Mirrors GraphRenderer.hasImage — true once setImage() has been posted (see graphRenderer.ts). */
   hasImage = false;
+  /** Verify/debug-only: counts render() calls (worker posts) — see CanvasView's __debug.renderPostCount(). */
+  renderPostCount = 0;
   viewMode: 'color' | 'grayscale' = 'color';
   private onError: ((message: string) => void) | null = null;
 
@@ -130,6 +132,7 @@ export class RenderWorkerClient {
     overlayMaskNodeId?: string | null;
   }): void {
     this.gen++;
+    this.renderPostCount++;
     const msg: RenderWorkerCommand = {
       type: 'render',
       gen: this.gen,

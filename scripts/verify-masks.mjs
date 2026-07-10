@@ -110,6 +110,8 @@ try {
   // ---------------------------------------------------------------------
   console.log('verify-masks (2. + Local Adjustment: one click, one undo entry, D/M/B wired):');
   const pastBeforeLA = await historyPast();
+  const gBeforeLA = await graphState();
+  const outputBeforeLA = gBeforeLA.nodes.find((n) => n.kind === 'output');
   await page.locator('[data-testid="add-local-adjustment"]').click();
   check('+ Local Adjustment is exactly one undo entry', (await historyPast()) === pastBeforeLA + 1, {
     before: pastBeforeLA,
@@ -132,6 +134,30 @@ try {
     .isVisible()
     .catch(() => false);
   check('the new mask node (M) is selected afterwards', maskInspectorVisible, maskInspectorVisible);
+  // Layout reads left-to-right: source → (Develop above / Mask below) →
+  // Blend → output. Blend takes the output's OLD spot; the output itself
+  // shifts right ~200px to make room (previously it landed to the blend's
+  // right, reading backwards — see appStore.ts's addLocalAdjustment).
+  const devAfterLA = gAfterLA.nodes.find((n) => n.id === 'dev-1');
+  const maskAfterLA = gAfterLA.nodes.find((n) => n.id === 'mask-1');
+  const blendAfterLA = gAfterLA.nodes.find((n) => n.id === 'blend-1');
+  const outputAfterLA = gAfterLA.nodes.find((n) => n.kind === 'output');
+  check('blend lands where the output used to be', blendAfterLA.position.x === outputBeforeLA.position.x, {
+    blendX: blendAfterLA.position.x,
+    outputBeforeX: outputBeforeLA.position.x,
+  });
+  check('output shifts right of the blend (chain reads left-to-right)', outputAfterLA.position.x > blendAfterLA.position.x, {
+    blendX: blendAfterLA.position.x,
+    outputX: outputAfterLA.position.x,
+  });
+  check('Develop sits above the blend', devAfterLA.position.y < blendAfterLA.position.y, {
+    devY: devAfterLA.position.y,
+    blendY: blendAfterLA.position.y,
+  });
+  check('Mask sits below the blend', maskAfterLA.position.y > blendAfterLA.position.y, {
+    maskY: maskAfterLA.position.y,
+    blendY: blendAfterLA.position.y,
+  });
   const meanAfterLA = await gpuMean();
   check(
     'D is identity ⇒ a==b ⇒ readbackMean is bit-equal to baseline within 1e-6 regardless of the mask',
@@ -273,6 +299,23 @@ try {
     Math.abs(redness(screenshotOffAgain) - redness(screenshotOff)) < 0.03,
     { screenshotOff, screenshotOffAgain }
   );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-masks (6b. toolbar mask-overlay-toggle button — discoverable without the shortcut):');
+  const overlayToggleBtn = page.locator('[data-testid="mask-overlay-toggle"]');
+  check('toggle is enabled while a mask node is selected', await overlayToggleBtn.isEnabled(), await overlayToggleBtn.isEnabled());
+  const toggleActive = (btn) => btn.evaluate((el) => el.classList.contains('active'));
+  check('toggle starts inactive (overlay off)', (await toggleActive(overlayToggleBtn)) === false, await toggleActive(overlayToggleBtn));
+  await overlayToggleBtn.click();
+  check('clicking the toolbar toggle marks it active', (await toggleActive(overlayToggleBtn)) === true, await toggleActive(overlayToggleBtn));
+  const screenshotToggleOn = await clipMeans();
+  check(
+    "the toolbar toggle produces the same red overlay as pressing 'O'",
+    redness(screenshotToggleOn) > redness(screenshotOff) + 0.05,
+    { screenshotOff, screenshotToggleOn }
+  );
+  await overlayToggleBtn.click();
+  check('clicking again turns it back off', (await toggleActive(overlayToggleBtn)) === false, await toggleActive(overlayToggleBtn));
 
   // ---------------------------------------------------------------------
   console.log('verify-masks (8. sidecar v3: save/reload, v2 fixture, unknown-key passthrough):');

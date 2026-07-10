@@ -102,6 +102,8 @@ declare global {
       maskState(nodeId?: string): MaskParams | null;
       /** Replace shapes[0] of a mask node — one undo entry (verify-only convenience; the UI drag handles use the store action directly). */
       setMaskShape(nodeId: string, shape: MaskShape): void;
+      /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
+      renderPostCount(): number;
     };
   }
 }
@@ -112,6 +114,27 @@ declare global {
  * linear Rec.2020 working color → linear sRGB. srgbEncode then clamps to
  * [0,1] — the gamut clip lives at the exit.
  */
+/**
+ * Referentially-stable projection of a GraphDoc onto the fields buildPlan (and
+ * the GPU pass) actually consume. Node `position` is layout-only (graphDoc.ts
+ * — buildPlan never reads it) and used only by NodeEditorPanel/serialization,
+ * so a position-only edit (dragging a node, or the one commit at drag end —
+ * see NodeEditorPanel.tsx's local drag state) must not change the object this
+ * hook returns. That keeps it safe to key the render effect below on this
+ * value instead of the raw store `graph`: a drag no longer re-posts the same
+ * plan to the render worker on every move, or even once at drop.
+ */
+function usePlanDoc(doc: GraphDoc): GraphDoc {
+  const stableRef = useRef(doc);
+  const keyRef = useRef<string>('');
+  const key = JSON.stringify(doc.nodes.map(({ position: _position, ...rest }) => rest)) + '|' + JSON.stringify(doc.edges);
+  if (key !== keyRef.current) {
+    keyRef.current = key;
+    stableRef.current = doc;
+  }
+  return stableRef.current;
+}
+
 function workToSrgb(rgb: readonly [number, number, number]): [number, number, number] {
   const [r, g, b] = rgb;
   return [
@@ -200,6 +223,12 @@ export function CanvasView() {
     outputDimsRef.current = rawOutputDims;
   }
   const outputDims = outputDimsRef.current;
+  // Position-only edits (node drags) must never cause a re-render-and-post to
+  // the worker — buildPlan ignores position entirely, so reposting the exact
+  // same plan is wasted GPU work (and was the root cause of the drag-lag bug:
+  // see NodeEditorPanel.tsx). planDoc keeps the SAME reference across such
+  // edits; it — not graphForBuild directly — drives the render effect below.
+  const planDoc = usePlanDoc(graphForBuild);
   const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims, wbPicking || colorKeyPicking);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -267,7 +296,7 @@ export function CanvasView() {
       // redundant to the worker's own copy over the SAME doc — costs nothing
       // and needs no round trip just to learn whether it throws.
       try {
-        buildPlan(graphForBuild, { wb: wbModel, renderScale, outputId: activeOutputId ?? undefined });
+        buildPlan(planDoc, { wb: wbModel, renderScale, outputId: activeOutputId ?? undefined });
         useAppStore.getState().setGraphBroken(false);
       } catch {
         useAppStore.getState().setGraphBroken(true);
@@ -288,7 +317,7 @@ export function CanvasView() {
       // graphRenderer.ts's render()), gated on BOTH the 'O' toggle and the
       // selection actually being a mask node.
       client.render({
-        doc: graphForBuild,
+        doc: planDoc,
         renderScale,
         showBefore,
         outputId: activeOutputId ?? undefined,
@@ -317,7 +346,7 @@ export function CanvasView() {
     }
   }, [
     image,
-    graph,
+    planDoc,
     shaderRev,
     wbModel,
     showBefore,
@@ -548,6 +577,9 @@ export function CanvasView() {
       },
       setMaskShape(nodeId, shape) {
         useAppStore.getState().setMaskShape(nodeId, shape, null);
+      },
+      renderPostCount() {
+        return clientRef.current?.renderPostCount ?? 0;
       },
     };
     return () => {

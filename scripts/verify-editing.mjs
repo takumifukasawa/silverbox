@@ -114,6 +114,60 @@ try {
     () => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev
   );
   check('⌘Y undoes like ⌘Z', evAfterY === 0, evAfterY);
+
+  console.log('verify-editing (node drag: follows the pointer, ONE commit, ≤2 worker re-renders — #pointer-drag-lag):');
+  // Root cause: position is layout-only (buildPlan never reads it), but the
+  // OLD code re-derived React Flow's `nodes` prop fresh from the store every
+  // render with no onNodesChange handler, so the node's visual position was
+  // never updated per mouse-move at all — it only caught up on whatever
+  // incidental re-render happened to fire, which read as "lags far behind
+  // the cursor." The fix: drag positions live in NodeEditorPanel's own local
+  // React state (via onNodesChange/applyNodeChanges); the GraphDoc — and the
+  // render worker post it drives — only sees ONE commit, at drag end.
+  const devPosBefore = await page.evaluate(
+    () => window.__debug.graphState().nodes.find((n) => n.id === 'dev').position
+  );
+  const pastBeforeDrag = (await page.evaluate(() => window.__debug.historyState())).past;
+  const postsBeforeDrag = await page.evaluate(() => window.__debug.renderPostCount());
+  const devNode = page.locator('.react-flow__node[data-id="dev"]');
+  const devBoxBefore = await devNode.boundingBox();
+  const dx = 150;
+  const dy = 40;
+  const startX = devBoxBefore.x + devBoxBefore.width / 2;
+  const startY = devBoxBefore.y + devBoxBefore.height / 2;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  // 60 discrete mousemove events, matching a real scripted 60-move drag
+  await page.mouse.move(startX + dx, startY + dy, { steps: 60 });
+  const devBoxDuringDrag = await devNode.boundingBox();
+  check(
+    'the node visually follows the pointer DURING the drag (not frozen/lagging behind)',
+    Math.abs(devBoxDuringDrag.x - (devBoxBefore.x + dx)) < 20 && Math.abs(devBoxDuringDrag.y - (devBoxBefore.y + dy)) < 20,
+    { devBoxBefore, devBoxDuringDrag, expectedDx: dx, expectedDy: dy }
+  );
+  await page.mouse.up();
+
+  const postsAfterDrag = await page.evaluate(() => window.__debug.renderPostCount());
+  check(
+    'a 60-move drag posts to the render worker at most twice (position-only edits never re-post the plan)',
+    postsAfterDrag - postsBeforeDrag <= 2,
+    { postsBeforeDrag, postsAfterDrag, delta: postsAfterDrag - postsBeforeDrag }
+  );
+
+  const pastAfterDrag = (await page.evaluate(() => window.__debug.historyState())).past;
+  check('the whole drag is exactly ONE undo entry (not one per mouse-move)', pastAfterDrag === pastBeforeDrag + 1, {
+    pastBeforeDrag,
+    pastAfterDrag,
+  });
+
+  const devPosAfter = await page.evaluate(
+    () => window.__debug.graphState().nodes.find((n) => n.id === 'dev').position
+  );
+  check(
+    'the GraphDoc position commits once, at drag end',
+    devPosAfter.x !== devPosBefore.x || devPosAfter.y !== devPosBefore.y,
+    { devPosBefore, devPosAfter }
+  );
 } finally {
   await app.close();
 }
