@@ -46,6 +46,18 @@ WORK_TO_SRGB then the sRGB curve; verify:cst guards it).
 - **AdobeRGB is an export target, not a working space.** sRGB ⊂ AdobeRGB ⊂
   Rec.2020; a Rec.2020 working space serves print by conversion at export.
 
+### JPEG sources live in the same working space
+
+A JPEG is linearized and converted through `SRGB_TO_WORK` at ingest, so
+RAW and JPEG edits mean exactly the same thing — one sidecar, one preset,
+one behavior. Nothing is lost or stretched: sRGB sits entirely inside
+Rec.2020, and the ingest matrix cancels against the exit matrix, so an
+untouched JPEG round-trips to itself (to float precision, orders of
+magnitude below 1/255). The gain is headroom: saturation pushed on a JPEG
+now survives to the exit instead of clipping against the working space
+mid-chain. This mirrors what Lightroom and darktable do with non-RAW
+sources.
+
 ### Ops keep their own internal encodes
 
 Storage between passes is linear Rec.2020; each op is free to encode
