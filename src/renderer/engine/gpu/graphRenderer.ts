@@ -11,8 +11,9 @@
  * so it never depends on a prior render() call.
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
-import type { RenderPlan } from '../graph/graphDoc';
+import { orientedDims, type RenderPlan } from '../graph/graphDoc';
 import { WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
+import { WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -47,19 +48,19 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
 // Shared verbatim by the canvas present, the grayscale view and the rgba8unorm
 // readback used by stats/scopes/export, so all exits stay in lockstep.
 // All targets match the image size, so pos.xy maps 1:1 in every pass.
+// srgbEncode below clamps to [0,1] first (WGSL_SRGB_ENCODE's srgbEncode1 does
+// not) — that clamp IS the gamut clip (colors outside sRGB go negative after
+// the matrix), and it belongs here at the exit, not in the shared snippet.
 const ENCODE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 ${FULLSCREEN_VS}
-fn srgbEncode(v: f32) -> f32 {
-  let c = clamp(v, 0.0, 1.0);
-  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
-}
+${WGSL_SRGB_ENCODE}
 
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
-  let s = ${WGSL_WORK_TO_SRGB} * t.rgb;
-  return vec4f(srgbEncode(s.r), srgbEncode(s.g), srgbEncode(s.b), 1.0);
+  let s = clamp(${WGSL_WORK_TO_SRGB} * t.rgb, vec3f(0.0), vec3f(1.0));
+  return vec4f(srgbEncode(s), 1.0);
 }
 `;
 
@@ -69,16 +70,13 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 const GRAYSCALE_ENCODE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 ${FULLSCREEN_VS}
-fn srgbEncode(v: f32) -> f32 {
-  let c = clamp(v, 0.0, 1.0);
-  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
-}
+${WGSL_SRGB_ENCODE}
 
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let t = textureLoad(src, vec2i(pos.xy), 0);
-  let s = ${WGSL_WORK_TO_SRGB} * t.rgb;
-  let y = dot(vec3f(srgbEncode(s.r), srgbEncode(s.g), srgbEncode(s.b)), ${WGSL_WORKING_LUMA});
+  let s = clamp(${WGSL_WORK_TO_SRGB} * t.rgb, vec3f(0.0), vec3f(1.0));
+  let y = dot(srgbEncode(s), ${WGSL_WORKING_LUMA});
   return vec4f(y, y, y, 1.0);
 }
 `;
@@ -135,11 +133,11 @@ const RESAMPLE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var geomSampler: sampler;
 struct ResampleParams {
-  // x = crop.x, y = crop.y (normalized), z = srcWidth, w = srcHeight (px)
+  // x = crop.x, y = crop.y (normalized to the ORIENTED frame), z = srcWidth, w = srcHeight (px, decoded texture)
   p0: vec4f,
   // x = angleRad, y = distortion k, z = CA red k, w = CA blue k
   p1: vec4f,
-  // x = vignette amount (vignette/100, 0..1), yzw unused
+  // x = vignette amount (vignette/100, 0..1), y = quarterTurns (0..3), z = flipH (0.0/1.0), w unused
   p2: vec4f,
 }
 @group(0) @binding(2) var<uniform> u: ResampleParams;
@@ -150,30 +148,68 @@ fn rotate(v: vec2f, angleRad: f32) -> vec2f {
   return vec2f(v.x * c + v.y * s, v.y * c - v.x * s);
 }
 
+/**
+ * Inverse of the orientation step (graphDoc.ts's GeometryOrientation: flipH
+ * THEN quarterTurns 90-CCW-on-screen turns). Maps a coordinate in the
+ * ORIENTED frame (what crop/straighten/lens all operate in) back to the
+ * actual decoded-texture SOURCE frame, so the sample lands on real pixels.
+ * w/h are the SOURCE dims (pre-orientation) - exact +1/0/-1 index
+ * arithmetic (no trig), so a texel-center input maps to a texel-center
+ * output: orientation alone (angle=0, full crop, no lens) never blurs, it
+ * only permutes which texel is read.
+ */
+fn orientInverse(pt: vec2f, w: f32, h: f32, k: i32, flip: f32) -> vec2f {
+  var x0: f32;
+  var y0: f32;
+  if (k == 1) {
+    y0 = pt.x;
+    x0 = w - pt.y;
+  } else if (k == 2) {
+    x0 = w - pt.x;
+    y0 = h - pt.y;
+  } else if (k == 3) {
+    y0 = h - pt.x;
+    x0 = pt.y;
+  } else {
+    x0 = pt.x;
+    y0 = pt.y;
+  }
+  let sx = select(x0, w - x0, flip > 0.5);
+  return vec2f(sx, y0);
+}
+
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let srcDims = u.p0.zw;
-  let cropOrigin = u.p0.xy * srcDims;
-  let srcCenter = srcDims * 0.5;
-  let cornerRadius = length(srcCenter);
+  let k = i32(round(u.p2.y));
+  let flip = u.p2.z;
+  let orientedDims = select(srcDims, srcDims.yx, k == 1 || k == 3);
+  let cropOrigin = u.p0.xy * orientedDims;
+  let orientedCenter = orientedDims * 0.5;
+  let cornerRadius = length(orientedCenter);
   let p = cropOrigin + pos.xy;
-  let q = rotate(p - srcCenter, -u.p1.x) + srcCenter;
+  let q = rotate(p - orientedCenter, -u.p1.x) + orientedCenter;
 
-  // 2. lens distortion
-  let rel = q - srcCenter;
+  // 2. lens distortion (oriented frame)
+  let rel = q - orientedCenter;
   let rn = length(rel) / cornerRadius;
   let kd = u.p1.y;
-  let qd = srcCenter + rel * (1.0 + kd * rn * rn);
+  let qd = orientedCenter + rel * (1.0 + kd * rn * rn);
 
-  // 3. chromatic aberration — per-channel radial scale of the distorted position
-  let relD = qd - srcCenter;
+  // 3. chromatic aberration — per-channel radial scale of the distorted position (oriented frame)
+  let relD = qd - orientedCenter;
   let kr = u.p1.z;
   let kb = u.p1.w;
-  let qr = srcCenter + relD * (1.0 + kr);
-  let qb = srcCenter + relD * (1.0 + kb);
-  let r = textureSampleLevel(src, geomSampler, qr / srcDims, 0.0).r;
-  let g = textureSampleLevel(src, geomSampler, qd / srcDims, 0.0).g;
-  let b = textureSampleLevel(src, geomSampler, qb / srcDims, 0.0).b;
+  let qr = orientedCenter + relD * (1.0 + kr);
+  let qb = orientedCenter + relD * (1.0 + kb);
+
+  // 3b. map each oriented-frame sample point to the real decoded-texture SOURCE frame
+  let sr = orientInverse(qr, srcDims.x, srcDims.y, k, flip);
+  let sd = orientInverse(qd, srcDims.x, srcDims.y, k, flip);
+  let sb = orientInverse(qb, srcDims.x, srcDims.y, k, flip);
+  let r = textureSampleLevel(src, geomSampler, sr / srcDims, 0.0).r;
+  let g = textureSampleLevel(src, geomSampler, sd / srcDims, 0.0).g;
+  let b = textureSampleLevel(src, geomSampler, sb / srcDims, 0.0).b;
 
   // 4. vignetting recovery, linear space, rn of the distortion-corrected position
   let rnD = length(relD) / cornerRadius;
@@ -367,14 +403,17 @@ export class GraphRenderer {
     data[6] = lens ? LENS_CA_STRENGTH * (lens.caRed / 100) : 0;
     data[7] = lens ? LENS_CA_STRENGTH * (lens.caBlue / 100) : 0;
     data[8] = lens ? lens.vignette / 100 : 0;
+    data[9] = geometry?.orientation.quarterTurns ?? 0;
+    data[10] = geometry?.orientation.flipH ? 1 : 0;
     return data;
   }
 
   private static baseDims(plan: RenderPlan, srcWidth: number, srcHeight: number): { width: number; height: number } {
     if (!plan.geometry) return { width: srcWidth, height: srcHeight };
+    const oriented = orientedDims(srcWidth, srcHeight, plan.geometry.orientation);
     return {
-      width: Math.max(1, Math.round(plan.geometry.crop.w * srcWidth)),
-      height: Math.max(1, Math.round(plan.geometry.crop.h * srcHeight)),
+      width: Math.max(1, Math.round(plan.geometry.crop.w * oriented.width)),
+      height: Math.max(1, Math.round(plan.geometry.crop.h * oriented.height)),
     };
   }
 

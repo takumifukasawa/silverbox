@@ -334,3 +334,82 @@ export function createWbModel(meta: WbMeta): WbModel {
 
 /** Fallback model for contexts without an image. */
 export const DEFAULT_WB_MODEL: WbModel = createWbModel({});
+
+// --- WB eyedropper: solve (temp, tint) that neutralizes a sampled pixel ------
+
+/** Golden-section minimize of a unimodal f(x) over [lo, hi]. */
+function goldenMinimize(f: (x: number) => number, lo0: number, hi0: number, iters: number): number {
+  let lo = lo0;
+  let hi = hi0;
+  const phi = (Math.sqrt(5) - 1) / 2;
+  let m1 = hi - phi * (hi - lo);
+  let m2 = lo + phi * (hi - lo);
+  let f1 = f(m1);
+  let f2 = f(m2);
+  for (let i = 0; i < iters; i++) {
+    if (f1 < f2) {
+      hi = m2;
+      m2 = m1;
+      f2 = f1;
+      m1 = hi - phi * (hi - lo);
+      f1 = f(m1);
+    } else {
+      lo = m1;
+      m1 = m2;
+      f1 = f2;
+      m2 = lo + phi * (hi - lo);
+      f2 = f(m2);
+    }
+  }
+  return (lo + hi) / 2;
+}
+
+/**
+ * WB eyedropper solver: find (temp, tint) so that `model.gains(temp, tint)`
+ * applied to `rgb` (a decoded, linear working-space pixel) becomes neutral
+ * (r' = g' = b'). Since `gains()` always returns [gr, 1, gb] (G-normalized —
+ * see WbModel.gains), neutrality means `r*gr = g = b*gb`, i.e. the target
+ * gain pair is fully determined by the ratio of `rgb`'s channels; the solver
+ * just has to find which (temp, tint) the per-image model produces that gain
+ * pair for.
+ *
+ * Small, robust coordinate-descent: alternately golden-section-minimize the
+ * temp axis (which mostly separates R from B) against `(errR − errB)²`, then
+ * the tint axis (which mostly moves G against R+B) against `(errR + errB)²`,
+ * for a few rounds. Bounded to the UI's slider ranges; ~1e-3-of-range
+ * practical convergence in well under the iteration budget below.
+ */
+export function solveNeutralWb(rgb: readonly [number, number, number], model: WbModel): WbTempTint {
+  const [r, g, b] = rgb;
+  const errorsAt = (temp: number, tint: number): { errR: number; errB: number } => {
+    const [gr, , gb] = model.gains(temp, tint);
+    return { errR: r * gr - g, errB: b * gb - g };
+  };
+
+  let temp = clampTemp(model.asShot.temp);
+  let tint = clampTint(model.asShot.tint);
+  const ROUNDS = 8;
+  const ITERS_PER_AXIS = 48;
+  for (let round = 0; round < ROUNDS; round++) {
+    temp = goldenMinimize(
+      (t) => {
+        const { errR, errB } = errorsAt(t, tint);
+        return (errR - errB) * (errR - errB);
+      },
+      WB_TEMP_RANGE.min,
+      WB_TEMP_RANGE.max,
+      ITERS_PER_AXIS
+    );
+    tint = goldenMinimize(
+      (ti) => {
+        const { errR, errB } = errorsAt(temp, ti);
+        const avg = (errR + errB) / 2;
+        return avg * avg;
+      },
+      WB_TINT_RANGE.min,
+      WB_TINT_RANGE.max,
+      ITERS_PER_AXIS
+    );
+  }
+  return { temp: Math.round(clampTemp(temp)), tint: Math.round(clampTint(tint)) };
+}

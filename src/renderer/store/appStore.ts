@@ -78,6 +78,14 @@ interface AppState {
   history: GraphHistory;
   /** Yellow toolbar notice when a sidecar existed but could not be used. */
   sidecarNotice: string | null;
+  /**
+   * True when the image's sidecar file EXISTS on disk but parseGraphDoc threw
+   * at open time (e.g. a newer schema this build doesn't understand).
+   * saveGraph() refuses to write while this is set — otherwise a later ⌘S
+   * would silently overwrite a document this build can't actually read.
+   * Cleared whenever a (different) image is opened.
+   */
+  sidecarUnreadable: boolean;
   /** createdAt carried through sidecar round-trips (set on first save). */
   sidecarCreatedAt: string | null;
   /** Result line for the toolbar after a successful export. */
@@ -93,6 +101,13 @@ interface AppState {
   /** Crop/straighten tool active — the canvas previews the full (uncropped) rotated frame while true. */
   cropMode: boolean;
   toggleCropMode(): void;
+  /** WB eyedropper picking mode — the next canvas click samples a pixel and solves temp/tint. */
+  wbPicking: boolean;
+  setWbPicking(picking: boolean): void;
+  /** ⌘⇧C/⌘⇧V in-session develop-settings clipboard (nodes+edges; input geometry stripped). */
+  developClipboard: GraphDoc | null;
+  copyDevelopSettings(): void;
+  pasteDevelopSettings(): void;
   /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
@@ -281,12 +296,15 @@ export const useAppStore = create<AppState>((set, get) => {
   scopeSamples: null,
   history: emptyHistory(),
   sidecarNotice: null,
+  sidecarUnreadable: false,
   sidecarCreatedAt: null,
   exportInfo: null,
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
   grayscaleView: false,
   cropMode: false,
+  wbPicking: false,
+  developClipboard: null,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -304,13 +322,23 @@ export const useAppStore = create<AppState>((set, get) => {
       // untouched until the user saves over it) with a toolbar notice.
       let graph = defaultGraphDoc();
       let sidecarNotice: string | null = null;
+      let sidecarUnreadable = false;
       let sidecarCreatedAt: string | null = null;
       try {
         const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
         if (sidecar !== null) {
-          const parsed = parseGraphDoc(sidecar);
-          graph = parsed.graph;
-          sidecarCreatedAt = parsed.createdAt ?? null;
+          // the sidecar file EXISTS — a parse failure here (unlike readSidecar
+          // itself throwing, an I/O-level issue) means this build genuinely
+          // cannot understand the document on disk, so guard it from ⌘S
+          try {
+            const parsed = parseGraphDoc(sidecar);
+            graph = parsed.graph;
+            sidecarCreatedAt = parsed.createdAt ?? null;
+          } catch (err) {
+            sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
+            sidecarUnreadable = true;
+            console.warn(`ignoring unreadable sidecar for ${fileName}:`, err);
+          }
         }
       } catch (err) {
         sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
@@ -349,10 +377,12 @@ export const useAppStore = create<AppState>((set, get) => {
         history: emptyHistory(),
         shaderErrors: {},
         sidecarNotice,
+        sidecarUnreadable,
         sidecarCreatedAt,
         exportInfo: null,
         wbModel,
         cropMode: false,
+        wbPicking: false,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -675,6 +705,40 @@ export const useAppStore = create<AppState>((set, get) => {
     set((s) => ({ cropMode: !s.cropMode }));
   },
 
+  setWbPicking(picking) {
+    set({ wbPicking: picking });
+  },
+
+  copyDevelopSettings() {
+    const { graph } = get();
+    // crop/orientation stay per-photo — strip the input node's geometry;
+    // lens IS copied (optical, not photo-specific in the same way).
+    const clipboard: GraphDoc = {
+      ...graph,
+      nodes: graph.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: undefined } : n)),
+    };
+    set({ developClipboard: structuredClone(clipboard) });
+  },
+
+  pasteDevelopSettings() {
+    let nextGraph: GraphDoc | null = null;
+    set((s) => {
+      const clip = s.developClipboard;
+      if (!clip) return {};
+      const currentInput = s.graph.nodes.find((n) => n.kind === 'input');
+      const currentGeometry = currentInput?.geometry;
+      const graph: GraphDoc = structuredClone({
+        ...clip,
+        nodes: clip.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: currentGeometry } : n)),
+      });
+      nextGraph = graph;
+      return { ...pushHistory(s, null), graph, graphDirty: true };
+    });
+    // node ids referenced by the pasted custom nodes need fresh compiled
+    // artifacts in THIS session's cache (same as opening a doc with shaders)
+    if (nextGraph) revalidateShaders(nextGraph);
+  },
+
   setGeometry(geo, coalesceKey) {
     set((s) => {
       const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
@@ -766,8 +830,8 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async saveGraph() {
-    const { imagePath, fileName, image, graph, sidecarCreatedAt } = get();
-    if (!imagePath || !fileName) return;
+    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarUnreadable } = get();
+    if (!imagePath || !fileName || sidecarUnreadable) return;
     const source = {
       fileName,
       ...(image?.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),

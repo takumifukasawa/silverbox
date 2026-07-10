@@ -118,6 +118,7 @@ export function Toolbar() {
   const graph = useAppStore((s) => s.graph);
   const history = useAppStore((s) => s.history);
   const sidecarNotice = useAppStore((s) => s.sidecarNotice);
+  const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
@@ -142,9 +143,13 @@ export function Toolbar() {
       </button>
       <button
         onClick={() => void saveGraph()}
-        disabled={imageStatus !== 'ready'}
+        disabled={imageStatus !== 'ready' || sidecarUnreadable}
         data-testid="save-button"
-        title="Save the graph to the sidecar (⌘S)"
+        title={
+          sidecarUnreadable
+            ? 'Saving is disabled — the sidecar on disk could not be read by this build'
+            : 'Save the graph to the sidecar (⌘S)'
+        }
       >
         Save
         {graphDirty && (
@@ -183,6 +188,15 @@ export function Toolbar() {
         {sidecarNotice && (
           <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
             {sidecarNotice}
+          </span>
+        )}
+        {sidecarUnreadable && (
+          <span
+            className="toolbar-warn"
+            data-testid="sidecar-guard-notice"
+            title="This image's sidecar file could not be parsed by this build; saving is disabled so it is never overwritten."
+          >
+            Sidecar could not be read — saving is disabled to protect it
           </span>
         )}
         {image && fileName ? (

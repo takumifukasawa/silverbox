@@ -19,13 +19,25 @@ const MAX_SCALE = 8;
  */
 export function useCanvasViewport(
   containerRef: RefObject<HTMLDivElement | null>,
-  image: { width: number; height: number } | null
+  image: { width: number; height: number } | null,
+  /**
+   * True while a click on the canvas must be handled by the CALLER (e.g. the
+   * WB eyedropper) instead of starting a pan. `container`'s own pointerdown
+   * listener below is a raw addEventListener — it fires during real native
+   * bubbling BEFORE React's synthetic dispatch reaches a descendant's own
+   * onClick, so `setPointerCapture` here would otherwise redirect the click's
+   * target away from the canvas before the caller ever sees it (same
+   * "check the target directly" gotcha the crop overlay works around).
+   */
+  suppressPan = false
 ) {
   const [view, setView] = useState<ViewportState>({ mode: 'fit', scale: 1, tx: 0, ty: 0 });
   const viewRef = useRef(view);
   viewRef.current = view;
   const imageRef = useRef(image);
   imageRef.current = image;
+  const suppressPanRef = useRef(suppressPan);
+  suppressPanRef.current = suppressPan;
 
   const computeFit = useCallback((): ViewportState | null => {
     const container = containerRef.current;
@@ -96,6 +108,7 @@ export function useCanvasViewport(
     let dragging: { x: number; y: number } | null = null;
     const onPointerDown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
+      if (suppressPanRef.current) return;
       // This is a raw addEventListener on the container, so it fires during
       // native bubbling BEFORE React's root-delegated synthetic dispatch —
       // a descendant's `ev.stopPropagation()` (e.g. the crop overlay's drag

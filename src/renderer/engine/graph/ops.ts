@@ -8,6 +8,7 @@
 
 import { srgbDecode, srgbEncode } from '../color/srgb';
 import { WGSL_WORKING_LUMA } from '../color/workingSpace';
+import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
   cpuBrightness,
   cpuContrast,
@@ -134,13 +135,8 @@ ${wgslContrast('p.x')}
   let t = abs(x - c) / r;
   return select(0.0, 0.5 * (1.0 + cos(3.14159265358979 * t)), t < 1.0);
 }
-fn tcEncode(v: f32) -> f32 {
-  let c = clamp(v, 0.0, 1.0);
-  return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, c * 12.92, c <= 0.0031308);
-}
-fn tcDecode(v: f32) -> f32 {
-  return select(pow((v + 0.055) / 1.055, 2.4), v / 12.92, v <= 0.04045);
-}
+${WGSL_SRGB_ENCODE}
+${WGSL_SRGB_DECODE}
 fn tcCurve(x: f32, p: vec4f) -> f32 {
   let y = x + 0.25 * (p.x * tcBump(x, 0.15, 0.25) + p.y * tcBump(x, 0.4, 0.3)
     + p.z * tcBump(x, 0.65, 0.3) + p.w * tcBump(x, 0.9, 0.25));
@@ -148,9 +144,9 @@ fn tcCurve(x: f32, p: vec4f) -> f32 {
 }
 fn applyOp(c: vec4f, p: vec4f) -> vec4f {
   return vec4f(
-    tcDecode(tcCurve(tcEncode(c.r), p)),
-    tcDecode(tcCurve(tcEncode(c.g), p)),
-    tcDecode(tcCurve(tcEncode(c.b), p)),
+    srgbDecode1(tcCurve(srgbEncode1(clamp(c.r, 0.0, 1.0)), p)),
+    srgbDecode1(tcCurve(srgbEncode1(clamp(c.g, 0.0, 1.0)), p)),
+    srgbDecode1(tcCurve(srgbEncode1(clamp(c.b, 0.0, 1.0)), p)),
     c.a
   );
 }`,

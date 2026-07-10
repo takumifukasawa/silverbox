@@ -60,6 +60,31 @@ export function App() {
         if (ev.shiftKey) useAppStore.getState().redo();
         else useAppStore.getState().undo();
       }
+      if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'c' || ev.key === 'C')) {
+        const target = ev.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
+        ) {
+          return;
+        }
+        ev.preventDefault();
+        useAppStore.getState().copyDevelopSettings();
+      }
+      if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'v' || ev.key === 'V')) {
+        const target = ev.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
+        ) {
+          return;
+        }
+        ev.preventDefault();
+        useAppStore.getState().pasteDevelopSettings();
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().wbPicking) {
+        useAppStore.getState().setWbPicking(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);

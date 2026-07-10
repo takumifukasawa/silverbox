@@ -2,14 +2,18 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
+import { solveNeutralWb } from '../engine/color/whiteBalance';
 import { DECODE_OUTPUT_COLOR } from '../engine/decoder/librawDecoder';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
 import {
   buildPlan,
   computeOutputDims,
   cpuEvalPlan,
+  defaultGeometryOrientation,
   defaultGeometryParams,
   defaultLensParams,
+  DEVELOP_KIND,
+  isIdentityGeometry,
   planHasCpuReference,
   type GeometryParams,
   type GraphDoc,
@@ -54,6 +58,13 @@ declare global {
       setLens(lens: LensParams): void;
       lensState(): LensParams;
       outputDims(): { width: number; height: number } | null;
+      /** WB eyedropper solver unit check: solves + applies gains to `rgb`, using the live per-image wbModel. */
+      wbSolveCheck(rgb: [number, number, number]): {
+        temp: number;
+        tint: number;
+        result: [number, number, number];
+        resultEncoded: [number, number, number];
+      };
       scopeState(): {
         mode: string;
         samples: { cols: number; rows: number; length: number; meanLuma: number } | null;
@@ -102,18 +113,27 @@ export function CanvasView() {
   const toggleBefore = useAppStore((s) => s.toggleBefore);
   const toggleGrayscaleView = useAppStore((s) => s.toggleGrayscaleView);
   const cropMode = useAppStore((s) => s.cropMode);
+  const wbPicking = useAppStore((s) => s.wbPicking);
+  const setWbPicking = useAppStore((s) => s.setWbPicking);
   // Crop mode previews the FULL (uncropped) straightened frame — the overlay
   // lets you re-adjust the crop rect against the whole image — so force crop
   // back to identity for RENDERING only; the true crop committed in the graph
-  // is untouched and takes over once cropMode exits (Done). Angle stays live
-  // so straighten is visible while cropping.
+  // is untouched and takes over once cropMode exits (Done). Angle AND
+  // orientation stay live so straighten/rotate/flip are visible while cropping.
   const graphForBuild =
     cropMode && image
       ? {
           ...graph,
           nodes: graph.nodes.map((n) =>
             n.kind === 'input'
-              ? { ...n, geometry: { crop: { x: 0, y: 0, w: 1, h: 1 }, angle: n.geometry?.angle ?? 0 } }
+              ? {
+                  ...n,
+                  geometry: {
+                    crop: { x: 0, y: 0, w: 1, h: 1 },
+                    angle: n.geometry?.angle ?? 0,
+                    orientation: n.geometry?.orientation ?? defaultGeometryOrientation(),
+                  },
+                }
               : n
           ),
         }
@@ -136,7 +156,7 @@ export function CanvasView() {
     outputDimsRef.current = rawOutputDims;
   }
   const outputDims = outputDimsRef.current;
-  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims);
+  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims, wbPicking);
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
@@ -394,11 +414,69 @@ export function CanvasView() {
         if (!canvas || canvas.width === 0) return null;
         return { width: canvas.width, height: canvas.height };
       },
+      wbSolveCheck(rgb) {
+        const { wbModel: model } = useAppStore.getState();
+        const { temp, tint } = solveNeutralWb(rgb, model);
+        const g = model.gains(temp, tint);
+        const result: [number, number, number] = [rgb[0] * g[0], rgb[1] * g[1], rgb[2] * g[2]];
+        const resultEncoded: [number, number, number] = [
+          srgbEncode(result[0]),
+          srgbEncode(result[1]),
+          srgbEncode(result[2]),
+        ];
+        return { temp, tint, result, resultEncoded };
+      },
     };
     return () => {
       delete window.__debug;
     };
   }, []);
+
+  /**
+   * WB eyedropper: samples the DECODED image pixel (store's `image.data`,
+   * linear working space) at the clicked point, then solves (temp, tint) so
+   * that pixel becomes neutral under the per-image WB model.
+   *
+   * Coordinate mapping: the canvas's own untransformed pixel grid equals
+   * `image` 1:1 (only the CSS `transform: translate(tx,ty) scale(scale)` pans
+   * /zooms it — see useCanvasViewport's contract), so a screen point maps to
+   * an image pixel via `(client - containerOrigin - (tx,ty)) / scale`.
+   *
+   * Geometry (crop/straighten/orientation/lens) resamples the image through a
+   * GPU-only inverse map with no CPU mirror (same as crop/lens elsewhere in
+   * this file — see planHasCpuReference). Reimplementing that inverse here
+   * just to support picking through it isn't worth the duplication, so the
+   * simplest-correct choice (spec-approved): picking is a no-op while the
+   * input node's geometry is non-identity. Straighten/rotate first if you
+   * need to WB-pick a cropped/rotated image.
+   */
+  const handleWbPick = (ev: React.MouseEvent<HTMLCanvasElement>) => {
+    const container = containerRef.current;
+    if (!container || !image) return;
+    const inputNode = graph.nodes.find((n) => n.kind === 'input');
+    const geometry = inputNode?.geometry ?? defaultGeometryParams();
+    if (!isIdentityGeometry(geometry)) return;
+    const rect = container.getBoundingClientRect();
+    const ix = Math.floor((ev.clientX - rect.left - view.tx) / view.scale);
+    const iy = Math.floor((ev.clientY - rect.top - view.ty) / view.scale);
+    if (ix < 0 || iy < 0 || ix >= image.width || iy >= image.height) return;
+    const idx = (iy * image.width + ix) * 4;
+    const rgb: [number, number, number] = [image.data[idx]!, image.data[idx + 1]!, image.data[idx + 2]!];
+    const devNode = graph.nodes.find((n) => n.kind === DEVELOP_KIND);
+    if (!devNode) return;
+    const { temp, tint } = solveNeutralWb(rgb, wbModel);
+    useAppStore
+      .getState()
+      .updateNodeParamsBatch(
+        devNode.id,
+        [
+          ['basic.temp', temp],
+          ['basic.tint', tint],
+        ],
+        `wbpick:${Date.now()}`
+      );
+    setWbPicking(false);
+  };
 
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
   return (
@@ -410,8 +488,10 @@ export function CanvasView() {
       >
         <canvas
           ref={canvasRef}
-          className="canvas-view-canvas"
+          className={`canvas-view-canvas${wbPicking ? ' canvas-view-canvas--picking' : ''}`}
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
+          onClick={wbPicking ? handleWbPick : undefined}
+          data-testid="canvas-view-canvas"
         />
         {!overlayVisible && cropMode && outputDims && (
           <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />

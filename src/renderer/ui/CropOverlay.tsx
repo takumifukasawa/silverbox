@@ -1,11 +1,29 @@
 import { useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { defaultGeometryParams, GEOMETRY_MIN_CROP_SIZE, type GeometryCrop } from '../engine/graph/graphDoc';
+import {
+  clampGeometry,
+  defaultGeometryOrientation,
+  defaultGeometryParams,
+  GEOMETRY_MIN_CROP_SIZE,
+  type GeometryCrop,
+  type GeometryOrientation,
+} from '../engine/graph/graphDoc';
 import type { ViewportState } from './useCanvasViewport';
 
 /** Corners + edges, clockwise from north-west (drag target ids double as CSS class suffixes). */
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 type HandleId = (typeof HANDLES)[number];
+
+/** Aspect-ratio lock options (UI spec §item4): output-px width/height; 'free'/'original' are resolved dynamically. */
+const RATIO_OPTIONS: { key: string; label: string; ar: number | null }[] = [
+  { key: 'free', label: 'Free', ar: null },
+  { key: 'original', label: 'Original', ar: null },
+  { key: '1:1', label: '1:1', ar: 1 },
+  { key: '3:2', label: '3:2', ar: 3 / 2 },
+  { key: '2:3', label: '2:3', ar: 2 / 3 },
+  { key: '4:3', label: '4:3', ar: 4 / 3 },
+  { key: '16:9', label: '16:9', ar: 16 / 9 },
+];
 
 interface Props {
   view: ViewportState;
@@ -30,15 +48,25 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
   const inputNode = graph.nodes.find((n) => n.kind === 'input');
   const geometry = inputNode?.geometry ?? defaultGeometryParams();
   const { crop, angle } = geometry;
+  const orientation = geometry.orientation ?? defaultGeometryOrientation();
 
   const [dragging, setDragging] = useState(false);
+  const [ratioKey, setRatioKey] = useState('free');
   const dragRef = useRef<{ crop: GeometryCrop; startX: number; startY: number } | null>(null);
   const sessionRef = useRef<number | null>(null);
   const angleSessionRef = useRef<number | null>(null);
 
+  // `canvasWidth`/`canvasHeight` are the ORIENTED full-frame dims (see the
+  // component doc comment) — exactly what an output-px aspect ratio needs.
+  const arFor = (key: string): number | null => {
+    if (key === 'free') return null;
+    if (key === 'original') return canvasWidth / canvasHeight;
+    return RATIO_OPTIONS.find((o) => o.key === key)?.ar ?? null;
+  };
+
   const commitCrop = (next: GeometryCrop) => {
     sessionRef.current ??= Date.now();
-    setGeometry({ crop: next, angle }, `geometry:${sessionRef.current}`);
+    setGeometry({ crop: next, angle, orientation }, `geometry:${sessionRef.current}`);
   };
 
   const beginDrag = (kind: 'move' | HandleId) => (ev: React.PointerEvent) => {
@@ -47,6 +75,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
     sessionRef.current = Date.now();
     setDragging(true);
     dragRef.current = { crop, startX: ev.clientX, startY: ev.clientY };
+    const ar = arFor(ratioKey);
 
     const onMove = (e: PointerEvent) => {
       const start = dragRef.current;
@@ -72,6 +101,33 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
         if (kind.includes('s')) {
           h = start.crop.h + dy;
         }
+
+        // Aspect-ratio lock (normalized crop fractions, ratio in OUTPUT px —
+        // account for the source's own aspect: outputAr = (w*canvasWidth) /
+        // (h*canvasHeight)). Corners + vertical edges (e/w) drive off the
+        // freeform `w` and recompute `h`; horizontal edges (n/s) drive off
+        // `h` and recompute `w`. Each case repositions whichever edge must
+        // stay pinned (the opposite corner for corners, the center for a
+        // single-edge drag) so the constrained rect grows/shrinks naturally.
+        if (ar !== null) {
+          const isVerticalEdge = kind === 'e' || kind === 'w';
+          const isHorizontalEdge = kind === 'n' || kind === 's';
+          if (isHorizontalEdge) {
+            const wNew = (h * canvasHeight * ar) / canvasWidth;
+            const xCenter = start.crop.x + start.crop.w / 2;
+            x = xCenter - wNew / 2;
+            w = wNew;
+          } else {
+            const hNew = (w * canvasWidth) / (ar * canvasHeight);
+            if (isVerticalEdge) {
+              const yCenter = start.crop.y + start.crop.h / 2;
+              y = yCenter - hNew / 2;
+            } else if (kind.includes('n')) {
+              y = start.crop.y + start.crop.h - hNew;
+            }
+            h = hNew;
+          }
+        }
       }
       w = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, w));
       h = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, h));
@@ -92,7 +148,38 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
 
   const onAngleChange = (value: number) => {
     angleSessionRef.current ??= Date.now();
-    setGeometry({ crop, angle: value }, `geometry:${angleSessionRef.current}`);
+    setGeometry({ crop, angle: value, orientation }, `geometry:${angleSessionRef.current}`);
+  };
+
+  /** Selecting a new ratio re-fits the CURRENT rect immediately: a centered shrink of whichever axis is too big (one undo entry); Free changes nothing. */
+  const onRatioChange = (key: string) => {
+    setRatioKey(key);
+    const ar = arFor(key);
+    if (ar === null) return;
+    const cx = crop.x + crop.w / 2;
+    const cy = crop.y + crop.h / 2;
+    const curAr = (crop.w * canvasWidth) / (crop.h * canvasHeight);
+    let w = crop.w;
+    let h = crop.h;
+    if (curAr > ar) {
+      w = (h * canvasHeight * ar) / canvasWidth;
+    } else {
+      h = (w * canvasWidth) / (ar * canvasHeight);
+    }
+    const next = clampGeometry({ crop: { x: cx - w / 2, y: cy - h / 2, w, h }, angle, orientation });
+    setGeometry(next, null);
+  };
+
+  const rotateBy = (delta: 1 | 3) => {
+    const next: GeometryOrientation = {
+      quarterTurns: (((orientation.quarterTurns + delta) % 4) as 0 | 1 | 2 | 3),
+      flipH: orientation.flipH,
+    };
+    setGeometry({ crop, angle, orientation: next }, null);
+  };
+
+  const flipH = () => {
+    setGeometry({ crop, angle, orientation: { quarterTurns: orientation.quarterTurns, flipH: !orientation.flipH } }, null);
   };
 
   const pct = (v: number) => `${v * 100}%`;
@@ -168,10 +255,34 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
             {angle.toFixed(1)}°
           </span>
         </label>
+        <button data-testid="crop-rotate-left" onClick={() => rotateBy(1)} title="Rotate left 90°">
+          ⟲
+        </button>
+        <button data-testid="crop-rotate-right" onClick={() => rotateBy(3)} title="Rotate right 90°">
+          ⟳
+        </button>
+        <button data-testid="crop-flip" onClick={flipH} title="Flip horizontal">
+          ⇋
+        </button>
+        <label>
+          Ratio
+          <select
+            data-testid="crop-ratio"
+            value={ratioKey}
+            onChange={(ev) => onRatioChange(ev.target.value)}
+            title="Lock the crop to an aspect ratio"
+          >
+            {RATIO_OPTIONS.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}
+              </option>
+            ))}
+          </select>
+        </label>
         <button
           data-testid="crop-reset"
           onClick={() => setGeometry(defaultGeometryParams(), null)}
-          title="Reset crop and straighten"
+          title="Reset crop, straighten, rotate and flip"
         >
           Reset
         </button>

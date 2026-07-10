@@ -112,21 +112,65 @@ export interface GeometryCrop {
   h: number;
 }
 
+/**
+ * Orientation: applied FIRST, before crop/rotate±45 — flipH (horizontal
+ * mirror) happens BEFORE the quarterTurns rotation (documented order; see
+ * RESAMPLE_SHADER's orientInverse for the exact inverse mapping). quarterTurns
+ * counts 90° counter-clockwise-on-screen turns (same "+angle rotates the
+ * displayed image CCW" convention the straighten pass already promises).
+ * Identity = 0 turns, no flip — an untouched input node stays a bit-exact
+ * pass-through, same invariant crop/angle uphold.
+ */
+export interface GeometryOrientation {
+  quarterTurns: 0 | 1 | 2 | 3;
+  flipH: boolean;
+}
+
 export interface GeometryParams {
   crop: GeometryCrop;
   angle: number;
+  orientation: GeometryOrientation;
 }
 
 /** Smallest allowed crop.w/h — keeps the resample from collapsing to a sliver. */
 export const GEOMETRY_MIN_CROP_SIZE = 0.05;
 const GEOMETRY_MAX_ANGLE = 45;
 
+export function defaultGeometryOrientation(): GeometryOrientation {
+  return { quarterTurns: 0, flipH: false };
+}
+
 export function defaultGeometryParams(): GeometryParams {
-  return { crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 };
+  return { crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0, orientation: defaultGeometryOrientation() };
 }
 
 export function isIdentityGeometry(g: GeometryParams): boolean {
-  return g.angle === 0 && g.crop.x === 0 && g.crop.y === 0 && g.crop.w === 1 && g.crop.h === 1;
+  const o = g.orientation ?? defaultGeometryOrientation();
+  return (
+    g.angle === 0 &&
+    g.crop.x === 0 &&
+    g.crop.y === 0 &&
+    g.crop.w === 1 &&
+    g.crop.h === 1 &&
+    o.quarterTurns === 0 &&
+    o.flipH === false
+  );
+}
+
+/**
+ * Dims of the frame AFTER orientation (before crop): odd quarterTurns swap
+ * width/height (a 90°/270° turn), even turns leave them unchanged. Shared by
+ * computeOutputDims (sync UI sizing) and GraphRenderer.baseDims (GPU) so both
+ * agree on the crop rectangle's reference frame.
+ */
+export function orientedDims(
+  srcWidth: number,
+  srcHeight: number,
+  orientation: GeometryOrientation
+): { width: number; height: number } {
+  return orientation.quarterTurns % 2 === 1
+    ? { width: srcHeight, height: srcWidth }
+    : { width: srcWidth, height: srcHeight };
 }
 
 /**
@@ -134,7 +178,10 @@ export function isIdentityGeometry(g: GeometryParams): boolean {
  * [GEOMETRY_MIN_CROP_SIZE, 1], x/y in [0, 1 - w/h] (crop never spills past the
  * rotated frame), angle in [-45, 45]. Used both by the sidecar sanitizer and
  * by runtime mutations (drag handles, the angle slider) so a stray value can
- * never wedge the doc into an invalid state.
+ * never wedge the doc into an invalid state. `orientation` passes through
+ * untouched (already validated by the caller — sanitizeGeometry or a typed
+ * runtime literal); missing (older call sites / debug-hook payloads) falls
+ * back to identity.
  */
 export function clampGeometry(g: GeometryParams): GeometryParams {
   const w = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, g.crop.w));
@@ -144,7 +191,8 @@ export function clampGeometry(g: GeometryParams): GeometryParams {
   if (x + w > 1) x = 1 - w;
   if (y + h > 1) y = 1 - h;
   const angle = Math.min(GEOMETRY_MAX_ANGLE, Math.max(-GEOMETRY_MAX_ANGLE, g.angle));
-  return { crop: { x, y, w, h }, angle };
+  const orientation = g.orientation ?? defaultGeometryOrientation();
+  return { crop: { x, y, w, h }, angle, orientation };
 }
 
 /**
@@ -158,17 +206,39 @@ export function computeOutputDims(srcWidth: number, srcHeight: number, doc: Grap
   const inputNode = doc.nodes.find((n) => n.kind === 'input');
   const geometry = inputNode?.geometry ?? defaultGeometryParams();
   if (isIdentityGeometry(geometry)) return { width: srcWidth, height: srcHeight };
+  const oriented = orientedDims(srcWidth, srcHeight, geometry.orientation ?? defaultGeometryOrientation());
   return {
-    width: Math.max(1, Math.round(geometry.crop.w * srcWidth)),
-    height: Math.max(1, Math.round(geometry.crop.h * srcHeight)),
+    width: Math.max(1, Math.round(geometry.crop.w * oriented.width)),
+    height: Math.max(1, Math.round(geometry.crop.h * oriented.height)),
   };
+}
+
+/**
+ * Normalize an untrusted orientation payload; missing ⇒ identity default (old
+ * sidecars with no `orientation` field load unchanged). Throws on structural
+ * garbage, same convention as the rest of sanitizeGeometry.
+ */
+function sanitizeOrientation(raw: unknown, nodeId: string): GeometryOrientation {
+  const base = defaultGeometryOrientation();
+  if (raw === undefined) return base;
+  if (typeof raw !== 'object' || raw === null) {
+    throw new Error(`${nodeId}.geometry.orientation must be an object`);
+  }
+  const src = raw as Partial<Record<keyof GeometryOrientation, unknown>>;
+  const quarterTurns = src.quarterTurns === undefined ? base.quarterTurns : src.quarterTurns;
+  if (quarterTurns !== 0 && quarterTurns !== 1 && quarterTurns !== 2 && quarterTurns !== 3) {
+    throw new Error(`${nodeId}.geometry.orientation.quarterTurns must be 0, 1, 2, or 3`);
+  }
+  const flipH = src.flipH === undefined ? base.flipH : src.flipH;
+  if (typeof flipH !== 'boolean') throw new Error(`${nodeId}.geometry.orientation.flipH must be a boolean`);
+  return { quarterTurns, flipH };
 }
 
 /** Normalize an untrusted geometry payload; throws on non-finite numbers (mergeDevelopParams style). */
 export function sanitizeGeometry(raw: unknown, nodeId: string): GeometryParams {
   const base = defaultGeometryParams();
   if (typeof raw !== 'object' || raw === null) return base;
-  const src = raw as { crop?: Partial<GeometryCrop>; angle?: unknown };
+  const src = raw as { crop?: Partial<GeometryCrop>; angle?: unknown; orientation?: unknown };
   const num = (v: unknown, fallback: number, path: string): number => {
     if (v === undefined) return fallback;
     if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`geometry ${path} must be a finite number`);
@@ -182,6 +252,7 @@ export function sanitizeGeometry(raw: unknown, nodeId: string): GeometryParams {
       h: num(src.crop?.h, base.crop.h, `${nodeId}.geometry.crop.h`),
     },
     angle: num(src.angle, base.angle, `${nodeId}.geometry.angle`),
+    orientation: sanitizeOrientation(src.orientation, nodeId),
   });
 }
 
@@ -486,7 +557,7 @@ export interface RenderPlan {
    * texture of dims (round(crop.w*srcW), round(crop.h*srcH)) before running
    * `steps` — absent means zero added cost, bit-exact pass-through.
    */
-  geometry?: { angleRad: number; crop: GeometryCrop };
+  geometry?: { angleRad: number; crop: GeometryCrop; orientation: GeometryOrientation };
   /**
    * Present only when the input node's lens corrections are non-identity.
    * Folded into the SAME resample pass as `geometry` (one resample, not two)
@@ -633,7 +704,11 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   const plan: RenderPlan = { steps, output: resolve(output.id) };
   const geometry = inputNode.geometry ?? defaultGeometryParams();
   if (!isIdentityGeometry(geometry)) {
-    plan.geometry = { angleRad: (geometry.angle * Math.PI) / 180, crop: geometry.crop };
+    plan.geometry = {
+      angleRad: (geometry.angle * Math.PI) / 180,
+      crop: geometry.crop,
+      orientation: geometry.orientation ?? defaultGeometryOrientation(),
+    };
   }
   const lens = inputNode.lens ?? defaultLensParams();
   if (!isIdentityLens(lens)) {

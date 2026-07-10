@@ -168,6 +168,8 @@ function HslSection({ node, params }: { node: GraphNode; params: DevelopParams }
 /** The aggregated Develop panel — Basic now; more sections per spec order. */
 function DevelopInspector({ node }: { node: GraphNode }) {
   const wbModel = useAppStore((s) => s.wbModel);
+  const wbPicking = useAppStore((s) => s.wbPicking);
+  const setWbPicking = useAppStore((s) => s.setWbPicking);
   const params: DevelopParams = node.develop ?? defaultDevelopParams();
   const basic = params.basic as unknown as Record<string, number>;
   const wbDefs: OpParamDef[] = [
@@ -183,6 +185,17 @@ function DevelopInspector({ node }: { node: GraphNode }) {
     <>
       <div className="inspector-title">Develop</div>
       <Section title="Basic">
+        <div className="wb-eyedropper-row">
+          <button
+            type="button"
+            data-testid="wb-eyedropper"
+            className={`wb-eyedropper-button${wbPicking ? ' active' : ''}`}
+            title="Pick a neutral point in the image to set white balance (Esc to cancel)"
+            onClick={() => setWbPicking(!wbPicking)}
+          >
+            {wbPicking ? 'Click the image…' : 'Eyedropper'}
+          </button>
+        </div>
         {wbDefs.map((def) => (
           <ParamSlider
             key={def.key}
