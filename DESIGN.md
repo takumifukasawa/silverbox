@@ -86,7 +86,13 @@ wired by hand. Consequences:
 
 - there are no special node classes for "primary" vs "secondary" grading —
   a secondary is just a Develop node with a mask plugged into its blend;
-- anything the UI can do, the document can express, and vice versa;
+- "virtual copies" are not a separate concept either: a graph may hold
+  several named output nodes (compositor-style), each a look that shares
+  whatever upstream structure it wants — previewable and exportable
+  per-output;
+- anything the UI can do, the document can express, and vice versa; the
+  same holds for the command line — batch rendering a folder against a
+  document is a first-class, UI-free operation;
 - power users may open the node editor and rewire what a one-click helper
   created; the helper never hides structure.
 
@@ -134,6 +140,27 @@ macOS is the development platform; Windows is an intended target. Every
 dependency in the stack (WebGPU, libraw-wasm, sharp, Electron) is chosen to
 be portable, paths and keyboard shortcuts are abstracted as they are
 written, and platform-specific behavior is isolated in the main process.
+
+### 9. Documents outlive versions
+
+Two compatibility promises, kept forever:
+
+- **Old sidecars always load.** Every schema bump ships with sanitizers
+  that read every previous version; a photograph edited today opens
+  correctly in every future Silverbox.
+- **Unknown data survives round-trips.** An older Silverbox that opens a
+  newer document must carry fields it doesn't understand through
+  load→save untouched, instead of silently deleting a future feature's
+  data. Not knowing what something means is no excuse for destroying it.
+
+### 10. Performance model: display-resolution editing, honest pixels on demand
+
+Editing runs the GPU chain at display-appropriate resolution so sliders
+respond instantly; exports render at full resolution. True 100% inspection
+is planned as on-demand tile rendering of the visible region at full
+resolution (the Lightroom/darktable model) — keeping full-resolution
+textures in the interactive chain at all times would trade responsiveness
+and VRAM for accuracy nobody is looking at.
 
 ## Non-goals (deliberate, revisitable)
 
