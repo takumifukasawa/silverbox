@@ -33,7 +33,8 @@ EXIF/ICC, drag & drop, linear wide-gamut working space (Rec.2020).
 7. LUT export: .cube + Unity URP strip + UE 256×16 + WebGL snippet
 8. Sony embedded lens profile auto-correction (validated against the
    in-camera JPEG)
-9. AI denoise (ONNX/WebGPU)
+9. Denoise for high ISO (external-tool hook node first — see nice-to-have
+   notes; bundled inference only if that proves insufficient)
 10. Headless CLI renderer (batch export against sidecars/presets)
 
 ## Should have (credibility gaps vs Lightroom/Resolve, mostly small)
@@ -63,8 +64,9 @@ watermark; file-naming templates belong to the CLI.
 None exist today. The vehicle: a schema-versioned `settings.json` in the
 app data directory — file first, preferences UI later, same text-first
 philosophy as the sidecars (and where UI theme tokens will live). Initial
-contents: export defaults, preview-resolution cap, sidecar autosave toggle,
-baseline-exposure offset (decided in the Lightroom calibration session).
+contents: export defaults, preview-resolution cap, sidecar autosave
+(decided: on by default, debounced, disable-able), baseline-exposure
+offset (value decided in the Lightroom calibration session).
 
 ## Nice to have
 
@@ -95,8 +97,8 @@ baseline-exposure offset (decided in the Lightroom calibration session).
 - Grain quality pass (gaussian, band-limited, roughness control)
 - Navigator panel; EXIF info panel
 - UI theming via design tokens (vim-colorscheme-style shareable JSON)
-- Embedded terminal pane (the user's own shell/AI client)
-- AI subject/sky selection → mask output (after masks + AI denoise)
+- AI subject/sky selection → mask output (after masks; needs an inference
+  story, same constraints as denoise)
 
 ## Not planned
 

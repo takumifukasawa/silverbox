@@ -53,11 +53,12 @@ code. This is not just a storage choice: a text document with documented
 semantics is also an **API surface**. The planned path for AI-assisted
 editing is exactly this — watch the sidecar for external changes and
 hot-reload it, so that anything able to edit JSON (a human in an editor, a
-script, an AI client) can edit the photograph. The app may grow an embedded
-terminal pane (the user's own shell — zsh, WSL, whatever runs their AI
-client and git) as a convenience surface for that loop, but it will not grow
-its own chat UI or a built-in assistant: each user's existing tools should
-compose with Silverbox for free.
+script, an AI client) can edit the photograph. The app's job is to make
+reaching that loop effortless — at minimum a one-click way to open the
+user's own terminal (zsh, WSL, whatever runs their AI client and git) at
+the document's directory; possibly an embedded pane someday — but it will
+not grow its own chat UI or a built-in assistant: each user's existing
+tools should compose with Silverbox for free.
 
 ### 3. The engine is verified, not trusted
 
