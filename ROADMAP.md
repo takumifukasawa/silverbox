@@ -32,7 +32,11 @@ EXIF/ICC, drag & drop, linear wide-gamut working space (Rec.2020).
 6. Sidecar hot-reload on external change (the AI-editing loop)
 7. LUT export: .cube + Unity URP strip + UE 256×16 + WebGL snippet
 8. Sony embedded lens profile auto-correction (validated against the
-   in-camera JPEG)
+   in-camera JPEG). No per-lens database: every ARW embeds its own
+   correction splines for whatever E-mount lens took it. Contactless
+   /vintage glass uses the manual sliders + named lens presets; other
+   makers come later via DNG opcode support (the semi-universal path),
+   then per-maker parsing on demand.
 9. Denoise for high ISO (external-tool hook node first — see nice-to-have
    notes; bundled inference only if that proves insufficient)
 10. Headless CLI renderer (batch export against sidecars/presets)
