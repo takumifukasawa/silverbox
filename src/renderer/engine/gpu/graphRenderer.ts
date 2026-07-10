@@ -14,6 +14,22 @@ import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderPlan } from '../graph/graphDoc';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
+type PlanLens = NonNullable<RenderPlan['lens']>;
+
+// Lens correction tuning constants — LR-CALIBRATION CANDIDATES, same
+// convention as the FX_* constants in developNode.ts: the reference for
+// feel/range is Lightroom's Lens Corrections panel; these first-pass
+// strengths are meant to be recalibrated against LR side-by-side in a
+// follow-up session. Recalibrate HERE only — the resample pass consumes
+// these named constants, so the formulas never need to change.
+/** Distortion ±100 → ±this quadratic radial coefficient (corner-normalized r²). */
+const LENS_DISTORTION_STRENGTH = 0.15;
+/** CA Red/Blue ±100 → ±this relative radial channel scale. */
+const LENS_CA_STRENGTH = 0.004;
+/** Vignette recovery gain's r² coefficient at vignette=100 (corner). */
+const LENS_VIG_R2 = 0.7;
+/** Vignette recovery gain's r⁴ coefficient at vignette=100 (corner). */
+const LENS_VIG_R4 = 0.7;
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex
@@ -72,12 +88,16 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 `;
 
 /**
- * Geometry pass: crop + straighten. The ONLY pass that reads its source with
- * a sampler instead of textureLoad (bilinear, clamp-to-edge — rgba16float is
+ * Resample pass: crop + straighten (geometry) folded with manual lens
+ * corrections (distortion / chromatic aberration / vignette recovery) into
+ * ONE pass, so the image is resampled only once no matter how many of the
+ * two feature sets are active. The ONLY pass that reads its source with a
+ * sampler instead of textureLoad (bilinear, clamp-to-edge — rgba16float is
  * filterable in core WebGPU), because it resamples at non-integer source
- * coordinates. Output dims are the crop rectangle at source resolution; for
- * output texel (ox,oy), `pos.xy` is already the texel CENTER (ox+0.5,
- * oy+0.5), so `p` below is exactly crop.origin·srcDims + (ox+0.5, oy+0.5).
+ * coordinates. Output dims are the crop rectangle at source resolution
+ * (lens never changes dims); for output texel (ox,oy), `pos.xy` is already
+ * the texel CENTER (ox+0.5, oy+0.5), so `p` below is exactly
+ * crop.origin·srcDims + (ox+0.5, oy+0.5).
  *
  * `rotate` intentionally is NOT the textbook CCW-in-math (y-up) matrix: texel
  * space has y growing DOWNWARD, so that formula would look clockwise on
@@ -87,17 +107,33 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
  * is the corresponding INVERSE map (rotate(v,-a) is rotate(v,a)'s inverse for
  * any proper rotation), i.e. "where in the true source does this output
  * texel's content come from".
+ *
+ * Mapping order for each output texel, all in SOURCE pixel space:
+ *   1. crop/rotate inverse map → q (as above, unchanged from the old
+ *      geometry-only pass)
+ *   2. lens distortion about the source center, radius normalized so the
+ *      CORNER = 1 (rn = length(q - center) / length(center)):
+ *      q' = center + (q - center) * (1 + kd * rn²)
+ *   3. chromatic aberration: each channel samples at its own radial scale of
+ *      q' — R at center + (q' - center) * (1 + kr), B at * (1 + kb), G at q'
+ *      unscaled. Always three textureSampleLevel calls (G's scale is 1) —
+ *      simpler than branching on whether CA is active.
+ *   4. vignetting recovery in LINEAR space on the sampled color, using rn of
+ *      q' (the DISTORTION-CORRECTED position, before the CA offset):
+ *      gain = 1 + vignette * (LENS_VIG_R2 * rn² + LENS_VIG_R4 * rn⁴)
  */
-const GEOMETRY_SHADER = /* wgsl */ `
+const RESAMPLE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var geomSampler: sampler;
-struct GeometryParams {
+struct ResampleParams {
   // x = crop.x, y = crop.y (normalized), z = srcWidth, w = srcHeight (px)
   p0: vec4f,
-  // x = angleRad, yzw unused
+  // x = angleRad, y = distortion k, z = CA red k, w = CA blue k
   p1: vec4f,
+  // x = vignette amount (vignette/100, 0..1), yzw unused
+  p2: vec4f,
 }
-@group(0) @binding(2) var<uniform> u: GeometryParams;
+@group(0) @binding(2) var<uniform> u: ResampleParams;
 ${FULLSCREEN_VS}
 fn rotate(v: vec2f, angleRad: f32) -> vec2f {
   let s = sin(angleRad);
@@ -110,9 +146,31 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let srcDims = u.p0.zw;
   let cropOrigin = u.p0.xy * srcDims;
   let srcCenter = srcDims * 0.5;
+  let cornerRadius = length(srcCenter);
   let p = cropOrigin + pos.xy;
   let q = rotate(p - srcCenter, -u.p1.x) + srcCenter;
-  return textureSampleLevel(src, geomSampler, q / srcDims, 0.0);
+
+  // 2. lens distortion
+  let rel = q - srcCenter;
+  let rn = length(rel) / cornerRadius;
+  let kd = u.p1.y;
+  let qd = srcCenter + rel * (1.0 + kd * rn * rn);
+
+  // 3. chromatic aberration — per-channel radial scale of the distorted position
+  let relD = qd - srcCenter;
+  let kr = u.p1.z;
+  let kb = u.p1.w;
+  let qr = srcCenter + relD * (1.0 + kr);
+  let qb = srcCenter + relD * (1.0 + kb);
+  let r = textureSampleLevel(src, geomSampler, qr / srcDims, 0.0).r;
+  let g = textureSampleLevel(src, geomSampler, qd / srcDims, 0.0).g;
+  let b = textureSampleLevel(src, geomSampler, qb / srcDims, 0.0).b;
+
+  // 4. vignetting recovery, linear space, rn of the distortion-corrected position
+  let rnD = length(relD) / cornerRadius;
+  let vig = u.p2.x;
+  let gain = 1.0 + vig * (${LENS_VIG_R2} * rnD * rnD + ${LENS_VIG_R4} * rnD * rnD * rnD * rnD);
+  return vec4f(r * gain, g * gain, b * gain, 1.0);
 }
 `;
 
@@ -165,11 +223,13 @@ export class GraphRenderer {
   private srcHeight = 0;
   /** Non-null only when the current plan has a non-identity geometry. */
   private planGeometry: PlanGeometry | undefined = undefined;
-  /** Resample target for geometry (crop/straighten); dims = (width, height) above. */
+  /** Non-null only when the current plan has non-identity lens corrections. */
+  private planLens: PlanLens | undefined = undefined;
+  /** Resample target for geometry+lens (crop/straighten/distortion/CA/vignette); dims = (width, height) above. */
   private baseTexture: GPUTexture | null = null;
-  private geometryUniform: GPUBuffer | null = null;
-  private geometryPipelineCache: GPURenderPipeline | null = null;
-  private geometrySamplerCache: GPUSampler | null = null;
+  private resampleUniform: GPUBuffer | null = null;
+  private resamplePipelineCache: GPURenderPipeline | null = null;
+  private resampleSamplerCache: GPUSampler | null = null;
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -247,46 +307,57 @@ export class GraphRenderer {
     this.scratchTexture = null;
     this.baseTexture?.destroy();
     this.baseTexture = null;
-    this.geometryUniform?.destroy();
-    this.geometryUniform = null;
+    this.resampleUniform?.destroy();
+    this.resampleUniform = null;
     this.planGeometry = undefined;
+    this.planLens = undefined;
     this.srcWidth = width;
     this.srcHeight = height;
     this.width = width;
     this.height = height;
   }
 
-  /** Pipeline for the geometry (crop/straighten) pass — compiled once, shared by every consumer. */
-  private geometryPipeline(): GPURenderPipeline {
-    if (!this.geometryPipelineCache) {
-      const module = this.device.createShaderModule({ code: GEOMETRY_SHADER });
-      this.geometryPipelineCache = this.device.createRenderPipeline({
+  /** Pipeline for the resample (geometry+lens) pass — compiled once, shared by every consumer. */
+  private resamplePipeline(): GPURenderPipeline {
+    if (!this.resamplePipelineCache) {
+      const module = this.device.createShaderModule({ code: RESAMPLE_SHADER });
+      this.resamplePipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
         fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
       });
     }
-    return this.geometryPipelineCache;
+    return this.resamplePipelineCache;
   }
 
-  /** Clamp-to-edge bilinear sampler — the geometry pass's only non-integer-coordinate read. */
-  private geometrySampler(): GPUSampler {
-    this.geometrySamplerCache ??= this.device.createSampler({
+  /** Clamp-to-edge bilinear sampler — the resample pass's only non-integer-coordinate read. */
+  private resampleSampler(): GPUSampler {
+    this.resampleSamplerCache ??= this.device.createSampler({
       addressModeU: 'clamp-to-edge',
       addressModeV: 'clamp-to-edge',
       magFilter: 'linear',
       minFilter: 'linear',
     });
-    return this.geometrySamplerCache;
+    return this.resampleSamplerCache;
   }
 
-  private geometryUniformData(geometry: PlanGeometry, srcWidth: number, srcHeight: number): Float32Array {
-    const data = new Float32Array(8);
-    data[0] = geometry.crop.x;
-    data[1] = geometry.crop.y;
+  /** Packs geometry (or its identity default) + lens (or its identity default) into one uniform. */
+  private resampleUniformData(
+    geometry: PlanGeometry | undefined,
+    lens: PlanLens | undefined,
+    srcWidth: number,
+    srcHeight: number
+  ): Float32Array {
+    const data = new Float32Array(12);
+    data[0] = geometry?.crop.x ?? 0;
+    data[1] = geometry?.crop.y ?? 0;
     data[2] = srcWidth;
     data[3] = srcHeight;
-    data[4] = geometry.angleRad;
+    data[4] = geometry?.angleRad ?? 0;
+    data[5] = lens ? LENS_DISTORTION_STRENGTH * (lens.distortion / 100) : 0;
+    data[6] = lens ? LENS_CA_STRENGTH * (lens.caRed / 100) : 0;
+    data[7] = lens ? LENS_CA_STRENGTH * (lens.caBlue / 100) : 0;
+    data[8] = lens ? lens.vignette / 100 : 0;
     return data;
   }
 
@@ -381,11 +452,15 @@ export class GraphRenderer {
     this.outputIndex = plan.output;
 
     // Base dims: the source itself when geometry is identity (zero cost, no
-    // extra texture/pass), else the crop rectangle at source resolution.
+    // extra texture/pass), else the crop rectangle at source resolution. Lens
+    // never changes dims — only geometry's crop does.
     const { width: nextWidth, height: nextHeight } = GraphRenderer.baseDims(plan, this.srcWidth, this.srcHeight);
     const dimsChanged = nextWidth !== this.width || nextHeight !== this.height;
 
-    if (plan.geometry) {
+    // The resample pass activates when EITHER geometry or lens is
+    // non-identity — both fold into the same pass, so a lens-only edit still
+    // needs the base texture even though geometry itself stays absent.
+    if (plan.geometry || plan.lens) {
       if (!this.baseTexture || this.baseTexture.width !== nextWidth || this.baseTexture.height !== nextHeight) {
         this.baseTexture?.destroy();
         this.baseTexture = this.device.createTexture({
@@ -394,23 +469,24 @@ export class GraphRenderer {
           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
         });
       }
-      this.geometryUniform?.destroy();
-      this.geometryUniform = this.device.createBuffer({
-        size: 32,
+      this.resampleUniform?.destroy();
+      this.resampleUniform = this.device.createBuffer({
+        size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
       this.device.queue.writeBuffer(
-        this.geometryUniform,
+        this.resampleUniform,
         0,
-        this.geometryUniformData(plan.geometry, this.srcWidth, this.srcHeight)
+        this.resampleUniformData(plan.geometry, plan.lens, this.srcWidth, this.srcHeight)
       );
     } else {
       this.baseTexture?.destroy();
       this.baseTexture = null;
-      this.geometryUniform?.destroy();
-      this.geometryUniform = null;
+      this.resampleUniform?.destroy();
+      this.resampleUniform = null;
     }
     this.planGeometry = plan.geometry;
+    this.planLens = plan.lens;
 
     if (dimsChanged) {
       for (const t of this.stepTextures) t.destroy();
@@ -484,18 +560,18 @@ export class GraphRenderer {
   }
 
   /**
-   * The chain's source view: the decoded texture itself when geometry is
-   * identity (zero added pass, bit-exact), else a fresh resample of it into
-   * `baseTexture` at the crop's dims — recorded every call, same cost model
+   * The chain's source view: the decoded texture itself when BOTH geometry
+   * and lens are identity (zero added pass, bit-exact), else a fresh
+   * resample of it into `baseTexture` — recorded every call, same cost model
    * as every other pass in the chain (they all re-record each render() too).
    */
   private effectiveSourceView(encoder: GPUCommandEncoder): GPUTextureView {
-    if (!this.planGeometry) return this.source!.createView();
+    if (!this.planGeometry && !this.planLens) return this.source!.createView();
     const target = this.baseTexture!.createView();
-    this.addPass(encoder, target, this.geometryPipeline(), [
+    this.addPass(encoder, target, this.resamplePipeline(), [
       { binding: 0, resource: this.source!.createView() },
-      { binding: 1, resource: this.geometrySampler() },
-      { binding: 2, resource: { buffer: this.geometryUniform! } },
+      { binding: 1, resource: this.resampleSampler() },
+      { binding: 2, resource: { buffer: this.resampleUniform! } },
     ]);
     return target;
   }
@@ -555,6 +631,7 @@ export class GraphRenderer {
     // Output dims: the crop rectangle at THIS image's resolution when
     // geometry is active (so a full-res export crops at full-res dims, same
     // normalized fraction as the preview) — else the source dims, unchanged.
+    // Lens never changes dims (only geometry's crop does).
     const { width, height } = GraphRenderer.baseDims(plan, srcWidth, srcHeight);
     const temps: GPUTexture[] = [source];
     const tempBuffers: GPUBuffer[] = [];
@@ -568,14 +645,14 @@ export class GraphRenderer {
     try {
       const encoder = device.createCommandEncoder();
       let baseView = source.createView();
-      if (plan.geometry) {
+      if (plan.geometry || plan.lens) {
         const base = makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT);
-        const uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const uniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         tempBuffers.push(uniform);
-        device.queue.writeBuffer(uniform, 0, this.geometryUniformData(plan.geometry, srcWidth, srcHeight));
-        this.addPass(encoder, base.createView(), this.geometryPipeline(), [
+        device.queue.writeBuffer(uniform, 0, this.resampleUniformData(plan.geometry, plan.lens, srcWidth, srcHeight));
+        this.addPass(encoder, base.createView(), this.resamplePipeline(), [
           { binding: 0, resource: source.createView() },
-          { binding: 1, resource: this.geometrySampler() },
+          { binding: 1, resource: this.resampleSampler() },
           { binding: 2, resource: { buffer: uniform } },
         ]);
         baseView = base.createView();

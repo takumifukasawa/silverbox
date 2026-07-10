@@ -40,6 +40,8 @@ export interface GraphNode {
   shader?: CustomShaderParams;
   /** Non-destructive crop + straighten; only for kind 'input'. */
   geometry?: GeometryParams;
+  /** Manual lens corrections (distortion/CA/vignette); only for kind 'input'. */
+  lens?: LensParams;
 }
 
 export interface GraphEdge {
@@ -68,7 +70,7 @@ export function defaultGraphDoc(): GraphDoc {
   return {
     version: 1,
     nodes: [
-      { id: 'in', kind: 'input', position: { x: 20, y: 60 }, geometry: defaultGeometryParams() },
+      { id: 'in', kind: 'input', position: { x: 20, y: 60 }, geometry: defaultGeometryParams(), lens: defaultLensParams() },
       { id: 'dev', kind: DEVELOP_KIND, position: { x: 220, y: 60 }, develop: defaultDevelopParams() },
       { id: 'out', kind: 'output', position: { x: 420, y: 60 } },
     ],
@@ -183,6 +185,62 @@ export function sanitizeGeometry(raw: unknown, nodeId: string): GeometryParams {
   });
 }
 
+// --- Lens: manual lens corrections (distortion / CA / vignette recovery) ----
+//
+// Optical, like geometry, so it lives on the input node and is folded into
+// the SAME resample pass as crop/straighten — the image is resampled once.
+// Unlike geometry it never changes output dims (crop alone does). All four
+// fields default to 0 = identity, so an untouched input node stays a
+// bit-exact pass-through, same invariant geometry upholds.
+
+export interface LensParams {
+  /** −100..100; + straightens barrel distortion. */
+  distortion: number;
+  /** −100..100; radial scale of the R channel (chromatic aberration). */
+  caRed: number;
+  /** −100..100; radial scale of the B channel (chromatic aberration). */
+  caBlue: number;
+  /** 0..100; corner illumination recovery. */
+  vignette: number;
+}
+
+export function defaultLensParams(): LensParams {
+  return { distortion: 0, caRed: 0, caBlue: 0, vignette: 0 };
+}
+
+export function isIdentityLens(l: LensParams): boolean {
+  return l.distortion === 0 && l.caRed === 0 && l.caBlue === 0 && l.vignette === 0;
+}
+
+/** Clamp an already-numeric lens payload into valid ranges (see LensParams field docs). */
+export function clampLens(l: LensParams): LensParams {
+  const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+  return {
+    distortion: clamp(l.distortion, -100, 100),
+    caRed: clamp(l.caRed, -100, 100),
+    caBlue: clamp(l.caBlue, -100, 100),
+    vignette: clamp(l.vignette, 0, 100),
+  };
+}
+
+/** Normalize an untrusted lens payload; throws on non-finite numbers (sanitizeGeometry style). */
+export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
+  const base = defaultLensParams();
+  if (typeof raw !== 'object' || raw === null) return base;
+  const src = raw as Partial<Record<keyof LensParams, unknown>>;
+  const num = (v: unknown, fallback: number, path: string): number => {
+    if (v === undefined) return fallback;
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`lens ${path} must be a finite number`);
+    return v;
+  };
+  return clampLens({
+    distortion: num(src.distortion, base.distortion, `${nodeId}.lens.distortion`),
+    caRed: num(src.caRed, base.caRed, `${nodeId}.lens.caRed`),
+    caBlue: num(src.caBlue, base.caBlue, `${nodeId}.lens.caBlue`),
+    vignette: num(src.vignette, base.vignette, `${nodeId}.lens.vignette`),
+  });
+}
+
 /**
  * Serialize for the sidecar (spec §3): a schemaVersion-2 wrapper with the
  * source block and timestamps around the graph. Nodes serialize their kind
@@ -205,6 +263,7 @@ export function serializeGraphDoc(doc: GraphDoc, source: SidecarSource | null, c
         ...(n.develop ? { develop: n.develop } : {}),
         ...(n.shader ? { shader: n.shader } : {}),
         ...(n.geometry ? { geometry: n.geometry } : {}),
+        ...(n.lens ? { lens: n.lens } : {}),
       })),
       edges: doc.edges.map((e) => ({
         id: e.id,
@@ -276,6 +335,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
     }
     if (n.kind === 'input') {
       n.geometry = sanitizeGeometry(n.geometry, n.id);
+      n.lens = sanitizeLens(n.lens, n.id);
     }
   });
   for (const e of doc.edges) {
@@ -427,6 +487,12 @@ export interface RenderPlan {
    * `steps` — absent means zero added cost, bit-exact pass-through.
    */
   geometry?: { angleRad: number; crop: GeometryCrop };
+  /**
+   * Present only when the input node's lens corrections are non-identity.
+   * Folded into the SAME resample pass as `geometry` (one resample, not two)
+   * — absent means zero added cost, same rule as geometry.
+   */
+  lens?: LensParams;
 }
 
 /** Per-compile context: the image's WB model + render/full resolution ratio. */
@@ -569,6 +635,10 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   if (!isIdentityGeometry(geometry)) {
     plan.geometry = { angleRad: (geometry.angle * Math.PI) / 180, crop: geometry.crop };
   }
+  const lens = inputNode.lens ?? defaultLensParams();
+  if (!isIdentityLens(lens)) {
+    plan.lens = lens;
+  }
   return plan;
 }
 
@@ -595,8 +665,8 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
   return at(plan.output);
 }
 
-/** True when every step in the plan has a CPU mirror (geometry has none — like spatial ops). */
+/** True when every step in the plan has a CPU mirror (geometry/lens have none — like spatial ops). */
 export function planHasCpuReference(plan: RenderPlan): boolean {
-  if (plan.geometry) return false;
+  if (plan.geometry || plan.lens) return false;
   return plan.steps.every((s) => s.type !== 'passes' || s.cpu !== null);
 }

@@ -5,6 +5,7 @@ import type { PreparedImage } from '../engine/decoder/decodeWorker';
 import {
   buildPlan,
   clampGeometry,
+  clampLens,
   defaultGraphDoc,
   defaultParams,
   DEVELOP_KIND,
@@ -14,6 +15,7 @@ import {
   type AddableKind,
   type GeometryParams,
   type GraphDoc,
+  type LensParams,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import type { GraphRenderer, HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
@@ -93,6 +95,8 @@ interface AppState {
   toggleCropMode(): void;
   /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
+  /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
+  setLens(lens: LensParams, coalesceKey: string | null): void;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -681,6 +685,22 @@ export const useAppStore = create<AppState>((set, get) => {
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === inputNode.id ? { ...n, geometry } : n)),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
+  setLens(lensParams, coalesceKey) {
+    set((s) => {
+      const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+      if (!inputNode) return {};
+      const lens = clampLens(lensParams);
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === inputNode.id ? { ...n, lens } : n)),
         },
         graphDirty: true,
       };

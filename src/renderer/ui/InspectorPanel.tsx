@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import {
   BLEND_KIND,
@@ -11,7 +11,7 @@ import {
   toneCurvePoint,
   type OpParamDef,
 } from '../engine/graph/ops';
-import { DEVELOP_KIND, type GraphNode } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND, defaultLensParams, type GraphNode, type LensParams } from '../engine/graph/graphDoc';
 import {
   defaultDevelopParams,
   GRADING_REGIONS,
@@ -37,14 +37,21 @@ function ParamSlider({
   def,
   value,
   defaultValue,
+  setValue,
 }: {
   nodeId: string;
   def: OpParamDef;
   value: number;
   defaultValue?: number;
+  /** Overrides the default updateNodeParam(nodeId, def.key, v) commit (e.g. the input node's lens, which isn't stored under node.params). */
+  setValue?: (v: number) => void;
 }) {
   const updateNodeParam = useAppStore((s) => s.updateNodeParam);
-  const set = (v: number) => updateNodeParam(nodeId, def.key, Math.min(def.max, Math.max(def.min, v)));
+  const set = (v: number) => {
+    const clamped = Math.min(def.max, Math.max(def.min, v));
+    if (setValue) setValue(clamped);
+    else updateNodeParam(nodeId, def.key, clamped);
+  };
   const resetTo = defaultValue ?? def.default;
   const changed = value !== resetTo;
   const isLog = def.scale === 'log';
@@ -395,6 +402,53 @@ function CurvePreview({ node }: { node: GraphNode }) {
   );
 }
 
+const LENS_SLIDER_DEFS: { key: keyof LensParams; label: string; min: number; max: number }[] = [
+  { key: 'distortion', label: 'Distortion', min: -100, max: 100 },
+  { key: 'caRed', label: 'CA Red', min: -100, max: 100 },
+  { key: 'caBlue', label: 'CA Blue', min: -100, max: 100 },
+  { key: 'vignette', label: 'Vignetting', min: 0, max: 100 },
+];
+
+/**
+ * Manual lens corrections — optical, so (like geometry/crop) it lives on the
+ * input node rather than a Develop section. Pinned as the input node's ONLY
+ * inspector content (geometry itself is edited via the crop overlay, not a
+ * slider here). Each slider commits through setLens with a per-drag session
+ * key so a whole drag coalesces into one undo entry — same pattern as
+ * CropOverlay's angle slider / setGeometry.
+ */
+function LensSection({ node }: { node: GraphNode }) {
+  const setLens = useAppStore((s) => s.setLens);
+  const lens = node.lens ?? defaultLensParams();
+  const sessionRef = useRef<Partial<Record<keyof LensParams, number | null>>>({});
+
+  return (
+    <Section title="Lens Corrections">
+      {LENS_SLIDER_DEFS.map((d) => (
+        <div
+          key={d.key}
+          onPointerDown={() => {
+            sessionRef.current[d.key] = Date.now();
+          }}
+          onPointerUp={() => {
+            sessionRef.current[d.key] = null;
+          }}
+        >
+          <ParamSlider
+            nodeId={node.id}
+            def={{ key: `lens.${d.key}`, label: d.label, min: d.min, max: d.max, step: 1, default: 0 }}
+            value={lens[d.key]}
+            setValue={(v) => {
+              sessionRef.current[d.key] ??= Date.now();
+              setLens({ ...lens, [d.key]: v }, `lens:${node.id}:${d.key}:${sessionRef.current[d.key]}`);
+            }}
+          />
+        </div>
+      ))}
+    </Section>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -416,12 +470,16 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
       </>
     );
   }
-  if (!isOpKind(node.kind)) {
+  if (node.kind === 'input') {
     return (
-      <div className="inspector-placeholder">
-        {node.kind === 'input' ? 'Input: the decoded linear image.' : 'Output: sRGB-encoded display.'}
-      </div>
+      <>
+        <div className="inspector-title">Input</div>
+        <LensSection node={node} />
+      </>
     );
+  }
+  if (!isOpKind(node.kind)) {
+    return <div className="inspector-placeholder">Output: sRGB-encoded display.</div>;
   }
   const def = OPS[node.kind];
   // the WB atomic resets to the image's as-shot values, not a fixed default

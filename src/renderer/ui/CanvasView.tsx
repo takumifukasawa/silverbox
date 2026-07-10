@@ -7,9 +7,11 @@ import {
   computeOutputDims,
   cpuEvalPlan,
   defaultGeometryParams,
+  defaultLensParams,
   planHasCpuReference,
   type GeometryParams,
   type GraphDoc,
+  type LensParams,
 } from '../engine/graph/graphDoc';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
@@ -43,6 +45,8 @@ declare global {
       historyState(): { past: number; future: number };
       setGeometry(geo: GeometryParams): void;
       geometryState(): GeometryParams;
+      setLens(lens: LensParams): void;
+      lensState(): LensParams;
       outputDims(): { width: number; height: number } | null;
       scopeState(): {
         mode: string;
@@ -338,6 +342,14 @@ export function CanvasView() {
         const s = useAppStore.getState();
         const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
         return inputNode?.geometry ?? defaultGeometryParams();
+      },
+      setLens(lens) {
+        useAppStore.getState().setLens(lens, null);
+      },
+      lensState() {
+        const s = useAppStore.getState();
+        const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+        return inputNode?.lens ?? defaultLensParams();
       },
       outputDims() {
         const canvas = canvasRef.current;
