@@ -24,6 +24,9 @@ What makes it different:
   pretty-printed, stable JSON document (schemaVersion 2) carrying the graph,
   its provenance and timestamps.
 
+The principles behind these choices — and what Silverbox deliberately is
+not — are written down in [DESIGN.md](DESIGN.md).
+
 ## Develop features
 
 - **Basic** — real Kelvin/Tint white balance (as-shot estimated from the
