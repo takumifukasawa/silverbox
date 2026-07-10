@@ -17,6 +17,7 @@ import {
 } from './customShaderNode';
 import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
 import { sanitizeCurvePoints } from '../color/toneCurve';
+import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams } from './maskNode';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -26,7 +27,8 @@ export type GraphNodeKind =
   | OpKind
   | typeof CUSTOM_KIND
   | typeof BLEND_KIND
-  | typeof DEVELOP_KIND;
+  | typeof DEVELOP_KIND
+  | typeof MASK_KIND;
 
 export interface GraphNode {
   id: string;
@@ -42,14 +44,25 @@ export interface GraphNode {
   geometry?: GeometryParams;
   /** Manual lens corrections (distortion/CA/vignette); only for kind 'input'. */
   lens?: LensParams;
+  /** Analytic mask shapes; only for kind 'mask' (masks milestone). */
+  mask?: MaskParams;
+  /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
+  name?: string;
 }
 
 export interface GraphEdge {
   id: string;
   source: string;
   target: string;
-  /** Which input of a blend node this edge feeds ('a' = base, 'b' = overlay). */
-  targetHandle?: 'a' | 'b';
+  /**
+   * Which input port of a multi-input node this edge feeds: 'a'/'b' for
+   * blend's base/overlay, 'mask' for blend's optional mask input; absent =
+   * the target node's primary (only) input. Serialized as `port` in schema
+   * v3 (see serializeGraphDoc/parseGraphDoc); this internal field name is
+   * unchanged from before v3 to minimize churn at every call site already
+   * keyed on `targetHandle`.
+   */
+  targetHandle?: 'a' | 'b' | 'mask';
 }
 
 export interface GraphDoc {
@@ -58,9 +71,16 @@ export interface GraphDoc {
   edges: GraphEdge[];
 }
 
-export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND;
+export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND | typeof MASK_KIND | 'output';
 
-export function defaultParams(kind: Exclude<AddableKind, typeof CUSTOM_KIND>): Record<string, number> {
+/** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
+export function outputName(node: GraphNode): string {
+  return node.name?.trim() || 'main';
+}
+
+export function defaultParams(
+  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | 'output'>
+): Record<string, number> {
   const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
 }
@@ -93,9 +113,11 @@ export interface SidecarDoc {
   graph: GraphDoc;
   source?: SidecarSource;
   createdAt?: string;
+  /** Unrecognized wrapper-level keys (DESIGN §9 passthrough) — round-tripped verbatim by serializeGraphDoc. */
+  unknown?: Record<string, unknown>;
 }
 
-export const SIDECAR_SCHEMA_VERSION = 2;
+export const SIDECAR_SCHEMA_VERSION = 3;
 
 // --- Geometry: non-destructive crop + straighten (input node only) ----------
 //
@@ -312,42 +334,98 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
   });
 }
 
+/** Wrapper-level keys `serializeGraphDoc`/`parseGraphDoc` know about; anything else round-trips verbatim (DESIGN §9). */
+const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'graph']);
+/** Node-level keys the schema knows about; anything else round-trips verbatim per node. */
+const KNOWN_NODE_KEYS = new Set([
+  'id',
+  'kind',
+  'position',
+  'params',
+  'develop',
+  'shader',
+  'geometry',
+  'lens',
+  'mask',
+  'name',
+]);
+/** Edge-level keys the schema knows about; anything else round-trips verbatim per edge. */
+const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
+
 /**
- * Serialize for the sidecar (spec §3): a schemaVersion-2 wrapper with the
+ * Serialize for the sidecar (spec §3): a schemaVersion-3 wrapper with the
  * source block and timestamps around the graph. Nodes serialize their kind
- * as `type` and edges as from/to — the spec's field names. Pretty-printed
- * and newline-terminated for git.
+ * as `type` and edges as from/to — the spec's field names; an edge's
+ * internal `targetHandle` port serializes as `port` (schema v3's formalized
+ * port concept — see GraphEdge's doc comment). Unrecognized keys on the
+ * wrapper/nodes/edges (`unknownWrapperFields` + whatever extra properties
+ * ride along on a parsed node/edge object — see parseGraphDoc) are written
+ * back verbatim, with known keys winning on conflict (DESIGN §9). Pretty-
+ * printed and newline-terminated for git.
  */
-export function serializeGraphDoc(doc: GraphDoc, source: SidecarSource | null, createdAt: string | null): string {
+export function serializeGraphDoc(
+  doc: GraphDoc,
+  source: SidecarSource | null,
+  createdAt: string | null,
+  unknownWrapperFields?: Record<string, unknown>
+): string {
   const now = new Date().toISOString();
   const wrapper = {
+    ...(unknownWrapperFields ?? {}),
     schemaVersion: SIDECAR_SCHEMA_VERSION,
     ...(source ? { source } : {}),
     createdAt: createdAt ?? now,
     updatedAt: now,
     graph: {
-      nodes: doc.nodes.map((n) => ({
-        id: n.id,
-        type: n.kind,
-        position: n.position,
-        ...(n.params ? { params: n.params } : {}),
-        ...(n.develop ? { develop: n.develop } : {}),
-        ...(n.shader ? { shader: n.shader } : {}),
-        ...(n.geometry ? { geometry: n.geometry } : {}),
-        ...(n.lens ? { lens: n.lens } : {}),
-      })),
-      edges: doc.edges.map((e) => ({
-        id: e.id,
-        from: e.source,
-        to: e.target,
-        ...(e.targetHandle ? { targetHandle: e.targetHandle } : {}),
-      })),
+      nodes: doc.nodes.map((n) => {
+        const rec = n as unknown as Record<string, unknown>;
+        const extra: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(rec)) {
+          if (!KNOWN_NODE_KEYS.has(k) && v !== undefined) extra[k] = v;
+        }
+        return {
+          ...extra,
+          id: n.id,
+          type: n.kind,
+          position: n.position,
+          ...(n.params ? { params: n.params } : {}),
+          ...(n.develop ? { develop: n.develop } : {}),
+          ...(n.shader ? { shader: n.shader } : {}),
+          ...(n.geometry ? { geometry: n.geometry } : {}),
+          ...(n.lens ? { lens: n.lens } : {}),
+          ...(n.mask ? { mask: n.mask } : {}),
+          ...(n.name !== undefined ? { name: n.name } : {}),
+        };
+      }),
+      edges: doc.edges.map((e) => {
+        const rec = e as unknown as Record<string, unknown>;
+        const extra: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(rec)) {
+          if (!KNOWN_EDGE_KEYS.has(k) && v !== undefined) extra[k] = v;
+        }
+        return {
+          ...extra,
+          id: e.id,
+          from: e.source,
+          to: e.target,
+          ...(e.targetHandle ? { port: e.targetHandle } : {}),
+        };
+      }),
     },
   };
   return JSON.stringify(wrapper, null, 2) + '\n';
 }
 
-/** Parse + validate a sidecar; throws with a reason on anything malformed. */
+/**
+ * Parse + validate a sidecar; throws with a reason on anything malformed.
+ * Accepts BOTH schemaVersion 2 (today's shape: edges carry `targetHandle`
+ * directly, no `mask` kind, no output `name`) and 3 (edges carry `port`,
+ * formalizing the same concept) — a v2 sidecar loads byte-semantically
+ * identically to before v3 existed. Unrecognized keys on the wrapper and on
+ * each node/edge are preserved (as extra untyped properties riding along on
+ * the parsed objects, or on the returned SidecarDoc's `unknown` for the
+ * wrapper) so serializeGraphDoc can write them back verbatim (DESIGN §9).
+ */
 export function parseGraphDoc(text: string): SidecarDoc {
   const raw: unknown = JSON.parse(text);
   if (typeof raw !== 'object' || raw === null) throw new Error('graph doc must be an object');
@@ -357,8 +435,9 @@ export function parseGraphDoc(text: string): SidecarDoc {
     createdAt?: unknown;
     graph?: { nodes?: unknown; edges?: unknown };
   };
-  if (wrapper.schemaVersion !== SIDECAR_SCHEMA_VERSION) {
-    throw new Error(`unsupported sidecar schemaVersion ${String(wrapper.schemaVersion)}`);
+  const version = wrapper.schemaVersion;
+  if (version !== 2 && version !== 3) {
+    throw new Error(`unsupported sidecar schemaVersion ${String(version)}`);
   }
   const rawNodes = wrapper.graph?.nodes;
   const rawEdges = wrapper.graph?.edges;
@@ -370,12 +449,22 @@ export function parseGraphDoc(text: string): SidecarDoc {
       kind: n.type,
       type: undefined,
     })) as unknown as GraphNode[],
-    edges: rawEdges.map((e: Record<string, unknown>) => ({
-      id: e.id,
-      source: e.from,
-      target: e.to,
-      ...(e.targetHandle !== undefined ? { targetHandle: e.targetHandle } : {}),
-    })) as unknown as GraphEdge[],
+    edges: rawEdges.map((e: Record<string, unknown>) => {
+      // v2 read the port straight off `targetHandle`; v3 formalizes it as
+      // `port` — either way it lands on the internal `targetHandle` field.
+      const portRaw = version === 3 ? e.port : e.targetHandle;
+      const extra: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(e)) {
+        if (k !== 'id' && k !== 'from' && k !== 'to' && k !== 'targetHandle' && k !== 'port') extra[k] = v;
+      }
+      return {
+        ...extra,
+        id: e.id,
+        source: e.from,
+        target: e.to,
+        ...(portRaw !== undefined ? { targetHandle: portRaw } : {}),
+      };
+    }) as unknown as GraphEdge[],
   };
   doc.nodes.forEach((n, i) => {
     if (typeof n.id !== 'string') throw new Error('node id must be a string');
@@ -385,6 +474,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
       n.kind !== CUSTOM_KIND &&
       n.kind !== BLEND_KIND &&
       n.kind !== DEVELOP_KIND &&
+      n.kind !== MASK_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -408,20 +498,40 @@ export function parseGraphDoc(text: string): SidecarDoc {
       n.geometry = sanitizeGeometry(n.geometry, n.id);
       n.lens = sanitizeLens(n.lens, n.id);
     }
+    if (n.kind === MASK_KIND) {
+      n.mask = sanitizeMaskParams(n.mask, n.id);
+    }
+    if (n.kind === 'output') {
+      n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
+    }
   });
   for (const e of doc.edges) {
     if (typeof e.id !== 'string' || typeof e.source !== 'string' || typeof e.target !== 'string') {
       throw new Error('edges need string id/source/target');
     }
-    if (e.targetHandle !== undefined && e.targetHandle !== 'a' && e.targetHandle !== 'b') {
+    if (
+      e.targetHandle !== undefined &&
+      e.targetHandle !== 'a' &&
+      e.targetHandle !== 'b' &&
+      e.targetHandle !== 'mask'
+    ) {
       throw new Error(`edge ${e.id} has an invalid targetHandle`);
     }
   }
-  buildPlan(doc); // throws unless the output resolves through a valid DAG
+  // every output resolves through a valid DAG (buildPlan is pure/side-effect-free — see its doc comment)
+  const outputNodes = doc.nodes.filter((n) => n.kind === 'output');
+  if (outputNodes.length === 0) throw new Error('graph has no output node');
+  for (const out of outputNodes) buildPlan(doc, { outputId: out.id });
+
+  const unknownWrapper: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(wrapper as Record<string, unknown>)) {
+    if (!KNOWN_WRAPPER_KEYS.has(k)) unknownWrapper[k] = v;
+  }
   return {
     graph: doc,
     ...(wrapper.source ? { source: wrapper.source } : {}),
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
+    ...(Object.keys(unknownWrapper).length > 0 ? { unknown: unknownWrapper } : {}),
   };
 }
 
@@ -520,7 +630,15 @@ export type PlanStep =
       /** (px, x, y, width, height) — x/y are the render target's integer texel coords. */
       cpu: ((px: Rgb, x: number, y: number, width: number, height: number) => Rgb) | null;
     }
-  | { nodeId: string; type: 'blend'; uniform: Vec4; srcA: number; srcB: number };
+  | {
+      nodeId: string;
+      type: 'blend';
+      uniform: Vec4;
+      srcA: number;
+      srcB: number;
+      /** Optional mask input (spec §3): out = mix(a, b, maskValue.r * uniform.amount) when present. */
+      srcMask?: number;
+    };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
 export function opPassWgsl(applyOp: string): string {
@@ -568,17 +686,24 @@ export interface RenderPlan {
 
 /** Per-compile context: the image's WB model + render/full resolution ratio. */
 export interface CompileContext {
-  wb: WbModel;
+  /** Defaults to DEFAULT_WB_MODEL when omitted (e.g. parseGraphDoc's own internal validation calls). */
+  wb?: WbModel;
   /** renderLongEdge / fullLongEdge (≤1 preview, 1 export); scales Detail kernels. */
   renderScale?: number;
+  /**
+   * Selects which output node to resolve when the doc has more than one
+   * (named-outputs, spec §6) — matched against a node's `id`. Default (or no
+   * match) = the doc's first output node, in `doc.nodes` array order.
+   */
+  outputId?: string;
 }
 
 /**
  * Compile the GraphDoc into an execution plan by resolving the output node's
  * ancestry. The graph is a DAG: ops and custom nodes take one input, blend
- * takes two ('a'/'b' handles), anything may fan out. Nodes not reachable from
- * the output are allowed but simply not executed. Throws on cycles, missing
- * connections, or unknown kinds.
+ * takes two or three ('a'/'b'/optional 'mask' handles), anything may fan
+ * out. Nodes not reachable from the SELECTED output are allowed but simply
+ * not executed. Throws on cycles, missing connections, or unknown kinds.
  */
 export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   const wb = ctx?.wb ?? DEFAULT_WB_MODEL;
@@ -586,8 +711,9 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   const byId = new Map(doc.nodes.map((n) => [n.id, n]));
   const incoming = new Map<string, GraphEdge[]>();
   for (const e of doc.edges) incoming.set(e.target, [...(incoming.get(e.target) ?? []), e]);
-  const output = doc.nodes.find((n) => n.kind === 'output');
-  if (!output) throw new Error('graph has no output node');
+  const outputs = doc.nodes.filter((n) => n.kind === 'output');
+  if (outputs.length === 0) throw new Error('graph has no output node');
+  const output = (ctx?.outputId !== undefined && outputs.find((n) => n.id === ctx.outputId)) || outputs[0]!;
   const inputNode = doc.nodes.find((n) => n.kind === 'input');
   if (!inputNode) throw new Error('graph has no input node');
 
@@ -611,15 +737,18 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
     if (node.kind === BLEND_KIND) {
       const ea = ins.find((e) => e.targetHandle === 'a');
       const eb = ins.find((e) => e.targetHandle === 'b');
-      if (!ea || !eb || ins.length !== 2) throw new Error(`blend ${id} needs exactly inputs a and b`);
+      const emask = ins.find((e) => e.targetHandle === 'mask');
+      const expectedCount = emask ? 3 : 2;
+      if (!ea || !eb || ins.length !== expectedCount) throw new Error(`blend ${id} needs exactly inputs a and b`);
       const srcA = resolve(ea.source);
       const srcB = resolve(eb.source);
+      const srcMask = emask ? resolve(emask.source) : undefined;
       const uniform = packBlendUniform(node.params ?? {});
       if (uniform[0] === 0) {
-        // amount 0 = pure input a — identity, no step
+        // amount 0 = pure input a — identity, no step (mix(a,b,mask*0)=a regardless of the mask)
         index = srcA;
       } else {
-        steps.push({ nodeId: id, type: 'blend', uniform, srcA, srcB });
+        steps.push({ nodeId: id, type: 'blend', uniform, srcA, srcB, ...(srcMask !== undefined ? { srcMask } : {}) });
         index = steps.length - 1;
       }
     } else {
@@ -659,6 +788,25 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           steps.push({ nodeId: id, type: 'passes', passes: compiled.passes, src, cpu: compiled.cpu });
           index = steps.length - 1;
         }
+      } else if (node.kind === MASK_KIND) {
+        // Analytic per-pixel mask (masks milestone): NO identity skip — a
+        // mask node always produces its mask when it's part of the resolved
+        // DAG. An UNCONNECTED mask node never affects any render simply
+        // because it's never reached by `resolve()` in the first place (same
+        // "not reachable from output = not executed" rule every other node
+        // kind gets — see this function's doc comment). The node's own
+        // input (`src`) is read only for frame-size context by the shader/
+        // CPU mirror; its color is ignored entirely.
+        const shapes = node.mask?.shapes ?? defaultMaskParams().shapes;
+        const shape = shapes[0] ?? defaultMaskParams().shapes[0]!;
+        steps.push({
+          nodeId: id,
+          type: 'passes',
+          passes: [{ shaderId: 'mask/analytic', wgsl: MASK_WGSL, uniforms: packMaskUniform(shape).buffer as ArrayBuffer }],
+          src,
+          cpu: (px, x, y, w, h) => cpuMaskShape(shape, px, x, y, w, h),
+        });
+        index = steps.length - 1;
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip
@@ -733,14 +881,23 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
-      const t = step.uniform[0];
+      // out = mix(a, b, maskValue.r * factor) when a mask is connected
+      // (factor = the blend's own uniform, now acting as an adjustment
+      // strength); exactly today's mix(a,b,amount) otherwise.
+      const t =
+        step.srcMask !== undefined ? Math.min(Math.max(at(step.srcMask)[0] * step.uniform[0], 0), 1) : step.uniform[0];
       outputs.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]);
     }
   }
   return at(plan.output);
 }
 
-/** True when every step in the plan has a CPU mirror (geometry/lens have none — like spatial ops). */
+/**
+ * True when every step in the plan has a CPU mirror (geometry/lens have none
+ * — like spatial ops). Analytic masks always carry a CPU mirror (see
+ * buildPlan's mask branch), so a masked blend keeps the CPU reference alive
+ * exactly like an unmasked one.
+ */
 export function planHasCpuReference(plan: RenderPlan): boolean {
   if (plan.geometry || plan.lens) return false;
   return plan.steps.every((s) => s.type !== 'passes' || s.cpu !== null);

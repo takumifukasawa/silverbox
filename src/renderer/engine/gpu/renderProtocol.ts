@@ -37,6 +37,10 @@ export type RenderWorkerCommand =
       renderScale: number;
       viewMode: 'color' | 'grayscale';
       showBefore: boolean;
+      /** Selects which output node to resolve when the doc has more than one (named outputs); undefined = the doc's first. */
+      outputId?: string;
+      /** Selected mask node id whose value should composite as a canvas-only red overlay (masks milestone); null/undefined = no overlay. */
+      overlayMaskNodeId?: string | null;
     }
   | { type: 'resize'; width: number; height: number }
   | { type: 'shaderArtifactSet'; nodeId: string; artifact: CustomShaderArtifact }
@@ -57,6 +61,8 @@ export type RenderWorkerRequestMethod =
       doc: GraphDoc;
       renderScale: number;
       colorSpace: ExportColorSpace;
+      /** Selects which output node to render when the doc has more than one; undefined = the doc's first. */
+      outputId?: string;
     };
 
 export type RenderWorkerRequest = { type: 'request'; reqId: number; gen: number } & RenderWorkerRequestMethod;
@@ -64,4 +70,12 @@ export type RenderWorkerRequest = { type: 'request'; reqId: number; gen: number 
 export type RenderWorkerResponse =
   | { type: 'response'; reqId: number; gen: number; ok: true; result: unknown }
   | { type: 'response'; reqId: number; gen: number; ok: false; error: string }
-  | { type: 'initError'; message: string };
+  | { type: 'initError'; message: string }
+  /**
+   * Out-of-band failure from a fire-and-forget command ('image'/'render' —
+   * task #45/worker-error-surfacing): these have no reqId/response to reject,
+   * so a failure (e.g. a lost GPU device) is instead posted here and routed
+   * to the client's error handler exactly like initError, surfacing it in
+   * the UI the same way a pre-worker GraphRenderer rejection used to.
+   */
+  | { type: 'error'; message: string };

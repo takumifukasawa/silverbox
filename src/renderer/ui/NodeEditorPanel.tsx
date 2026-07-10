@@ -14,14 +14,16 @@ import {
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS, isOpKind } from '../engine/graph/ops';
-import { DEVELOP_KIND } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND, outputName } from '../engine/graph/graphDoc';
+import { MASK_KIND } from '../engine/graph/maskNode';
 
-/** Blend node: two labeled inputs (a = base, b = overlay), one output. */
+/** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output. */
 function BlendNode({ data, selected }: NodeProps) {
   return (
     <div className={`blend-node${selected ? ' selected' : ''}`}>
       <Handle type="target" id="a" position={Position.Left} style={{ top: '30%' }} />
       <Handle type="target" id="b" position={Position.Left} style={{ top: '70%' }} />
+      <Handle type="target" id="mask" position={Position.Bottom} style={{ left: '50%' }} />
       <span className="blend-node-ports">
         a<br />b
       </span>
@@ -65,22 +67,25 @@ export function NodeEditorPanel() {
             ? `input — ${fileName}`
             : 'input'
           : n.kind === 'output'
-            ? 'output (sRGB)'
+            ? `output (sRGB) — ${outputName(n)}`
             : n.kind === DEVELOP_KIND
               ? 'Develop'
               : n.kind === CUSTOM_KIND
                 ? 'custom (wgsl)'
                 : n.kind === BLEND_KIND
                   ? 'blend'
-                  : isOpKind(n.kind)
-                    ? OPS[n.kind].label.toLowerCase()
-                    : n.kind,
+                  : n.kind === MASK_KIND
+                    ? 'mask'
+                    : isOpKind(n.kind)
+                      ? OPS[n.kind].label.toLowerCase()
+                      : n.kind,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
     sourcePosition: 'right',
     targetPosition: 'left',
-    deletable: isOpKind(n.kind) || n.kind === CUSTOM_KIND || n.kind === BLEND_KIND || n.kind === DEVELOP_KIND,
+    deletable:
+      isOpKind(n.kind) || n.kind === CUSTOM_KIND || n.kind === BLEND_KIND || n.kind === DEVELOP_KIND || n.kind === MASK_KIND,
   })) as Node[];
 
   const edges: Edge[] = graph.edges.map((e) => ({
@@ -96,7 +101,10 @@ export function NodeEditorPanel() {
   const onConnect = useCallback(
     (conn: Connection) => {
       if (!conn.source || !conn.target) return;
-      const handle = conn.targetHandle === 'a' || conn.targetHandle === 'b' ? conn.targetHandle : undefined;
+      const handle =
+        conn.targetHandle === 'a' || conn.targetHandle === 'b' || conn.targetHandle === 'mask'
+          ? conn.targetHandle
+          : undefined;
       connectEdge(conn.source, conn.target, handle);
     },
     [connectEdge]

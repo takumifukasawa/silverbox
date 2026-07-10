@@ -53,6 +53,10 @@ function routeMessage(ev: MessageEvent<RenderWorkerResponse>): void {
     activeClient?.handleInitError(msg.message);
     return;
   }
+  if (msg.type === 'error') {
+    activeClient?.handleRuntimeError(msg.message);
+    return;
+  }
   const entry = pending.get(msg.reqId);
   if (!entry) return;
   pending.delete(msg.reqId);
@@ -96,6 +100,11 @@ export class RenderWorkerClient {
     this.onError?.(message);
   }
 
+  /** Routes an out-of-band worker failure (fire-and-forget 'image'/'render' rejecting) to the same handler as an init failure. */
+  handleRuntimeError(message: string): void {
+    this.onError?.(message);
+  }
+
   /** Current generation — CanvasView's debounced stats/scope consumers compare a response's gen against this. */
   currentGen(): number {
     return this.gen;
@@ -113,7 +122,13 @@ export class RenderWorkerClient {
     getWorker().postMessage(msg);
   }
 
-  render(args: { doc: GraphDoc; renderScale: number; showBefore: boolean }): void {
+  render(args: {
+    doc: GraphDoc;
+    renderScale: number;
+    showBefore: boolean;
+    outputId?: string;
+    overlayMaskNodeId?: string | null;
+  }): void {
     this.gen++;
     const msg: RenderWorkerCommand = {
       type: 'render',
@@ -122,6 +137,8 @@ export class RenderWorkerClient {
       renderScale: args.renderScale,
       viewMode: this.viewMode,
       showBefore: args.showBefore,
+      outputId: args.outputId,
+      overlayMaskNodeId: args.overlayMaskNodeId ?? null,
     };
     getWorker().postMessage(msg);
   }
@@ -159,11 +176,12 @@ export class RenderWorkerClient {
     image: PreparedImage,
     doc: GraphDoc,
     renderScale: number,
-    colorSpace: ExportColorSpace
+    colorSpace: ExportColorSpace,
+    outputId?: string
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     return request(
       this.gen,
-      { method: 'renderToPixels', image, doc, renderScale, colorSpace },
+      { method: 'renderToPixels', image, doc, renderScale, colorSpace, outputId },
       [image.data.buffer]
     );
   }

@@ -113,6 +113,54 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 `;
 
 /**
+ * Blend with an optional mask input (masks milestone): out = mix(a, b,
+ * maskValue.r * factor), where `factor` is the blend's own uniform (params.x
+ * — now acting as an adjustment strength when a mask is connected). A
+ * separate pipeline (rather than an always-3-texture BLEND_SHADER) keeps the
+ * unmasked path's bind group layout — and every existing masked-blend-free
+ * render — completely unchanged.
+ */
+const BLEND_MASK_SHADER = /* wgsl */ `
+@group(0) @binding(0) var srcA: texture_2d<f32>;
+@group(0) @binding(1) var srcB: texture_2d<f32>;
+@group(0) @binding(2) var srcMask: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> params: vec4f;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let a = textureLoad(srcA, vec2i(pos.xy), 0);
+  let b = textureLoad(srcB, vec2i(pos.xy), 0);
+  let m = textureLoad(srcMask, vec2i(pos.xy), 0);
+  let t = clamp(m.r * params.x, 0.0, 1.0);
+  return vec4f(mix(a.rgb, b.rgb, t), 1.0);
+}
+`;
+
+/**
+ * Mask-select overlay (masks milestone, UX-only): the normal color exit
+ * (WORK_TO_SRGB + srgbEncode, same as ENCODE_SHADER) composited with red at
+ * ~50% alpha scaled by the selected mask node's own value — an LR-style "red
+ * mask" preview. Used ONLY by the canvas present pass (render()); never by
+ * readbackMean/readbackSharpness/stats/scopeSamples/export, so it can never
+ * perturb anything the verify harness or the user's export depends on.
+ */
+const MASK_OVERLAY_ENCODE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var maskTex: texture_2d<f32>;
+${FULLSCREEN_VS}
+${WGSL_SRGB_ENCODE}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let t = textureLoad(src, vec2i(pos.xy), 0);
+  let s = clamp(${WGSL_WORK_TO_SRGB} * t.rgb, vec3f(0.0), vec3f(1.0));
+  var enc = srgbEncode(s);
+  let m = clamp(textureLoad(maskTex, vec2i(pos.xy), 0).r, 0.0, 1.0);
+  enc = mix(enc, vec3f(1.0, 0.0, 0.0), m * 0.5);
+  return vec4f(enc, 1.0);
+}
+`;
+
+/**
  * `bins` layout for HISTOGRAM_SHADER: [0..255] = r histogram, [256..511] = g,
  * [512..767] = b, [768..1023] = luma, [1024] = shadow-clip count (any channel
  * == 0), [1025] = highlight-clip count (any channel == 255). One u32 per
@@ -357,6 +405,8 @@ interface ExecStep {
   src: number;
   /** Present only on blend steps (second input). */
   srcB?: number;
+  /** Present only on masked blend steps (third input). */
+  srcMask?: number;
 }
 
 
@@ -426,6 +476,10 @@ export class GraphRenderer {
   private histogramPipelineCache: GPUComputePipeline | null = null;
   /** Compiled once, shared by scopeSamples(). */
   private scopePipelineCache: GPUComputePipeline | null = null;
+  /** Compiled once, on first use — the canvas-only mask-select red overlay (see MASK_OVERLAY_ENCODE_SHADER). */
+  private maskOverlayPipelineCache: GPURenderPipeline | null = null;
+  /** Compiled once, on first use — the masked variant of the blend pass (see BLEND_MASK_SHADER). */
+  private blendMaskPipelineCache: GPURenderPipeline | null = null;
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -433,6 +487,7 @@ export class GraphRenderer {
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
+    private readonly canvasFormat: GPUTextureFormat,
     private readonly canvasEncodePipeline: GPURenderPipeline,
     private readonly canvasGrayscalePipeline: GPURenderPipeline,
     private readonly readbackEncodePipeline: GPURenderPipeline
@@ -455,6 +510,7 @@ export class GraphRenderer {
     return new GraphRenderer(
       device,
       context,
+      canvasFormat,
       makeEncodePipeline(ENCODE_SHADER, canvasFormat),
       makeEncodePipeline(GRAYSCALE_ENCODE_SHADER, canvasFormat),
       makeEncodePipeline(ENCODE_SHADER, 'rgba8unorm')
@@ -644,6 +700,32 @@ export class GraphRenderer {
     return this.blendPipelineCache;
   }
 
+  /** Masked variant of the blend pass (see BLEND_MASK_SHADER) — compiled once, on first use. */
+  private blendMaskPipeline(): GPURenderPipeline {
+    if (!this.blendMaskPipelineCache) {
+      const module = this.device.createShaderModule({ code: BLEND_MASK_SHADER });
+      this.blendMaskPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.blendMaskPipelineCache;
+  }
+
+  /** Canvas-only mask-select red overlay pipeline (see MASK_OVERLAY_ENCODE_SHADER) — compiled once, on first use. */
+  private maskOverlayPipeline(): GPURenderPipeline {
+    if (!this.maskOverlayPipelineCache) {
+      const module = this.device.createShaderModule({ code: MASK_OVERLAY_ENCODE_SHADER });
+      this.maskOverlayPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: this.canvasFormat }] },
+      });
+    }
+    return this.maskOverlayPipelineCache;
+  }
+
   /** Compute pipeline for HISTOGRAM_SHADER — compiled once, shared by stats() and statsCrop(). */
   private histogramPipeline(): GPUComputePipeline {
     if (!this.histogramPipelineCache) {
@@ -715,10 +797,12 @@ export class GraphRenderer {
         });
         return { phases, src: op.src };
       }
+      const hasMask = op.srcMask !== undefined;
       return {
-        phases: [{ pipeline: this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
+        phases: [{ pipeline: hasMask ? this.blendMaskPipeline() : this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
         src: op.srcA,
         srcB: op.srcB,
+        srcMask: op.srcMask,
       };
     });
   }
@@ -825,11 +909,17 @@ export class GraphRenderer {
     steps.forEach((step, i) => {
       if (step.srcB !== undefined) {
         const phase = step.phases[0]!;
-        addPass(encoder, views[i]!, phase.pipeline, [
+        const entries: GPUBindGroupEntry[] = [
           { binding: 0, resource: at(step.src) },
           { binding: 1, resource: at(step.srcB) },
-          { binding: 2, resource: { buffer: phase.uniformBuffer! } },
-        ]);
+        ];
+        if (step.srcMask !== undefined) {
+          entries.push({ binding: 2, resource: at(step.srcMask) });
+          entries.push({ binding: 3, resource: { buffer: phase.uniformBuffer! } });
+        } else {
+          entries.push({ binding: 2, resource: { buffer: phase.uniformBuffer! } });
+        }
+        addPass(encoder, views[i]!, phase.pipeline, entries);
         return;
       }
       const n = step.phases.length;
@@ -881,15 +971,35 @@ export class GraphRenderer {
     );
   }
 
-  /** Execute the chain and draw to the canvas (canvas must match the image size). */
-  render(): void {
+  /**
+   * Execute the chain and draw to the canvas (canvas must match the image
+   * size). `overlayMaskStepIndex` (masks milestone, present-only — see
+   * MASK_OVERLAY_ENCODE_SHADER's doc comment): when a valid step index, the
+   * canvas shows that step's own mask value composited as a red overlay
+   * instead of the plain color/grayscale exit; null/undefined/out-of-range
+   * falls back to the normal exit. Never affects readbacks, stats, scopes,
+   * or export — those all call addChainPasses/withEncodedPixels directly.
+   */
+  render(overlayMaskStepIndex?: number | null): void {
     if (!this.source) return;
     const encoder = this.device.createCommandEncoder();
     const linear = this.addChainPasses(encoder);
-    const pipeline = this.viewMode === 'grayscale' ? this.canvasGrayscalePipeline : this.canvasEncodePipeline;
-    this.addPass(encoder, this.context.getCurrentTexture().createView(), pipeline, [
-      { binding: 0, resource: linear },
-    ]);
+    const canvasView = this.context.getCurrentTexture().createView();
+    if (
+      overlayMaskStepIndex !== undefined &&
+      overlayMaskStepIndex !== null &&
+      overlayMaskStepIndex >= 0 &&
+      overlayMaskStepIndex < this.stepTextures.length
+    ) {
+      const maskView = this.stepTextures[overlayMaskStepIndex]!.createView();
+      this.addPass(encoder, canvasView, this.maskOverlayPipeline(), [
+        { binding: 0, resource: linear },
+        { binding: 1, resource: maskView },
+      ]);
+    } else {
+      const pipeline = this.viewMode === 'grayscale' ? this.canvasGrayscalePipeline : this.canvasEncodePipeline;
+      this.addPass(encoder, canvasView, pipeline, [{ binding: 0, resource: linear }]);
+    }
     this.device.queue.submit([encoder.finish()]);
   }
 

@@ -113,7 +113,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
         // image (identical camera metadata to the preview in practice, but
         // never assumed — see this file's doc comment).
         const wb = createWbModel(req.image.color ?? {});
-        const plan = buildPlan(req.doc, { wb, renderScale: req.renderScale });
+        const plan = buildPlan(req.doc, { wb, renderScale: req.renderScale, outputId: req.outputId });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result }, [result.data.buffer]);
         return;
@@ -147,7 +147,14 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
     case 'image': {
       currentGen = msg.gen;
       wbModel = createWbModel(msg.image.color ?? {});
-      void rendererReady.then((renderer) => renderer.setImage(msg.image));
+      // fire-and-forget, but a failure (e.g. a lost GPU device) must still
+      // surface to the UI (task #45/worker-error-surfacing) instead of
+      // vanishing silently — see renderProtocol.ts's 'error' response doc.
+      void rendererReady
+        .then((renderer) => renderer.setImage(msg.image))
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
       return;
     }
     case 'render': {
@@ -157,14 +164,25 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       // effect did after its own await(s) — rendererReady/setGraph() are the
       // only await points, so a STALE render (superseded by a newer 'render'
       // message while awaiting either) must not draw over the current state.
-      void rendererReady.then(async (renderer) => {
-        if (gen !== currentGen) return;
-        const plan = buildPreviewPlan(msg.doc, { wb: wbModel, renderScale: msg.renderScale }, msg.showBefore);
-        renderer.viewMode = msg.viewMode;
-        await renderer.setGraph(plan);
-        if (gen !== currentGen) return;
-        renderer.render();
-      });
+      void rendererReady
+        .then(async (renderer) => {
+          if (gen !== currentGen) return;
+          const plan = buildPreviewPlan(
+            msg.doc,
+            { wb: wbModel, renderScale: msg.renderScale, outputId: msg.outputId },
+            msg.showBefore
+          );
+          renderer.viewMode = msg.viewMode;
+          await renderer.setGraph(plan);
+          if (gen !== currentGen) return;
+          const overlayStepIndex = msg.overlayMaskNodeId
+            ? plan.steps.findIndex((s) => s.nodeId === msg.overlayMaskNodeId)
+            : -1;
+          renderer.render(overlayStepIndex >= 0 ? overlayStepIndex : null);
+        })
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
       return;
     }
     case 'resize': {

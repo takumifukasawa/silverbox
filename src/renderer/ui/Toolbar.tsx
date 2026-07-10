@@ -2,17 +2,20 @@ import { useEffect, useRef, useState } from 'react';
 import type { ExportColorSpace, ExportMetadataPolicy, ExportPreset, PingResult } from '../../../shared/ipc';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
-import type { AddableKind } from '../engine/graph/graphDoc';
+import { outputName, type AddableKind } from '../engine/graph/graphDoc';
+import { MASK_KIND } from '../engine/graph/maskNode';
 
 /**
- * "Add node ▾" menu (UI spec §2): customShader + blend + the atomic nodes.
- * The node is inserted right before `output`, auto-wired and selected (one
- * undo entry); rewire it freely afterwards.
+ * "Add node ▾" menu (UI spec §2): customShader + blend + mask + output + the
+ * atomic nodes. Most kinds are inserted right before the active output,
+ * auto-wired and selected (one undo entry); kind 'output' is special — a new
+ * output node lands disconnected (named outputs, spec §6) rather than
+ * hijacking the existing one; rewire it freely afterwards.
  */
 function AddNodeMenu() {
   const addOpNode = useAppStore((s) => s.addOpNode);
   const [open, setOpen] = useState(false);
-  const kinds: AddableKind[] = [CUSTOM_KIND, BLEND_KIND, ...(Object.keys(OPS) as AddableKind[])];
+  const kinds: AddableKind[] = [CUSTOM_KIND, BLEND_KIND, MASK_KIND, 'output', ...(Object.keys(OPS) as AddableKind[])];
   return (
     <span className="add-node-menu">
       <button
@@ -42,6 +45,32 @@ function AddNodeMenu() {
         </>
       )}
     </span>
+  );
+}
+
+/** Output selector (spec §6): appears only when the doc has more than one output node. */
+function OutputSelector() {
+  const graph = useAppStore((s) => s.graph);
+  const activeOutputId = useAppStore((s) => s.activeOutputId);
+  const setActiveOutputId = useAppStore((s) => s.setActiveOutputId);
+  const outputs = graph.nodes.filter((n) => n.kind === 'output');
+  if (outputs.length <= 1) return null;
+  const current = activeOutputId && outputs.some((n) => n.id === activeOutputId) ? activeOutputId : outputs[0]!.id;
+  return (
+    <label className="toolbar-output-select" title="Which output the preview renders and export uses">
+      output
+      <select
+        data-testid="output-selector"
+        value={current}
+        onChange={(ev) => setActiveOutputId(ev.target.value)}
+      >
+        {outputs.map((n) => (
+          <option key={n.id} value={n.id}>
+            {outputName(n)}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -223,6 +252,7 @@ export function Toolbar() {
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const cropMode = useAppStore((s) => s.cropMode);
   const toggleCropMode = useAppStore((s) => s.toggleCropMode);
+  const addLocalAdjustment = useAppStore((s) => s.addLocalAdjustment);
   const [ping, setPing] = useState<PingResult | null>(null);
 
   useEffect(() => {
@@ -273,6 +303,14 @@ export function Toolbar() {
       </button>
       <AddNodeMenu />
       <button
+        onClick={addLocalAdjustment}
+        disabled={imageStatus !== 'ready'}
+        data-testid="add-local-adjustment"
+        title="Add a Develop + Mask + Blend rig feeding the active output, and select the mask"
+      >
+        + Local Adjustment
+      </button>
+      <button
         onClick={() => selectedNodeId && removeOpNode(selectedNodeId)}
         disabled={!deletable}
         data-testid="delete-node-button"
@@ -280,6 +318,7 @@ export function Toolbar() {
       >
         Delete node
       </button>
+      <OutputSelector />
       <ExportControls />
       <div className="toolbar-info">
         {sidecarNotice && (

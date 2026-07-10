@@ -11,7 +11,14 @@ import {
   toneCurvePoint,
   type OpParamDef,
 } from '../engine/graph/ops';
-import { DEVELOP_KIND, defaultLensParams, type GraphNode, type LensParams } from '../engine/graph/graphDoc';
+import { DEVELOP_KIND, outputName, defaultLensParams, type GraphNode, type LensParams } from '../engine/graph/graphDoc';
+import {
+  defaultLinearMaskShape,
+  defaultMaskParams,
+  defaultRadialMaskShape,
+  MASK_KIND,
+  type MaskShape,
+} from '../engine/graph/maskNode';
 import {
   defaultDevelopParams,
   GRADING_REGIONS,
@@ -462,6 +469,149 @@ function LensSection({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * Mask node inspector (masks milestone): a shape-type toggle (fresh default
+ * shape of the other type — combine modes/multi-shape editing ship later, so
+ * only shapes[0] is ever touched here), numeric rows for its geometry (the
+ * canvas overlay's drag handles edit the SAME fields), and feather/invert.
+ * Each field's own session key coalesces a whole drag/typing run into one
+ * undo entry (CropOverlay/LensSection precedent); the type toggle and the
+ * invert checkbox are each their own discrete undo entry.
+ */
+function MaskInspector({ node }: { node: GraphNode }) {
+  const setMaskShape = useAppStore((s) => s.setMaskShape);
+  const mask = node.mask ?? defaultMaskParams();
+  const shape = mask.shapes[0] ?? defaultMaskParams().shapes[0]!;
+  const sessionRef = useRef<Record<string, number | null>>({});
+
+  const commit = (next: MaskShape, key: string) => {
+    sessionRef.current[key] ??= Date.now();
+    setMaskShape(node.id, next, `mask:${node.id}:${key}:${sessionRef.current[key]}`);
+  };
+  const commitDiscrete = (next: MaskShape) => {
+    setMaskShape(node.id, next, null);
+  };
+
+  const numRow = (
+    label: string,
+    key: string,
+    value: number,
+    min: number,
+    max: number,
+    step: number,
+    onChange: (v: number) => void
+  ) => (
+    <div
+      key={key}
+      className="param-row"
+      onPointerDown={() => {
+        sessionRef.current[key] = Date.now();
+      }}
+      onPointerUp={() => {
+        sessionRef.current[key] = null;
+      }}
+    >
+      <span className="param-label">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(ev) => onChange(Number(ev.target.value))}
+      />
+      <input
+        type="number"
+        className="param-number"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(ev) => {
+          const v = Number(ev.target.value);
+          if (Number.isFinite(v)) onChange(v);
+        }}
+      />
+    </div>
+  );
+
+  return (
+    <>
+      <div className="inspector-title">Mask</div>
+      <Section title="Mask">
+        <div className="mask-type-toggle">
+          <button
+            className={shape.type === 'radial' ? 'active' : undefined}
+            data-testid="mask-type-radial"
+            onClick={() => commitDiscrete(defaultRadialMaskShape())}
+          >
+            Radial
+          </button>
+          <button
+            className={shape.type === 'linear' ? 'active' : undefined}
+            data-testid="mask-type-linear"
+            onClick={() => commitDiscrete(defaultLinearMaskShape())}
+          >
+            Linear
+          </button>
+        </div>
+        {shape.type === 'radial' ? (
+          <>
+            {numRow('Center X', 'cx', shape.cx, 0, 1, 0.01, (v) => commit({ ...shape, cx: v }, 'cx'))}
+            {numRow('Center Y', 'cy', shape.cy, 0, 1, 0.01, (v) => commit({ ...shape, cy: v }, 'cy'))}
+            {numRow('Radius', 'radius', shape.radius, 0, 1.5, 0.01, (v) => commit({ ...shape, radius: v }, 'radius'))}
+          </>
+        ) : (
+          <>
+            {numRow('X0', 'x0', shape.x0, -0.5, 1.5, 0.01, (v) => commit({ ...shape, x0: v }, 'x0'))}
+            {numRow('Y0', 'y0', shape.y0, -0.5, 1.5, 0.01, (v) => commit({ ...shape, y0: v }, 'y0'))}
+            {numRow('X1', 'x1', shape.x1, -0.5, 1.5, 0.01, (v) => commit({ ...shape, x1: v }, 'x1'))}
+            {numRow('Y1', 'y1', shape.y1, -0.5, 1.5, 0.01, (v) => commit({ ...shape, y1: v }, 'y1'))}
+          </>
+        )}
+        {numRow('Feather', 'feather', shape.feather, 0, 1, 0.01, (v) => commit({ ...shape, feather: v }, 'feather'))}
+        <label className="mask-invert-row">
+          <input
+            type="checkbox"
+            data-testid="mask-invert"
+            checked={shape.invert}
+            onChange={(ev) => commitDiscrete({ ...shape, invert: ev.target.checked })}
+          />
+          Invert
+        </label>
+      </Section>
+    </>
+  );
+}
+
+/** Output node inspector: editable display name (spec §6, default 'main'). */
+function OutputInspector({ node }: { node: GraphNode }) {
+  const renameOutput = useAppStore((s) => s.renameOutput);
+  const sessionRef = useRef<number | null>(null);
+  return (
+    <>
+      <div className="inspector-title">Output: sRGB-encoded display.</div>
+      <Section title="Output">
+        <label className="output-name-row">
+          Name
+          <input
+            type="text"
+            data-testid="output-name"
+            value={outputName(node)}
+            onChange={(ev) => {
+              sessionRef.current ??= Date.now();
+              renameOutput(node.id, ev.target.value, `output-name:${node.id}:${sessionRef.current}`);
+            }}
+            onBlur={() => {
+              sessionRef.current = null;
+            }}
+          />
+        </label>
+      </Section>
+    </>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -483,6 +633,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
       </>
     );
   }
+  if (node.kind === MASK_KIND) {
+    return <MaskInspector node={node} />;
+  }
   if (node.kind === 'input') {
     return (
       <>
@@ -490,6 +643,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
         <LensSection node={node} />
       </>
     );
+  }
+  if (node.kind === 'output') {
+    return <OutputInspector node={node} />;
   }
   if (!isOpKind(node.kind)) {
     return <div className="inspector-placeholder">Output: sRGB-encoded display.</div>;

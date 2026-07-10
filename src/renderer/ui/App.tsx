@@ -85,6 +85,23 @@ export function App() {
       if (ev.key === 'Escape' && useAppStore.getState().wbPicking) {
         useAppStore.getState().setWbPicking(false);
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
+        // masks milestone: 'O' toggles the LR-style red mask overlay, but
+        // only while the selection is actually a mask node — off = normal
+        // render, mask stays selected (spec §5).
+        const target = ev.target as HTMLElement | null;
+        if (
+          target &&
+          (target.tagName === 'TEXTAREA' || target.tagName === 'INPUT' || target.closest?.('.shader-editor'))
+        ) {
+          return;
+        }
+        const s = useAppStore.getState();
+        const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
+        if (node?.kind !== 'mask') return;
+        ev.preventDefault();
+        s.toggleMaskOverlay();
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);

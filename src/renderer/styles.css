@@ -184,6 +184,12 @@ button:disabled {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 340px;
+  /* `overflow: hidden` makes a flex item's automatic minimum size 0 — with
+     more buttons sharing the (flex-wrap) toolbar row (masks milestone: "+
+     Local Adjustment", the output selector), .toolbar-info can be squeezed
+     narrow enough that this notice collapses to 0px and vanishes entirely
+     instead of just eliding text. Pin a floor so it always stays visible. */
+  min-width: 160px;
 }
 
 .toolbar-dim {
@@ -409,6 +415,91 @@ button:disabled {
   color: #ddd;
   min-width: 40px;
   text-align: right;
+}
+
+.mask-type-toggle {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mask-type-toggle button.active {
+  border-color: #8ab4f8;
+  color: #8ab4f8;
+}
+
+.mask-invert-row,
+.output-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #ccc;
+  margin-top: 6px;
+}
+
+.output-name-row input[type='text'] {
+  flex: 1;
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 3px 6px;
+}
+
+.toolbar-output-select {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #aaa;
+}
+
+/* ---- mask editing overlay ---- */
+
+.mask-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.mask-handle {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.mask-handle-center {
+  width: 12px;
+  height: 12px;
+  margin: -6px;
+  border-radius: 50%;
+  background: #8ab4f8;
+  border: 1px solid #1c2733;
+  cursor: move;
+}
+
+.mask-handle-rim {
+  width: 10px;
+  height: 10px;
+  margin: -5px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1px solid #333;
+  cursor: ew-resize;
+}
+
+.mask-handle-endpoint {
+  width: 12px;
+  height: 12px;
+  margin: -6px;
+  border-radius: 50%;
+  background: #f0c674;
+  border: 1px solid #333;
+  cursor: move;
 }
 
 .canvas-overlay {

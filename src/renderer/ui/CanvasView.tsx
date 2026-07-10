@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
@@ -22,6 +22,8 @@ import {
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
+import { MaskOverlay } from './MaskOverlay';
+import { defaultMaskParams, MASK_KIND, type MaskParams, type MaskShape } from '../engine/graph/maskNode';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
 declare global {
@@ -95,6 +97,10 @@ declare global {
       ): Promise<import('../engine/gpu/graphRenderer').HistogramData | null>;
       /** Verify-only: raw encoded RGBA bytes of a crop rect, for cross-checking statsCrop() in JS. */
       encodedCropForVerify(x0: number, y0: number, w: number, h: number): Promise<number[] | null>;
+      /** Mask node params (masks milestone); `nodeId` defaults to the currently selected node. Null when that node isn't kind 'mask'. */
+      maskState(nodeId?: string): MaskParams | null;
+      /** Replace shapes[0] of a mask node — one undo entry (verify-only convenience; the UI drag handles use the store action directly). */
+      setMaskShape(nodeId: string, shape: MaskShape): void;
     };
   }
 }
@@ -126,7 +132,12 @@ export function CanvasView() {
   const containerRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<RenderWorkerClient | null>(null);
   const lastImageRef = useRef<unknown>(null);
-  const [gpuError, setGpuError] = useState<string | null>(null);
+  // Async GPU failures (device loss etc.) live in the store (see task
+  // #45/worker-error-surfacing) so the render worker's out-of-band 'error'
+  // message reaches the UI the same way a pre-worker GraphRenderer rejection
+  // used to — this component just reads it, same as any other store field.
+  const gpuError = useAppStore((s) => s.gpuError);
+  const setGpuError = useAppStore((s) => s.setGpuError);
   const imageStatus = useAppStore((s) => s.imageStatus);
   const image = useAppStore((s) => s.image);
   const imageError = useAppStore((s) => s.imageError);
@@ -140,6 +151,11 @@ export function CanvasView() {
   const cropMode = useAppStore((s) => s.cropMode);
   const wbPicking = useAppStore((s) => s.wbPicking);
   const setWbPicking = useAppStore((s) => s.setWbPicking);
+  const selectedNodeId = useAppStore((s) => s.selectedNodeId);
+  const activeOutputId = useAppStore((s) => s.activeOutputId);
+  const maskOverlay = useAppStore((s) => s.maskOverlay);
+  const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId);
+  const selectedMaskNode = selectedNode?.kind === MASK_KIND ? selectedNode : undefined;
   // Crop mode previews the FULL (uncropped) straightened frame — the overlay
   // lets you re-adjust the crop rect against the whole image — so force crop
   // back to identity for RENDERING only; the true crop committed in the graph
@@ -248,7 +264,7 @@ export function CanvasView() {
       // redundant to the worker's own copy over the SAME doc — costs nothing
       // and needs no round trip just to learn whether it throws.
       try {
-        buildPlan(graphForBuild, { wb: wbModel, renderScale });
+        buildPlan(graphForBuild, { wb: wbModel, renderScale, outputId: activeOutputId ?? undefined });
         useAppStore.getState().setGraphBroken(false);
       } catch {
         useAppStore.getState().setGraphBroken(true);
@@ -262,8 +278,19 @@ export function CanvasView() {
       client.viewMode = grayscaleView ? 'grayscale' : 'color';
       // Before/After: show the unedited decode (readbacks follow, so the
       // histogram describes what is on screen — LR behavior); the worker
-      // applies this same override after building its own plan.
-      client.render({ doc: graphForBuild, renderScale, showBefore });
+      // applies this same override after building its own plan. outputId
+      // selects among named outputs (spec §6, undefined = the doc's first);
+      // overlayMaskNodeId (masks milestone) shows the selected mask node's
+      // value as a canvas-only red overlay (present-time only — see
+      // graphRenderer.ts's render()), gated on BOTH the 'O' toggle and the
+      // selection actually being a mask node.
+      client.render({
+        doc: graphForBuild,
+        renderScale,
+        showBefore,
+        outputId: activeOutputId ?? undefined,
+        overlayMaskNodeId: maskOverlay && selectedMaskNode ? selectedMaskNode.id : null,
+      });
       setGpuError(null);
       // refresh the histogram once edits settle (slider drags fire rapidly);
       // `gen` pins this debounce cycle so a slow response that resolves after
@@ -285,7 +312,18 @@ export function CanvasView() {
     } catch (err) {
       setGpuError(err instanceof Error ? err.message : String(err));
     }
-  }, [image, graph, shaderRev, wbModel, showBefore, grayscaleView, cropMode]);
+  }, [
+    image,
+    graph,
+    shaderRev,
+    wbModel,
+    showBefore,
+    grayscaleView,
+    cropMode,
+    activeOutputId,
+    maskOverlay,
+    selectedMaskNode?.id,
+  ]);
 
   useEffect(() => {
     window.__debug = {
@@ -499,6 +537,15 @@ export function CanvasView() {
         ];
         return { temp, tint, result, resultEncoded };
       },
+      maskState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        return node?.kind === MASK_KIND ? (node.mask ?? defaultMaskParams()) : null;
+      },
+      setMaskShape(nodeId, shape) {
+        useAppStore.getState().setMaskShape(nodeId, shape, null);
+      },
     };
     return () => {
       delete window.__debug;
@@ -568,6 +615,15 @@ export function CanvasView() {
         />
         {!overlayVisible && cropMode && outputDims && (
           <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />
+        )}
+        {!overlayVisible && !cropMode && selectedMaskNode && outputDims && (
+          <MaskOverlay
+            key={selectedMaskNode.id}
+            node={selectedMaskNode}
+            view={view}
+            canvasWidth={outputDims.width}
+            canvasHeight={outputDims.height}
+          />
         )}
       </div>
       {!overlayVisible && <HistogramPanel />}

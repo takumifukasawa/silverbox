@@ -15,9 +15,11 @@ import {
   type AddableKind,
   type GeometryParams,
   type GraphDoc,
+  type GraphNode,
   type LensParams,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
+import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import type { HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
@@ -95,6 +97,8 @@ interface AppState {
   sidecarUnreadable: boolean;
   /** createdAt carried through sidecar round-trips (set on first save). */
   sidecarCreatedAt: string | null;
+  /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
+  sidecarUnknownFields: Record<string, unknown> | null;
   /** Result line for the toolbar after a successful export. */
   exportInfo: { width: number; height: number; bytes: number } | null;
   /** Per-image Kelvin/Tint model (as-shot estimate + relative gains). */
@@ -127,9 +131,29 @@ interface AppState {
   addOpNode(kind: AddableKind): void;
   removeOpNode(nodeId: string): void;
   /** Rewire an input: replaces whatever currently feeds (target, handle). */
-  connectEdge(source: string, target: string, targetHandle?: 'a' | 'b'): void;
+  connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
   /** Delete an edge (allowed to break the path — the preview passes through). */
   removeEdge(edgeId: string): void;
+  /** Selected output node id when the doc has more than one (named outputs); null = the doc's first. */
+  activeOutputId: string | null;
+  setActiveOutputId(id: string | null): void;
+  /** Rename an output node (kind 'output' only); coalesced per keystroke run like a text field. */
+  renameOutput(nodeId: string, name: string, coalesceKey: string | null): void;
+  /** Replace shapes[0] of a mask node; `coalesceKey` null = its own undo entry (see CropOverlay's setGeometry precedent). */
+  setMaskShape(nodeId: string, shape: MaskShape, coalesceKey: string | null): void;
+  /** LR-style red mask-select overlay (canvas-only, present-time); toggled by 'O' while a mask node is selected. */
+  maskOverlay: boolean;
+  toggleMaskOverlay(): void;
+  /**
+   * "+ Local Adjustment" (spec §4): in ONE undo entry, takes the node
+   * currently feeding the ACTIVE output and builds Develop D (defaults) +
+   * Mask M (default radial) + Blend B (a = that node, b = D, mask = M),
+   * rewires the output to B, and selects M.
+   */
+  addLocalAdjustment(): void;
+  /** Async GPU failure surfaced from the render worker (device loss etc.) — mirrors the pre-worker GraphRenderer rejection UI. */
+  gpuError: string | null;
+  setGpuError(message: string | null): void;
   /** Rejected-connection notice for the node editor (auto-clears after 4s). */
   connectNotice: string | null;
   /** True while input→output does not resolve (preview shows pass-through). */
@@ -331,6 +355,7 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarNotice: null,
   sidecarUnreadable: false,
   sidecarCreatedAt: null,
+  sidecarUnknownFields: null,
   exportInfo: null,
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
@@ -339,6 +364,9 @@ export const useAppStore = create<AppState>((set, get) => {
   wbPicking: false,
   developClipboard: null,
   settings: DEFAULT_SETTINGS,
+  activeOutputId: null,
+  maskOverlay: false,
+  gpuError: null,
 
   async openImageByPath(path: string) {
     // a pending autosave from whatever image was open belongs to THAT
@@ -361,6 +389,7 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarNotice: string | null = null;
       let sidecarUnreadable = false;
       let sidecarCreatedAt: string | null = null;
+      let sidecarUnknownFields: Record<string, unknown> | null = null;
       try {
         const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
         if (sidecar !== null) {
@@ -371,6 +400,7 @@ export const useAppStore = create<AppState>((set, get) => {
             const parsed = parseGraphDoc(sidecar);
             graph = parsed.graph;
             sidecarCreatedAt = parsed.createdAt ?? null;
+            sidecarUnknownFields = parsed.unknown ?? null;
           } catch (err) {
             sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
             sidecarUnreadable = true;
@@ -417,8 +447,11 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarNotice,
         sidecarUnreadable,
         sidecarCreatedAt,
+        sidecarUnknownFields,
         exportInfo: null,
         wbModel,
+        activeOutputId: null,
+        maskOverlay: false,
         cropMode: false,
         wbPicking: false,
       });
@@ -474,36 +507,53 @@ export const useAppStore = create<AppState>((set, get) => {
     }));
   },
 
-  // Insert before the output node; the new node takes the output's spot and
-  // the output shifts right so the chain stays readable. A blend node gets
-  // both inputs from the previous source (a self-blend is an identity) —
-  // rewiring 'b' onto another branch is what makes it useful.
+  // Insert before the ACTIVE output node; the new node takes the output's
+  // spot and the output shifts right so the chain stays readable. A blend
+  // node gets both inputs from the previous source (a self-blend is an
+  // identity) — rewiring 'b' onto another branch is what makes it useful.
+  // kind 'output' is special: multiple output nodes are legal (named
+  // outputs, spec §6), so adding one never rewires anything — it lands
+  // disconnected, ready to be wired up freely (see connectEdge).
   addOpNode(kind) {
     set((s) => {
       const g = s.graph;
-      const out = g.nodes.find((n) => n.kind === 'output');
-      const inEdge = g.edges.find((e) => e.target === out?.id);
-      if (!out || !inEdge) return {};
+      const outputs = g.nodes.filter((n) => n.kind === 'output');
+      const out = (s.activeOutputId && outputs.find((n) => n.id === s.activeOutputId)) || outputs[0];
+      if (!out) return {};
+
+      if (kind === 'output') {
+        const id = nextId(g, 'output');
+        const node: GraphNode = { id, kind: 'output', position: { x: out.position.x, y: out.position.y + 140 } };
+        return {
+          ...pushHistory(s, null),
+          graph: { ...g, nodes: [...g.nodes, node] },
+          graphDirty: true,
+          selectedNodeId: id,
+        };
+      }
+
+      const inEdge = g.edges.find((e) => e.target === out.id);
+      if (!inEdge) return {};
       const id = nextId(g, kind);
       // Fresh custom nodes are seeded with the engine-authored identity
       // artifact — known valid, no async validation round-trip needed.
       if (kind === CUSTOM_KIND) mirrorShaderArtifactSet(id, seedDefaultCustomShaderArtifact(id));
-      // fresh WB atomics start at the image's as-shot values (= identity)
-      const params =
-        kind === 'whitebalance'
-          ? { temp: s.wbModel.asShot.temp, tint: s.wbModel.asShot.tint }
-          : kind === CUSTOM_KIND
-            ? undefined
-            : defaultParams(kind);
-      const node =
-        kind === CUSTOM_KIND
-          ? { id, kind, position: { ...out.position }, shader: createDefaultCustomShaderParams() }
-          : { id, kind, position: { ...out.position }, params };
+      let node: GraphNode;
+      if (kind === CUSTOM_KIND) {
+        node = { id, kind, position: { ...out.position }, shader: createDefaultCustomShaderParams() };
+      } else if (kind === MASK_KIND) {
+        node = { id, kind, position: { ...out.position }, mask: defaultMaskParams() };
+      } else {
+        // fresh WB atomics start at the image's as-shot values (= identity)
+        const params =
+          kind === 'whitebalance' ? { temp: s.wbModel.asShot.temp, tint: s.wbModel.asShot.tint } : defaultParams(kind);
+        node = { id, kind, position: { ...out.position }, params };
+      }
       const nodes = g.nodes
         .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
         .concat(node);
       let scratch: GraphDoc = { ...g, nodes, edges: g.edges.filter((e) => e !== inEdge) };
-      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b') => {
+      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
         const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
         scratch = { ...scratch, edges: [...scratch.edges, edge] };
       };
@@ -600,6 +650,110 @@ export const useAppStore = create<AppState>((set, get) => {
 
   setGraphBroken(broken) {
     if (get().graphBroken !== broken) set({ graphBroken: broken });
+  },
+
+  setActiveOutputId(id) {
+    set({ activeOutputId: id });
+  },
+
+  renameOutput(nodeId, name, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== 'output') return {};
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, name } : n)) },
+        graphDirty: true,
+      };
+    });
+  },
+
+  setMaskShape(nodeId, shape, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== MASK_KIND) return {};
+      const mask = node.mask ?? defaultMaskParams();
+      const clamped = clampMaskShape(shape);
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) =>
+            n.id === nodeId ? { ...n, mask: { shapes: [clamped, ...mask.shapes.slice(1)] } } : n
+          ),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
+  toggleMaskOverlay() {
+    set((s) => ({ maskOverlay: !s.maskOverlay }));
+  },
+
+  setGpuError(message) {
+    set((s) => (s.gpuError === message ? {} : { gpuError: message }));
+  },
+
+  // See the AppState doc comment: one undo entry builds Develop D (defaults)
+  // + Mask M (default centered radial) + Blend B (a = the node currently
+  // feeding the active output, b = D, mask = M), rewires the output to B,
+  // and selects M.
+  addLocalAdjustment() {
+    set((s) => {
+      const g = s.graph;
+      const outputs = g.nodes.filter((n) => n.kind === 'output');
+      const activeOutput = (s.activeOutputId && outputs.find((n) => n.id === s.activeOutputId)) || outputs[0];
+      if (!activeOutput) return {};
+      const inEdge = g.edges.find((e) => e.target === activeOutput.id);
+      if (!inEdge) return {};
+      const sourceId = inEdge.source;
+
+      const devId = nextId(g, 'dev');
+      const devNode: GraphNode = {
+        id: devId,
+        kind: DEVELOP_KIND,
+        position: { x: activeOutput.position.x, y: activeOutput.position.y - 130 },
+        develop: defaultDevelopParams(),
+      };
+      const maskId = nextId({ ...g, nodes: [...g.nodes, devNode] }, 'mask');
+      const maskNode: GraphNode = {
+        id: maskId,
+        kind: MASK_KIND,
+        position: { x: activeOutput.position.x, y: activeOutput.position.y + 130 },
+        mask: defaultMaskParams(),
+      };
+      const blendId = nextId({ ...g, nodes: [...g.nodes, devNode, maskNode] }, 'blend');
+      const blendNode: GraphNode = {
+        id: blendId,
+        kind: BLEND_KIND,
+        position: { x: activeOutput.position.x + 200, y: activeOutput.position.y },
+        // Masked blend: `amount` now acts as an adjustment strength (spec
+        // §3), defaulting to 1 (full D within the mask, none outside) — the
+        // Lightroom-style local-adjustment behavior, distinct from a plain
+        // unmasked Blend node's 0.5 straight-mix default (BLEND_PARAM_DEFS,
+        // untouched — this only changes what THIS auto-created node starts at).
+        params: { amount: 1 },
+      };
+
+      let scratch: GraphDoc = {
+        ...g,
+        nodes: [...g.nodes, devNode, maskNode, blendNode],
+        edges: g.edges.filter((e) => e.id !== inEdge.id),
+      };
+      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+        const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+        scratch = { ...scratch, edges: [...scratch.edges, edge] };
+      };
+      addEdge(sourceId, devId);
+      addEdge(sourceId, maskId);
+      addEdge(sourceId, blendId, 'a');
+      addEdge(devId, blendId, 'b');
+      addEdge(maskId, blendId, 'mask');
+      addEdge(blendId, activeOutput.id);
+
+      return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: maskId };
+    });
   },
 
   shaderRev: 0,
@@ -822,7 +976,7 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async exportImage(path, opts) {
-    const { imagePath, fileName, graph, renderer, imageStatus, exportStatus } = get();
+    const { imagePath, fileName, graph, renderer, imageStatus, exportStatus, activeOutputId } = get();
     if (!imagePath || !fileName || !renderer || imageStatus !== 'ready' || exportStatus === 'working') return;
     let target = path ?? null;
     if (!target) {
@@ -840,8 +994,16 @@ export const useAppStore = create<AppState>((set, get) => {
       // plan — RenderPlan's cpu closures aren't structured-cloneable); the
       // full-res image's data buffer is TRANSFERRED, not copied (see
       // renderClient.ts) — `full` is loaded fresh for this export and never
-      // reused afterward.
-      const { data, width, height } = await renderer.renderToPixels(full, graph, 1, colorSpace);
+      // reused afterward. Export honors the currently SELECTED output
+      // (named outputs, spec §6) — undefined = the doc's first, same default
+      // buildPlan itself applies.
+      const { data, width, height } = await renderer.renderToPixels(
+        full,
+        graph,
+        1,
+        colorSpace,
+        activeOutputId ?? undefined
+      );
       // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
       const cap = full.capture;
       const result = await window.silverbox.exportEncode({
@@ -876,7 +1038,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
     cancelAutosaveTimer();
-    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarUnreadable } = get();
+    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarUnreadable, sidecarUnknownFields } = get();
     if (!imagePath || !fileName || sidecarUnreadable) return;
     const source = {
       fileName,
@@ -884,7 +1046,10 @@ export const useAppStore = create<AppState>((set, get) => {
       kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
     };
     const createdAt = sidecarCreatedAt ?? new Date().toISOString();
-    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, serializeGraphDoc(graph, source, createdAt));
+    await window.silverbox.writeSidecar(
+      imagePath + SIDECAR_SUFFIX,
+      serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined)
+    );
     set({ graphDirty: false, sidecarCreatedAt: createdAt });
   },
 
