@@ -92,15 +92,28 @@ function registerIpc(): void {
   });
 }
 
+/**
+ * Verify-harness mode: the suite launches dozens of app instances in a row,
+ * and each one appearing on screen makes the machine unusable while it runs.
+ * The window is never shown at all — WebGPU renders and readbacks don't need
+ * a visible window, backgroundThrottling:false keeps timers/rAF at full
+ * rate, and CDP screenshots force their own frame capture. The macOS
+ * accessory policy also keeps the app out of the Dock.
+ */
+const testMode = process.env['SILVERBOX_TEST'] === '1';
+
 function createWindow(): void {
   const win = new BrowserWindow({
     width: 1440,
     height: 960,
     backgroundColor: '#1e1e1e',
+    show: !testMode,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       // ESM preload requires an unsandboxed renderer; contextIsolation stays on.
       sandbox: false,
+      // hidden/unfocused windows must keep timers and rAF at full rate
+      backgroundThrottling: false,
     },
   });
 
@@ -113,6 +126,7 @@ function createWindow(): void {
 }
 
 void app.whenReady().then(() => {
+  if (testMode && process.platform === 'darwin') app.setActivationPolicy('accessory');
   registerIpc();
   createWindow();
 

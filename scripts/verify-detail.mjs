@@ -12,6 +12,9 @@ import { tmpdir } from 'node:os';
 import { existsSync, statSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
 
+// never steal focus while the suite runs (see testMode in src/main/index.ts)
+process.env.SILVERBOX_TEST = '1';
+
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const GPU_CPU_TOLERANCE = 1 / 255;

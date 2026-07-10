@@ -13,6 +13,9 @@ import { existsSync, unlinkSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { _electron as electron } from 'playwright';
 
+// never steal focus while the suite runs (see testMode in src/main/index.ts)
+process.env.SILVERBOX_TEST = '1';
+
 const require = createRequire(import.meta.url);
 const sharp = require('sharp');
 
