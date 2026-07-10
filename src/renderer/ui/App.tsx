@@ -85,6 +85,9 @@ export function App() {
       if (ev.key === 'Escape' && useAppStore.getState().wbPicking) {
         useAppStore.getState().setWbPicking(false);
       }
+      if (ev.key === 'Escape' && useAppStore.getState().colorKeyPicking) {
+        useAppStore.getState().setColorKeyPicking(false);
+      }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
         // masks milestone: 'O' toggles the LR-style red mask overlay, but
         // only while the selection is actually a mask node — off = normal

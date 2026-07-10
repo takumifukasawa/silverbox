@@ -115,6 +115,9 @@ interface AppState {
   /** WB eyedropper picking mode — the next canvas click samples a pixel and solves temp/tint. */
   wbPicking: boolean;
   setWbPicking(picking: boolean): void;
+  /** ColorKey mask eyedropper picking mode (same pattern as wbPicking) — the next canvas click seeds shapes[0]'s hue/sat/lum. */
+  colorKeyPicking: boolean;
+  setColorKeyPicking(picking: boolean): void;
   /** ⌘⇧C/⌘⇧V in-session develop-settings clipboard (nodes+edges; input geometry stripped). */
   developClipboard: GraphDoc | null;
   copyDevelopSettings(): void;
@@ -362,6 +365,7 @@ export const useAppStore = create<AppState>((set, get) => {
   grayscaleView: false,
   cropMode: false,
   wbPicking: false,
+  colorKeyPicking: false,
   developClipboard: null,
   settings: DEFAULT_SETTINGS,
   activeOutputId: null,
@@ -454,6 +458,7 @@ export const useAppStore = create<AppState>((set, get) => {
         maskOverlay: false,
         cropMode: false,
         wbPicking: false,
+        colorKeyPicking: false,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -574,7 +579,12 @@ export const useAppStore = create<AppState>((set, get) => {
       const node = g.nodes.find((n) => n.id === nodeId);
       if (!node || node.kind === 'input' || node.kind === 'output') return {};
       // bypass: route the node's input (blend: its 'a' input) to every target
-      // it fed, preserving handles
+      // it fed, preserving handles — EXCEPT a target's 'mask' port (masks
+      // milestone): rewiring raw color into a blend's mask input would silently
+      // reinterpret arbitrary color as a mask value, which is never what the
+      // user wants. Deleting the node that fed a mask port instead just DROPS
+      // that edge, so the blend falls back to its uniform factor (same as an
+      // unmasked blend) — see graphDoc.ts's buildPlan blend branch.
       const incoming = g.edges.filter((e) => e.target === nodeId);
       const outgoing = g.edges.filter((e) => e.source === nodeId);
       const bypass =
@@ -586,6 +596,7 @@ export const useAppStore = create<AppState>((set, get) => {
       };
       if (bypass) {
         for (const e of outgoing) {
+          if (e.targetHandle === 'mask') continue; // drop, don't rewire
           const edge = {
             id: nextId(scratch, 'e'),
             source: bypass,
@@ -899,6 +910,10 @@ export const useAppStore = create<AppState>((set, get) => {
 
   setWbPicking(picking) {
     set({ wbPicking: picking });
+  },
+
+  setColorKeyPicking(picking) {
+    set({ colorKeyPicking: picking });
   },
 
   copyDevelopSettings() {

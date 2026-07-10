@@ -13,6 +13,7 @@ import {
 } from '../engine/graph/ops';
 import { DEVELOP_KIND, outputName, defaultLensParams, type GraphNode, type LensParams } from '../engine/graph/graphDoc';
 import {
+  defaultColorKeyMaskShape,
   defaultLinearMaskShape,
   defaultMaskParams,
   defaultRadialMaskShape,
@@ -477,9 +478,16 @@ function LensSection({ node }: { node: GraphNode }) {
  * Each field's own session key coalesces a whole drag/typing run into one
  * undo entry (CropOverlay/LensSection precedent); the type toggle and the
  * invert checkbox are each their own discrete undo entry.
+ *
+ * colorKey (secondary color mask) adds an eyedropper (same picking-mode
+ * pattern as the WB eyedropper — see CanvasView's handleColorKeyPick) that
+ * seeds hue/sat/lum from a clicked pixel in one undo entry, plus its own
+ * numeric rows.
  */
 function MaskInspector({ node }: { node: GraphNode }) {
   const setMaskShape = useAppStore((s) => s.setMaskShape);
+  const colorKeyPicking = useAppStore((s) => s.colorKeyPicking);
+  const setColorKeyPicking = useAppStore((s) => s.setColorKeyPicking);
   const mask = node.mask ?? defaultMaskParams();
   const shape = mask.shapes[0] ?? defaultMaskParams().shapes[0]!;
   const sessionRef = useRef<Record<string, number | null>>({});
@@ -554,22 +562,51 @@ function MaskInspector({ node }: { node: GraphNode }) {
           >
             Linear
           </button>
+          <button
+            className={shape.type === 'colorKey' ? 'active' : undefined}
+            data-testid="mask-type-colorkey"
+            onClick={() => commitDiscrete(defaultColorKeyMaskShape())}
+          >
+            Color Key
+          </button>
         </div>
         {shape.type === 'radial' ? (
           <>
             {numRow('Center X', 'cx', shape.cx, 0, 1, 0.01, (v) => commit({ ...shape, cx: v }, 'cx'))}
             {numRow('Center Y', 'cy', shape.cy, 0, 1, 0.01, (v) => commit({ ...shape, cy: v }, 'cy'))}
             {numRow('Radius', 'radius', shape.radius, 0, 1.5, 0.01, (v) => commit({ ...shape, radius: v }, 'radius'))}
+            {numRow('Feather', 'feather', shape.feather, 0, 1, 0.01, (v) => commit({ ...shape, feather: v }, 'feather'))}
           </>
-        ) : (
+        ) : shape.type === 'linear' ? (
           <>
             {numRow('X0', 'x0', shape.x0, -0.5, 1.5, 0.01, (v) => commit({ ...shape, x0: v }, 'x0'))}
             {numRow('Y0', 'y0', shape.y0, -0.5, 1.5, 0.01, (v) => commit({ ...shape, y0: v }, 'y0'))}
             {numRow('X1', 'x1', shape.x1, -0.5, 1.5, 0.01, (v) => commit({ ...shape, x1: v }, 'x1'))}
             {numRow('Y1', 'y1', shape.y1, -0.5, 1.5, 0.01, (v) => commit({ ...shape, y1: v }, 'y1'))}
+            {numRow('Feather', 'feather', shape.feather, 0, 1, 0.01, (v) => commit({ ...shape, feather: v }, 'feather'))}
+          </>
+        ) : (
+          <>
+            <div className="colorkey-eyedropper-row">
+              <button
+                type="button"
+                data-testid="colorkey-eyedropper"
+                className={`colorkey-eyedropper-button${colorKeyPicking ? ' active' : ''}`}
+                title="Pick a pixel in the image to set hue/sat/lum (Esc to cancel)"
+                onClick={() => setColorKeyPicking(!colorKeyPicking)}
+              >
+                {colorKeyPicking ? 'Click the image…' : 'Eyedropper'}
+              </button>
+            </div>
+            {numRow('Hue', 'hue', shape.hue, 0, 360, 1, (v) => commit({ ...shape, hue: v }, 'hue'))}
+            {numRow('Hue Range', 'hueRange', shape.hueRange, 0, 180, 1, (v) => commit({ ...shape, hueRange: v }, 'hueRange'))}
+            {numRow('Saturation', 'sat', shape.sat, 0, 1, 0.01, (v) => commit({ ...shape, sat: v }, 'sat'))}
+            {numRow('Sat Range', 'satRange', shape.satRange, 0, 1, 0.01, (v) => commit({ ...shape, satRange: v }, 'satRange'))}
+            {numRow('Luminance', 'lum', shape.lum, 0, 1, 0.01, (v) => commit({ ...shape, lum: v }, 'lum'))}
+            {numRow('Lum Range', 'lumRange', shape.lumRange, 0, 1, 0.01, (v) => commit({ ...shape, lumRange: v }, 'lumRange'))}
+            {numRow('Softness', 'softness', shape.softness, 0, 1, 0.01, (v) => commit({ ...shape, softness: v }, 'softness'))}
           </>
         )}
-        {numRow('Feather', 'feather', shape.feather, 0, 1, 0.01, (v) => commit({ ...shape, feather: v }, 'feather'))}
         <label className="mask-invert-row">
           <input
             type="checkbox"

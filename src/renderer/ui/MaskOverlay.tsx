@@ -143,7 +143,7 @@ export function MaskOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
             onPointerDown={beginRimDrag}
           />
         </>
-      ) : (
+      ) : shape.type === 'linear' ? (
         <>
           <div
             className="mask-handle mask-handle-endpoint"
@@ -158,7 +158,7 @@ export function MaskOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
             onPointerDown={beginEndpointDrag('p1')}
           />
         </>
-      )}
+      ) : null /* colorKey has no on-canvas spatial handles — see the eyedropper in InspectorPanel */}
     </div>
   );
 }

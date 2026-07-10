@@ -56,6 +56,11 @@ try {
   // React Flow renders the default graph (exact shape is ms4's concern)
   const nodeCount = await page.locator('.react-flow__node').count();
   check('React Flow renders an input→…→output chain', nodeCount >= 2, nodeCount);
+  // edges render a tick after nodes; under parallel-suite CPU contention the
+  // immediate count can catch that gap — wait for the first edge to be IN THE
+  // DOM ('attached', not 'visible': an SVG <g> can report an empty box while
+  // React Flow is still measuring, and the assertion below only counts)
+  await page.locator('.react-flow__edge').first().waitFor({ state: 'attached', timeout: 10_000 });
   const edgeCount = await page.locator('.react-flow__edge').count();
   check('React Flow renders its edges', edgeCount >= 1 && edgeCount === nodeCount - 1, { nodeCount, edgeCount });
 

@@ -24,6 +24,7 @@ import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
 import { MaskOverlay } from './MaskOverlay';
 import { defaultMaskParams, MASK_KIND, type MaskParams, type MaskShape } from '../engine/graph/maskNode';
+import { cpuRgb2hsl } from '../engine/graph/developOps';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
 declare global {
@@ -151,6 +152,8 @@ export function CanvasView() {
   const cropMode = useAppStore((s) => s.cropMode);
   const wbPicking = useAppStore((s) => s.wbPicking);
   const setWbPicking = useAppStore((s) => s.setWbPicking);
+  const colorKeyPicking = useAppStore((s) => s.colorKeyPicking);
+  const setColorKeyPicking = useAppStore((s) => s.setColorKeyPicking);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const activeOutputId = useAppStore((s) => s.activeOutputId);
   const maskOverlay = useAppStore((s) => s.maskOverlay);
@@ -197,7 +200,7 @@ export function CanvasView() {
     outputDimsRef.current = rawOutputDims;
   }
   const outputDims = outputDimsRef.current;
-  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims, wbPicking);
+  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims, wbPicking || colorKeyPicking);
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
@@ -598,6 +601,41 @@ export function CanvasView() {
     setWbPicking(false);
   };
 
+  /**
+   * ColorKey mask eyedropper: same coordinate mapping and geometry caveat as
+   * handleWbPick (samples the DECODED image pixel, main-side, at the clicked
+   * point), but seeds the SELECTED mask node's shapes[0] hue/sat/lum instead
+   * of solving white balance. The pixel is converted through the exact same
+   * encoded-working-space HSL helpers the colorKey mask math itself uses
+   * (cpuRgb2hsl — see maskNode.ts's doc comment), so the picked point becomes
+   * the shape's new key center. Ranges/softness/invert are left untouched;
+   * one undo entry (coalesceKey null, same as setMaskShape's discrete edits).
+   */
+  const handleColorKeyPick = (ev: React.MouseEvent<HTMLCanvasElement>) => {
+    const container = containerRef.current;
+    if (!container || !image) return;
+    const inputNode = graph.nodes.find((n) => n.kind === 'input');
+    const geometry = inputNode?.geometry ?? defaultGeometryParams();
+    if (!isIdentityGeometry(geometry)) return;
+    const rect = container.getBoundingClientRect();
+    const ix = Math.floor((ev.clientX - rect.left - view.tx) / view.scale);
+    const iy = Math.floor((ev.clientY - rect.top - view.ty) / view.scale);
+    setColorKeyPicking(false);
+    if (ix < 0 || iy < 0 || ix >= image.width || iy >= image.height) return;
+    const idx = (iy * image.width + ix) * 4;
+    const rgb: [number, number, number] = [image.data[idx]!, image.data[idx + 1]!, image.data[idx + 2]!];
+    const maskNode = graph.nodes.find((n) => n.id === selectedNodeId && n.kind === MASK_KIND);
+    const shape = maskNode?.mask?.shapes[0];
+    if (!maskNode || !shape || shape.type !== 'colorKey') return;
+    const enc: [number, number, number] = [
+      srgbEncode(Math.min(Math.max(rgb[0], 0), 1)),
+      srgbEncode(Math.min(Math.max(rgb[1], 0), 1)),
+      srgbEncode(Math.min(Math.max(rgb[2], 0), 1)),
+    ];
+    const [hue, sat, lum] = cpuRgb2hsl(enc);
+    useAppStore.getState().setMaskShape(maskNode.id, { ...shape, hue, sat, lum }, null);
+  };
+
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
   return (
     <div className="canvas-view">
@@ -608,9 +646,9 @@ export function CanvasView() {
       >
         <canvas
           ref={canvasRef}
-          className={`canvas-view-canvas${wbPicking ? ' canvas-view-canvas--picking' : ''}`}
+          className={`canvas-view-canvas${wbPicking || colorKeyPicking ? ' canvas-view-canvas--picking' : ''}`}
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
-          onClick={wbPicking ? handleWbPick : undefined}
+          onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
           data-testid="canvas-view-canvas"
         />
         {!overlayVisible && cropMode && outputDims && (

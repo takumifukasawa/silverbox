@@ -168,27 +168,37 @@ export function wgslHslBands(bands: string): string {
 `;
 }
 
-/** CPU mirror of wgslHslBands — operates on ENCODED rgb, returns encoded. */
-export function cpuHslBandsEncoded(
-  enc: [number, number, number],
-  bands: Float32Array
-): [number, number, number] {
+/**
+ * CPU mirror of WGSL_HSL_HELPERS' rgb2hsl — the SAME conversion the HSL band
+ * op (and, downstream, the colorKey mask shape — see maskNode.ts) key off
+ * of. Input is already-encoded (sRGB-curve, 0..1, clamped) rgb; achromatic
+ * pixels report hue 0 / saturation 0, matching the WGSL function exactly.
+ */
+export function cpuRgb2hsl(enc: [number, number, number]): [number, number, number] {
   const [r, g, b] = enc;
   const mx = Math.max(r, g, b);
   const mn = Math.min(r, g, b);
   const l = 0.5 * (mx + mn);
   const d = mx - mn;
-  let h = 0;
-  let s = 0;
-  if (d >= 1e-6) {
-    s = d / (1 - Math.abs(2 * l - 1));
-    if (mx === r) h = (g - b) / d;
-    else if (mx === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  const chroma = mx - mn;
+  if (d < 1e-6) return [0, 0, l];
+  const s = d / (1 - Math.abs(2 * l - 1));
+  let h: number;
+  if (mx === r) h = (g - b) / d;
+  else if (mx === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return [h, s, l];
+}
+
+/** CPU mirror of wgslHslBands — operates on ENCODED rgb, returns encoded. */
+export function cpuHslBandsEncoded(
+  enc: [number, number, number],
+  bands: Float32Array
+): [number, number, number] {
+  const [h, s, l] = cpuRgb2hsl(enc);
+  const [r, g, b] = enc;
+  const chroma = Math.max(r, g, b) - Math.min(r, g, b);
   const tMask = Math.min(Math.max(chroma / HSL_CHROMA_MASK_FULL, 0), 1);
   const satMask = tMask * tMask * (3 - 2 * tMask);
   let i = 0;
