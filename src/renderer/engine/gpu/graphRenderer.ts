@@ -8,7 +8,12 @@
  * A final pass applies the exact piecewise sRGB encode — the same curve as
  * engine/color/srgb.ts — into the canvas. readbackMean() executes the whole
  * plan again into an offscreen rgba8unorm target and averages on the CPU,
- * so it never depends on a prior render() call.
+ * so it never depends on a prior render() call (verify-only path; kept as a
+ * full CPU readback for readbackMean/readbackSharpness/cpuReferenceMean).
+ * stats() and scopeSamples() — the UI-facing, debounced-per-edit readbacks —
+ * instead reduce that same encoded target entirely on the GPU (compute
+ * passes over HISTOGRAM_SHADER / SCOPE_SAMPLE_SHADER) so only a few KB ever
+ * crosses back to the CPU, no matter the preview's pixel count.
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
 import { orientedDims, type RenderPlan } from '../graph/graphDoc';
@@ -100,6 +105,102 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let a = textureLoad(srcA, vec2i(pos.xy), 0);
   let b = textureLoad(srcB, vec2i(pos.xy), 0);
   return vec4f(mix(a.rgb, b.rgb, params.x), 1.0);
+}
+`;
+
+/**
+ * `bins` layout for HISTOGRAM_SHADER: [0..255] = r histogram, [256..511] = g,
+ * [512..767] = b, [768..1023] = luma, [1024] = shadow-clip count (any channel
+ * == 0), [1025] = highlight-clip count (any channel == 255). One u32 per
+ * entry, ~4.1KB total — this is the entire GPU→CPU readback stats() now
+ * does, instead of the full encoded frame (~15MB at preview size).
+ */
+const HISTOGRAM_BIN_COUNT = 4 * 256 + 2;
+
+/**
+ * Histogram compute pass: reduces the encoded rgba8unorm output directly on
+ * the GPU, restricted to the rectangle `rect = (x0, y0, w, h)` of `src`
+ * (stats() always passes the full output rect; statsCrop() — verify-only,
+ * see scripts/verify-ms10-histogram.mjs — passes an arbitrary crop so the
+ * compute shader's binning can be cross-checked bit-for-bit against a JS
+ * recomputation over real pixels without shipping the whole frame across the
+ * debug bridge). Workgroup 16×16; out-of-range invocations (rect dims not a
+ * multiple of 16) bail via the bounds check before touching `bins`.
+ *
+ * Reconstructing the u8 channel value from the rgba8unorm texel's decoded
+ * float (textureLoad returns c/255 as f32) by rounding is exact: the
+ * float32 round-trip error is on the order of 3e-5 in the reconstructed
+ * integer, far below the 0.5 needed to flip a rounding decision.
+ *
+ * Luma binning mirrors the OLD CPU loop's formula bit-for-bit:
+ *   luma[Math.min(255, Math.round(WORKING_LUMA[0]*vr + WORKING_LUMA[1]*vg + WORKING_LUMA[2]*vb))]++
+ * WGSL's round() is round-half-to-even (unlike Math.round's round-half-away-
+ * from-zero); floor(x + 0.5) is used instead everywhere here — for x >= 0
+ * (always true for these values) that is bit-for-bit what Math.round computes.
+ */
+const HISTOGRAM_SHADER = /* wgsl */ `
+struct HistogramParams {
+  rect: vec4u, // x0, y0, w, h
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>>;
+@group(0) @binding(2) var<uniform> params: HistogramParams;
+
+@compute @workgroup_size(16, 16)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.rect.z || gid.y >= params.rect.w) {
+    return;
+  }
+  let coord = vec2i(params.rect.xy + gid.xy);
+  let texel = textureLoad(src, coord, 0);
+  let vr = u32(floor(texel.r * 255.0 + 0.5));
+  let vg = u32(floor(texel.g * 255.0 + 0.5));
+  let vb = u32(floor(texel.b * 255.0 + 0.5));
+  atomicAdd(&bins[vr], 1u);
+  atomicAdd(&bins[256u + vg], 1u);
+  atomicAdd(&bins[512u + vb], 1u);
+  let lumaF = dot(${WGSL_WORKING_LUMA}, vec3f(f32(vr), f32(vg), f32(vb)));
+  let lumaBin = min(255u, u32(floor(lumaF + 0.5)));
+  atomicAdd(&bins[768u + lumaBin], 1u);
+  if (vr == 0u || vg == 0u || vb == 0u) {
+    atomicAdd(&bins[1024u], 1u);
+  }
+  if (vr == 255u || vg == 255u || vb == 255u) {
+    atomicAdd(&bins[1025u], 1u);
+  }
+}
+`;
+
+/**
+ * Scope-sample compute pass: nearest-samples the encoded rgba8unorm output
+ * at each stride cell's TOP-LEFT texel — coord = (col*strideX, row*strideY),
+ * exactly the coordinates the old CPU stride loop read (`for (x = 0; x <
+ * width; x += strideX)` etc.) — packing each RGB triplet into one u32 (r |
+ * g<<8 | b<<16) in a `cols*rows`-entry storage buffer. Only that small grid
+ * (≤256×144×4 bytes ≈ 144KB) crosses back to the CPU instead of the whole
+ * encoded frame; scopeSamples() unpacks it into the same Uint8Array shape it
+ * always returned.
+ */
+const SCOPE_SAMPLE_SHADER = /* wgsl */ `
+struct ScopeParams {
+  grid: vec4u, // strideX, strideY, cols, rows
+}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> outSamples: array<u32>;
+@group(0) @binding(2) var<uniform> params: ScopeParams;
+
+@compute @workgroup_size(16, 16)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  if (gid.x >= params.grid.z || gid.y >= params.grid.w) {
+    return;
+  }
+  let coord = vec2i(gid.xy * params.grid.xy);
+  let texel = textureLoad(src, coord, 0);
+  let vr = u32(floor(texel.r * 255.0 + 0.5));
+  let vg = u32(floor(texel.g * 255.0 + 0.5));
+  let vb = u32(floor(texel.b * 255.0 + 0.5));
+  let idx = gid.y * params.grid.z + gid.x;
+  outSamples[idx] = vr | (vg << 8u) | (vb << 16u);
 }
 `;
 
@@ -317,6 +418,10 @@ export class GraphRenderer {
   private resampleSamplerCache: GPUSampler | null = null;
   /** Export-only encode pipelines, keyed by shader id ('encode/srgb' | 'encode/p3'); the preview's own pipelines are separate fixed fields above. */
   private exportEncodePipelines = new Map<string, GPURenderPipeline>();
+  /** Compiled once, shared by stats() and statsCrop() (verify-only). */
+  private histogramPipelineCache: GPUComputePipeline | null = null;
+  /** Compiled once, shared by scopeSamples(). */
+  private scopePipelineCache: GPUComputePipeline | null = null;
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -533,6 +638,30 @@ export class GraphRenderer {
       });
     }
     return this.blendPipelineCache;
+  }
+
+  /** Compute pipeline for HISTOGRAM_SHADER — compiled once, shared by stats() and statsCrop(). */
+  private histogramPipeline(): GPUComputePipeline {
+    if (!this.histogramPipelineCache) {
+      const module = this.device.createShaderModule({ code: HISTOGRAM_SHADER });
+      this.histogramPipelineCache = this.device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'cs' },
+      });
+    }
+    return this.histogramPipelineCache;
+  }
+
+  /** Compute pipeline for SCOPE_SAMPLE_SHADER — compiled once, shared by every scopeSamples() call. */
+  private scopePipeline(): GPUComputePipeline {
+    if (!this.scopePipelineCache) {
+      const module = this.device.createShaderModule({ code: SCOPE_SAMPLE_SHADER });
+      this.scopePipelineCache = this.device.createComputePipeline({
+        layout: 'auto',
+        compute: { module, entryPoint: 'cs' },
+      });
+    }
+    return this.scopePipelineCache;
   }
 
   private makeStepTexture(): GPUTexture {
@@ -944,64 +1073,177 @@ export class GraphRenderer {
     });
   }
 
-  /** Strided RGB samples of the encoded output for the scope displays. */
-  scopeSamples(maxCols = 256, maxRows = 144): Promise<ScopeSamples | null> {
-    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
-      const strideX = Math.max(1, Math.ceil(width / maxCols));
-      const strideY = Math.max(1, Math.ceil(height / maxRows));
-      const cols = Math.ceil(width / strideX);
-      const rows = Math.ceil(height / strideY);
-      const data = new Uint8Array(cols * rows * 3);
-      let i = 0;
-      for (let y = 0; y < height; y += strideY) {
-        const row = y * bytesPerRow;
-        for (let x = 0; x < width; x += strideX) {
-          const s = row + x * 4;
-          data[i++] = px[s]!;
-          data[i++] = px[s + 1]!;
-          data[i++] = px[s + 2]!;
-        }
+  /**
+   * Strided RGB samples of the encoded output for the scope displays, read
+   * back as a ≤256×144×4-byte packed buffer (GPU compute reduction — see
+   * SCOPE_SAMPLE_SHADER) instead of the whole encoded frame.
+   */
+  async scopeSamples(maxCols = 256, maxRows = 144): Promise<ScopeSamples | null> {
+    await this.graphReady;
+    if (!this.source) return null;
+    const { width, height } = this;
+    const strideX = Math.max(1, Math.ceil(width / maxCols));
+    const strideY = Math.max(1, Math.ceil(height / maxRows));
+    const cols = Math.ceil(width / strideX);
+    const rows = Math.ceil(height / strideY);
+    const sampleCount = cols * rows;
+    const target = this.createTexture({
+      size: [width, height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    const outBuffer = this.createBuffer({
+      size: Math.max(4, sampleCount * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const paramsBuffer = this.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([strideX, strideY, cols, rows]));
+    const readBuffer = this.createBuffer({
+      size: Math.max(4, sampleCount * 4),
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      const linear = this.addChainPasses(encoder);
+      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
+      const pipeline = this.scopePipeline();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(
+        0,
+        this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: target.createView() },
+            { binding: 1, resource: { buffer: outBuffer } },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+          ],
+        })
+      );
+      pass.dispatchWorkgroups(Math.ceil(cols / 16), Math.ceil(rows / 16));
+      pass.end();
+      encoder.copyBufferToBuffer(outBuffer, 0, readBuffer, 0, Math.max(4, sampleCount * 4));
+      this.device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint32Array(readBuffer.getMappedRange());
+      const data = new Uint8Array(sampleCount * 3);
+      for (let i = 0; i < sampleCount; i++) {
+        const v = mapped[i]!;
+        data[i * 3] = v & 0xff;
+        data[i * 3 + 1] = (v >> 8) & 0xff;
+        data[i * 3 + 2] = (v >> 16) & 0xff;
       }
       return { cols, rows, data };
+    } finally {
+      readBuffer.unmap();
+      this.destroyBuffer(readBuffer);
+      this.destroyBuffer(paramsBuffer);
+      this.destroyBuffer(outBuffer);
+      this.destroyTexture(target);
+    }
+  }
+
+  /**
+   * GPU-reduced 256-bin RGB+luma histogram and clip counts (see
+   * HISTOGRAM_SHADER), restricted to the rectangle [x0,x0+w) x [y0,y0+h) of
+   * the encoded output. `stats()` calls this with the full output rectangle;
+   * `statsCrop()` (verify-only) calls it with an arbitrary crop.
+   */
+  private async computeHistogram(x0: number, y0: number, w: number, h: number): Promise<HistogramData | null> {
+    await this.graphReady;
+    if (!this.source) return null;
+    const { width, height } = this;
+    const target = this.createTexture({
+      size: [width, height],
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
     });
+    const binsBuffer = this.createBuffer({
+      size: HISTOGRAM_BIN_COUNT * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    const paramsBuffer = this.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([x0, y0, w, h]));
+    const readBuffer = this.createBuffer({
+      size: HISTOGRAM_BIN_COUNT * 4,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      const linear = this.addChainPasses(encoder);
+      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
+      const pipeline = this.histogramPipeline();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(
+        0,
+        this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: target.createView() },
+            { binding: 1, resource: { buffer: binsBuffer } },
+            { binding: 2, resource: { buffer: paramsBuffer } },
+          ],
+        })
+      );
+      pass.dispatchWorkgroups(Math.ceil(w / 16), Math.ceil(h / 16));
+      pass.end();
+      encoder.copyBufferToBuffer(binsBuffer, 0, readBuffer, 0, HISTOGRAM_BIN_COUNT * 4);
+      this.device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint32Array(readBuffer.getMappedRange());
+      const n = w * h;
+      return {
+        bins: 256,
+        r: Array.from(mapped.subarray(0, 256)),
+        g: Array.from(mapped.subarray(256, 512)),
+        b: Array.from(mapped.subarray(512, 768)),
+        luma: Array.from(mapped.subarray(768, 1024)),
+        shadowClip: n > 0 ? mapped[1024]! / n : 0,
+        highlightClip: n > 0 ? mapped[1025]! / n : 0,
+        pixels: n,
+      };
+    } finally {
+      readBuffer.unmap();
+      this.destroyBuffer(readBuffer);
+      this.destroyBuffer(paramsBuffer);
+      this.destroyBuffer(binsBuffer);
+      this.destroyTexture(target);
+    }
   }
 
   /** 256-bin RGB + luma histogram and clipping fractions of the encoded output. */
   stats(): Promise<HistogramData | null> {
-    return this.withEncodedPixels((px, bytesPerRow, width, height) => {
-      const bins = 256;
-      const r = new Uint32Array(bins);
-      const g = new Uint32Array(bins);
-      const b = new Uint32Array(bins);
-      const luma = new Uint32Array(bins);
-      let shadow = 0;
-      let highlight = 0;
-      for (let y = 0; y < height; y++) {
-        const row = y * bytesPerRow;
-        for (let x = 0; x < width; x++) {
-          const s = row + x * 4;
-          const vr = px[s]!;
-          const vg = px[s + 1]!;
-          const vb = px[s + 2]!;
-          r[vr]!++;
-          g[vg]!++;
-          b[vb]!++;
-          luma[Math.min(255, Math.round(WORKING_LUMA[0] * vr + WORKING_LUMA[1] * vg + WORKING_LUMA[2] * vb))]!++;
-          if (vr === 0 || vg === 0 || vb === 0) shadow++;
-          if (vr === 255 || vg === 255 || vb === 255) highlight++;
-        }
+    return this.computeHistogram(0, 0, this.width, this.height);
+  }
+
+  /**
+   * Verify-only: same GPU histogram compute as stats(), restricted to an
+   * arbitrary crop rectangle of the encoded output — used by
+   * scripts/verify-ms10-histogram.mjs to cross-check HISTOGRAM_SHADER's
+   * binning bit-for-bit against a JS recomputation over real pixels (see
+   * encodedCropForVerify below for how those real pixels are obtained).
+   */
+  statsCrop(x0: number, y0: number, w: number, h: number): Promise<HistogramData | null> {
+    return this.computeHistogram(x0, y0, w, h);
+  }
+
+  /**
+   * Verify-only: raw encoded RGBA bytes for a crop rectangle of the current
+   * output. Built on withEncodedPixels (the full-frame CPU readback kept for
+   * readbackMean/readbackSharpness) purely so scripts/verify-ms10-histogram.mjs
+   * can independently recompute histogram bins in JS over real pixels and
+   * diff them against statsCrop()'s GPU result — never used by the
+   * production stats()/scopeSamples() path, which stays GPU-side end to end.
+   */
+  encodedCropForVerify(x0: number, y0: number, w: number, h: number): Promise<Uint8Array | null> {
+    return this.withEncodedPixels((px, bytesPerRow) => {
+      const out = new Uint8Array(w * h * 4);
+      for (let y = 0; y < h; y++) {
+        const srcRow = (y0 + y) * bytesPerRow + x0 * 4;
+        out.set(px.subarray(srcRow, srcRow + w * 4), y * w * 4);
       }
-      const n = width * height;
-      return {
-        bins,
-        r: Array.from(r),
-        g: Array.from(g),
-        b: Array.from(b),
-        luma: Array.from(luma),
-        shadowClip: shadow / n,
-        highlightClip: highlight / n,
-        pixels: n,
-      };
+      return out;
     });
   }
 }

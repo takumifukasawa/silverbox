@@ -83,6 +83,15 @@ declare global {
       rendererStats(): import('../engine/gpu/graphRenderer').RendererStats | null;
       /** Heap + renderer snapshot in one call, for scripts/perf-probe.mjs's per-batch sampling. */
       perfProbe(): { heapUsed: number | null; rendererStats: import('../engine/gpu/graphRenderer').RendererStats | null };
+      /** Verify-only: GPU histogram compute restricted to a crop rect (scripts/verify-ms10-histogram.mjs). */
+      statsCrop(
+        x0: number,
+        y0: number,
+        w: number,
+        h: number
+      ): Promise<import('../engine/gpu/graphRenderer').HistogramData | null>;
+      /** Verify-only: raw encoded RGBA bytes of a crop rect, for cross-checking statsCrop() in JS. */
+      encodedCropForVerify(x0: number, y0: number, w: number, h: number): Promise<number[] | null>;
     };
   }
 }
@@ -424,6 +433,17 @@ export function CanvasView() {
           heapUsed: (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? null,
           rendererStats: useAppStore.getState().renderer?.rendererStats() ?? null,
         };
+      },
+      async statsCrop(x0, y0, w, h) {
+        const renderer = rendererRef.current ? await rendererRef.current : null;
+        if (!renderer || !renderer.hasImage) return null;
+        return renderer.statsCrop(x0, y0, w, h);
+      },
+      async encodedCropForVerify(x0, y0, w, h) {
+        const renderer = rendererRef.current ? await rendererRef.current : null;
+        if (!renderer || !renderer.hasImage) return null;
+        const px = await renderer.encodedCropForVerify(x0, y0, w, h);
+        return px ? Array.from(px) : null;
       },
       setGeometry(geo) {
         useAppStore.getState().setGeometry(geo, null);

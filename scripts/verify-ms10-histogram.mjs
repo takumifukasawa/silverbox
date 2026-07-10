@@ -112,6 +112,70 @@ try {
     await page.locator('[data-testid="clip-shadows"]').getAttribute('class')
   );
 
+  console.log('verify-ms10 (GPU histogram compute matches a JS recomputation, bit-for-bit, on a small crop):');
+  // small crop (not the whole frame) so the pixel data crosses the Playwright
+  // debug bridge fast — the GPU compute path (statsCrop) and the reference
+  // JS loop below both operate on the SAME real pixels (encodedCropForVerify,
+  // a verify-only full-frame CPU readback kept for exactly this purpose).
+  const outDims = await page.evaluate(() => window.__debug.outputDims());
+  const cropW = Math.min(64, outDims.width);
+  const cropH = Math.min(64, outDims.height);
+  const cx0 = Math.floor((outDims.width - cropW) / 2);
+  const cy0 = Math.floor((outDims.height - cropH) / 2);
+  const gpuCrop = await page.evaluate(
+    ([x0, y0, w, h]) => window.__debug.statsCrop(x0, y0, w, h),
+    [cx0, cy0, cropW, cropH]
+  );
+  const cropPixels = await page.evaluate(
+    ([x0, y0, w, h]) => window.__debug.encodedCropForVerify(x0, y0, w, h),
+    [cx0, cy0, cropW, cropH]
+  );
+  // mirrors src/renderer/engine/color/workingSpace.ts's WORKING_LUMA and the
+  // OLD CPU histogram loop's exact formula (Math.round, min(255, ...))
+  const WORKING_LUMA = [0.2126, 0.7152, 0.0722];
+  const expected = {
+    r: new Array(256).fill(0),
+    g: new Array(256).fill(0),
+    b: new Array(256).fill(0),
+    luma: new Array(256).fill(0),
+    shadow: 0,
+    highlight: 0,
+  };
+  for (let y = 0; y < cropH; y++) {
+    for (let x = 0; x < cropW; x++) {
+      const s = (y * cropW + x) * 4;
+      const vr = cropPixels[s];
+      const vg = cropPixels[s + 1];
+      const vb = cropPixels[s + 2];
+      expected.r[vr]++;
+      expected.g[vg]++;
+      expected.b[vb]++;
+      expected.luma[Math.min(255, Math.round(WORKING_LUMA[0] * vr + WORKING_LUMA[1] * vg + WORKING_LUMA[2] * vb))]++;
+      if (vr === 0 || vg === 0 || vb === 0) expected.shadow++;
+      if (vr === 255 || vg === 255 || vb === 255) expected.highlight++;
+    }
+  }
+  const arraysEqual = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  check('GPU histogram r bins match the JS recomputation exactly (crop)', arraysEqual(gpuCrop.r, expected.r), {
+    diffAt: gpuCrop.r.findIndex((v, i) => v !== expected.r[i]),
+  });
+  check('GPU histogram g bins match the JS recomputation exactly (crop)', arraysEqual(gpuCrop.g, expected.g), {
+    diffAt: gpuCrop.g.findIndex((v, i) => v !== expected.g[i]),
+  });
+  check('GPU histogram b bins match the JS recomputation exactly (crop)', arraysEqual(gpuCrop.b, expected.b), {
+    diffAt: gpuCrop.b.findIndex((v, i) => v !== expected.b[i]),
+  });
+  check('GPU histogram luma bins match the JS recomputation exactly (crop)', arraysEqual(gpuCrop.luma, expected.luma), {
+    diffAt: gpuCrop.luma.findIndex((v, i) => v !== expected.luma[i]),
+  });
+  const gpuShadow = Math.round(gpuCrop.shadowClip * gpuCrop.pixels);
+  const gpuHighlight = Math.round(gpuCrop.highlightClip * gpuCrop.pixels);
+  check(
+    'GPU shadow/highlight clip counts match the JS recomputation exactly (crop)',
+    gpuShadow === expected.shadow && gpuHighlight === expected.highlight,
+    { gpu: { shadow: gpuShadow, highlight: gpuHighlight }, expected: { shadow: expected.shadow, highlight: expected.highlight } }
+  );
+
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms10-histogram.png') });
   console.log('screenshot: test-artifacts/ms10-histogram.png');
 } finally {
