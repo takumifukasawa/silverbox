@@ -25,8 +25,10 @@ rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
 // inside 1/255 per channel (see verify-ms3).
 const GPU_CPU_TOLERANCE = 1 / 255;
 
-console.log('building…');
-execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 
 let failures = 0;
 const check = (name, cond, actual) => {

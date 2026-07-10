@@ -113,6 +113,16 @@ function registerIpc(): void {
  */
 const testMode = process.env['SILVERBOX_TEST'] === '1';
 
+// Verify-suite parallelism: every script that shows up here mutates
+// <userData>/settings.json (autosave, presets, …). Running the suite's
+// scripts concurrently against the OS-default userData dir means they'd
+// stomp each other's settings.json. In test mode only, an explicit
+// SILVERBOX_USER_DATA env var repoints Electron's userData dir before
+// anything (readSettings included) touches it — the runner assigns each
+// pooled script its own fresh temp directory here.
+const testUserData = process.env['SILVERBOX_USER_DATA'];
+if (testMode && testUserData) app.setPath('userData', testUserData);
+
 function createWindow(): void {
   const win = new BrowserWindow({
     width: 1440,

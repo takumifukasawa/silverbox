@@ -13,8 +13,10 @@ process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 
-console.log('building…');
-execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 
 let failures = 0;
 const check = (name, cond, actual) => {

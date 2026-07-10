@@ -24,8 +24,10 @@ const OUT_PNG = join(projectRoot, 'test-artifacts', 'ms8-export.png');
 // JPEG quantization + preview-vs-full-res sampling differences
 const MEAN_TOLERANCE = 0.02;
 
-console.log('building…');
-execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 
 let failures = 0;
 const check = (name, cond, actual) => {

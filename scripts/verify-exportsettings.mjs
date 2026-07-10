@@ -12,9 +12,13 @@
  *  5. Export presets: saving one via the UI persists to settings.json;
  *     re-selecting it restores the toolbar controls.
  *
- * Isolation: launches Electron with --user-data-dir pointing at a fresh temp
- * directory (confirmed via app.evaluate(app.getPath('userData')) to actually
- * take effect), so this run never touches the real installed settings.json.
+ * Isolation: points Electron's userData dir at a fresh temp directory via
+ * SILVERBOX_USER_DATA (see testUserData handling in src/main/index.ts;
+ * confirmed via app.evaluate(app.getPath('userData')) to actually take
+ * effect), so this run never touches the real installed settings.json. If
+ * the runner already assigned SILVERBOX_USER_DATA (parallel suite run), that
+ * directory is reused and left for the runner to clean up; standalone runs
+ * create and clean up their own.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -35,8 +39,10 @@ const OUT_NONE = join(projectRoot, 'test-artifacts', 'exportsettings-metadata-no
 const OUT_SRGB = join(projectRoot, 'test-artifacts', 'exportsettings-srgb.jpg');
 const OUT_P3 = join(projectRoot, 'test-artifacts', 'exportsettings-p3.jpg');
 
-console.log('building…');
-execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 
 let failures = 0;
 const check = (name, cond, actual) => {
@@ -52,9 +58,13 @@ for (const p of [OUT_ALL, OUT_NONE, OUT_SRGB, OUT_P3]) if (existsSync(p)) unlink
 mkdirSync(join(projectRoot, 'test-artifacts'), { recursive: true });
 if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 
-const userDataDir = mkdtempSync(join(tmpdir(), 'silverbox-settings-verify-'));
+// reuse the runner's assignment when present (parallel run); otherwise mint
+// our own, standalone-run temp dir and own its cleanup
+const ownUserData = !process.env.SILVERBOX_USER_DATA;
+const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-settings-verify-'));
+process.env.SILVERBOX_USER_DATA = userDataDir;
 
-const app = await electron.launch({ args: [projectRoot, `--user-data-dir=${userDataDir}`] });
+const app = await electron.launch({ args: [projectRoot] });
 const pageErrors = [];
 try {
   const page = await app.firstWindow();
@@ -70,7 +80,7 @@ try {
   // match — this is still specific enough to catch a silent fallback to the
   // real (non-isolated) userData directory.
   check(
-    'Electron actually honored --user-data-dir (isolated from the real settings.json)',
+    'Electron actually honored SILVERBOX_USER_DATA (isolated from the real settings.json)',
     basename(realUserData) === basename(userDataDir),
     { realUserData, userDataDir }
   );
@@ -301,7 +311,7 @@ try {
 } finally {
   await app.close();
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
-  rmSync(userDataDir, { recursive: true, force: true });
+  if (ownUserData) rmSync(userDataDir, { recursive: true, force: true });
 }
 
 if (failures > 0) {

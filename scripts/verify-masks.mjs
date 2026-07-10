@@ -33,8 +33,10 @@ const GPU_CPU_TOLERANCE = 1 / 255;
 const OUT_MAIN = join(projectRoot, 'test-artifacts', 'masks-output-main.jpg');
 const OUT_SECOND = join(projectRoot, 'test-artifacts', 'masks-output-second.jpg');
 
-console.log('building…');
-execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 
 let failures = 0;
 const check = (name, cond, actual) => {

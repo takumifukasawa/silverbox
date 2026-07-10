@@ -24,8 +24,17 @@ const APP_DIR = join(projectRoot, 'dist', arch() === 'arm64' ? 'mac-arm64' : 'ma
 const EXECUTABLE = join(APP_DIR, 'Silverbox.app', 'Contents', 'MacOS', 'Silverbox');
 const GPU_CPU_TOLERANCE = 1 / 255;
 
+// "npm run package" is electron-vite build && electron-builder --dir; split
+// so the runner can skip the redundant build (it already built `out/` once
+// up front) while electron-builder --dir (the actual thing ms14 verifies)
+// always runs. ms14 packages/mutates dist/, so it stays pinned to the
+// exclusive serial tail after the parallel pool regardless.
+if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
+  console.log('building…');
+  execFileSync('npx', ['electron-vite', 'build'], { cwd: projectRoot, stdio: 'inherit' });
+}
 console.log('packaging…');
-execFileSync('npm', ['run', 'package'], { cwd: projectRoot, stdio: 'inherit' });
+execFileSync('npx', ['electron-builder', '--dir'], { cwd: projectRoot, stdio: 'inherit' });
 
 let failures = 0;
 const check = (name, cond, actual) => {
