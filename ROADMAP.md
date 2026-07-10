@@ -86,6 +86,13 @@ offset (value decided in the Lightroom calibration session).
   node** (pipe through a user-configured command, cache keyed by input
   hash — stays intent-data, no bundled ML runtime); in-app ONNX only if
   that proves insufficient
+- **Golden renders** (`silverbox check`): commit a thumbnail/hash next to
+  each sidecar and let the CLI re-render and report ΔE — a photo archive
+  that owns a regression test suite; engine updates become detectable
+  choices instead of silent drift
+- Unit-test tier (vitest) for pure engine math (matrices, splines,
+  solvers, sanitizers) under the E2E suite — F3b's Sony-spline decoding
+  should be written test-first against in-camera-JPEG-derived values
 - Look-history replay (render a sidecar's git history as a timelapse)
 - Learn-a-preset from a set of looks (distill shared parameters from
   chosen sidecars; exploratory)
