@@ -37,17 +37,30 @@ not — are written down in [DESIGN.md](DESIGN.md).
   tabs, endpoint black/white-point control.
 - **HSL** — 8 bands × hue/saturation/luminance with smooth band weighting
   and a chroma mask that keeps grays untouched.
+- **Color Grading** — 3-way wheels (shadows/midtones/highlights + global)
+  with blending and balance controls, zero-luminance chroma handling that
+  keeps blacks and whites clean.
 - **Detail** — bilateral luminance NR, chroma NR and unsharp-mask sharpening
   with edge masking, computed in a luma/chroma space and scaled so preview
   and full-resolution export agree in look.
-- LR-style histogram (RGB + luminance, additive) with clipping indicators,
-  zoom/pan with fit and 1:1 views, undo/redo with gesture coalescing,
-  drag & drop opening.
+- **Effects** — dehaze, clarity, texture, film grain and a post-crop
+  vignette with midpoint control.
+- **Crop & straighten** — non-destructive normalized crop rectangle with a
+  ±45° angle, edited through an on-canvas overlay with rule-of-thirds grid.
+- **Lens corrections** — manual distortion, red/blue chromatic aberration
+  and vignetting recovery, folded into the same single resample pass as the
+  crop.
+- **Scopes** — LR-style histogram (RGB + luminance, additive) with clipping
+  indicators, plus luma waveform, RGB parade and a vectorscope.
+- Before/after compare (`\`) and a grayscale check view (`G`), zoom/pan with
+  fit and 1:1 views, undo/redo with gesture coalescing, drag & drop opening.
 
 ## Engine
 
-Everything internal is linear RGB in `rgba16float` textures; the exact
-piecewise sRGB transfer runs only at input/output (and inside the passes
+Everything internal is **linear Rec.2020** in `rgba16float` textures — a
+wide-gamut working space, so saturated colors the camera captured survive
+until the sRGB conversion at display/export (see [COLOR.md](COLOR.md)). The
+exact piecewise sRGB transfer runs only at the exits (and inside the passes
 that deliberately work in display space). The graph compiles into a
 topologically ordered plan of WebGPU fullscreen passes; nodes at their
 default values are skipped entirely, so an untouched graph is a bit-exact
@@ -81,7 +94,7 @@ reference implementation of the same math, typically within 1/255 per
 channel — plus interaction checks through the actual UI.
 
 ```sh
-npm run verify           # everything (builds, launches, ~20 scripts)
+npm run verify           # everything (builds, launches, ~30 scripts)
 npm run verify:wb        # or any single area
 ```
 

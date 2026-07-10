@@ -113,15 +113,13 @@ ground truth, not tuned by gut:
 
 ### 6. Scene-referred color, output-referred late
 
-Working color is linear, and the direction of travel is **wide**: a RAW
-editor that clips camera gamut at decode time has thrown away data no slider
-can recover, which sits badly with a tool that calls itself a RAW developer.
-The engine currently works in linear sRGB; migrating the working space to a
-wide gamut (linear Rec.2020 is the leading candidate) is planned, gated on a
-decode spike that demonstrates the pipeline end-to-end and makes the visual
-difference judgeable on real photographs. Display and export convert to the
-destination late (sRGB today; print/HDR targets become possible later
-precisely because the working space is wider than any of them). Effects that
+Working color is linear and **wide**: a RAW editor that clips camera gamut
+at decode time has thrown away data no slider can recover, which sits badly
+with a tool that calls itself a RAW developer. The engine works in **linear
+Rec.2020** — one fixed working space, defined in a single module the whole
+engine imports from. Display and export convert to the destination late
+(sRGB today; print/HDR targets become possible later precisely because the
+working space is wider than any of them). Effects that
 model display behavior (tone curve, grading) operate on encoded values by
 design — but encoded *working-space* values, never a clipped copy. The
 full decision record, including what histograms and scopes measure and

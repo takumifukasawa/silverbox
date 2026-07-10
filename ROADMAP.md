@@ -48,6 +48,24 @@ EXIF/ICC, drag & drop, linear wide-gamut working space (Rec.2020).
 - **Sidecar overwrite guard** — never save over a document that failed to
   parse (promise 9 enforcement).
 
+## Export pipeline (current: quality 1–100, long-edge resize without
+enlargement, JPEG/PNG, sRGB ICC, EXIF carry-over)
+
+Should have: **metadata control** (all / minimal / none, GPS stripping —
+privacy for social export), **export color space** (AdobeRGB / Display P3
+with ICC tags), **export presets** (named bundles of these options).
+Nice: 16-bit TIFF (print/interchange), output sharpening (post-resize,
+screen/print), short-edge/megapixel resize modes, WebP/AVIF, DPI metadata,
+watermark; file-naming templates belong to the CLI.
+
+## App settings
+
+None exist today. The vehicle: a schema-versioned `settings.json` in the
+app data directory — file first, preferences UI later, same text-first
+philosophy as the sidecars (and where UI theme tokens will live). Initial
+contents: export defaults, preview-resolution cap, sidecar autosave toggle,
+baseline-exposure offset (decided in the Lightroom calibration session).
+
 ## Nice to have
 
 - LUT **import** node (film-sim .cube packs inside the graph)
