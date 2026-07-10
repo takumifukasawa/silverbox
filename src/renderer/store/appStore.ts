@@ -4,6 +4,7 @@ import { isRawFileName } from '../engine/decoder/librawDecoder';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
 import {
   buildPlan,
+  clampGeometry,
   defaultGraphDoc,
   defaultParams,
   DEVELOP_KIND,
@@ -11,6 +12,7 @@ import {
   parseGraphDoc,
   serializeGraphDoc,
   type AddableKind,
+  type GeometryParams,
   type GraphDoc,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
@@ -86,6 +88,11 @@ interface AppState {
   /** Viewer-only: display the render as luminance (tone/contrast check). */
   grayscaleView: boolean;
   toggleGrayscaleView(): void;
+  /** Crop/straighten tool active — the canvas previews the full (uncropped) rotated frame while true. */
+  cropMode: boolean;
+  toggleCropMode(): void;
+  /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
+  setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   openImageByPath(path: string): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -275,6 +282,7 @@ export const useAppStore = create<AppState>((set, get) => {
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
   grayscaleView: false,
+  cropMode: false,
 
   async openImageByPath(path: string) {
     const fileName = path.split('/').pop() ?? path;
@@ -340,6 +348,7 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarCreatedAt,
         exportInfo: null,
         wbModel,
+        cropMode: false,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -656,6 +665,26 @@ export const useAppStore = create<AppState>((set, get) => {
 
   toggleGrayscaleView() {
     set((s) => ({ grayscaleView: !s.grayscaleView }));
+  },
+
+  toggleCropMode() {
+    set((s) => ({ cropMode: !s.cropMode }));
+  },
+
+  setGeometry(geo, coalesceKey) {
+    set((s) => {
+      const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+      if (!inputNode) return {};
+      const geometry = clampGeometry(geo);
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === inputNode.id ? { ...n, geometry } : n)),
+        },
+        graphDirty: true,
+      };
+    });
   },
 
   setHistogram(histogram) {

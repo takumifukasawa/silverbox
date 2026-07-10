@@ -38,6 +38,8 @@ export interface GraphNode {
   develop?: DevelopParams;
   /** customShader payload (code + GUI params); only for kind 'custom'. */
   shader?: CustomShaderParams;
+  /** Non-destructive crop + straighten; only for kind 'input'. */
+  geometry?: GeometryParams;
 }
 
 export interface GraphEdge {
@@ -66,7 +68,7 @@ export function defaultGraphDoc(): GraphDoc {
   return {
     version: 1,
     nodes: [
-      { id: 'in', kind: 'input', position: { x: 20, y: 60 } },
+      { id: 'in', kind: 'input', position: { x: 20, y: 60 }, geometry: defaultGeometryParams() },
       { id: 'dev', kind: DEVELOP_KIND, position: { x: 220, y: 60 }, develop: defaultDevelopParams() },
       { id: 'out', kind: 'output', position: { x: 420, y: 60 } },
     ],
@@ -93,6 +95,94 @@ export interface SidecarDoc {
 
 export const SIDECAR_SCHEMA_VERSION = 2;
 
+// --- Geometry: non-destructive crop + straighten (input node only) ----------
+//
+// crop is normalized 0..1 in the ROTATED frame (i.e. it shares the source's
+// width/height — rotation alone never changes canvas dims, only the crop
+// fraction does). angle is degrees, -45..45 (straighten). Both default to the
+// identity transform, so an untouched input node stays a bit-exact
+// pass-through — the same invariant every other node kind upholds.
+
+export interface GeometryCrop {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface GeometryParams {
+  crop: GeometryCrop;
+  angle: number;
+}
+
+/** Smallest allowed crop.w/h — keeps the resample from collapsing to a sliver. */
+export const GEOMETRY_MIN_CROP_SIZE = 0.05;
+const GEOMETRY_MAX_ANGLE = 45;
+
+export function defaultGeometryParams(): GeometryParams {
+  return { crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 };
+}
+
+export function isIdentityGeometry(g: GeometryParams): boolean {
+  return g.angle === 0 && g.crop.x === 0 && g.crop.y === 0 && g.crop.w === 1 && g.crop.h === 1;
+}
+
+/**
+ * Clamp an already-numeric geometry into valid ranges: w/h in
+ * [GEOMETRY_MIN_CROP_SIZE, 1], x/y in [0, 1 - w/h] (crop never spills past the
+ * rotated frame), angle in [-45, 45]. Used both by the sidecar sanitizer and
+ * by runtime mutations (drag handles, the angle slider) so a stray value can
+ * never wedge the doc into an invalid state.
+ */
+export function clampGeometry(g: GeometryParams): GeometryParams {
+  const w = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, g.crop.w));
+  const h = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, g.crop.h));
+  let x = Math.min(1, Math.max(0, g.crop.x));
+  let y = Math.min(1, Math.max(0, g.crop.y));
+  if (x + w > 1) x = 1 - w;
+  if (y + h > 1) y = 1 - h;
+  const angle = Math.min(GEOMETRY_MAX_ANGLE, Math.max(-GEOMETRY_MAX_ANGLE, g.angle));
+  return { crop: { x, y, w, h }, angle };
+}
+
+/**
+ * Output dims for a decoded image of (srcWidth, srcHeight) under `doc`'s
+ * input-node geometry — the same round(crop.w*srcW)/round(crop.h*srcH)
+ * formula GraphRenderer applies, exposed here so the UI (viewport fit, canvas
+ * sizing) can compute it SYNCHRONOUSLY from store state, without waiting on
+ * the GPU renderer's own async setGraph()/render() round-trip.
+ */
+export function computeOutputDims(srcWidth: number, srcHeight: number, doc: GraphDoc): { width: number; height: number } {
+  const inputNode = doc.nodes.find((n) => n.kind === 'input');
+  const geometry = inputNode?.geometry ?? defaultGeometryParams();
+  if (isIdentityGeometry(geometry)) return { width: srcWidth, height: srcHeight };
+  return {
+    width: Math.max(1, Math.round(geometry.crop.w * srcWidth)),
+    height: Math.max(1, Math.round(geometry.crop.h * srcHeight)),
+  };
+}
+
+/** Normalize an untrusted geometry payload; throws on non-finite numbers (mergeDevelopParams style). */
+export function sanitizeGeometry(raw: unknown, nodeId: string): GeometryParams {
+  const base = defaultGeometryParams();
+  if (typeof raw !== 'object' || raw === null) return base;
+  const src = raw as { crop?: Partial<GeometryCrop>; angle?: unknown };
+  const num = (v: unknown, fallback: number, path: string): number => {
+    if (v === undefined) return fallback;
+    if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`geometry ${path} must be a finite number`);
+    return v;
+  };
+  return clampGeometry({
+    crop: {
+      x: num(src.crop?.x, base.crop.x, `${nodeId}.geometry.crop.x`),
+      y: num(src.crop?.y, base.crop.y, `${nodeId}.geometry.crop.y`),
+      w: num(src.crop?.w, base.crop.w, `${nodeId}.geometry.crop.w`),
+      h: num(src.crop?.h, base.crop.h, `${nodeId}.geometry.crop.h`),
+    },
+    angle: num(src.angle, base.angle, `${nodeId}.geometry.angle`),
+  });
+}
+
 /**
  * Serialize for the sidecar (spec §3): a schemaVersion-2 wrapper with the
  * source block and timestamps around the graph. Nodes serialize their kind
@@ -114,6 +204,7 @@ export function serializeGraphDoc(doc: GraphDoc, source: SidecarSource | null, c
         ...(n.params ? { params: n.params } : {}),
         ...(n.develop ? { develop: n.develop } : {}),
         ...(n.shader ? { shader: n.shader } : {}),
+        ...(n.geometry ? { geometry: n.geometry } : {}),
       })),
       edges: doc.edges.map((e) => ({
         id: e.id,
@@ -182,6 +273,9 @@ export function parseGraphDoc(text: string): SidecarDoc {
     }
     if (n.kind === CUSTOM_KIND) {
       n.shader = sanitizeCustomShader(n.shader, n.id);
+    }
+    if (n.kind === 'input') {
+      n.geometry = sanitizeGeometry(n.geometry, n.id);
     }
   });
   for (const e of doc.edges) {
@@ -326,6 +420,13 @@ export interface RenderPlan {
   steps: PlanStep[];
   /** Step index whose output feeds the output node (-1 = the input itself). */
   output: number;
+  /**
+   * Present only when the input node's geometry is non-identity (crop and/or
+   * straighten). When present, the renderer resamples the source into a BASE
+   * texture of dims (round(crop.w*srcW), round(crop.h*srcH)) before running
+   * `steps` — absent means zero added cost, bit-exact pass-through.
+   */
+  geometry?: { angleRad: number; crop: GeometryCrop };
 }
 
 /** Per-compile context: the image's WB model + render/full resolution ratio. */
@@ -350,7 +451,8 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   for (const e of doc.edges) incoming.set(e.target, [...(incoming.get(e.target) ?? []), e]);
   const output = doc.nodes.find((n) => n.kind === 'output');
   if (!output) throw new Error('graph has no output node');
-  if (!doc.nodes.some((n) => n.kind === 'input')) throw new Error('graph has no input node');
+  const inputNode = doc.nodes.find((n) => n.kind === 'input');
+  if (!inputNode) throw new Error('graph has no input node');
 
   const steps: PlanStep[] = [];
   const memo = new Map<string, number>();
@@ -462,7 +564,12 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
     return index;
   };
 
-  return { steps, output: resolve(output.id) };
+  const plan: RenderPlan = { steps, output: resolve(output.id) };
+  const geometry = inputNode.geometry ?? defaultGeometryParams();
+  if (!isIdentityGeometry(geometry)) {
+    plan.geometry = { angleRad: (geometry.angle * Math.PI) / 180, crop: geometry.crop };
+  }
+  return plan;
 }
 
 /**
@@ -488,7 +595,8 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
   return at(plan.output);
 }
 
-/** True when every step in the plan has a CPU mirror. */
+/** True when every step in the plan has a CPU mirror (geometry has none — like spatial ops). */
 export function planHasCpuReference(plan: RenderPlan): boolean {
+  if (plan.geometry) return false;
   return plan.steps.every((s) => s.type !== 'passes' || s.cpu !== null);
 }

@@ -1,10 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { GraphRenderer } from '../engine/gpu/graphRenderer';
-import { buildPlan, cpuEvalPlan, planHasCpuReference, type GraphDoc } from '../engine/graph/graphDoc';
+import {
+  buildPlan,
+  computeOutputDims,
+  cpuEvalPlan,
+  defaultGeometryParams,
+  planHasCpuReference,
+  type GeometryParams,
+  type GraphDoc,
+} from '../engine/graph/graphDoc';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
+import { CropOverlay } from './CropOverlay';
 
 declare global {
   interface Window {
@@ -32,6 +41,9 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
+      setGeometry(geo: GeometryParams): void;
+      geometryState(): GeometryParams;
+      outputDims(): { width: number; height: number } | null;
       scopeState(): {
         mode: string;
         samples: { cols: number; rows: number; length: number; meanLuma: number } | null;
@@ -63,11 +75,58 @@ export function CanvasView() {
   const grayscaleView = useAppStore((s) => s.grayscaleView);
   const toggleBefore = useAppStore((s) => s.toggleBefore);
   const toggleGrayscaleView = useAppStore((s) => s.toggleGrayscaleView);
-  const { view, fit, oneToOne } = useCanvasViewport(containerRef, image);
+  const cropMode = useAppStore((s) => s.cropMode);
+  // Crop mode previews the FULL (uncropped) straightened frame — the overlay
+  // lets you re-adjust the crop rect against the whole image — so force crop
+  // back to identity for RENDERING only; the true crop committed in the graph
+  // is untouched and takes over once cropMode exits (Done). Angle stays live
+  // so straighten is visible while cropping.
+  const graphForBuild =
+    cropMode && image
+      ? {
+          ...graph,
+          nodes: graph.nodes.map((n) =>
+            n.kind === 'input'
+              ? { ...n, geometry: { crop: { x: 0, y: 0, w: 1, h: 1 }, angle: n.geometry?.angle ?? 0 } }
+              : n
+          ),
+        }
+      : graph;
+  // Output dims (post-crop) computed SYNCHRONOUSLY from store state — the
+  // canvas/viewport must not wait on the GPU renderer's async setGraph()
+  // round-trip to know its own size, or fit-to-view would race it (see ms9).
+  // A ref-memoized value keeps the object referentially stable across
+  // unrelated re-renders, so fit-to-view only re-runs when the size actually
+  // changes.
+  const outputDimsRef = useRef<{ width: number; height: number } | null>(null);
+  const rawOutputDims = image ? computeOutputDims(image.width, image.height, graphForBuild) : null;
+  if (!rawOutputDims) {
+    outputDimsRef.current = null;
+  } else if (
+    !outputDimsRef.current ||
+    outputDimsRef.current.width !== rawOutputDims.width ||
+    outputDimsRef.current.height !== rawOutputDims.height
+  ) {
+    outputDimsRef.current = rawOutputDims;
+  }
+  const outputDims = outputDimsRef.current;
+  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims);
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
   const scopeMode = useAppStore((s) => s.scopeMode);
+
+  // Keep the canvas element's own pixel dims in sync with outputDims
+  // SYNCHRONOUSLY (before paint) — decoupled from the GPU renderer's async
+  // render pipeline, which only needs to catch up on PIXEL CONTENT.
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !outputDims) return;
+    if (canvas.width !== outputDims.width || canvas.height !== outputDims.height) {
+      canvas.width = outputDims.width;
+      canvas.height = outputDims.height;
+    }
+  }, [outputDims]);
 
   // switching into a non-histogram mode fetches fresh samples immediately:
   // edits made while the histogram was showing don't update scopeSamples, so
@@ -94,8 +153,6 @@ export function CanvasView() {
         const renderer = await rendererRef.current;
         if (cancelled) return;
         if (lastImageRef.current !== image) {
-          canvas.width = image.width;
-          canvas.height = image.height;
           renderer.setImage(image);
           lastImageRef.current = image;
         }
@@ -103,7 +160,7 @@ export function CanvasView() {
         // in the node editor instead of killing the preview
         let plan;
         try {
-          plan = buildPlan(graph, {
+          plan = buildPlan(graphForBuild, {
             wb: wbModel,
             renderScale: Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight),
           });
@@ -116,6 +173,8 @@ export function CanvasView() {
         // histogram describes what is on screen — LR behavior)
         if (showBefore) plan = { steps: [], output: -1 };
         renderer.viewMode = grayscaleView ? 'grayscale' : 'color';
+        // the canvas element's pixel dims are kept in sync with outputDims by
+        // the useLayoutEffect above (synchronous, no GPU round-trip needed)
         await renderer.setGraph(plan);
         if (cancelled) return;
         renderer.render();
@@ -141,7 +200,7 @@ export function CanvasView() {
     return () => {
       cancelled = true;
     };
-  }, [image, graph, shaderRev, wbModel, showBefore, grayscaleView]);
+  }, [image, graph, shaderRev, wbModel, showBefore, grayscaleView, cropMode]);
 
   useEffect(() => {
     window.__debug = {
@@ -272,6 +331,19 @@ export function CanvasView() {
       setScopeMode(mode) {
         useAppStore.getState().setScopeMode(mode);
       },
+      setGeometry(geo) {
+        useAppStore.getState().setGeometry(geo, null);
+      },
+      geometryState() {
+        const s = useAppStore.getState();
+        const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+        return inputNode?.geometry ?? defaultGeometryParams();
+      },
+      outputDims() {
+        const canvas = canvasRef.current;
+        if (!canvas || canvas.width === 0) return null;
+        return { width: canvas.width, height: canvas.height };
+      },
     };
     return () => {
       delete window.__debug;
@@ -291,6 +363,9 @@ export function CanvasView() {
           className="canvas-view-canvas"
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
         />
+        {!overlayVisible && cropMode && outputDims && (
+          <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />
+        )}
       </div>
       {!overlayVisible && <HistogramPanel />}
       {!overlayVisible && showBefore && (

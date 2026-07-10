@@ -96,6 +96,13 @@ export function useCanvasViewport(
     let dragging: { x: number; y: number } | null = null;
     const onPointerDown = (ev: PointerEvent) => {
       if (ev.button !== 0) return;
+      // This is a raw addEventListener on the container, so it fires during
+      // native bubbling BEFORE React's root-delegated synthetic dispatch —
+      // a descendant's `ev.stopPropagation()` (e.g. the crop overlay's drag
+      // handles/controls) cannot preempt it. Check the target directly
+      // instead: crop-mode UI owns its own pointer handling.
+      const target = ev.target as HTMLElement | null;
+      if (target?.closest('.crop-rect, .crop-handle, .crop-controls')) return;
       dragging = { x: ev.clientX, y: ev.clientY };
       container.setPointerCapture(ev.pointerId);
     };

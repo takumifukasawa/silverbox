@@ -13,6 +13,8 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderPlan } from '../graph/graphDoc';
 
+type PlanGeometry = NonNullable<RenderPlan['geometry']>;
+
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -69,6 +71,51 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+/**
+ * Geometry pass: crop + straighten. The ONLY pass that reads its source with
+ * a sampler instead of textureLoad (bilinear, clamp-to-edge — rgba16float is
+ * filterable in core WebGPU), because it resamples at non-integer source
+ * coordinates. Output dims are the crop rectangle at source resolution; for
+ * output texel (ox,oy), `pos.xy` is already the texel CENTER (ox+0.5,
+ * oy+0.5), so `p` below is exactly crop.origin·srcDims + (ox+0.5, oy+0.5).
+ *
+ * `rotate` intentionally is NOT the textbook CCW-in-math (y-up) matrix: texel
+ * space has y growing DOWNWARD, so that formula would look clockwise on
+ * screen. The sin terms are flipped here so rotate(v, +a) turns v
+ * counter-clockwise ON SCREEN — the "+angle rotates the displayed image CCW"
+ * convention this pass promises. `q = rotate(p - center, -angleRad) + center`
+ * is the corresponding INVERSE map (rotate(v,-a) is rotate(v,a)'s inverse for
+ * any proper rotation), i.e. "where in the true source does this output
+ * texel's content come from".
+ */
+const GEOMETRY_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var geomSampler: sampler;
+struct GeometryParams {
+  // x = crop.x, y = crop.y (normalized), z = srcWidth, w = srcHeight (px)
+  p0: vec4f,
+  // x = angleRad, yzw unused
+  p1: vec4f,
+}
+@group(0) @binding(2) var<uniform> u: GeometryParams;
+${FULLSCREEN_VS}
+fn rotate(v: vec2f, angleRad: f32) -> vec2f {
+  let s = sin(angleRad);
+  let c = cos(angleRad);
+  return vec2f(v.x * c + v.y * s, v.y * c - v.x * s);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let srcDims = u.p0.zw;
+  let cropOrigin = u.p0.xy * srcDims;
+  let srcCenter = srcDims * 0.5;
+  let p = cropOrigin + pos.xy;
+  let q = rotate(p - srcCenter, -u.p1.x) + srcCenter;
+  return textureSampleLevel(src, geomSampler, q / srcDims, 0.0);
+}
+`;
+
 let devicePromise: Promise<GPUDevice> | null = null;
 
 function getGpuDevice(): Promise<GPUDevice> {
@@ -110,8 +157,19 @@ export class GraphRenderer {
   private setGraphGen = 0;
   /** Resolves when the most recent setGraph() has landed (readback waits on it). */
   private graphReady: Promise<unknown> = Promise.resolve();
+  /** Base/working dims: equal the source dims when geometry is absent, else the crop rectangle's dims. */
   private width = 0;
   private height = 0;
+  /** Raw decoded-image dims (`source`'s own size) — geometry resamples FROM these. */
+  private srcWidth = 0;
+  private srcHeight = 0;
+  /** Non-null only when the current plan has a non-identity geometry. */
+  private planGeometry: PlanGeometry | undefined = undefined;
+  /** Resample target for geometry (crop/straighten); dims = (width, height) above. */
+  private baseTexture: GPUTexture | null = null;
+  private geometryUniform: GPUBuffer | null = null;
+  private geometryPipelineCache: GPURenderPipeline | null = null;
+  private geometrySamplerCache: GPUSampler | null = null;
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -187,8 +245,57 @@ export class GraphRenderer {
     this.stepTextures = [];
     this.scratchTexture?.destroy();
     this.scratchTexture = null;
+    this.baseTexture?.destroy();
+    this.baseTexture = null;
+    this.geometryUniform?.destroy();
+    this.geometryUniform = null;
+    this.planGeometry = undefined;
+    this.srcWidth = width;
+    this.srcHeight = height;
     this.width = width;
     this.height = height;
+  }
+
+  /** Pipeline for the geometry (crop/straighten) pass — compiled once, shared by every consumer. */
+  private geometryPipeline(): GPURenderPipeline {
+    if (!this.geometryPipelineCache) {
+      const module = this.device.createShaderModule({ code: GEOMETRY_SHADER });
+      this.geometryPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.geometryPipelineCache;
+  }
+
+  /** Clamp-to-edge bilinear sampler — the geometry pass's only non-integer-coordinate read. */
+  private geometrySampler(): GPUSampler {
+    this.geometrySamplerCache ??= this.device.createSampler({
+      addressModeU: 'clamp-to-edge',
+      addressModeV: 'clamp-to-edge',
+      magFilter: 'linear',
+      minFilter: 'linear',
+    });
+    return this.geometrySamplerCache;
+  }
+
+  private geometryUniformData(geometry: PlanGeometry, srcWidth: number, srcHeight: number): Float32Array {
+    const data = new Float32Array(8);
+    data[0] = geometry.crop.x;
+    data[1] = geometry.crop.y;
+    data[2] = srcWidth;
+    data[3] = srcHeight;
+    data[4] = geometry.angleRad;
+    return data;
+  }
+
+  private static baseDims(plan: RenderPlan, srcWidth: number, srcHeight: number): { width: number; height: number } {
+    if (!plan.geometry) return { width: srcWidth, height: srcHeight };
+    return {
+      width: Math.max(1, Math.round(plan.geometry.crop.w * srcWidth)),
+      height: Math.max(1, Math.round(plan.geometry.crop.h * srcHeight)),
+    };
   }
 
   private blendPipeline(): GPURenderPipeline {
@@ -272,6 +379,52 @@ export class GraphRenderer {
     GraphRenderer.destroySteps(this.steps);
     this.steps = steps;
     this.outputIndex = plan.output;
+
+    // Base dims: the source itself when geometry is identity (zero cost, no
+    // extra texture/pass), else the crop rectangle at source resolution.
+    const { width: nextWidth, height: nextHeight } = GraphRenderer.baseDims(plan, this.srcWidth, this.srcHeight);
+    const dimsChanged = nextWidth !== this.width || nextHeight !== this.height;
+
+    if (plan.geometry) {
+      if (!this.baseTexture || this.baseTexture.width !== nextWidth || this.baseTexture.height !== nextHeight) {
+        this.baseTexture?.destroy();
+        this.baseTexture = this.device.createTexture({
+          size: [nextWidth, nextHeight],
+          format: 'rgba16float',
+          usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+      }
+      this.geometryUniform?.destroy();
+      this.geometryUniform = this.device.createBuffer({
+        size: 32,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(
+        this.geometryUniform,
+        0,
+        this.geometryUniformData(plan.geometry, this.srcWidth, this.srcHeight)
+      );
+    } else {
+      this.baseTexture?.destroy();
+      this.baseTexture = null;
+      this.geometryUniform?.destroy();
+      this.geometryUniform = null;
+    }
+    this.planGeometry = plan.geometry;
+
+    if (dimsChanged) {
+      for (const t of this.stepTextures) t.destroy();
+      this.stepTextures = [];
+      this.scratchTexture?.destroy();
+      this.scratchTexture = null;
+      this.width = nextWidth;
+      this.height = nextHeight;
+    }
+  }
+
+  /** Output dims of the current render (post-crop when geometry is active). */
+  outputDims(): { width: number; height: number } {
+    return { width: this.width, height: this.height };
   }
 
   private addPass(
@@ -330,8 +483,26 @@ export class GraphRenderer {
     return at(outputIndex);
   }
 
+  /**
+   * The chain's source view: the decoded texture itself when geometry is
+   * identity (zero added pass, bit-exact), else a fresh resample of it into
+   * `baseTexture` at the crop's dims — recorded every call, same cost model
+   * as every other pass in the chain (they all re-record each render() too).
+   */
+  private effectiveSourceView(encoder: GPUCommandEncoder): GPUTextureView {
+    if (!this.planGeometry) return this.source!.createView();
+    const target = this.baseTexture!.createView();
+    this.addPass(encoder, target, this.geometryPipeline(), [
+      { binding: 0, resource: this.source!.createView() },
+      { binding: 1, resource: this.geometrySampler() },
+      { binding: 2, resource: { buffer: this.geometryUniform! } },
+    ]);
+    return target;
+  }
+
   /** Record the plan; returns the view holding the final linear result. */
   private addChainPasses(encoder: GPUCommandEncoder): GPUTextureView {
+    const sourceView = this.effectiveSourceView(encoder);
     this.ensureStepTextures(
       this.steps.length,
       this.steps.some((s) => s.phases.length > 1)
@@ -340,7 +511,7 @@ export class GraphRenderer {
       this.addPass.bind(this),
       this.steps,
       this.outputIndex,
-      this.source!.createView(),
+      sourceView,
       this.stepTextures,
       this.scratchTexture,
       encoder
@@ -369,19 +540,24 @@ export class GraphRenderer {
     plan: RenderPlan
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     const { device } = this;
-    const { data, width, height } = image;
+    const { data, width: srcWidth, height: srcHeight } = image;
     const source = device.createTexture({
-      size: [width, height],
+      size: [srcWidth, srcHeight],
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     const half = new Float16Array(data.length);
     half.set(data);
-    device.queue.writeTexture({ texture: source }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [
-      width,
-      height,
+    device.queue.writeTexture({ texture: source }, half, { bytesPerRow: srcWidth * 8, rowsPerImage: srcHeight }, [
+      srcWidth,
+      srcHeight,
     ]);
+    // Output dims: the crop rectangle at THIS image's resolution when
+    // geometry is active (so a full-res export crops at full-res dims, same
+    // normalized fraction as the preview) — else the source dims, unchanged.
+    const { width, height } = GraphRenderer.baseDims(plan, srcWidth, srcHeight);
     const temps: GPUTexture[] = [source];
+    const tempBuffers: GPUBuffer[] = [];
     const makeTarget = (format: GPUTextureFormat, usage: number) => {
       const t = device.createTexture({ size: [width, height], format, usage });
       temps.push(t);
@@ -391,6 +567,19 @@ export class GraphRenderer {
     const steps = this.resolveSteps(plan);
     try {
       const encoder = device.createCommandEncoder();
+      let baseView = source.createView();
+      if (plan.geometry) {
+        const base = makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT);
+        const uniform = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        tempBuffers.push(uniform);
+        device.queue.writeBuffer(uniform, 0, this.geometryUniformData(plan.geometry, srcWidth, srcHeight));
+        this.addPass(encoder, base.createView(), this.geometryPipeline(), [
+          { binding: 0, resource: source.createView() },
+          { binding: 1, resource: this.geometrySampler() },
+          { binding: 2, resource: { buffer: uniform } },
+        ]);
+        baseView = base.createView();
+      }
       const stepTextures = plan.steps.map(() =>
         makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
       );
@@ -401,7 +590,7 @@ export class GraphRenderer {
         this.addPass.bind(this),
         steps,
         plan.output,
-        source.createView(),
+        baseView,
         stepTextures,
         scratch,
         encoder
@@ -426,6 +615,7 @@ export class GraphRenderer {
       return { data: out, width, height };
     } finally {
       for (const t of temps) t.destroy();
+      for (const b of tempBuffers) b.destroy();
       GraphRenderer.destroySteps(steps);
     }
   }

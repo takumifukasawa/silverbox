@@ -173,6 +173,11 @@ button:disabled {
   font-size: 12px;
 }
 
+.toolbar button.active {
+  background: #4a6b9a;
+  border-color: #6a9fe8;
+}
+
 .main-row {
   flex: 1;
   display: flex;
@@ -246,6 +251,146 @@ button:disabled {
   min-width: 42px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* ---- crop / straighten overlay ---- */
+
+.crop-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 6;
+}
+
+.crop-mask-part {
+  position: absolute;
+  background: rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+.crop-rect {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px solid #fff;
+  cursor: move;
+  touch-action: none;
+}
+
+.crop-thirds {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.crop-thirds-v {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.crop-thirds-h {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.crop-handle {
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  margin: -5px;
+  background: #fff;
+  border: 1px solid #333;
+  border-radius: 2px;
+  touch-action: none;
+}
+
+.crop-handle-nw {
+  left: 0;
+  top: 0;
+  cursor: nwse-resize;
+}
+
+.crop-handle-n {
+  left: 50%;
+  top: 0;
+  cursor: ns-resize;
+}
+
+.crop-handle-ne {
+  left: 100%;
+  top: 0;
+  cursor: nesw-resize;
+}
+
+.crop-handle-e {
+  left: 100%;
+  top: 50%;
+  cursor: ew-resize;
+}
+
+.crop-handle-se {
+  left: 100%;
+  top: 100%;
+  cursor: nwse-resize;
+}
+
+.crop-handle-s {
+  left: 50%;
+  top: 100%;
+  cursor: ns-resize;
+}
+
+.crop-handle-sw {
+  left: 0;
+  top: 100%;
+  cursor: nesw-resize;
+}
+
+.crop-handle-w {
+  left: 0;
+  top: 50%;
+  cursor: ew-resize;
+}
+
+.crop-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(30, 30, 30, 0.85);
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 6px 12px;
+}
+
+.crop-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.crop-controls input[type='range'] {
+  width: 160px;
+  accent-color: #6a9fe8;
+}
+
+.crop-angle-value {
+  font-variant-numeric: tabular-nums;
+  color: #ddd;
+  min-width: 40px;
+  text-align: right;
 }
 
 .canvas-overlay {

@@ -123,6 +123,8 @@ export function Toolbar() {
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
+  const cropMode = useAppStore((s) => s.cropMode);
+  const toggleCropMode = useAppStore((s) => s.toggleCropMode);
   const [ping, setPing] = useState<PingResult | null>(null);
 
   useEffect(() => {
@@ -157,6 +159,15 @@ export function Toolbar() {
       </button>
       <button onClick={redo} disabled={history.future.length === 0} data-testid="redo-button" title="Redo (⌘⇧Z)">
         ↪︎
+      </button>
+      <button
+        onClick={toggleCropMode}
+        disabled={imageStatus !== 'ready'}
+        data-testid="crop-toggle"
+        className={cropMode ? 'active' : undefined}
+        title="Crop & straighten"
+      >
+        Crop
       </button>
       <AddNodeMenu />
       <button
