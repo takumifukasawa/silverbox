@@ -14,9 +14,18 @@ inspectable, rewireable step. The graph is not an expert mode bolted onto a
 photo editor; it is the single source of truth that the friendly UI compiles
 down to.
 
-The intended user is someone who develops photographs *and* writes shaders,
-keeps their work in git, and wants the looks they build to travel — into
-Unity, Unreal, OBS, the web — rather than stay locked inside a catalog.
+The intended user is, first, its author: someone who develops photographs
+*and* writes shaders, keeps their work in git, and wants the looks they
+build to travel — into Unity, Unreal, OBS, the web — rather than stay locked
+inside a catalog. The project is public because the *ideas* are worth
+sharing — a photo tool whose documents are code-shaped, whose engine is
+machine-verified, and whose development is AI-orchestrated — not because it
+competes on feature count.
+
+Developing quality and look-development freedom are not competing goals
+here, and neither is allowed to lose: the daily developing experience is
+*built out of* composable look-dev primitives, so making the primitives
+better is how the photographs get better.
 
 ## Principles
 
@@ -43,9 +52,12 @@ schema-versioned JSON. It diffs, branches, merges and reviews like source
 code. This is not just a storage choice: a text document with documented
 semantics is also an **API surface**. The planned path for AI-assisted
 editing is exactly this — watch the sidecar for external changes and
-hot-reload, then expose the same operations through an MCP server — rather
-than embedding chat panels or terminals into the app. Tools the user already
-has (an editor, git, an AI client) should compose with Silverbox for free.
+hot-reload it, so that anything able to edit JSON (a human in an editor, a
+script, an AI client) can edit the photograph. The app may grow an embedded
+terminal pane (the user's own shell — zsh, WSL, whatever runs their AI
+client and git) as a convenience surface for that loop, but it will not grow
+its own chat UI or a built-in assistant: each user's existing tools should
+compose with Silverbox for free.
 
 ### 3. The engine is verified, not trusted
 
@@ -95,14 +107,17 @@ ground truth, not tuned by gut:
 
 ### 6. Scene-referred color, output-referred late
 
-Working color is linear and wide. The engine started in linear sRGB and is
-migrating to **linear Rec.2020** as its working space, because a RAW editor
-that clips camera gamut at decode time has thrown away data no slider can
-recover. Display and export convert to the destination (sRGB today; wider
-print/HDR targets become possible later precisely because the working space
-is wider than any of them). Effects that model display behavior (tone curve,
-grading) operate on encoded values by design — but encoded *working-space*
-values, never a clipped copy.
+Working color is linear, and the direction of travel is **wide**: a RAW
+editor that clips camera gamut at decode time has thrown away data no slider
+can recover, which sits badly with a tool that calls itself a RAW developer.
+The engine currently works in linear sRGB; migrating the working space to a
+wide gamut (linear Rec.2020 is the leading candidate) is planned, gated on a
+decode spike that demonstrates the pipeline end-to-end and makes the visual
+difference judgeable on real photographs. Display and export convert to the
+destination late (sRGB today; print/HDR targets become possible later
+precisely because the working space is wider than any of them). Effects that
+model display behavior (tone curve, grading) operate on encoded values by
+design — but encoded *working-space* values, never a clipped copy.
 
 ### 7. Looks are exportable artifacts
 
@@ -123,12 +138,12 @@ written, and platform-specific behavior is isolated in the main process.
 - **No catalog/DAM** for now. Silverbox develops one image at a time;
   becoming a library manager is a different product with different gravity.
   Revisit only after the developing experience is complete.
-- **No embedded terminal or chat UI.** AI integration goes through the
-  document and MCP (see principle 2).
+- **No built-in chat UI or assistant.** AI integration goes through the
+  document (see principle 2); at most the app hosts the user's own terminal.
 - **No raster mask data** in the sidecar. Vector strokes only, when brush
   masks arrive.
-- **No color spaces beyond the Rec.2020 working space** (no ACES pipeline,
-  no ICC-managed working space) unless printing/HDR demands it.
+- **No ACES pipeline, no ICC-managed working space.** One working space,
+  chosen once (principle 6), revisited only if printing/HDR demands more.
 - **No cloud anything.**
 
 ## Process notes
