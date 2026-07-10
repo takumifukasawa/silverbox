@@ -188,7 +188,9 @@ export function CanvasView() {
         let g = 0;
         let b = 0;
         for (let i = 0; i < n; i++) {
-          const px = cpuEvalPlan(plan, [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!]);
+          const x = i % width;
+          const y = Math.floor(i / width);
+          const px = cpuEvalPlan(plan, [data[i * 4]!, data[i * 4 + 1]!, data[i * 4 + 2]!], x, y, width, height);
           r += srgbEncode(px[0]);
           g += srgbEncode(px[1]);
           b += srgbEncode(px[2]);

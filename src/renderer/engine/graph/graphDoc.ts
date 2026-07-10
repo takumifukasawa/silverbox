@@ -287,7 +287,14 @@ type Rgb = [number, number, number];
  * makes untouched nodes bit-exact pass-throughs.
  */
 export type PlanStep =
-  | { nodeId: string; type: 'passes'; passes: PassSpec[]; src: number; cpu: ((px: Rgb) => Rgb) | null }
+  | {
+      nodeId: string;
+      type: 'passes';
+      passes: PassSpec[];
+      src: number;
+      /** (px, x, y, width, height) — x/y are the render target's integer texel coords. */
+      cpu: ((px: Rgb, x: number, y: number, width: number, height: number) => Rgb) | null;
+    }
   | { nodeId: string; type: 'blend'; uniform: Vec4; srcA: number; srcB: number };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -458,14 +465,19 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   return { steps, output: resolve(output.id) };
 }
 
-/** CPU reference for one pixel; caller must ensure every step has a mirror. */
-export function cpuEvalPlan(plan: RenderPlan, px: Rgb): Rgb {
+/**
+ * CPU reference for one pixel; caller must ensure every step has a mirror.
+ * `x`/`y` are the render target's integer texel coords, `width`/`height` its
+ * dimensions — passed through to each step's cpu mirror for position-aware
+ * ops (vignette, grain); every other mirror simply ignores them.
+ */
+export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, width: number, height: number): Rgb {
   const outputs: Rgb[] = [];
   const at = (i: number) => (i < 0 ? px : outputs[i]!);
   for (const step of plan.steps) {
     if (step.type === 'passes') {
       if (!step.cpu) throw new Error(`step ${step.nodeId} has no CPU reference`);
-      outputs.push(step.cpu(at(step.src)));
+      outputs.push(step.cpu(at(step.src), x, y, width, height));
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);

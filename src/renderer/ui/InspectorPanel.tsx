@@ -244,6 +244,43 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           Preview is downsampled — judge sharpening/NR at 100% zoom or in the exported file.
         </div>
       </Section>
+      <Section title="Effects">
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.dehaze', label: 'Dehaze', min: -100, max: 100, step: 1, default: 0 }}
+          value={params.effects.dehaze}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.clarity', label: 'Clarity', min: -100, max: 100, step: 1, default: 0 }}
+          value={params.effects.clarity}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.texture', label: 'Texture', min: -100, max: 100, step: 1, default: 0 }}
+          value={params.effects.texture}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.grain', label: 'Grain', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.effects.grain}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.grainSize', label: 'Grain Size', min: 1, max: 3, step: 0.1, default: 1.5 }}
+          value={params.effects.grainSize}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.vignette', label: 'Vignette', min: -100, max: 100, step: 1, default: 0 }}
+          value={params.effects.vignette}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'effects.vignetteMidpoint', label: 'Midpoint', min: 0, max: 1, step: 0.01, default: 0.5 }}
+          value={params.effects.vignetteMidpoint}
+        />
+      </Section>
     </>
   );
 }

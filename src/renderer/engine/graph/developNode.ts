@@ -108,12 +108,29 @@ export interface GradingParams {
   balance: number;
 }
 
+/**
+ * "Effects" section: dehaze/vignette/grain are per-pixel (position-aware for
+ * vignette/grain, but still no neighborhood reads — a CPU mirror exists);
+ * clarity/texture are local-contrast unsharp masks (spatial, no CPU mirror,
+ * same rule as Detail).
+ */
+export interface EffectsParams {
+  dehaze: number;
+  clarity: number;
+  texture: number;
+  grain: number;
+  grainSize: number;
+  vignette: number;
+  vignetteMidpoint: number;
+}
+
 export interface DevelopParams {
   basic: DevelopBasicParams;
   toneCurve: ToneCurveParams;
   hsl: Record<HslBand, HslBandParams>;
   grading: GradingParams;
   detail: DetailParams;
+  effects: EffectsParams;
 }
 
 export const CURVE_MAX = 255;
@@ -150,6 +167,15 @@ export function defaultDevelopParams(): DevelopParams {
       balance: 0,
     },
     detail: { sharpen: { amount: 0, radius: 1.0, masking: 0 }, noiseLuminance: { amount: 0 }, noiseColor: { amount: 0 } },
+    effects: {
+      dehaze: 0,
+      clarity: 0,
+      texture: 0,
+      grain: 0,
+      grainSize: 1.5,
+      vignette: 0,
+      vignetteMidpoint: 0.5,
+    },
   };
 }
 
@@ -174,6 +200,16 @@ export function isIdentityDetail(d: DetailParams): boolean {
 /** Hue never matters at sat 0; blending/balance only shape active wheels. */
 export function isIdentityGrading(g: GradingParams): boolean {
   return GRADING_REGIONS.every((r) => g[r].sat === 0 && g[r].lum === 0);
+}
+
+/** Per-pixel Effects ops (dehaze/vignette/grain) — the fx-pixel pass. */
+export function isIdentityEffectsPixel(e: EffectsParams): boolean {
+  return e.dehaze === 0 && e.grain === 0 && e.vignette === 0;
+}
+
+/** Spatial Effects ops (clarity/texture) — the fx-spatial bracket, no CPU mirror. */
+export function isIdentityEffectsSpatial(e: EffectsParams): boolean {
+  return e.clarity === 0 && e.texture === 0;
 }
 
 // --- GPU passes --------------------------------------------------------------
@@ -594,10 +630,249 @@ function packSharpen(d: DetailParams, scale: number): ArrayBuffer {
   return buf;
 }
 
+// --- Effects: dehaze/vignette/grain (fx-pixel) + clarity/texture (fx-spatial) --
+//
+// fx-spatial (clarity/texture) mirrors the Detail architecture exactly: the
+// SAME luma/chroma encode/decode brackets (DETAIL_ENC_WGSL / DETAIL_DEC_WGSL,
+// reused verbatim — they are pure YCbCr-style transforms, not Detail-
+// specific) around two independent unsharp-mask stages on Y. It sits BEFORE
+// Detail in the chain and has no CPU mirror (spatial, like Detail).
+//
+// fx-pixel (dehaze, vignette, grain) runs AFTER Detail, in DISPLAY (sRGB-
+// encoded) space, in that fixed order (grain last). Vignette and grain are
+// POSITION-aware but still per-pixel (no neighborhood reads), so they keep an
+// exact CPU mirror — the mirror takes the render-target texel coords (x, y)
+// and its (width, height), matching the GPU fragment's `in.pos.xy` /
+// `textureDimensions(src)` 1:1 (confirmed: the CPU reference in CanvasView
+// iterates the SAME-resolution decoded image the GPU renders at).
+
+// Effects tuning constants — LR-CALIBRATION CANDIDATES. The reference for the
+// Effects sliders' range/feel is Lightroom; these first-pass strengths and
+// sigmas are meant to be recalibrated against LR side-by-side in a follow-up
+// session. Recalibrate HERE only — the passes and CPU mirrors consume these
+// named constants, so the formulas never need to change.
+/** Dehaze ±100 → black-point shift k = ±this (encoded units; must stay < 1). */
+const FX_DEHAZE_STRENGTH = 0.3;
+/** Vignette ±100 → ±this many stops of exp2 gain at the far corners. */
+const FX_VIGNETTE_STOPS = 1.5;
+/** Clarity ±100 → this × the (midtone-weighted) luma highpass. */
+const FX_CLARITY_GAIN = 0.6;
+/** Clarity gaussian sigma in FULL-RESOLUTION pixels. */
+const FX_CLARITY_SIGMA_FULL = 15.0;
+/** Texture ±100 → this × the (unweighted) luma highpass. */
+const FX_TEXTURE_GAIN = 0.8;
+/** Texture gaussian sigma in FULL-RESOLUTION pixels. */
+const FX_TEXTURE_SIGMA_FULL = 3.0;
+/** Grain 100 → ±this noise amplitude in encoded units. */
+const FX_GRAIN_AMPLITUDE = 0.25;
+/** Kernel radius caps (render px) — perf guard, same convention as Detail. */
+const FX_CLARITY_KERNEL_RADIUS_MAX = 32;
+const FX_TEXTURE_KERNEL_RADIUS_MAX = 10;
+
+// Clarity: gaussian blur of Y (sigma 15px full-res) + midtone-weighted USM.
+const FX_CLARITY_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct ClarityParams {
+  // x = 1/(2σ²), y = kernel radius (render px), z = amount (already ×0.6)
+  p0: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: ClarityParams;
+`,
+  body: /* wgsl */ `
+  {
+    let p = vec2i(in.pos.xy);
+    let dims = vec2i(textureDimensions(src));
+    let v0 = c0;
+    let R = i32(u.p0.y);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var dy = -R; dy <= R; dy++) {
+      for (var dx = -R; dx <= R; dx++) {
+        let q = clamp(p + vec2i(dx, dy), vec2i(0), dims - vec2i(1));
+        let yv = textureLoad(src, q, 0).x;
+        let w = exp(-f32(dx * dx + dy * dy) * u.p0.x);
+        sum += yv * w;
+        wsum += w;
+      }
+    }
+    let blur = sum / wsum;
+    // midtone weight: clarity favors midtones, leaves shadows/highlights alone
+    let wgt = clamp(4.0 * v0.x * (1.0 - v0.x), 0.0, 1.0);
+    c = vec3f(clamp(v0.x + u.p0.z * wgt * (v0.x - blur), 0.0, 1.0), v0.yz);
+  }
+`,
+});
+
+// Texture: gaussian blur of Y (sigma 3px full-res) + flat (unweighted) USM.
+const FX_TEXTURE_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct TextureParams {
+  // x = 1/(2σ²), y = kernel radius (render px), z = amount (already ×0.8)
+  p0: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: TextureParams;
+`,
+  body: /* wgsl */ `
+  {
+    let p = vec2i(in.pos.xy);
+    let dims = vec2i(textureDimensions(src));
+    let v0 = c0;
+    let R = i32(u.p0.y);
+    var sum = 0.0;
+    var wsum = 0.0;
+    for (var dy = -R; dy <= R; dy++) {
+      for (var dx = -R; dx <= R; dx++) {
+        let q = clamp(p + vec2i(dx, dy), vec2i(0), dims - vec2i(1));
+        let yv = textureLoad(src, q, 0).x;
+        let w = exp(-f32(dx * dx + dy * dy) * u.p0.x);
+        sum += yv * w;
+        wsum += w;
+      }
+    }
+    let blur = sum / wsum;
+    c = vec3f(clamp(v0.x + u.p0.z * (v0.x - blur), 0.0, 1.0), v0.yz);
+  }
+`,
+});
+
+function packClarity(e: EffectsParams, scale: number): ArrayBuffer {
+  const sigma = Math.max(DETAIL_SIGMA_MIN, FX_CLARITY_SIGMA_FULL * scale);
+  const radius = Math.min(FX_CLARITY_KERNEL_RADIUS_MAX, Math.max(1, Math.ceil(2.5 * sigma)));
+  const buf = new ArrayBuffer(16);
+  const f = new Float32Array(buf);
+  f[0] = inv2s2(sigma);
+  f[1] = radius;
+  f[2] = (e.clarity / 100) * FX_CLARITY_GAIN;
+  return buf;
+}
+
+function packTexture(e: EffectsParams, scale: number): ArrayBuffer {
+  const sigma = Math.max(DETAIL_SIGMA_MIN, FX_TEXTURE_SIGMA_FULL * scale);
+  const radius = Math.min(FX_TEXTURE_KERNEL_RADIUS_MAX, Math.max(1, Math.ceil(2.5 * sigma)));
+  const buf = new ArrayBuffer(16);
+  const f = new Float32Array(buf);
+  f[0] = inv2s2(sigma);
+  f[1] = radius;
+  f[2] = (e.texture / 100) * FX_TEXTURE_GAIN;
+  return buf;
+}
+
+/** Integer-hash noise (pcg), shared verbatim in spirit between WGSL and CPU. */
+const WGSL_PCG_HASH = /* wgsl */ `
+fn pcgHash(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+`;
+
+// fx-pixel: dehaze → vignette → grain (grain intentionally last), all in
+// DISPLAY (sRGB-encoded) space, one pass, one uniform buffer.
+const FX_PIXEL_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct FxPixelParams {
+  // x = dehaze k (±0.3), y = vignette exponent scale, z = vignette midpoint,
+  // w = grain amplitude
+  p0: vec4f,
+  // x = grain cell size (render px), yzw unused
+  p1: vec4f,
+}
+@group(0) @binding(1) var<uniform> u: FxPixelParams;
+`,
+  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_PCG_HASH,
+  body: /* wgsl */ `
+  {
+    var e = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
+
+    // 1. Dehaze: k in [-0.3, 0.3] — never divides by zero
+    let k = u.p0.x;
+    e = clamp((e - vec3f(k)) / (1.0 - k), vec3f(0.0), vec3f(1.0));
+
+    // 2. Vignette: radial falloff from image center; corner r = 1
+    let dims = vec2f(textureDimensions(src));
+    let uv = in.pos.xy / dims;
+    let d = (uv - vec2f(0.5)) * 2.0;
+    let r = length(d) / sqrt(2.0);
+    let falloff = smoothstep(u.p0.z, 1.0, r);
+    let gain = exp2(u.p0.y * falloff);
+    e = clamp(e * gain, vec3f(0.0), vec3f(1.0));
+
+    // 3. Grain: monochrome integer-hash noise, applied at RENDER resolution
+    // (no renderScale compensation — grain is a stylistic texture, not a
+    // measurement, so preview and full-res export show different apparent
+    // grain scale).
+    let p = vec2i(in.pos.xy);
+    let cell = vec2u(vec2i(floor(vec2f(p) / u.p1.x)));
+    let h = pcgHash(cell.x + pcgHash(cell.y));
+    let n = (f32(h) / 4294967295.0 - 0.5) * 2.0;
+    e = clamp(e + vec3f(n * u.p0.w), vec3f(0.0), vec3f(1.0));
+
+    c = srgbDecode(e);
+  }
+`,
+});
+
+function packFxPixel(e: EffectsParams): Float32Array {
+  const f = new Float32Array(8); // p0 (4) + p1 (4)
+  f[0] = FX_DEHAZE_STRENGTH * (e.dehaze / 100);
+  f[1] = FX_VIGNETTE_STOPS * (e.vignette / 100);
+  f[2] = e.vignetteMidpoint;
+  f[3] = (e.grain / 100) * FX_GRAIN_AMPLITUDE;
+  f[4] = e.grainSize;
+  return f;
+}
+
+/** CPU mirror of pcgHash — u32 ops via Math.imul + unsigned shifts, in lockstep with the WGSL. */
+function pcgHashCpu(v: number): number {
+  const vv = v >>> 0;
+  const s = (Math.imul(vv, 747796405) + 2891336453) >>> 0;
+  const shift = (s >>> 28) + 4;
+  const t = ((s >>> shift) ^ s) >>> 0;
+  const w = Math.imul(t, 277803737) >>> 0;
+  return ((w >>> 22) ^ w) >>> 0;
+}
+
+/**
+ * Mirror of the fx-pixel pass: dehaze → vignette → grain, in that order.
+ * `x`/`y` are the render-target's integer texel coords, `width`/`height` its
+ * dimensions — the CPU-side equivalent of `in.pos.xy` / `textureDimensions`.
+ */
+function cpuFxPixel(px: Rgb, u: Float32Array, x: number, y: number, width: number, height: number): Rgb {
+  let e: Rgb = [
+    srgbEncode(Math.min(Math.max(px[0], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[1], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[2], 0), 1)),
+  ];
+  // 1. Dehaze
+  const k = u[0]!;
+  const dehaze = (v: number) => Math.min(Math.max((v - k) / (1 - k), 0), 1);
+  e = [dehaze(e[0]), dehaze(e[1]), dehaze(e[2])];
+  // 2. Vignette
+  const uvx = (x + 0.5) / width;
+  const uvy = (y + 0.5) / height;
+  const dx = (uvx - 0.5) * 2;
+  const dy = (uvy - 0.5) * 2;
+  const r = Math.sqrt(dx * dx + dy * dy) / Math.SQRT2;
+  const falloff = smoothstepCpu(u[2]!, 1, r);
+  const gain = Math.pow(2, u[1]! * falloff);
+  const vig = (v: number) => Math.min(Math.max(v * gain, 0), 1);
+  e = [vig(e[0]), vig(e[1]), vig(e[2])];
+  // 3. Grain
+  const grainSize = u[4]!;
+  const cellX = Math.floor(x / grainSize) >>> 0;
+  const cellY = Math.floor(y / grainSize) >>> 0;
+  const h = pcgHashCpu((cellX + pcgHashCpu(cellY)) >>> 0);
+  const n = (h / 4294967295 - 0.5) * 2;
+  const g = n * u[3]!;
+  const grain = (v: number) => Math.min(Math.max(v + g, 0), 1);
+  e = [grain(e[0]), grain(e[1]), grain(e[2])];
+  return [srgbDecode(e[0]), srgbDecode(e[1]), srgbDecode(e[2])];
+}
+
 export interface CompiledDevelop {
   passes: PassSpec[];
-  /** null when Detail is active — spatial kernels have no per-pixel mirror. */
-  cpu: ((px: Rgb) => Rgb) | null;
+  /** null when Detail or fx-spatial is active — spatial kernels have no per-pixel mirror. */
+  cpu: ((px: Rgb, x: number, y: number, width: number, height: number) => Rgb) | null;
 }
 
 /**
@@ -630,11 +905,17 @@ export function compileDevelop(
   const nrActive = d.noiseLuminance.amount > 0 || d.noiseColor.amount > 0;
   const sharpenActive = d.sharpen.amount > 0;
   const detailActive = !isIdentityDetail(d);
+  const e = params.effects;
+  const fxSpatialActive = !isIdentityEffectsSpatial(e);
+  const clarityActive = e.clarity !== 0;
+  const textureActive = e.texture !== 0;
+  const fxPixelActive = !isIdentityEffectsPixel(e);
   const scale = Math.min(1, Math.max(1e-4, renderScale));
 
   const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
   const hslBands = hslActive ? packHsl(params.hsl) : null;
   const grading = gradingActive ? packGrading(params.grading) : null;
+  const fxPixel = fxPixelActive ? packFxPixel(e) : null;
   const passes: PassSpec[] = [];
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
   if (lut) {
@@ -647,6 +928,19 @@ export function compileDevelop(
   if (grading) {
     passes.push({ shaderId: 'develop/grading', wgsl: GRADING_WGSL, uniforms: grading.buffer as ArrayBuffer });
   }
+  if (fxSpatialActive) {
+    // clarity → texture bracketed by the SAME luma/chroma encode/decode
+    // passes Detail uses (reused verbatim — they carry no Detail-specific
+    // state), placed BEFORE Detail in the chain.
+    passes.push({ shaderId: 'develop/detailEnc', wgsl: DETAIL_ENC_WGSL, uniforms: new ArrayBuffer(0) });
+    if (clarityActive) {
+      passes.push({ shaderId: 'develop/fxClarity', wgsl: FX_CLARITY_WGSL, uniforms: packClarity(e, scale) });
+    }
+    if (textureActive) {
+      passes.push({ shaderId: 'develop/fxTexture', wgsl: FX_TEXTURE_WGSL, uniforms: packTexture(e, scale) });
+    }
+    passes.push({ shaderId: 'develop/detailDec', wgsl: DETAIL_DEC_WGSL, uniforms: new ArrayBuffer(0) });
+  }
   if (detailActive) {
     // NR → sharpen bracketed by the luma/chroma encode/decode passes
     passes.push({ shaderId: 'develop/detailEnc', wgsl: DETAIL_ENC_WGSL, uniforms: new ArrayBuffer(0) });
@@ -656,18 +950,24 @@ export function compileDevelop(
     }
     passes.push({ shaderId: 'develop/detailDec', wgsl: DETAIL_DEC_WGSL, uniforms: new ArrayBuffer(0) });
   }
+  if (fxPixel) {
+    // dehaze → vignette → grain (grain intentionally last), always runs LAST
+    passes.push({ shaderId: 'develop/fxPixel', wgsl: FX_PIXEL_WGSL, uniforms: fxPixel.buffer as ArrayBuffer });
+  }
 
-  const cpu = detailActive
-    ? null // spatial kernels have no per-pixel CPU mirror
-    : (px: Rgb): Rgb => {
-        let out = px;
-        if (toneActive) out = cpuDevelopTone(out, b, wbGains);
-        if (lut) out = cpuToneCurve(out, lut);
-        if (hslBands) out = cpuHsl(out, hslBands);
-        if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
-        if (grading) out = cpuGrading(out, grading);
-        return out;
-      };
+  const cpu =
+    detailActive || fxSpatialActive
+      ? null // spatial kernels have no per-pixel CPU mirror
+      : (px: Rgb, x: number, y: number, width: number, height: number): Rgb => {
+          let out = px;
+          if (toneActive) out = cpuDevelopTone(out, b, wbGains);
+          if (lut) out = cpuToneCurve(out, lut);
+          if (hslBands) out = cpuHsl(out, hslBands);
+          if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
+          if (grading) out = cpuGrading(out, grading);
+          if (fxPixel) out = cpuFxPixel(out, fxPixel, x, y, width, height);
+          return out;
+        };
   return { passes, cpu };
 }
 
