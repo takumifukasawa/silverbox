@@ -68,6 +68,23 @@ baseline-exposure offset (decided in the Lightroom calibration session).
 
 ## Nice to have
 
+- **Per-node preview** (UE-material-editor style): inspect any node's
+  output in the preview / as node thumbnails — the renderer already keeps
+  per-step textures
+- Side-by-side compare view (current vs before, or two outputs two-up)
+- "Open terminal here" button (spawns the user's own terminal at the
+  document's directory — the cheap honest version of an embedded pane)
+- Denoise for high-ISO work: preferred shape is an **external-tool hook
+  node** (pipe through a user-configured command, cache keyed by input
+  hash — stays intent-data, no bundled ML runtime); in-app ONNX only if
+  that proves insufficient
+- Look-history replay (render a sidecar's git history as a timelapse)
+- Learn-a-preset from a set of looks (distill shared parameters from
+  chosen sidecars; exploratory)
+- Camera-JPEG look match (one-click starting point that resembles the
+  in-camera rendering; the baseline-exposure subset comes first via the
+  LR calibration)
+- Read-only browser viewer / slideshow for photo+sidecar repos
 - LUT **import** node (film-sim .cube packs inside the graph)
 - B&W mixer (per-band gray conversion, LR's B&W tab)
 - Auto tone (one-button histogram-based starting point)
