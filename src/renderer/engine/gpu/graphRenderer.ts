@@ -255,8 +255,39 @@ interface ExecStep {
 }
 
 
+/**
+ * Live-resource diagnostics (perf-probe instrumentation, see scripts/perf-probe.mjs):
+ * cheap running counters updated at every GPUBuffer/GPUTexture create/destroy
+ * call site in this class. `live* = *Created - *Destroyed` — a real leak shows
+ * up as a monotonically growing `liveBuffers`/`liveTextures` across repeated
+ * edits, instead of only failing much later when the GPU device runs out of
+ * memory. Cache sizes and the current ExecStep/step-texture counts are
+ * included too since an unbounded cache is the same class of bug.
+ */
+export interface RendererStats {
+  liveBuffers: number;
+  liveTextures: number;
+  buffersCreated: number;
+  buffersDestroyed: number;
+  texturesCreated: number;
+  texturesDestroyed: number;
+  /** Compiled-pipeline cache for plan passes (op/develop/custom shaderIds). */
+  passPipelineCacheSize: number;
+  /** Export-only encode pipeline cache ('encode/srgb' | 'encode/p3'). */
+  exportEncodePipelineCacheSize: number;
+  /** ExecSteps currently held by the renderer (one per plan step). */
+  execStepCount: number;
+  /** rgba16float step output textures currently held. */
+  stepTextureCount: number;
+}
+
 export class GraphRenderer {
   private source: GPUTexture | null = null;
+  // --- live-resource counters (diagnostics only, see RendererStats above) ---
+  private buffersCreated = 0;
+  private buffersDestroyed = 0;
+  private texturesCreated = 0;
+  private texturesDestroyed = 0;
   private stepTextures: GPUTexture[] = [];
   /** Intra-step ping-pong target for multi-pass steps. */
   private scratchTexture: GPUTexture | null = null;
@@ -325,6 +356,48 @@ export class GraphRenderer {
     return this.source !== null;
   }
 
+  /** Counted GPUBuffer.create — every allocation in this class goes through here. */
+  private createBuffer(desc: GPUBufferDescriptor): GPUBuffer {
+    this.buffersCreated++;
+    return this.device.createBuffer(desc);
+  }
+
+  /** Counted GPUBuffer.destroy — no-op on null/undefined (mirrors `buf?.destroy()`). */
+  private destroyBuffer(buf: GPUBuffer | null | undefined): void {
+    if (!buf) return;
+    buf.destroy();
+    this.buffersDestroyed++;
+  }
+
+  /** Counted GPUTexture.create — every allocation in this class goes through here. */
+  private createTexture(desc: GPUTextureDescriptor): GPUTexture {
+    this.texturesCreated++;
+    return this.device.createTexture(desc);
+  }
+
+  /** Counted GPUTexture.destroy — no-op on null/undefined (mirrors `tex?.destroy()`). */
+  private destroyTexture(tex: GPUTexture | null | undefined): void {
+    if (!tex) return;
+    tex.destroy();
+    this.texturesDestroyed++;
+  }
+
+  /** Live-resource + cache-size snapshot — see RendererStats; exposed via window.__debug.rendererStats(). */
+  rendererStats(): RendererStats {
+    return {
+      liveBuffers: this.buffersCreated - this.buffersDestroyed,
+      liveTextures: this.texturesCreated - this.texturesDestroyed,
+      buffersCreated: this.buffersCreated,
+      buffersDestroyed: this.buffersDestroyed,
+      texturesCreated: this.texturesCreated,
+      texturesDestroyed: this.texturesDestroyed,
+      passPipelineCacheSize: this.passPipelines.size,
+      exportEncodePipelineCacheSize: this.exportEncodePipelines.size,
+      execStepCount: this.steps.length,
+      stepTextureCount: this.stepTextures.length,
+    };
+  }
+
   /** Pipeline for a plan pass — compiled once per shaderId. */
   private passPipeline(shaderId: string, wgsl: string): GPURenderPipeline {
     let pipeline = this.passPipelines.get(shaderId);
@@ -343,8 +416,8 @@ export class GraphRenderer {
   /** Upload the linear preview as rgba16float (values are in [0,1] after decode). */
   setImage(image: PreparedImage): void {
     const { data, width, height } = image;
-    this.source?.destroy();
-    this.source = this.device.createTexture({
+    this.destroyTexture(this.source);
+    this.source = this.createTexture({
       size: [width, height],
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
@@ -357,13 +430,13 @@ export class GraphRenderer {
       { bytesPerRow: width * 8, rowsPerImage: height },
       [width, height]
     );
-    for (const t of this.stepTextures) t.destroy();
+    for (const t of this.stepTextures) this.destroyTexture(t);
     this.stepTextures = [];
-    this.scratchTexture?.destroy();
+    this.destroyTexture(this.scratchTexture);
     this.scratchTexture = null;
-    this.baseTexture?.destroy();
+    this.destroyTexture(this.baseTexture);
     this.baseTexture = null;
-    this.resampleUniform?.destroy();
+    this.destroyBuffer(this.resampleUniform);
     this.resampleUniform = null;
     this.planGeometry = undefined;
     this.planLens = undefined;
@@ -463,7 +536,7 @@ export class GraphRenderer {
   }
 
   private makeStepTexture(): GPUTexture {
-    return this.device.createTexture({
+    return this.createTexture({
       size: [this.width, this.height],
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
@@ -488,7 +561,7 @@ export class GraphRenderer {
   }
 
   private vec4Buffer(v: [number, number, number, number]): GPUBuffer {
-    const buffer = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const buffer = this.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(buffer, 0, new Float32Array(v));
     return buffer;
   }
@@ -499,7 +572,7 @@ export class GraphRenderer {
         const phases = op.passes.map((pass): ExecPhase => {
           let uniformBuffer: GPUBuffer | null = null;
           if (pass.uniforms.byteLength > 0) {
-            uniformBuffer = this.device.createBuffer({
+            uniformBuffer = this.createBuffer({
               size: pass.uniforms.byteLength,
               usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             });
@@ -517,18 +590,18 @@ export class GraphRenderer {
     });
   }
 
-  private static destroySteps(steps: ExecStep[]): void {
-    for (const step of steps) for (const phase of step.phases) phase.uniformBuffer?.destroy();
+  private destroySteps(steps: ExecStep[]): void {
+    for (const step of steps) for (const phase of step.phases) this.destroyBuffer(phase.uniformBuffer);
   }
 
   private async applyGraph(plan: RenderPlan): Promise<void> {
     const gen = ++this.setGraphGen;
     const steps = this.resolveSteps(plan);
     if (gen !== this.setGraphGen) {
-      GraphRenderer.destroySteps(steps);
+      this.destroySteps(steps);
       return;
     }
-    GraphRenderer.destroySteps(this.steps);
+    this.destroySteps(this.steps);
     this.steps = steps;
     this.outputIndex = plan.output;
 
@@ -543,15 +616,15 @@ export class GraphRenderer {
     // needs the base texture even though geometry itself stays absent.
     if (plan.geometry || plan.lens) {
       if (!this.baseTexture || this.baseTexture.width !== nextWidth || this.baseTexture.height !== nextHeight) {
-        this.baseTexture?.destroy();
-        this.baseTexture = this.device.createTexture({
+        this.destroyTexture(this.baseTexture);
+        this.baseTexture = this.createTexture({
           size: [nextWidth, nextHeight],
           format: 'rgba16float',
           usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
         });
       }
-      this.resampleUniform?.destroy();
-      this.resampleUniform = this.device.createBuffer({
+      this.destroyBuffer(this.resampleUniform);
+      this.resampleUniform = this.createBuffer({
         size: 48,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       });
@@ -561,18 +634,18 @@ export class GraphRenderer {
         this.resampleUniformData(plan.geometry, plan.lens, this.srcWidth, this.srcHeight)
       );
     } else {
-      this.baseTexture?.destroy();
+      this.destroyTexture(this.baseTexture);
       this.baseTexture = null;
-      this.resampleUniform?.destroy();
+      this.destroyBuffer(this.resampleUniform);
       this.resampleUniform = null;
     }
     this.planGeometry = plan.geometry;
     this.planLens = plan.lens;
 
     if (dimsChanged) {
-      for (const t of this.stepTextures) t.destroy();
+      for (const t of this.stepTextures) this.destroyTexture(t);
       this.stepTextures = [];
-      this.scratchTexture?.destroy();
+      this.destroyTexture(this.scratchTexture);
       this.scratchTexture = null;
       this.width = nextWidth;
       this.height = nextHeight;
@@ -701,7 +774,7 @@ export class GraphRenderer {
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     const { device } = this;
     const { data, width: srcWidth, height: srcHeight } = image;
-    const source = device.createTexture({
+    const source = this.createTexture({
       size: [srcWidth, srcHeight],
       format: 'rgba16float',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
@@ -720,7 +793,7 @@ export class GraphRenderer {
     const temps: GPUTexture[] = [source];
     const tempBuffers: GPUBuffer[] = [];
     const makeTarget = (format: GPUTextureFormat, usage: number) => {
-      const t = device.createTexture({ size: [width, height], format, usage });
+      const t = this.createTexture({ size: [width, height], format, usage });
       temps.push(t);
       return t;
     };
@@ -731,7 +804,7 @@ export class GraphRenderer {
       let baseView = source.createView();
       if (plan.geometry || plan.lens) {
         const base = makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT);
-        const uniform = device.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        const uniform = this.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         tempBuffers.push(uniform);
         device.queue.writeBuffer(uniform, 0, this.resampleUniformData(plan.geometry, plan.lens, srcWidth, srcHeight));
         this.addPass(encoder, base.createView(), this.resamplePipeline(), [
@@ -758,10 +831,14 @@ export class GraphRenderer {
       );
       const target = makeTarget('rgba8unorm', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
       const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
-      const buffer = device.createBuffer({
+      const buffer = this.createBuffer({
         size: bytesPerRow * height,
         usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
       });
+      // tracked from creation, same as `temps`/`tempBuffers` above — if
+      // mapAsync (below) ever rejects, the outer finally still frees it
+      // instead of only on the success path.
+      tempBuffers.push(buffer);
       this.addPass(encoder, target.createView(), this.exportEncodePipeline(colorSpace), [
         { binding: 0, resource: linear },
       ]);
@@ -774,44 +851,51 @@ export class GraphRenderer {
         out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + width * 4), y * width * 4);
       }
       buffer.unmap();
-      buffer.destroy();
       return { data: out, width, height };
     } finally {
-      for (const t of temps) t.destroy();
-      for (const b of tempBuffers) b.destroy();
-      GraphRenderer.destroySteps(steps);
+      for (const t of temps) this.destroyTexture(t);
+      for (const b of tempBuffers) this.destroyBuffer(b);
+      this.destroySteps(steps);
     }
   }
 
-  /** Run the chain + encode offscreen and hand the mapped RGBA8 rows to `use`. */
+  /**
+   * Run the chain + encode offscreen and hand the mapped RGBA8 rows to `use`.
+   * `target`/`buffer` are created BEFORE the try so a throw between creation
+   * and the try (there is none today, but the original code also left
+   * `buffer.mapAsync` — which CAN reject, e.g. on a lost device — outside any
+   * try/finally) can never again skip their destroy: the whole GPU round-trip
+   * from submit through `use` is now inside one try, with a single finally
+   * that always frees both, success or failure.
+   */
   private async withEncodedPixels<T>(
     use: (px: Uint8Array, bytesPerRow: number, width: number, height: number) => T
   ): Promise<T | null> {
     await this.graphReady;
     if (!this.source) return null;
-    const { device, width, height } = this;
-    const target = device.createTexture({
+    const { width, height } = this;
+    const target = this.createTexture({
       size: [width, height],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
     const bytesPerRow = Math.ceil((width * 4) / 256) * 256;
-    const buffer = device.createBuffer({
+    const buffer = this.createBuffer({
       size: bytesPerRow * height,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
-    const encoder = device.createCommandEncoder();
-    const linear = this.addChainPasses(encoder);
-    this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
-    encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
-    device.queue.submit([encoder.finish()]);
-    await buffer.mapAsync(GPUMapMode.READ);
     try {
+      const encoder = this.device.createCommandEncoder();
+      const linear = this.addChainPasses(encoder);
+      this.addPass(encoder, target.createView(), this.readbackEncodePipeline, [{ binding: 0, resource: linear }]);
+      encoder.copyTextureToBuffer({ texture: target }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
+      this.device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
       return use(new Uint8Array(buffer.getMappedRange()), bytesPerRow, width, height);
     } finally {
-      buffer.unmap();
-      buffer.destroy();
-      target.destroy();
+      buffer.unmap(); // spec: a no-op when not currently mapped — safe on any exit path
+      this.destroyBuffer(buffer);
+      this.destroyTexture(target);
     }
   }
 

@@ -79,6 +79,10 @@ declare global {
         samples: { cols: number; rows: number; length: number; meanLuma: number } | null;
       };
       setScopeMode(mode: 'histogram' | 'waveform' | 'parade' | 'vectorscope'): void;
+      /** Live GPU-resource counters + cache sizes from the GraphRenderer (perf-probe diagnostics). */
+      rendererStats(): import('../engine/gpu/graphRenderer').RendererStats | null;
+      /** Heap + renderer snapshot in one call, for scripts/perf-probe.mjs's per-batch sampling. */
+      perfProbe(): { heapUsed: number | null; rendererStats: import('../engine/gpu/graphRenderer').RendererStats | null };
     };
   }
 }
@@ -411,6 +415,15 @@ export function CanvasView() {
       },
       setScopeMode(mode) {
         useAppStore.getState().setScopeMode(mode);
+      },
+      rendererStats() {
+        return useAppStore.getState().renderer?.rendererStats() ?? null;
+      },
+      perfProbe() {
+        return {
+          heapUsed: (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? null,
+          rendererStats: useAppStore.getState().renderer?.rendererStats() ?? null,
+        };
       },
       setGeometry(geo) {
         useAppStore.getState().setGeometry(geo, null);
