@@ -1,5 +1,9 @@
 /**
  * WebGPU graph renderer (milestone 4, DAG execution since milestone 13).
+ * Render-isolation (DESIGN.md §10, phase B): this class now lives ENTIRELY
+ * inside the render worker (renderWorker.ts) — the main thread never
+ * instantiates it directly, only talks to it through renderClient.ts's
+ * message bridge. `create()` takes an OffscreenCanvas for that reason.
  *
  * The linear RGBA preview uploads once per image as an rgba16float texture.
  * The RenderPlan executes step by step — ops and custom nodes as one-input
@@ -434,7 +438,7 @@ export class GraphRenderer {
     private readonly readbackEncodePipeline: GPURenderPipeline
   ) {}
 
-  static async create(canvas: HTMLCanvasElement): Promise<GraphRenderer> {
+  static async create(canvas: OffscreenCanvas): Promise<GraphRenderer> {
     const device = await getGpuDevice();
     const context = canvas.getContext('webgpu');
     if (!context) throw new Error('webgpu canvas context unavailable');

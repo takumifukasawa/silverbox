@@ -137,10 +137,16 @@ export function getCustomShaderArtifact(nodeId: string): CustomShaderArtifact | 
   return artifacts.get(nodeId);
 }
 
-/** Seed a fresh node with the engine-authored (known valid) identity shader. */
-export function seedDefaultCustomShaderArtifact(nodeId: string): void {
+/**
+ * Seed a fresh node with the engine-authored (known valid) identity shader.
+ * Returns the artifact so callers (appStore.ts) can mirror it into the
+ * render worker's own cache without recomputing it (see renderClient.ts).
+ */
+export function seedDefaultCustomShaderArtifact(nodeId: string): CustomShaderArtifact {
   const { wgsl } = buildCustomShaderWgsl(DEFAULT_CUSTOM_SHADER_SRC, []);
-  artifacts.set(nodeId, makeCustomShaderArtifact(wgsl, []));
+  const artifact = makeCustomShaderArtifact(wgsl, []);
+  artifacts.set(nodeId, artifact);
+  return artifact;
 }
 
 /** Drop everything — a new document's node ids must never alias stale shaders. */

@@ -18,7 +18,8 @@ import {
   type LensParams,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
-import type { GraphRenderer, HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
+import type { HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
+import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
 import {
   buildCustomShaderWgsl,
@@ -69,8 +70,8 @@ interface AppState {
   selectedNodeId: string | null;
   /** WGSL compile errors by node id (custom nodes render identity meanwhile). */
   shaderErrors: Record<string, string>;
-  /** The live GraphRenderer (registered by CanvasView; used for export). */
-  renderer: GraphRenderer | null;
+  /** The live render-worker client (registered by CanvasView; used for export). */
+  renderer: RenderWorkerClient | null;
   exportStatus: 'idle' | 'working' | 'error';
   exportError: string | null;
   /** Stats of the current render (updated debounced after each render). */
@@ -155,7 +156,7 @@ interface AppState {
   addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
   removeShaderParam(nodeId: string, name: string): void;
   updateShaderParam(nodeId: string, name: string, value: number): void;
-  setRenderer(renderer: GraphRenderer): void;
+  setRenderer(renderer: RenderWorkerClient): void;
   setHistogram(histogram: HistogramData | null): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
@@ -252,7 +253,9 @@ export const useAppStore = create<AppState>((set, get) => {
     if (!now) return; // node deleted while validating
 
     if (error === null) {
-      setCustomShaderArtifact(nodeId, makeCustomShaderArtifact(wgsl, paramList));
+      const artifact = makeCustomShaderArtifact(wgsl, paramList);
+      setCustomShaderArtifact(nodeId, artifact);
+      mirrorShaderArtifactSet(nodeId, artifact);
       if (now.code.src !== src || now.code.lastValidSrc !== src) {
         set((s) => ({
           ...(opts.history ? pushHistory(s, null) : {}),
@@ -294,7 +297,9 @@ export const useAppStore = create<AppState>((set, get) => {
         if (validationSeq.get(nodeId) !== seq || shaderEpoch !== epoch) return;
         if (!getShader(get().graph, nodeId)) return;
         if (error === null) {
-          setCustomShaderArtifact(nodeId, makeCustomShaderArtifact(wgsl, params));
+          const artifact = makeCustomShaderArtifact(wgsl, params);
+          setCustomShaderArtifact(nodeId, artifact);
+          mirrorShaderArtifactSet(nodeId, artifact);
           set((s) => ({ shaderRev: s.shaderRev + 1 }));
         } else {
           set((s) => ({ shaderErrors: { ...s.shaderErrors, [nodeId]: error } }));
@@ -399,6 +404,7 @@ export const useAppStore = create<AppState>((set, get) => {
       };
       // node ids of the previous doc must never alias into stale shaders
       clearCustomShaderArtifacts();
+      mirrorShaderArtifactClear();
       shaderEpoch++;
       set({
         imageStatus: 'ready',
@@ -481,7 +487,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const id = nextId(g, kind);
       // Fresh custom nodes are seeded with the engine-authored identity
       // artifact — known valid, no async validation round-trip needed.
-      if (kind === CUSTOM_KIND) seedDefaultCustomShaderArtifact(id);
+      if (kind === CUSTOM_KIND) mirrorShaderArtifactSet(id, seedDefaultCustomShaderArtifact(id));
       // fresh WB atomics start at the image's as-shot values (= identity)
       const params =
         kind === 'whitebalance'
@@ -830,11 +836,12 @@ export const useAppStore = create<AppState>((set, get) => {
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
       const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
       const colorSpace = opts?.colorSpace ?? 'srgb';
-      const { data, width, height } = await renderer.renderToPixels(
-        full,
-        buildPlan(graph, { wb: get().wbModel, renderScale: 1 }),
-        colorSpace
-      );
+      // buildPlan runs worker-side now (renderToPixels ships the doc, not a
+      // plan — RenderPlan's cpu closures aren't structured-cloneable); the
+      // full-res image's data buffer is TRANSFERRED, not copied (see
+      // renderClient.ts) — `full` is loaded fresh for this export and never
+      // reused afterward.
+      const { data, width, height } = await renderer.renderToPixels(full, graph, 1, colorSpace);
       // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
       const cap = full.capture;
       const result = await window.silverbox.exportEncode({

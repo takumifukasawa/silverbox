@@ -4,7 +4,7 @@ import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
 import { DECODE_OUTPUT_COLOR } from '../engine/decoder/librawDecoder';
-import { GraphRenderer } from '../engine/gpu/graphRenderer';
+import { RenderWorkerClient } from '../engine/gpu/renderClient';
 import {
   buildPlan,
   computeOutputDims,
@@ -79,10 +79,13 @@ declare global {
         samples: { cols: number; rows: number; length: number; meanLuma: number } | null;
       };
       setScopeMode(mode: 'histogram' | 'waveform' | 'parade' | 'vectorscope'): void;
-      /** Live GPU-resource counters + cache sizes from the GraphRenderer (perf-probe diagnostics). */
-      rendererStats(): import('../engine/gpu/graphRenderer').RendererStats | null;
+      /** Live GPU-resource counters + cache sizes from the GraphRenderer (perf-probe diagnostics; bridged to the render worker). */
+      rendererStats(): Promise<import('../engine/gpu/graphRenderer').RendererStats | null>;
       /** Heap + renderer snapshot in one call, for scripts/perf-probe.mjs's per-batch sampling. */
-      perfProbe(): { heapUsed: number | null; rendererStats: import('../engine/gpu/graphRenderer').RendererStats | null };
+      perfProbe(): Promise<{
+        heapUsed: number | null;
+        rendererStats: import('../engine/gpu/graphRenderer').RendererStats | null;
+      }>;
       /** Verify-only: GPU histogram compute restricted to a crop rect (scripts/verify-ms10-histogram.mjs). */
       statsCrop(
         x0: number,
@@ -121,7 +124,7 @@ function workToSrgb(rgb: readonly [number, number, number]): [number, number, nu
 export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const rendererRef = useRef<Promise<GraphRenderer> | null>(null);
+  const clientRef = useRef<RenderWorkerClient | null>(null);
   const lastImageRef = useRef<unknown>(null);
   const [gpuError, setGpuError] = useState<string | null>(null);
   const imageStatus = useAppStore((s) => s.imageStatus);
@@ -184,16 +187,25 @@ export function CanvasView() {
   const statsTimerRef = useRef<number | undefined>(undefined);
   const scopeMode = useAppStore((s) => s.scopeMode);
 
-  // Keep the canvas element's own pixel dims in sync with outputDims
+  // Keep the canvas element's own LAYOUT size in sync with outputDims
   // SYNCHRONOUSLY (before paint) — decoupled from the GPU renderer's async
   // render pipeline, which only needs to catch up on PIXEL CONTENT.
+  //
+  // This sets CSS pixel size, not the width/height IDL attributes: once the
+  // canvas's control has been transferred to the render worker's
+  // OffscreenCanvas (RenderWorkerClient's constructor — see the effect
+  // below), setting those attributes on the placeholder THROWS ("Cannot
+  // resize canvas after call to transferControlToOffscreen()"). The
+  // OffscreenCanvas's own backing-store size is instead kept in sync by an
+  // explicit 'resize' message (client.resize() in the effect below) — CSS
+  // size here and backing-store size there are set from the same
+  // `outputDims` value, so the 1:1 pixel-grid invariant handleWbPick relies
+  // on still holds.
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !outputDims) return;
-    if (canvas.width !== outputDims.width || canvas.height !== outputDims.height) {
-      canvas.width = outputDims.width;
-      canvas.height = outputDims.height;
-    }
+    canvas.style.width = `${outputDims.width}px`;
+    canvas.style.height = `${outputDims.height}px`;
   }, [outputDims]);
 
   // switching into a non-histogram mode fetches fresh samples immediately:
@@ -201,9 +213,9 @@ export function CanvasView() {
   // an existing value may be stale — always refetch, never just reuse it
   useEffect(() => {
     if (scopeMode === 'histogram') return;
-    const renderer = useAppStore.getState().renderer;
-    if (!renderer || !renderer.hasImage) return;
-    void renderer.scopeSamples().then((samples) => {
+    const client = useAppStore.getState().renderer;
+    if (!client || !client.hasImage) return;
+    void client.scopeSamples().then((samples) => {
       useAppStore.getState().setScopeSamples(samples);
     });
   }, [scopeMode]);
@@ -211,63 +223,68 @@ export function CanvasView() {
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        rendererRef.current ??= GraphRenderer.create(canvas).then((r) => {
-          useAppStore.getState().setRenderer(r);
-          return r;
-        });
-        const renderer = await rendererRef.current;
-        if (cancelled) return;
-        if (lastImageRef.current !== image) {
-          renderer.setImage(image);
-          lastImageRef.current = image;
-        }
-        // a broken input→output path renders as pass-through with a banner
-        // in the node editor instead of killing the preview
-        let plan;
-        try {
-          plan = buildPlan(graphForBuild, {
-            wb: wbModel,
-            renderScale: Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight),
-          });
-          useAppStore.getState().setGraphBroken(false);
-        } catch {
-          plan = { steps: [], output: -1 };
-          useAppStore.getState().setGraphBroken(true);
-        }
-        // Before/After: show the unedited decode (readbacks follow, so the
-        // histogram describes what is on screen — LR behavior)
-        if (showBefore) plan = { steps: [], output: -1 };
-        renderer.viewMode = grayscaleView ? 'grayscale' : 'color';
-        // the canvas element's pixel dims are kept in sync with outputDims by
-        // the useLayoutEffect above (synchronous, no GPU round-trip needed)
-        await renderer.setGraph(plan);
-        if (cancelled) return;
-        renderer.render();
-        setGpuError(null);
-        // refresh the histogram once edits settle (slider drags fire rapidly)
-        clearTimeout(statsTimerRef.current);
-        statsTimerRef.current = window.setTimeout(() => {
-          void renderer.stats().then((stats) => {
-            if (stats) useAppStore.getState().setHistogram(stats);
-          });
-          // scope samples are an extra readback — skip them in the default
-          // histogram mode, where nothing consumes them
-          if (useAppStore.getState().scopeMode !== 'histogram') {
-            void renderer.scopeSamples().then((samples) => {
-              useAppStore.getState().setScopeSamples(samples);
-            });
-          }
-        }, 120);
-      } catch (err) {
-        if (!cancelled) setGpuError(err instanceof Error ? err.message : String(err));
+    try {
+      // transferControlToOffscreen() may only run once per canvas element —
+      // this ref persists across re-renders the same way the old GraphRenderer
+      // promise did. Creation itself is synchronous (the GPUDevice/pipelines
+      // come up async INSIDE the worker); GPU-init failure surfaces later via
+      // handleInitError → setGpuError, mirroring GraphRenderer.create()
+      // rejecting on the old single-thread path.
+      if (!clientRef.current) {
+        const client = new RenderWorkerClient(canvas);
+        client.setErrorHandler((message) => setGpuError(message));
+        clientRef.current = client;
+        useAppStore.getState().setRenderer(client);
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      const client = clientRef.current;
+      if (lastImageRef.current !== image) {
+        client.setImage(image);
+        lastImageRef.current = image;
+      }
+      const renderScale = Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight);
+      // a broken input→output path renders as pass-through with a banner in
+      // the node editor instead of killing the preview. buildPlan is pure and
+      // side-effect-free (graphDoc.ts), so re-running it here — main-side,
+      // redundant to the worker's own copy over the SAME doc — costs nothing
+      // and needs no round trip just to learn whether it throws.
+      try {
+        buildPlan(graphForBuild, { wb: wbModel, renderScale });
+        useAppStore.getState().setGraphBroken(false);
+      } catch {
+        useAppStore.getState().setGraphBroken(true);
+      }
+      // the canvas element's pixel dims are kept in sync with outputDims by
+      // the useLayoutEffect above (synchronous, no GPU round-trip needed);
+      // the OFFSCREEN canvas the worker actually renders into needs its own
+      // explicit resize message (setting the placeholder's width/height does
+      // not reach across the transfer).
+      if (outputDims) client.resize(outputDims.width, outputDims.height);
+      client.viewMode = grayscaleView ? 'grayscale' : 'color';
+      // Before/After: show the unedited decode (readbacks follow, so the
+      // histogram describes what is on screen — LR behavior); the worker
+      // applies this same override after building its own plan.
+      client.render({ doc: graphForBuild, renderScale, showBefore });
+      setGpuError(null);
+      // refresh the histogram once edits settle (slider drags fire rapidly);
+      // `gen` pins this debounce cycle so a slow response that resolves after
+      // a NEWER edit's response never clobbers the store with stale data.
+      clearTimeout(statsTimerRef.current);
+      const gen = client.currentGen();
+      statsTimerRef.current = window.setTimeout(() => {
+        void client.stats().then((stats) => {
+          if (stats && client.currentGen() === gen) useAppStore.getState().setHistogram(stats);
+        });
+        // scope samples are an extra readback — skip them in the default
+        // histogram mode, where nothing consumes them
+        if (useAppStore.getState().scopeMode !== 'histogram') {
+          void client.scopeSamples().then((samples) => {
+            if (client.currentGen() === gen) useAppStore.getState().setScopeSamples(samples);
+          });
+        }
+      }, 120);
+    } catch (err) {
+      setGpuError(err instanceof Error ? err.message : String(err));
+    }
   }, [image, graph, shaderRev, wbModel, showBefore, grayscaleView, cropMode]);
 
   useEffect(() => {
@@ -286,19 +303,23 @@ export function CanvasView() {
         return 'webgpu';
       },
       outputSize() {
-        const canvas = canvasRef.current;
-        if (!canvas || canvas.width === 0) return null;
-        return { width: canvas.width, height: canvas.height };
+        // outputDimsRef is the single synchronous source of truth for the
+        // canvas's pixel dims (see its computation above) — the DOM canvas
+        // element's own width/height ATTRIBUTES are frozen at whatever they
+        // were before transferControlToOffscreen() (setting them afterward
+        // throws); its backing store is resized via an explicit message to
+        // the render worker instead (RenderWorkerClient.resize()).
+        return outputDimsRef.current;
       },
       async readbackMean() {
-        const renderer = rendererRef.current ? await rendererRef.current : null;
-        if (!renderer || !renderer.hasImage) return null;
-        return renderer.readbackMean();
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        return client.readbackMean();
       },
       async readbackSharpness() {
-        const renderer = rendererRef.current ? await rendererRef.current : null;
-        if (!renderer || !renderer.hasImage) return null;
-        return renderer.readbackSharpness();
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        return client.readbackSharpness();
       },
       cpuReferenceMean() {
         const s = useAppStore.getState();
@@ -425,24 +446,26 @@ export function CanvasView() {
       setScopeMode(mode) {
         useAppStore.getState().setScopeMode(mode);
       },
-      rendererStats() {
-        return useAppStore.getState().renderer?.rendererStats() ?? null;
+      async rendererStats() {
+        const client = useAppStore.getState().renderer;
+        return client ? await client.rendererStats() : null;
       },
-      perfProbe() {
+      async perfProbe() {
+        const client = useAppStore.getState().renderer;
         return {
           heapUsed: (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize ?? null,
-          rendererStats: useAppStore.getState().renderer?.rendererStats() ?? null,
+          rendererStats: client ? await client.rendererStats() : null,
         };
       },
       async statsCrop(x0, y0, w, h) {
-        const renderer = rendererRef.current ? await rendererRef.current : null;
-        if (!renderer || !renderer.hasImage) return null;
-        return renderer.statsCrop(x0, y0, w, h);
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        return client.statsCrop(x0, y0, w, h);
       },
       async encodedCropForVerify(x0, y0, w, h) {
-        const renderer = rendererRef.current ? await rendererRef.current : null;
-        if (!renderer || !renderer.hasImage) return null;
-        const px = await renderer.encodedCropForVerify(x0, y0, w, h);
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        const px = await client.encodedCropForVerify(x0, y0, w, h);
         return px ? Array.from(px) : null;
       },
       setGeometry(geo) {
@@ -462,9 +485,7 @@ export function CanvasView() {
         return inputNode?.lens ?? defaultLensParams();
       },
       outputDims() {
-        const canvas = canvasRef.current;
-        if (!canvas || canvas.width === 0) return null;
-        return { width: canvas.width, height: canvas.height };
+        return outputDimsRef.current;
       },
       wbSolveCheck(rgb) {
         const { wbModel: model } = useAppStore.getState();
