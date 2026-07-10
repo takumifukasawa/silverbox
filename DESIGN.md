@@ -117,7 +117,9 @@ difference judgeable on real photographs. Display and export convert to the
 destination late (sRGB today; print/HDR targets become possible later
 precisely because the working space is wider than any of them). Effects that
 model display behavior (tone curve, grading) operate on encoded values by
-design — but encoded *working-space* values, never a clipped copy.
+design — but encoded *working-space* values, never a clipped copy. The
+full decision record, including what histograms and scopes measure and
+why, is in [COLOR.md](COLOR.md).
 
 ### 7. Looks are exportable artifacts
 
