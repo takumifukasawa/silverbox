@@ -86,6 +86,7 @@ const ALL_SCRIPTS = [
   { name: 'presets', file: 'verify-presets.mjs' },
   { name: 'lensprofile', file: 'verify-lensprofile.mjs' },
   { name: 'basecurve', file: 'verify-basecurve.mjs' },
+  { name: 'hotreload', file: 'verify-hotreload.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

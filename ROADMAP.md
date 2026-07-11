@@ -41,6 +41,21 @@ list (up to 32) of dst/src circle pairs, drag-created on the canvas in "Spots"
 tool mode and auto-inserted right after the input node (retouch before color);
 spatial (no CPU mirror, like Detail), excluded from LUT export same as a
 masked local adjustment.
+Sidecar hot-reload on external change (the AI-editing loop): while an image
+is open, main watches its sidecar's containing directory (fs.watch on the
+file alone loses the inode across the atomic write-temp-then-rename every
+writer, ours included, uses) and pushes a debounced (~150ms) event to the
+renderer whenever the sidecar's basename is touched. A clean session
+(no unsaved edits) auto-reloads the new content as ONE undo entry with a
+transient toolbar notice; a dirty session never auto-clobbers — it shows a
+persistent notice with an inline Reload button instead, so even an AI
+editing the JSON mid-session can't silently discard in-progress work.
+Content unreadable on disk (a mid-write snapshot, a bad edit) leaves the
+in-app graph untouched with a warning, and saving over it is still allowed
+(the in-app document is the good copy). Self-writes (⌘S, autosave) are
+suppressed by comparing disk content against what this session last wrote,
+not against the live in-memory graph — so an edit made between save and the
+watcher's echo never gets misread as an external change.
 
 ## In flight / agreed order
 
@@ -49,10 +64,9 @@ masked local adjustment.
    named multiple outputs ride the same bump)
 2. ColorKey (secondary) mask node
 3. Image node (composite with / mask by another file, path reference)
-4. Sidecar hot-reload on external change (the AI-editing loop)
-5. Denoise for high ISO (external-tool hook node first — see nice-to-have
+4. Denoise for high ISO (external-tool hook node first — see nice-to-have
    notes; bundled inference only if that proves insufficient)
-6. Headless CLI renderer (batch export against sidecars/presets)
+5. Headless CLI renderer (batch export against sidecars/presets)
 
 Other-maker lens correction (DNG opcodes — the semi-universal path — then
 per-maker parsing on demand; contactless/vintage glass keeps the manual

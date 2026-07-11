@@ -243,6 +243,15 @@ button:disabled {
   font-size: 12px;
 }
 
+/* Sidecar hot-reload notice (AI-editing loop): the Reload button sits OUTSIDE
+   .toolbar-warn's overflow:hidden text span so it's never clipped along with
+   a long message. */
+.toolbar-hotreload-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .toolbar button.active {
   background: #4a6b9a;
   border-color: #6a9fe8;

@@ -93,6 +93,8 @@ export function Toolbar() {
   const history = useAppStore((s) => s.history);
   const sidecarNotice = useAppStore((s) => s.sidecarNotice);
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
+  const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
+  const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
@@ -227,6 +229,23 @@ export function Toolbar() {
         ⚙ Settings…
       </button>
       <div className="toolbar-info">
+        {sidecarHotReloadNotice && (
+          // The button lives OUTSIDE the ellipsis/nowrap `.toolbar-warn` text
+          // span (a sibling, not a child) — nesting it inside would put its
+          // hit target under the span's `overflow:hidden` clip, which made
+          // it visible but unclickable (Playwright: "span intercepts pointer
+          // events").
+          <span className="toolbar-hotreload-notice" data-hotreload-kind={sidecarHotReloadNotice.kind}>
+            <span className="toolbar-warn" data-testid="hotreload-notice" title={sidecarHotReloadNotice.message}>
+              {sidecarHotReloadNotice.message}
+            </span>
+            {sidecarHotReloadNotice.kind === 'pending' && (
+              <button onClick={() => void reloadSidecarNow()} data-testid="hotreload-reload-button">
+                Reload
+              </button>
+            )}
+          </span>
+        )}
         {sidecarNotice && (
           <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
             {sidecarNotice}

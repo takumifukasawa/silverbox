@@ -7,6 +7,12 @@ const api: SilverboxApi = {
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
   readSidecar: (path) => ipcRenderer.invoke(IPC.readSidecar, path),
   writeSidecar: (path, content) => ipcRenderer.invoke(IPC.writeSidecar, path, content),
+  watchSidecar: (path) => ipcRenderer.invoke(IPC.watchSidecar, path),
+  onSidecarChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC.sidecarChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.sidecarChanged, listener);
+  },
   exportImageDialog: (defaultPath) => ipcRenderer.invoke(IPC.exportImageDialog, defaultPath),
   exportEncode: (req) => ipcRenderer.invoke(IPC.exportEncode, req),
   exportLutDialog: (defaultPath) => ipcRenderer.invoke(IPC.exportLutDialog, defaultPath),

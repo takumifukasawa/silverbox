@@ -19,6 +19,7 @@ import {
   type GraphDoc,
   type GraphNode,
   type LensParams,
+  type SidecarDoc,
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
@@ -106,6 +107,43 @@ interface AppState {
   sidecarCreatedAt: string | null;
   /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
   sidecarUnknownFields: Record<string, unknown> | null;
+  /**
+   * Raw sidecar TEXT this session has already accounted for — set on image
+   * open (whatever was on disk then, or null if no sidecar existed), on
+   * save (exactly what we just wrote), and on a hot-reload apply (exactly
+   * what we just loaded). A fresh disk read is compared against THIS field,
+   * not against `serializeGraphDoc(currentGraph, …)` recomputed on the fly:
+   * the live graph can move on (further edits) between our own write and the
+   * fs-watch echo of it arriving, which would make a live-recompute compare
+   * unequal and misreport our own save as an external change. A frozen
+   * snapshot from the moment of the write has no such race.
+   */
+  lastSidecarText: string | null;
+  /**
+   * Sidecar hot-reload notice (the AI-editing loop): 'reloaded' is
+   * transient (connectNotice's 4s auto-clear pattern) after a clean-session
+   * auto-reload; 'pending' is persistent (an inline Reload action) while the
+   * session has unsaved edits a hot-reload must not clobber; 'malformed'
+   * warns that external content on disk could not be parsed and the in-app
+   * graph was left untouched. Cleared on reload, on save, and on image
+   * switch (openImageByPath resets it).
+   */
+  sidecarHotReloadNotice: { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
+  /**
+   * Re-read + re-parse the sidecar and apply it now — the 'pending' notice's
+   * "Reload" button (one undo entry, same as the clean-session auto-reload).
+   * No-op without an open image.
+   */
+  reloadSidecarNow(): Promise<void>;
+  /**
+   * Route a debounced external-sidecar-change push from main (see preload's
+   * onSidecarChanged, subscribed once at module scope below): reads the
+   * sidecar, compares it against `lastSidecarText` (self-write suppression),
+   * and — for genuinely different content — either auto-reloads (clean
+   * session) or raises the 'pending' notice (dirty session), or raises
+   * 'malformed' if the new content doesn't parse.
+   */
+  handleExternalSidecarChange(): Promise<void>;
   /** Result line for the toolbar after a successful export. */
   exportInfo: { width: number; height: number; bytes: number } | null;
   /** Per-image Kelvin/Tint model (as-shot estimate + relative gains). */
@@ -550,6 +588,80 @@ function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: Gr
   return { ...pushHistory(s, null), graph, graphDirty: true };
 }
 
+/**
+ * Sidecar hot-reload apply (the AI-editing loop): swap in `parsed.graph`
+ * wholesale as ONE history entry — unlike applyLook, geometry is NOT
+ * preserved from the current session, because `parsed` IS a full read of
+ * THIS image's own sidecar (its geometry is exactly as valid as anything
+ * else in it, not a foreign look being pasted in). `graphDirty: false` is
+ * deliberate (see AppState.lastSidecarText's doc comment and ROADMAP item
+ * #6 in the brief): the freshly loaded graph now matches disk exactly, so
+ * there is nothing for autosave to echo back. Also clears sidecarUnreadable
+ * / sidecarNotice — a successful external parse proves the file is
+ * readable now, and leaving a stale open-time guard in place would block
+ * saving a graph that's demonstrably good (the malformed-content path in
+ * handleExternalSidecarChange/reloadSidecarNow never reaches this
+ * function, so it can never clear the guard on genuinely bad content).
+ */
+/**
+ * Read + parse the CURRENT image's sidecar off disk — the shared "malformed
+ * / deleted / parses fine" three-way split hot-reload's two entry points
+ * both need (the automatic push handler and the dirty-session "Reload"
+ * button), so it lives once here instead of twice inline. `image` supplies
+ * the anchor-space migration dims exactly like openImageByPath's own
+ * parseGraphDoc call.
+ */
+async function readAndParseSidecar(
+  imagePath: string,
+  image: { width: number; height: number }
+): Promise<{ ok: true; text: string; parsed: SidecarDoc } | { ok: false; notice: string }> {
+  const unreadable = (detail: string): { ok: false; notice: string } => ({
+    ok: false,
+    notice: `sidecar on disk is unreadable — keeping the in-app state (${detail})`,
+  });
+  let text: string | null;
+  try {
+    text = await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
+  } catch (err) {
+    return unreadable(err instanceof Error ? err.message : String(err));
+  }
+  if (text === null) {
+    // Deleted externally (`rm`, or a `git checkout` of a commit predating
+    // the sidecar) — same "keep the good in-app copy" policy as malformed
+    // content: there is nothing valid on disk to load.
+    return { ok: false, notice: 'sidecar removed from disk — keeping the in-app state' };
+  }
+  try {
+    const parsed = parseGraphDoc(text, { width: image.width, height: image.height });
+    return { ok: true, text, parsed };
+  } catch (err) {
+    return unreadable(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function applyExternalGraph(s: AppState, parsed: SidecarDoc, rawText: string): Partial<AppState> & { graph: GraphDoc } {
+  const graph = parsed.graph;
+  return {
+    ...pushHistory(s, null),
+    graph,
+    graphDirty: false,
+    selectedNodeId: graph.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+    selectedSpotIndex: null,
+    sidecarCreatedAt: parsed.createdAt ?? null,
+    sidecarUnknownFields: parsed.unknown ?? null,
+    sidecarUnreadable: false,
+    sidecarNotice: null,
+    lastSidecarText: rawText,
+    // Resolves whatever hot-reload notice was showing (this function IS the
+    // "apply" step of both the automatic clean-session reload and the
+    // dirty-session Reload button). handleExternalSidecarChange's clean-path
+    // caller sets its own transient 'reloaded' notice in a SEPARATE set()
+    // right after this patch lands, so that still wins there; reloadSidecarNow
+    // has nothing further to set, so this null is what actually clears it.
+    sidecarHotReloadNotice: null,
+  };
+}
+
 function getShader(graph: GraphDoc, nodeId: string): CustomShaderParams | null {
   const node = graph.nodes.find((n) => n.id === nodeId);
   return node?.kind === CUSTOM_KIND ? (node.shader ?? null) : null;
@@ -726,6 +838,8 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarUnreadable: false,
   sidecarCreatedAt: null,
   sidecarUnknownFields: null,
+  lastSidecarText: null,
+  sidecarHotReloadNotice: null,
   exportInfo: null,
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
@@ -767,8 +881,15 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarCreatedAt: string | null = null;
       let sidecarUnknownFields: Record<string, unknown> | null = null;
       let usedSidecar = false;
+      // Raw disk text this session is about to account for (hot-reload's
+      // self-write-suppression baseline — see AppState.lastSidecarText's doc
+      // comment). Recorded even when the parse below fails: the malformed
+      // text IS what's on disk, so a future external change compares against
+      // it too, not against nothing.
+      let sidecarRawText: string | null = null;
       try {
         const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
+        sidecarRawText = sidecar;
         if (sidecar !== null) {
           // the sidecar file EXISTS — a parse failure here (unlike readSidecar
           // itself throwing, an I/O-level issue) means this build genuinely
@@ -870,6 +991,8 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarUnreadable,
         sidecarCreatedAt,
         sidecarUnknownFields,
+        lastSidecarText: sidecarRawText,
+        sidecarHotReloadNotice: null,
         exportInfo: null,
         wbModel,
         activeOutputId: null,
@@ -881,6 +1004,10 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedSpotIndex: null,
       });
       revalidateShaders(graph);
+      // Arm (re-arm) the main-process sidecar watcher for THIS image — see
+      // shared/ipc.ts's watchSidecar doc comment. Fire-and-forget: a failure
+      // here just means no hot-reload push for this image, not a broken open.
+      void window.silverbox.watchSidecar(path + SIDECAR_SUFFIX);
     } catch (err) {
       set({ imageStatus: 'error', image: null, imageError: err instanceof Error ? err.message : String(err) });
     }
@@ -1713,11 +1840,75 @@ export const useAppStore = create<AppState>((set, get) => {
       kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
     };
     const createdAt = sidecarCreatedAt ?? new Date().toISOString();
-    await window.silverbox.writeSidecar(
-      imagePath + SIDECAR_SUFFIX,
-      serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined)
-    );
-    set({ graphDirty: false, sidecarCreatedAt: createdAt });
+    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined);
+    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, content);
+    // Record exactly what we just wrote (hot-reload's self-write-suppression
+    // baseline) and clear any hot-reload notice: our edits just overwrote
+    // disk, resolving whatever pending/malformed conflict was showing (see
+    // AppState.sidecarHotReloadNotice's doc comment). The fs-watch echo of
+    // THIS write will read back identical text and be ignored silently.
+    set({ graphDirty: false, sidecarCreatedAt: createdAt, lastSidecarText: content, sidecarHotReloadNotice: null });
+  },
+
+  // Sidecar hot-reload (the AI-editing loop): handleExternalSidecarChange is
+  // the automatic entry point, called once from preload's onSidecarChanged
+  // subscription at module scope below; reloadSidecarNow is the dirty
+  // session's "Reload" button. Both share readAndParseSidecar/
+  // applyExternalGraph above.
+
+  async handleExternalSidecarChange() {
+    const { imagePath, image } = get();
+    if (!imagePath || !image) return;
+    const result = await readAndParseSidecar(imagePath, image);
+    // a slow read can resolve after a DIFFERENT image was opened meanwhile
+    if (get().imagePath !== imagePath) return;
+    if (!result.ok) {
+      set({ sidecarHotReloadNotice: { kind: 'malformed', message: result.notice } });
+      return;
+    }
+    if (result.text === get().lastSidecarText) return; // our own write's echo, or truly no change — ignore silently
+    if (get().graphDirty) {
+      // Dirty session: never auto-clobber unsaved edits (the AI-loop safety
+      // valve) — persistent notice with an inline Reload action instead.
+      set({
+        sidecarHotReloadNotice: {
+          kind: 'pending',
+          message: 'sidecar changed on disk — Reload (discards your unsaved edits)',
+        },
+      });
+      return;
+    }
+    // Clean session: safe to auto-reload — one undo entry, transient notice.
+    let nextGraph: GraphDoc | null = null;
+    set((s) => {
+      const patch = applyExternalGraph(s, result.parsed, result.text);
+      nextGraph = patch.graph;
+      return patch;
+    });
+    if (nextGraph) revalidateShaders(nextGraph);
+    const notice = { kind: 'reloaded' as const, message: 'sidecar reloaded from disk' };
+    set({ sidecarHotReloadNotice: notice });
+    setTimeout(() => {
+      if (get().sidecarHotReloadNotice === notice) set({ sidecarHotReloadNotice: null });
+    }, 4000);
+  },
+
+  async reloadSidecarNow() {
+    const { imagePath, image } = get();
+    if (!imagePath || !image) return;
+    const result = await readAndParseSidecar(imagePath, image);
+    if (get().imagePath !== imagePath) return;
+    if (!result.ok) {
+      set({ sidecarHotReloadNotice: { kind: 'malformed', message: result.notice } });
+      return;
+    }
+    let nextGraph: GraphDoc | null = null;
+    set((s) => {
+      const patch = applyExternalGraph(s, result.parsed, result.text);
+      nextGraph = patch.graph;
+      return patch;
+    });
+    if (nextGraph) revalidateShaders(nextGraph);
   },
 
   async updateSettings(partial) {
@@ -1738,6 +1929,14 @@ if (typeof window !== 'undefined' && window.silverbox) {
   });
   void window.silverbox.presetsList().then((presets) => {
     useAppStore.setState({ presets });
+  });
+  // Sidecar hot-reload (the AI-editing loop): one subscription for the whole
+  // app lifetime — main re-arms its OWN watcher per image (see
+  // openImageByPath's watchSidecar call), so this listener never needs to be
+  // re-registered per open/close, it just always routes to whatever image is
+  // current when the push arrives.
+  window.silverbox.onSidecarChanged(() => {
+    void useAppStore.getState().handleExternalSidecarChange();
   });
 }
 

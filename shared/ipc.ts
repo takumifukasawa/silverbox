@@ -12,6 +12,8 @@ export const IPC = {
   readFile: 'file:read',
   readSidecar: 'sidecar:read',
   writeSidecar: 'sidecar:write',
+  watchSidecar: 'sidecar:watch',
+  sidecarChanged: 'sidecar:changed',
   exportImageDialog: 'dialog:exportImage',
   exportEncode: 'export:encode',
   exportLutDialog: 'dialog:exportLut',
@@ -48,6 +50,21 @@ export interface SilverboxApi {
   readSidecar(path: string): Promise<string | null>;
   /** Write a `.silverbox.json` sidecar (main rejects other paths). */
   writeSidecar(path: string, content: string): Promise<void>;
+  /**
+   * Arm the main-process sidecar watcher for `path` (sidecar hot-reload —
+   * the AI-editing loop). Re-armed on every image open; each call tears down
+   * whatever this window was previously watching first (see main/index.ts's
+   * armSidecarWatch), so there is never more than one live watch per window.
+   */
+  watchSidecar(path: string): Promise<void>;
+  /**
+   * Subscribe to main's debounced "the watched sidecar's directory saw a
+   * write to its basename" push (~150ms after the last event in a burst —
+   * see armSidecarWatch). Carries no payload: the renderer re-reads the
+   * sidecar itself via readSidecar and decides what changed. Returns an
+   * unsubscribe function.
+   */
+  onSidecarChanged(callback: () => void): () => void;
   /** Native save dialog for the developed image (.jpg/.png). */
   exportImageDialog(defaultPath: string): Promise<OpenImageDialogResult>;
   /** Encode + write the developed pixels via sharp in the main process. */

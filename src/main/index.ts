@@ -1,4 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { watch, type FSWatcher } from 'node:fs';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename } from 'node:path';
@@ -22,6 +23,72 @@ import { readSettings, updateSettings } from './settings';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const IMAGE_EXTENSIONS = ['arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'orf', 'rw2', 'dng', 'pef', 'srw', 'x3f', 'jpg', 'jpeg'];
+
+function assertSidecarPath(path: unknown): string {
+  if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
+    throw new Error(`sidecar path must end with ${SIDECAR_SUFFIX}`);
+  }
+  return path;
+}
+
+// --- Sidecar hot-reload watcher (the AI-editing loop) -----------------------
+//
+// One watch lives at a time, scoped to this window: armSidecarWatch tears
+// down whatever was watched before it sets up the new one, so re-arming on
+// every openImageByPath (renderer side) is exactly "watch whatever image is
+// currently open, nothing else." Reference held at module scope (not inside
+// registerIpc) so app-quit/window-close teardown can reach it too.
+let mainWindow: BrowserWindow | null = null;
+let sidecarWatcher: FSWatcher | null = null;
+let sidecarWatchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+/** ~150ms: long enough to collapse a burst of writes (an editor's own atomic save, a multi-step AI edit) into one push, short enough to feel instant. */
+const SIDECAR_WATCH_DEBOUNCE_MS = 150;
+
+function teardownSidecarWatch(): void {
+  if (sidecarWatchDebounce !== null) {
+    clearTimeout(sidecarWatchDebounce);
+    sidecarWatchDebounce = null;
+  }
+  sidecarWatcher?.close();
+  sidecarWatcher = null;
+}
+
+/**
+ * Arm the sidecar watcher for `sidecarPath`. We watch the CONTAINING
+ * DIRECTORY, not the file itself: our own writeSidecar (above) and any
+ * well-behaved external editor write atomically (temp file, then rename into
+ * place), and `fs.watch` on a single file loses track of it across a rename
+ * — the inode underneath changes identity. Events are filtered down to the
+ * sidecar's own basename and debounced (SIDECAR_WATCH_DEBOUNCE_MS) before
+ * pushing `sidecarChanged` to the renderer, which carries no payload — it
+ * just tells the renderer "go re-read the sidecar and decide what changed"
+ * (self-write suppression, dirty-vs-clean, malformed handling all live
+ * renderer-side, see appStore.ts's handleExternalSidecarChange).
+ */
+function armSidecarWatch(sidecarPath: string): void {
+  teardownSidecarWatch();
+  const dir = dirname(sidecarPath);
+  const base = basename(sidecarPath);
+  try {
+    sidecarWatcher = watch(dir, (_eventType, filename) => {
+      // Some platforms don't always supply `filename` for a directory watch;
+      // when absent, don't filter it out — worst case is one harmless extra
+      // round-trip (the renderer's content compare is a no-op if nothing
+      // relevant changed).
+      if (filename !== null && filename !== base) return;
+      if (sidecarWatchDebounce !== null) clearTimeout(sidecarWatchDebounce);
+      sidecarWatchDebounce = setTimeout(() => {
+        sidecarWatchDebounce = null;
+        mainWindow?.webContents.send(IPC.sidecarChanged);
+      }, SIDECAR_WATCH_DEBOUNCE_MS);
+    });
+  } catch (err) {
+    // Directory vanished/unreadable — nothing to watch; the loop just never
+    // gets a hot-reload push for this image (same net effect as no watcher).
+    console.warn(`sidecar watch failed for ${dir}:`, err);
+  }
+}
 
 function registerIpc(): void {
   ipcMain.handle(IPC.ping, (): PingResult => {
@@ -51,13 +118,6 @@ function registerIpc(): void {
     return buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength) as ArrayBuffer;
   });
 
-  const assertSidecarPath = (path: unknown): string => {
-    if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
-      throw new Error(`sidecar path must end with ${SIDECAR_SUFFIX}`);
-    }
-    return path;
-  };
-
   ipcMain.handle(IPC.readSidecar, async (_ev, path: unknown): Promise<string | null> => {
     try {
       return await readFile(assertSidecarPath(path), 'utf8');
@@ -80,6 +140,10 @@ function registerIpc(): void {
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }
+  });
+
+  ipcMain.handle(IPC.watchSidecar, async (_ev, path: unknown): Promise<void> => {
+    armSidecarWatch(assertSidecarPath(path));
   });
 
   ipcMain.handle(IPC.exportImageDialog, async (_ev, defaultPath: unknown): Promise<OpenImageDialogResult> => {
@@ -167,6 +231,11 @@ function createWindow(): void {
       backgroundThrottling: false,
     },
   });
+  mainWindow = win;
+  win.on('closed', () => {
+    teardownSidecarWatch();
+    if (mainWindow === win) mainWindow = null;
+  });
 
   const devUrl = process.env['ELECTRON_RENDERER_URL'];
   if (devUrl) {
@@ -190,5 +259,6 @@ void app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', () => {
+  teardownSidecarWatch();
   if (process.platform !== 'darwin') app.quit();
 });

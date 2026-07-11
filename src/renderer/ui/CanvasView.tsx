@@ -58,6 +58,8 @@ declare global {
       graphState(): GraphDoc;
       graphDirty(): boolean;
       sidecarState(): { notice: string | null; unreadable: boolean };
+      /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
+      hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
@@ -585,6 +587,10 @@ export function CanvasView() {
       sidecarState() {
         const s = useAppStore.getState();
         return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable };
+      },
+      /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
+      hotReloadState() {
+        return useAppStore.getState().sidecarHotReloadNotice;
       },
       shaderErrors() {
         return useAppStore.getState().shaderErrors;

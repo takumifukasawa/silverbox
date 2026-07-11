@@ -27,7 +27,10 @@ What makes it different:
   against the cropped/straightened output — are migrated on load into
   "anchor space" (normalized against the oriented full frame, before crop and
   rotation) so a spot or mask stays pinned to its image content when the crop
-  or angle changes.
+  or angle changes. While an image is open, an external change to its
+  sidecar — a hand edit, `git checkout`, or an AI agent — hot-reloads live:
+  a clean session swaps it in as one undo entry, a session with unsaved
+  edits shows a Reload prompt instead of clobbering them.
 
 The principles behind these choices — and what Silverbox deliberately is
 not — are written down in [DESIGN.md](DESIGN.md).
