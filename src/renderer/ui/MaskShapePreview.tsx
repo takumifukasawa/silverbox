@@ -79,8 +79,10 @@ export function MaskShapePreview({
     <g className="mask-area-preview" data-testid="mask-area-linear">
       <defs>
         <linearGradient id={gradId} gradientUnits="userSpaceOnUse" x1={x0} y1={y0} x2={x1} y2={y1}>
-          <stop offset="0%" stopColor="rgba(255,255,255,0.22)" />
-          <stop offset="100%" stopColor="rgba(255,255,255,0)" />
+          {/* red = affected area, matching .mask-area-fill / the 'O' overlay (a
+              white wash was ambiguous against highlights — round-4 feedback) */}
+          <stop offset="0%" stopColor="rgba(255,60,50,0.30)" />
+          <stop offset="100%" stopColor="rgba(255,60,50,0)" />
         </linearGradient>
       </defs>
       <rect className="mask-area-gradient" x={0} y={0} width={canvasWidth} height={canvasHeight} fill={`url(#${gradId})`} />

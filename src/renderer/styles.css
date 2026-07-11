@@ -651,8 +651,11 @@ button:disabled {
   pointer-events: none;
 }
 
+/* The affected AREA reads as RED (matching the 'O' mask overlay and
+   Lightroom's convention) — a white wash was ambiguous against highlights
+   (user round-4 feedback). Guide lines/outlines stay white+understroke. */
 .mask-area-fill {
-  fill: rgba(255, 255, 255, 0.13);
+  fill: rgba(255, 60, 50, 0.28);
   stroke: none;
 }
 
