@@ -413,6 +413,35 @@ try {
     webMean,
   });
 
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (7. All outputs with COLLIDING names still writes distinct files):');
+  // Two unnamed outputs both fall back to 'main' (graphDoc.ts's outputName)
+  // — the user's original report ("two outputs, only one file written") is
+  // exactly this shape, so the suffixes must disambiguate (-main, -main-2).
+  // Section 6 left the dialog open (its export ran via the debug hook); the
+  // backdrop would swallow the node click below.
+  await page.locator('[data-testid="export-close-button"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="export-dialog"]') === null, { timeout: 5_000 });
+  await page.locator(`.react-flow__node[data-id="${secondOutputId}"]`).click();
+  await page.locator('[data-testid="output-name"]').fill('');
+  const OUT_DUP_BASE = join(projectRoot, 'test-artifacts', 'exportsettings-dupnames.jpg');
+  const OUT_DUP_1 = join(projectRoot, 'test-artifacts', 'exportsettings-dupnames-main.jpg');
+  const OUT_DUP_2 = join(projectRoot, 'test-artifacts', 'exportsettings-dupnames-main-2.jpg');
+  for (const p of [OUT_DUP_BASE, OUT_DUP_1, OUT_DUP_2]) if (existsSync(p)) unlinkSync(p);
+  await page.evaluate(
+    ([base, opts]) => window.__debug.exportOutputsTo('all', base, opts),
+    [OUT_DUP_BASE, { quality: 81, colorSpace: 'srgb' }]
+  );
+  await page.waitForFunction(() => window.__debug.exportState().status !== 'working', { timeout: 300_000 });
+  const dupBatch = await page.evaluate(() => window.__debug.exportBatchState());
+  check(
+    'colliding output names export 2 files at 2 DISTINCT paths',
+    dupBatch?.count === 2 && new Set(dupBatch.paths).size === 2,
+    dupBatch
+  );
+  check('first colliding output file exists (…-main.jpg)', existsSync(OUT_DUP_1), existsSync(OUT_DUP_1));
+  check('second colliding output file exists (…-main-2.jpg)', existsSync(OUT_DUP_2), existsSync(OUT_DUP_2));
+
   check('no page errors across the exportsettings checks', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();

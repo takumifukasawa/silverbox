@@ -1185,12 +1185,19 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ exportStatus: 'working', exportError: null, exportInfo: null, exportBatchInfo: null });
     try {
       const paths: string[] = [];
+      const used = new Set<string>();
       let last: { width: number; height: number; bytes: number } | null = null;
       for (const node of targets) {
         // single output = no suffix (current behavior); 2+ (an explicit "all
         // outputs" export) suffix each file with its output name so nothing
-        // silently overwrites the previous one.
-        const outPath = targets.length > 1 ? suffixExportPath(basePath, outputName(node)) : basePath;
+        // silently overwrites the previous one. Names can COLLIDE — two
+        // unnamed outputs both fall back to 'main' (outputName), and nothing
+        // stops the user naming two outputs identically — so repeats get a
+        // numeric disambiguator (-2, -3, …): every target must land in its
+        // own file, which is the entire point of "All outputs".
+        let outPath = targets.length > 1 ? suffixExportPath(basePath, outputName(node)) : basePath;
+        for (let n = 2; used.has(outPath); n++) outPath = suffixExportPath(basePath, `${outputName(node)}-${n}`);
+        used.add(outPath);
         last = await exportOnePath(outPath, node.id, opts);
         paths.push(outPath);
       }
