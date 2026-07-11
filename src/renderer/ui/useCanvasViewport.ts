@@ -29,7 +29,16 @@ export function useCanvasViewport(
    * target away from the canvas before the caller ever sees it (same
    * "check the target directly" gotcha the crop overlay works around).
    */
-  suppressPan = false
+  suppressPan = false,
+  /**
+   * True while the wheel must NOT zoom the viewport — spot mode (task #50)
+   * repurposes the plain wheel gesture to adjust the brush radius instead
+   * (CanvasView.tsx registers its own wheel listener on the same container;
+   * this just opts the zoom handler out so the two don't fight over the same
+   * event). preventDefault still fires either way, so the page itself never
+   * scrolls underneath the canvas.
+   */
+  suppressWheelZoom = false
 ) {
   const [view, setView] = useState<ViewportState>({ mode: 'fit', scale: 1, tx: 0, ty: 0 });
   const viewRef = useRef(view);
@@ -38,6 +47,8 @@ export function useCanvasViewport(
   imageRef.current = image;
   const suppressPanRef = useRef(suppressPan);
   suppressPanRef.current = suppressPan;
+  const suppressWheelZoomRef = useRef(suppressWheelZoom);
+  suppressWheelZoomRef.current = suppressWheelZoom;
 
   const computeFit = useCallback((): ViewportState | null => {
     const container = containerRef.current;
@@ -107,6 +118,7 @@ export function useCanvasViewport(
 
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault();
+      if (suppressWheelZoomRef.current) return;
       const rect = container.getBoundingClientRect();
       const factor = Math.exp(-ev.deltaY * 0.0015);
       zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, viewRef.current.scale * factor);
@@ -131,7 +143,7 @@ export function useCanvasViewport(
       // the same delta (both listeners see the same pointermove stream),
       // which silently drifts the view out of 'fit' on every mask edit.
       const target = ev.target as HTMLElement | null;
-      if (target?.closest('.crop-rect, .crop-handle, .crop-controls, .mask-handle')) return;
+      if (target?.closest('.crop-rect, .crop-handle, .crop-controls, .mask-handle, .spot-handle, .spot-controls')) return;
       dragging = { x: ev.clientX, y: ev.clientY };
       container.setPointerCapture(ev.pointerId);
     };

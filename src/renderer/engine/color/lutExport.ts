@@ -31,7 +31,11 @@
  * identity-reset escape hatch (arbitrary user WGSL), so they're bypassed
  * outright: the node is removed and its consumers rewired to whatever fed
  * it, the same graph-surgery `bypass` shape appStore.ts's removeOpNode
- * already uses for node deletion. A blend with a mask input is a THIRD case
+ * already uses for node deletion. Spot-removal nodes (task #50) get the
+ * exact same bypass treatment — a clone circle samples the input texture at
+ * an offset POSITION, which a position-independent LUT fundamentally cannot
+ * represent, and (unlike Detail) there is no identity-reset escape hatch
+ * short of dropping every spot. A blend with a mask input is a THIRD case
  * this module must also catch that planHasCpuReference does NOT: the blend
  * step type carries no `cpu` field at all (cpuEvalPlan evaluates it inline),
  * so a masked blend never shows up as "no CPU reference" — yet its mix
@@ -50,6 +54,7 @@ import {
 } from '../graph/graphDoc';
 import { defaultDevelopParams, isIdentityDetail, isIdentityEffectsSpatial } from '../graph/developNode';
 import { CUSTOM_KIND } from '../graph/ops';
+import { SPOTS_KIND } from '../graph/spotsNode';
 import type { WbModel } from './whiteBalance';
 import { srgbDecode, srgbEncode } from './srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB } from './workingSpace';
@@ -153,6 +158,11 @@ function reduceGraphForLut(doc: GraphDoc, ctx: CompileContext): { doc: GraphDoc;
           );
         } else if (node.kind === CUSTOM_KIND) {
           skipped.push(`${node.id}: custom shader node (no CPU reference)`);
+          removeIds.add(node.id);
+          const inEdge = working.edges.find((e) => e.target === node.id);
+          if (inEdge) bypassSource.set(node.id, inEdge.source);
+        } else if (node.kind === SPOTS_KIND) {
+          skipped.push(`${node.id}: spot removal (position-dependent clone sampling, not representable in a LUT)`);
           removeIds.add(node.id);
           const inEdge = working.edges.find((e) => e.target === node.id);
           if (inEdge) bypassSource.set(node.id, inEdge.source);

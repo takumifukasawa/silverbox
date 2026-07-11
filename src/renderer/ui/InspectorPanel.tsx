@@ -20,6 +20,7 @@ import {
   MASK_KIND,
   type MaskShape,
 } from '../engine/graph/maskNode';
+import { SPOTS_CAP, SPOTS_KIND } from '../engine/graph/spotsNode';
 import {
   defaultDevelopParams,
   GRADING_REGIONS,
@@ -635,6 +636,31 @@ function MaskInspector({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * Spots (spot removal, task #50) node inspector: spot count + a "clear all"
+ * button (one undo entry). Per-spot editing (move dst/src, resize, delete
+ * one) lives entirely in the on-canvas SpotOverlay while spot mode is
+ * active — this section is just a summary + bulk-clear escape hatch, same
+ * division of labor MaskInspector has with MaskOverlay for radial/linear.
+ */
+function SpotsInspector({ node }: { node: GraphNode }) {
+  const setSpots = useAppStore((s) => s.setSpots);
+  const count = node.spots?.spots.length ?? 0;
+  return (
+    <>
+      <div className="inspector-title">Spot Removal</div>
+      <Section title="Spots">
+        <div className="spots-count" data-testid="spots-count">
+          {count} spot{count === 1 ? '' : 's'} ({SPOTS_CAP} max)
+        </div>
+        <button data-testid="spots-clear-all" disabled={count === 0} onClick={() => setSpots(node.id, [], null)}>
+          Clear all
+        </button>
+      </Section>
+    </>
+  );
+}
+
 /** Output node inspector: editable display name (spec §6, default 'main'). */
 function OutputInspector({ node }: { node: GraphNode }) {
   const renameOutput = useAppStore((s) => s.renameOutput);
@@ -686,6 +712,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   }
   if (node.kind === MASK_KIND) {
     return <MaskInspector node={node} />;
+  }
+  if (node.kind === SPOTS_KIND) {
+    return <SpotsInspector node={node} />;
   }
   if (node.kind === 'input') {
     return (

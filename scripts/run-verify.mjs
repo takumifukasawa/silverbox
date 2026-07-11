@@ -81,6 +81,7 @@ const ALL_SCRIPTS = [
   { name: 'exportsettings', file: 'verify-exportsettings.mjs' },
   { name: 'masks', file: 'verify-masks.mjs' },
   { name: 'colorkey', file: 'verify-colorkey.mjs' },
+  { name: 'spots', file: 'verify-spots.mjs' },
   { name: 'lut', file: 'verify-lut.mjs' },
   { name: 'presets', file: 'verify-presets.mjs' },
   { name: 'lensprofile', file: 'verify-lensprofile.mjs' },

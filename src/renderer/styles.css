@@ -647,6 +647,156 @@ button:disabled {
   fill: #8ab4f8;
 }
 
+/* ---- spot-removal editing overlay (task #50) ---- */
+
+.spot-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 6;
+  pointer-events: none;
+}
+
+.spot-overlay-svg {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.spot-connector {
+  stroke: rgba(240, 198, 116, 0.6);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-connector.selected {
+  stroke: #f0c674;
+  stroke-width: 1.5;
+}
+
+.spot-handle {
+  position: absolute;
+  pointer-events: auto;
+  touch-action: none;
+  border-radius: 50%;
+  box-sizing: border-box;
+}
+
+.spot-handle-dst {
+  background: rgba(138, 180, 248, 0.18);
+  border: 1.5px solid #8ab4f8;
+  cursor: move;
+}
+
+.spot-handle-src {
+  background: rgba(240, 198, 116, 0.12);
+  border: 1.5px dashed #f0c674;
+  cursor: move;
+}
+
+.spot-handle-dst.selected,
+.spot-handle-src.selected {
+  border-color: #fff;
+  border-width: 2px;
+}
+
+.spot-handle-rim {
+  width: 10px;
+  height: 10px;
+  margin: -5px;
+  background: #fff;
+  border: 1px solid #333;
+  cursor: ew-resize;
+}
+
+/* Enlarge the rim handle's GRABBABLE area well past its visible 10px dot
+   (≥20px hit target), same trick as .crop-handle/.mask-handle. */
+.spot-handle-rim::after {
+  content: '';
+  position: absolute;
+  inset: -5px;
+}
+
+.spot-controls {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  z-index: 7;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(30, 30, 30, 0.85);
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 6px 12px;
+}
+
+.spot-controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #aaa;
+}
+
+.spot-controls input[type='range'] {
+  width: 160px;
+  accent-color: #f0c674;
+}
+
+.spot-radius-value {
+  font-variant-numeric: tabular-nums;
+  color: #ddd;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Live preview while dragging a NEW spot (create-by-drag) — same
+   sibling-of-<canvas> transform as .spot-overlay above, purely visual
+   (nothing committed yet). */
+.spot-draw-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 6;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.spot-draw-overlay-connector {
+  stroke: rgba(240, 198, 116, 0.6);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-draw-overlay-dst {
+  fill: rgba(138, 180, 248, 0.18);
+  stroke: #8ab4f8;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-draw-overlay-src {
+  fill: rgba(240, 198, 116, 0.12);
+  stroke: #f0c674;
+  stroke-width: 1.5;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spots-count {
+  font-size: 12px;
+  color: #ccc;
+  margin-bottom: 8px;
+}
+
 .canvas-overlay {
   position: absolute;
   inset: 0;

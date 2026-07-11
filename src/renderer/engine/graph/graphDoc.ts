@@ -18,6 +18,7 @@ import {
 import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
 import { sanitizeCurvePoints } from '../color/toneCurve';
 import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams } from './maskNode';
+import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams } from './spotsNode';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -28,7 +29,8 @@ export type GraphNodeKind =
   | typeof CUSTOM_KIND
   | typeof BLEND_KIND
   | typeof DEVELOP_KIND
-  | typeof MASK_KIND;
+  | typeof MASK_KIND
+  | typeof SPOTS_KIND;
 
 export interface GraphNode {
   id: string;
@@ -46,6 +48,8 @@ export interface GraphNode {
   lens?: LensParams;
   /** Analytic mask shapes; only for kind 'mask' (masks milestone). */
   mask?: MaskParams;
+  /** Non-destructive clone-circle list (spot removal, task #50); only for kind 'spots'. */
+  spots?: SpotsParams;
   /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
   name?: string;
 }
@@ -71,7 +75,7 @@ export interface GraphDoc {
   edges: GraphEdge[];
 }
 
-export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND | typeof MASK_KIND | 'output';
+export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND | typeof MASK_KIND | typeof SPOTS_KIND | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
 export function outputName(node: GraphNode): string {
@@ -79,7 +83,7 @@ export function outputName(node: GraphNode): string {
 }
 
 export function defaultParams(
-  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | 'output'>
+  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | 'output'>
 ): Record<string, number> {
   const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
@@ -384,6 +388,7 @@ const KNOWN_NODE_KEYS = new Set([
   'geometry',
   'lens',
   'mask',
+  'spots',
   'name',
 ]);
 /** Edge-level keys the schema knows about; anything else round-trips verbatim per edge. */
@@ -431,6 +436,7 @@ export function serializeGraphDoc(
           ...(n.geometry ? { geometry: n.geometry } : {}),
           ...(n.lens ? { lens: n.lens } : {}),
           ...(n.mask ? { mask: n.mask } : {}),
+          ...(n.spots ? { spots: n.spots } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
         };
       }),
@@ -512,6 +518,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
       n.kind !== BLEND_KIND &&
       n.kind !== DEVELOP_KIND &&
       n.kind !== MASK_KIND &&
+      n.kind !== SPOTS_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -537,6 +544,9 @@ export function parseGraphDoc(text: string): SidecarDoc {
     }
     if (n.kind === MASK_KIND) {
       n.mask = sanitizeMaskParams(n.mask, n.id);
+    }
+    if (n.kind === SPOTS_KIND) {
+      n.spots = sanitizeSpotsParams(n.spots, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -844,6 +854,28 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           cpu: (px, x, y, w, h) => cpuMaskShape(shape, px, x, y, w, h),
         });
         index = steps.length - 1;
+      } else if (node.kind === SPOTS_KIND) {
+        // Spot removal (task #50): empty list = bit-exact pass-through, same
+        // "identity params ⇒ pass not emitted" invariant every other node
+        // kind upholds. Once any spot is present the pass is SPATIAL (it
+        // samples the input texture at an offset position, not just this
+        // pixel) — cpu: null, same mechanism Detail/custom shaders use, and
+        // planHasCpuReference (below) picks that up automatically.
+        const spotsParams = node.spots ?? defaultSpotsParams();
+        if (spotsParams.spots.length === 0) {
+          index = src;
+        } else {
+          steps.push({
+            nodeId: id,
+            type: 'passes',
+            passes: [
+              { shaderId: 'spots/clone', wgsl: SPOTS_WGSL, uniforms: packSpotsUniform(spotsParams.spots).buffer as ArrayBuffer },
+            ],
+            src,
+            cpu: null,
+          });
+          index = steps.length - 1;
+        }
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip

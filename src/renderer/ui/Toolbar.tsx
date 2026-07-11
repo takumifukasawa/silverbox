@@ -4,6 +4,7 @@ import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
 import { outputName, type AddableKind } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
+import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { PresetsMenu } from './PresetsMenu';
 
 /**
@@ -16,7 +17,14 @@ import { PresetsMenu } from './PresetsMenu';
 function AddNodeMenu() {
   const addOpNode = useAppStore((s) => s.addOpNode);
   const [open, setOpen] = useState(false);
-  const kinds: AddableKind[] = [CUSTOM_KIND, BLEND_KIND, MASK_KIND, 'output', ...(Object.keys(OPS) as AddableKind[])];
+  const kinds: AddableKind[] = [
+    CUSTOM_KIND,
+    BLEND_KIND,
+    MASK_KIND,
+    SPOTS_KIND,
+    'output',
+    ...(Object.keys(OPS) as AddableKind[]),
+  ];
   return (
     <span className="add-node-menu">
       <button
@@ -96,6 +104,9 @@ export function Toolbar() {
   const setMaskDrawMode = useAppStore((s) => s.setMaskDrawMode);
   const maskOverlay = useAppStore((s) => s.maskOverlay);
   const toggleMaskOverlay = useAppStore((s) => s.toggleMaskOverlay);
+  const spotMode = useAppStore((s) => s.spotMode);
+  const setSpotMode = useAppStore((s) => s.setSpotMode);
+  const spotsCapNotice = useAppStore((s) => s.spotsCapNotice);
   const setExportDialogOpen = useAppStore((s) => s.setExportDialogOpen);
   const [ping, setPing] = useState<PingResult | null>(null);
 
@@ -150,6 +161,15 @@ export function Toolbar() {
       >
         Crop
       </button>
+      <button
+        onClick={() => setSpotMode(!spotMode)}
+        disabled={imageStatus !== 'ready'}
+        data-testid="spots-toggle"
+        className={spotMode ? 'active' : undefined}
+        title="Spot removal: drag from a blemish to a clean source area; Escape exits"
+      >
+        Spots
+      </button>
       <AddNodeMenu />
       <span className="local-adjustment-buttons">
         <button
@@ -202,6 +222,11 @@ export function Toolbar() {
         {sidecarNotice && (
           <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
             {sidecarNotice}
+          </span>
+        )}
+        {spotsCapNotice && (
+          <span className="toolbar-warn" data-testid="spots-cap-notice" title={spotsCapNotice}>
+            {spotsCapNotice}
           </span>
         )}
         {sidecarUnreadable && (

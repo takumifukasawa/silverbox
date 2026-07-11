@@ -36,6 +36,11 @@ uncorrected); vignetting is parsed but held OFF because its knot-scale divisor
 would not fit the JPEG radial falloff cleanly (the camera's creative tone
 curve dominates the residual). On by default for a fresh ARW open, off for a
 JPEG/non-Sony image; the DNG-opcode path for other makers stays future work.
+Spot removal (v1, manual clone circles): a `spots` node holds a non-destructive
+list (up to 32) of dst/src circle pairs, drag-created on the canvas in "Spots"
+tool mode and auto-inserted right after the input node (retouch before color);
+spatial (no CPU mirror, like Detail), excluded from LUT export same as a
+masked local adjustment.
 
 ## In flight / agreed order
 
@@ -43,12 +48,11 @@ JPEG/non-Sony image; the DNG-opcode path for other makers stays future work.
    (sidecar schemaVersion 3, ports on edges, unknown-field passthrough,
    named multiple outputs ride the same bump)
 2. ColorKey (secondary) mask node
-3. Spot removal (clone circles, non-destructive list)
-4. Image node (composite with / mask by another file, path reference)
-5. Sidecar hot-reload on external change (the AI-editing loop)
-6. Denoise for high ISO (external-tool hook node first — see nice-to-have
+3. Image node (composite with / mask by another file, path reference)
+4. Sidecar hot-reload on external change (the AI-editing loop)
+5. Denoise for high ISO (external-tool hook node first — see nice-to-have
    notes; bundled inference only if that proves insufficient)
-7. Headless CLI renderer (batch export against sidecars/presets)
+6. Headless CLI renderer (batch export against sidecars/presets)
 
 Other-maker lens correction (DNG opcodes — the semi-universal path — then
 per-maker parsing on demand; contactless/vintage glass keeps the manual

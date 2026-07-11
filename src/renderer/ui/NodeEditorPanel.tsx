@@ -18,6 +18,7 @@ import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS, isOpKind } from '../engine/graph/ops';
 import { DEVELOP_KIND, outputName, type GraphDoc } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
+import { SPOTS_KIND } from '../engine/graph/spotsNode';
 
 /** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output. */
 function BlendNode({ data, selected }: NodeProps) {
@@ -62,9 +63,11 @@ function buildNodes(graph: GraphDoc, fileName: string | null, selectedNodeId: st
                   ? 'blend'
                   : n.kind === MASK_KIND
                     ? 'mask'
-                    : isOpKind(n.kind)
-                      ? OPS[n.kind].label.toLowerCase()
-                      : n.kind,
+                    : n.kind === SPOTS_KIND
+                      ? 'spots'
+                      : isOpKind(n.kind)
+                        ? OPS[n.kind].label.toLowerCase()
+                        : n.kind,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
@@ -76,6 +79,7 @@ function buildNodes(graph: GraphDoc, fileName: string | null, selectedNodeId: st
       n.kind === BLEND_KIND ||
       n.kind === DEVELOP_KIND ||
       n.kind === MASK_KIND ||
+      n.kind === SPOTS_KIND ||
       (n.kind === 'output' && outputCount > 1),
   })) as Node[];
 }

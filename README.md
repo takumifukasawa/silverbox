@@ -56,6 +56,11 @@ not — are written down in [DESIGN.md](DESIGN.md).
   aberration auto-correct on by default for a fresh ARW open (validated
   against the in-camera JPEG) and stack on top of the manual sliders;
   vignetting is parsed but held off pending a clean scale-divisor fit.
+- **Spot removal** — manual clone-circle retouching (v1: no auto-heal): drag
+  from a blemish (dst) to a clean source area (src) in "Spots" tool mode; a
+  non-destructive list per node (up to 32 circles), each independently
+  movable/resizable via on-canvas handles, auto-inserted right after the
+  input node so retouching happens before color.
 - **Scopes** — LR-style histogram (RGB + luminance, additive) with clipping
   indicators, plus luma waveform, RGB parade and a vectorscope.
 - Before/after compare (`\`) and a grayscale check view (`G`), zoom/pan with
@@ -63,9 +68,9 @@ not — are written down in [DESIGN.md](DESIGN.md).
 - **LUT export** — the active output's color pipeline as a standard .cube,
   Unity/Unreal strip PNGs and a WebGL sampling snippet, for bringing a
   Silverbox look into a game engine. Geometry (crop/lens) never applies; any
-  spatial op (Detail, clarity/texture), custom WGSL node or masked local
-  adjustment can't be captured by a position-independent LUT and is instead
-  skipped and reported in the export dialog.
+  spatial op (Detail, clarity/texture, spot removal), custom WGSL node or
+  masked local adjustment can't be captured by a position-independent LUT
+  and is instead skipped and reported in the export dialog.
 - **Develop presets** — save or apply a whole-look develop graph as a named,
   git-shareable JSON file under the app data dir, with the same
   capture/merge semantics as the develop clipboard (⌘⇧C/⌘⇧V) — a preset

@@ -22,6 +22,7 @@ import {
 } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
+import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
 import type { HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
@@ -189,6 +190,40 @@ interface AppState {
    */
   maskDrawMode: 'radial' | 'linear' | null;
   setMaskDrawMode(mode: 'radial' | 'linear' | null): void;
+  /**
+   * Spot-removal tool mode (task #50): toggled by the toolbar's "Spots"
+   * button (like cropMode) — canvas cursor crosshair, pan suppressed, wheel
+   * repurposed to adjust spotBrushRadius instead of zoom. Escape exits (see
+   * App.tsx's Escape chain). Leaving the mode also clears selectedSpotIndex
+   * (its handles only render while the mode is active — see SpotOverlay).
+   */
+  spotMode: boolean;
+  setSpotMode(active: boolean): void;
+  /** Index into the ACTIVE spots node's list (see findActiveSpotsNodeId) currently selected on-canvas; null = none. */
+  selectedSpotIndex: number | null;
+  setSelectedSpotIndex(index: number | null): void;
+  /** Normalized (by max output dimension) brush radius used for the NEXT spot creation; adjustable via the spot-mode control strip slider or the canvas wheel while spotMode is active. */
+  spotBrushRadius: number;
+  setSpotBrushRadius(radius: number): void;
+  /** Transient toolbar notice (4s auto-clear, connectNotice's pattern) shown when an add is refused past SPOTS_CAP. */
+  spotsCapNotice: string | null;
+  /**
+   * Commit ONE spot-creation gesture (mousedown-drag-mouseup on the canvas
+   * in spot mode): `dst`/`src` are normalized 0..1 image-space points,
+   * `radius` is the current brush radius. If no spots node exists in the
+   * active chain yet, auto-inserts one right after the input node (retouch
+   * before color/develop) and adds the first spot — ONE combined undo entry.
+   * If a spots node already exists anywhere in the active chain, the spot is
+   * appended to its (the first such node's) list — still one undo entry.
+   * Refuses (with spotsCapNotice) past SPOTS_CAP without mutating anything.
+   */
+  commitSpot(dst: { x: number; y: number }, src: { x: number; y: number }, radius: number): void;
+  /** Move/resize one spot of a spots node; `coalesceKey` null = its own undo entry (drag handles pass a per-gesture session key — MaskOverlay's pattern). */
+  updateSpot(nodeId: string, index: number, patch: Partial<Spot>, coalesceKey: string | null): void;
+  /** Remove one spot by index — one undo entry; clears selectedSpotIndex. */
+  removeSpot(nodeId: string, index: number): void;
+  /** Wholesale-replace a spots node's list (verify __debug hook + the inspector's "clear all"; mirrors setMaskShape's pattern). Truncates to SPOTS_CAP. */
+  setSpots(nodeId: string, spots: Spot[], coalesceKey: string | null): void;
   /** Async GPU failure surfaced from the render worker (device loss etc.) — mirrors the pre-worker GraphRenderer rejection UI. */
   gpuError: string | null;
   setGpuError(message: string | null): void;
@@ -383,6 +418,43 @@ function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppS
   addEdge(blendId, activeOutput.id);
 
   return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: maskId };
+}
+
+/** Default brush radius for a fresh spot (task #50): ~1.5% of the max output dimension. */
+const DEFAULT_SPOT_BRUSH_RADIUS = 0.015;
+
+/** The output node the preview/export currently targets — same "selected or first" rule used throughout (addOpNode, exportSelectedOutputs, buildLocalAdjustmentPatch). */
+function activeOutputNode(graph: GraphDoc, activeOutputId: string | null): GraphNode | undefined {
+  const outputs = graph.nodes.filter((n) => n.kind === 'output');
+  return (activeOutputId && outputs.find((n) => n.id === activeOutputId)) || outputs[0];
+}
+
+/** Every node id reachable by walking edges BACKWARD from `outputId` — "the active chain" spot removal's brief refers to. */
+function reachableToOutput(graph: GraphDoc, outputId: string): Set<string> {
+  const seen = new Set<string>();
+  const stack = [outputId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    for (const e of graph.edges) {
+      if (e.target === id) stack.push(e.source);
+    }
+  }
+  return seen;
+}
+
+/**
+ * The spots node "in the active chain" (spec: edits target the FIRST one
+ * found, in doc.nodes array order, that's upstream of the active output) —
+ * null when none exists yet, in which case commitSpot auto-inserts one.
+ */
+export function findActiveSpotsNodeId(graph: GraphDoc, activeOutputId: string | null): string | null {
+  const out = activeOutputNode(graph, activeOutputId);
+  if (!out) return null;
+  const reach = reachableToOutput(graph, out.id);
+  const node = graph.nodes.find((n) => n.kind === SPOTS_KIND && reach.has(n.id));
+  return node?.id ?? null;
 }
 
 /**
@@ -640,6 +712,10 @@ export const useAppStore = create<AppState>((set, get) => {
   activeOutputId: null,
   maskOverlay: false,
   maskDrawMode: null,
+  spotMode: false,
+  selectedSpotIndex: null,
+  spotBrushRadius: DEFAULT_SPOT_BRUSH_RADIUS,
+  spotsCapNotice: null,
   gpuError: null,
 
   async openImageByPath(path: string) {
@@ -751,6 +827,8 @@ export const useAppStore = create<AppState>((set, get) => {
         cropMode: false,
         wbPicking: false,
         colorKeyPicking: false,
+        spotMode: false,
+        selectedSpotIndex: null,
       });
       revalidateShaders(graph);
     } catch (err) {
@@ -840,6 +918,8 @@ export const useAppStore = create<AppState>((set, get) => {
         node = { id, kind, position: { ...out.position }, shader: createDefaultCustomShaderParams() };
       } else if (kind === MASK_KIND) {
         node = { id, kind, position: { ...out.position }, mask: defaultMaskParams() };
+      } else if (kind === SPOTS_KIND) {
+        node = { id, kind, position: { ...out.position }, spots: defaultSpotsParams() };
       } else {
         // fresh WB atomics start at the image's as-shot values (= identity)
         const params =
@@ -1034,6 +1114,144 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ maskDrawMode: mode });
   },
 
+  setSpotMode(active) {
+    set((s) => (s.spotMode === active ? {} : { spotMode: active, selectedSpotIndex: active ? s.selectedSpotIndex : null }));
+  },
+
+  setSelectedSpotIndex(index) {
+    set({ selectedSpotIndex: index });
+  },
+
+  setSpotBrushRadius(radius) {
+    set({ spotBrushRadius: Math.min(0.5, Math.max(0.002, radius)) });
+  },
+
+  commitSpot(dst, src, radius) {
+    let capped = false;
+    const spot = clampSpot({ dx: dst.x, dy: dst.y, sx: src.x, sy: src.y, radius, feather: 0.3 });
+    set((s) => {
+      const existingId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
+      if (existingId) {
+        const node = s.graph.nodes.find((n) => n.id === existingId)!;
+        const list = node.spots?.spots ?? [];
+        if (list.length >= SPOTS_CAP) {
+          capped = true;
+          return {};
+        }
+        return {
+          ...pushHistory(s, null),
+          graph: {
+            ...s.graph,
+            nodes: s.graph.nodes.map((n) => (n.id === existingId ? { ...n, spots: { spots: [...list, spot] } } : n)),
+          },
+          graphDirty: true,
+          selectedNodeId: existingId,
+          selectedSpotIndex: list.length,
+        };
+      }
+      // No spots node anywhere in the active chain yet: auto-insert one
+      // RIGHT AFTER the input node (retouch before color — see spotsNode.ts's
+      // file doc comment), rewiring input→X to input→spots→X, combined with
+      // this first spot into ONE undo entry (buildLocalAdjustmentPatch's
+      // same one-entry-per-gesture rule).
+      const out = activeOutputNode(s.graph, s.activeOutputId);
+      const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+      if (!out || !inputNode) return {};
+      const reach = reachableToOutput(s.graph, out.id);
+      const edge = s.graph.edges.find((e) => e.source === inputNode.id && reach.has(e.target));
+      if (!edge) return {};
+      const spotsId = nextId(s.graph, 'spots');
+      const spotsNode: GraphNode = {
+        id: spotsId,
+        kind: SPOTS_KIND,
+        position: { x: inputNode.position.x + 110, y: inputNode.position.y + 90 },
+        spots: { spots: [spot] },
+      };
+      let scratch: GraphDoc = {
+        ...s.graph,
+        nodes: [...s.graph.nodes, spotsNode],
+        edges: s.graph.edges.filter((e) => e.id !== edge.id),
+      };
+      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+        const e = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+        scratch = { ...scratch, edges: [...scratch.edges, e] };
+      };
+      addEdge(inputNode.id, spotsId);
+      addEdge(spotsId, edge.target, edge.targetHandle);
+      return {
+        ...pushHistory(s, null),
+        graph: scratch,
+        graphDirty: true,
+        selectedNodeId: spotsId,
+        selectedSpotIndex: 0,
+      };
+    });
+    if (capped) {
+      const message = `spot cap reached (${SPOTS_CAP} max) — this spot was not added`;
+      set({ spotsCapNotice: message });
+      setTimeout(() => {
+        if (get().spotsCapNotice === message) set({ spotsCapNotice: null });
+      }, 4000);
+    }
+  },
+
+  updateSpot(nodeId, index, patch, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== SPOTS_KIND) return {};
+      const list = node.spots?.spots ?? [];
+      const current = list[index];
+      if (!current) return {};
+      const next = clampSpot({ ...current, ...patch });
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) =>
+            n.id === nodeId ? { ...n, spots: { spots: list.map((sp, i) => (i === index ? next : sp)) } } : n
+          ),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
+  removeSpot(nodeId, index) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== SPOTS_KIND) return {};
+      const list = node.spots?.spots ?? [];
+      if (index < 0 || index >= list.length) return {};
+      return {
+        ...pushHistory(s, null),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) =>
+            n.id === nodeId ? { ...n, spots: { spots: list.filter((_, i) => i !== index) } } : n
+          ),
+        },
+        graphDirty: true,
+        selectedSpotIndex: null,
+      };
+    });
+  },
+
+  setSpots(nodeId, spots, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== SPOTS_KIND) return {};
+      const clamped = spots.slice(0, SPOTS_CAP).map(clampSpot);
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, spots: { spots: clamped } } : n)),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
   shaderRev: 0,
 
   async applyShaderSource(nodeId, src) {
@@ -1133,6 +1351,9 @@ export const useAppStore = create<AppState>((set, get) => {
         },
         graphDirty: true,
         selectedNodeId: prev.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+        // a jump can change (or shorten) any spots node's list — a stale
+        // index would either point at the wrong spot or past the end
+        selectedSpotIndex: null,
       };
     });
     // a jump may restore shader sources whose artifacts are stale
@@ -1153,6 +1374,7 @@ export const useAppStore = create<AppState>((set, get) => {
         },
         graphDirty: true,
         selectedNodeId: next.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+        selectedSpotIndex: null,
       };
     });
     shaderEpoch++;

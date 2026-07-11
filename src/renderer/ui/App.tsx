@@ -108,6 +108,35 @@ export function App() {
       if (ev.key === 'Escape' && useAppStore.getState().colorKeyPicking) {
         useAppStore.getState().setColorKeyPicking(false);
       }
+      if (ev.key === 'Escape' && useAppStore.getState().spotMode) {
+        // spot removal (task #50): Escape exits cleanly, same as the other
+        // canvas modes above — CanvasView's in-progress drag listener (if
+        // any) watches this same field flip to false and tears itself down
+        // without committing.
+        useAppStore.getState().setSpotMode(false);
+      }
+      if ((ev.key === 'Backspace' || ev.key === 'Delete') && useAppStore.getState().spotMode) {
+        // Delete-key precedence (task #50): React Flow's own node editor
+        // ALSO binds Backspace/Delete (deleteKeyCode, NodeEditorPanel.tsx) to
+        // delete whatever graph node is currently selected. Resolution:
+        // spot mode is itself a modal tool (like crop/mask-draw) entered and
+        // exited explicitly, so being in it already signals canvas-editing
+        // intent — no separate DOM-focus check is needed. A selected spot
+        // (selectedSpotIndex !== null) takes precedence and consumes the
+        // key (preventDefault + stopPropagation, so React Flow's own
+        // bubble-phase listener on window never sees it — this handler runs
+        // in the capture phase, see the listener registration below). With
+        // spot mode on but NO spot selected, this falls through untouched —
+        // Backspace/Delete keeps its normal "delete the selected graph node"
+        // behavior.
+        if (isTextEntry(ev.target)) return;
+        const s = useAppStore.getState();
+        if (s.selectedSpotIndex !== null && s.selectedNodeId) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          s.removeSpot(s.selectedNodeId, s.selectedSpotIndex);
+        }
+      }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
         // masks milestone: 'O' toggles the LR-style red mask overlay, but
         // only while the selection is actually a mask node — off = normal

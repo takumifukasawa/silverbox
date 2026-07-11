@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { useAppStore } from '../store/appStore';
+import { findActiveSpotsNodeId, useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
@@ -33,6 +33,9 @@ import {
   type MaskParams,
   type MaskShape,
 } from '../engine/graph/maskNode';
+import { defaultSpotsParams, SPOTS_KIND, type Spot, type SpotsParams } from '../engine/graph/spotsNode';
+import { SpotOverlay } from './SpotOverlay';
+import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
@@ -134,6 +137,16 @@ declare global {
       maskState(nodeId?: string): MaskParams | null;
       /** Replace shapes[0] of a mask node — one undo entry (verify-only convenience; the UI drag handles use the store action directly). */
       setMaskShape(nodeId: string, shape: MaskShape): void;
+      /** Spots node params (spot removal, task #50); `nodeId` defaults to the currently selected node. Null when that node isn't kind 'spots'. */
+      spotsState(nodeId?: string): SpotsParams | null;
+      /** Wholesale-replace a spots node's list — one undo entry (verify-only convenience; mirrors setMaskShape's pattern). */
+      setSpots(nodeId: string, spots: Spot[]): void;
+      /** The active chain's spots node id (see appStore.ts's findActiveSpotsNodeId), or null when none exists yet. */
+      activeSpotsNodeId(): string | null;
+      /** Spot-mode UI state: tool toggle, current brush radius, selected index, and any cap notice. */
+      spotState(): { mode: boolean; brushRadius: number; selectedIndex: number | null; capNotice: string | null };
+      /** Verify-only convenience: set the brush radius directly (bypasses the slider's UI range so scripts can dial in a "generous" radius). */
+      setSpotBrushRadius(radius: number): void;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
@@ -219,11 +232,20 @@ export function CanvasView() {
   const setColorKeyPicking = useAppStore((s) => s.setColorKeyPicking);
   const maskDrawMode = useAppStore((s) => s.maskDrawMode);
   const setMaskDrawMode = useAppStore((s) => s.setMaskDrawMode);
+  const spotMode = useAppStore((s) => s.spotMode);
+  const setSpotMode = useAppStore((s) => s.setSpotMode);
+  const spotBrushRadius = useAppStore((s) => s.spotBrushRadius);
+  const commitSpot = useAppStore((s) => s.commitSpot);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const activeOutputId = useAppStore((s) => s.activeOutputId);
   const maskOverlay = useAppStore((s) => s.maskOverlay);
   const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId);
   const selectedMaskNode = selectedNode?.kind === MASK_KIND ? selectedNode : undefined;
+  // The active chain's spots node (appStore.ts's findActiveSpotsNodeId) —
+  // NOT simply selectedNode: spot mode edits/shows that chain's spots
+  // regardless of whatever else happens to be selected in the node editor.
+  const activeSpotsNodeId = spotMode ? findActiveSpotsNodeId(graph, activeOutputId) : null;
+  const activeSpotsNode = graph.nodes.find((n) => n.id === activeSpotsNodeId);
   // Crop mode previews the FULL (uncropped) straightened frame — the overlay
   // lets you re-adjust the crop rect against the whole image — so force crop
   // back to identity for RENDERING only; the true crop committed in the graph
@@ -274,12 +296,33 @@ export function CanvasView() {
   const { view, fit, oneToOne, setViewFree } = useCanvasViewport(
     containerRef,
     outputDims,
-    wbPicking || colorKeyPicking || maskDrawMode !== null
+    wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode,
+    spotMode // spot mode repurposes the wheel to adjust brush radius (see the dedicated wheel listener below)
   );
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
   const scopeMode = useAppStore((s) => s.scopeMode);
+
+  // Spot mode (task #50): the plain wheel gesture adjusts the brush radius
+  // instead of zooming (useCanvasViewport's own onWheel opts out via
+  // suppressWheelZoom above — both listeners sit on the SAME container
+  // element, so no propagation trickery is needed, just checking spotMode
+  // fresh from the store on every event so this effect never needs to
+  // re-register when the mode flips).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (ev: WheelEvent) => {
+      if (!useAppStore.getState().spotMode) return;
+      ev.preventDefault();
+      const s = useAppStore.getState();
+      const factor = Math.exp(-ev.deltaY * 0.0015);
+      s.setSpotBrushRadius(s.spotBrushRadius * factor);
+    };
+    container.addEventListener('wheel', onWheel, { passive: false });
+    return () => container.removeEventListener('wheel', onWheel);
+  }, []);
 
   // Keep the canvas element's own LAYOUT size in sync with outputDims
   // SYNCHRONOUSLY (before paint) — decoupled from the GPU renderer's async
@@ -652,6 +695,31 @@ export function CanvasView() {
       setMaskShape(nodeId, shape) {
         useAppStore.getState().setMaskShape(nodeId, shape, null);
       },
+      spotsState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        return node?.kind === SPOTS_KIND ? (node.spots ?? defaultSpotsParams()) : null;
+      },
+      setSpots(nodeId, spots) {
+        useAppStore.getState().setSpots(nodeId, spots, null);
+      },
+      activeSpotsNodeId() {
+        const s = useAppStore.getState();
+        return findActiveSpotsNodeId(s.graph, s.activeOutputId);
+      },
+      spotState() {
+        const s = useAppStore.getState();
+        return {
+          mode: s.spotMode,
+          brushRadius: s.spotBrushRadius,
+          selectedIndex: s.selectedSpotIndex,
+          capNotice: s.spotsCapNotice,
+        };
+      },
+      setSpotBrushRadius(radius) {
+        useAppStore.getState().setSpotBrushRadius(radius);
+      },
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;
       },
@@ -846,6 +914,75 @@ export function CanvasView() {
     window.addEventListener('pointerup', onUp);
   };
 
+  // --- Spot removal (task #50): create-by-drag on the canvas -------------
+  //
+  // Mousedown on empty canvas fixes the dst (blemish) center; dragging moves
+  // a live src (source) preview (SpotDrawOverlay) — unlike mask draw, the
+  // RADIUS never comes from the drag distance, it's always the current brush
+  // radius (slider / wheel — see spotBrushRadius). Mouseup commits ONE
+  // commitSpot call (one undo entry, possibly combined with the spots node's
+  // auto-insert — see appStore.ts). A click with no meaningful drag (<2px)
+  // still commits something sane: src = dst nudged sideways by ~1.5x the
+  // brush radius (close enough that the clone is barely perceptible until
+  // the user deliberately drags the src elsewhere — the brief's "visibly
+  // does nothing" fallback), rather than reusing dst exactly (which some
+  // future feature might special-case as "no spot").
+  const [spotDraft, setSpotDraft] = useState<{ dst: { x: number; y: number }; src: { x: number; y: number } } | null>(
+    null
+  );
+  const spotDraftCleanupRef = useRef<(() => void) | null>(null);
+
+  // Escape (App.tsx) flips spotMode to false directly — tear down any
+  // in-flight drag the same way the mask-draw gesture does above.
+  useEffect(() => {
+    if (!spotMode) {
+      spotDraftCleanupRef.current?.();
+      spotDraftCleanupRef.current = null;
+      setSpotDraft(null);
+    }
+  }, [spotMode]);
+
+  const handleSpotPointerDown = (ev: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!spotMode || !outputDims) return;
+    ev.preventDefault();
+    const dst = imagePointFromClient(ev.clientX, ev.clientY);
+    if (!dst) return;
+    setSpotDraft({ dst, src: dst });
+
+    const onMove = (e: PointerEvent) => {
+      const pt = imagePointFromClient(e.clientX, e.clientY);
+      if (pt) setSpotDraft({ dst, src: pt });
+    };
+    const onUp = (e: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      spotDraftCleanupRef.current = null;
+      setSpotDraft(null);
+
+      const end = imagePointFromClient(e.clientX, e.clientY) ?? dst;
+      const dxPx = (end.x - dst.x) * outputDims.width;
+      const dyPx = (end.y - dst.y) * outputDims.height;
+      const draggedPx = Math.hypot(dxPx, dyPx);
+      const clickOnly = draggedPx < 2;
+      const radius = useAppStore.getState().spotBrushRadius;
+
+      let src: { x: number; y: number };
+      if (clickOnly) {
+        const offsetPx = Math.max(8, radius * Math.max(outputDims.width, outputDims.height) * 1.5);
+        src = { x: dst.x + offsetPx / outputDims.width, y: dst.y };
+      } else {
+        src = end;
+      }
+      commitSpot(dst, src, radius);
+    };
+    spotDraftCleanupRef.current = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
   return (
     <div className="canvas-view">
@@ -856,10 +993,10 @@ export function CanvasView() {
       >
         <canvas
           ref={canvasRef}
-          className={`canvas-view-canvas${wbPicking || colorKeyPicking || maskDrawMode !== null ? ' canvas-view-canvas--picking' : ''}`}
+          className={`canvas-view-canvas${wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode ? ' canvas-view-canvas--picking' : ''}`}
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
           onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
-          onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : undefined}
+          onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : spotMode ? handleSpotPointerDown : undefined}
           data-testid="canvas-view-canvas"
         />
         {!overlayVisible && drawGesture && outputDims && (
@@ -876,6 +1013,25 @@ export function CanvasView() {
           <MaskOverlay
             key={selectedMaskNode.id}
             node={selectedMaskNode}
+            view={view}
+            canvasWidth={outputDims.width}
+            canvasHeight={outputDims.height}
+          />
+        )}
+        {!overlayVisible && !cropMode && spotMode && outputDims && (
+          <SpotOverlay
+            key={activeSpotsNode?.id ?? 'none'}
+            node={activeSpotsNode}
+            view={view}
+            canvasWidth={outputDims.width}
+            canvasHeight={outputDims.height}
+          />
+        )}
+        {!overlayVisible && spotDraft && outputDims && (
+          <SpotDrawOverlay
+            dst={spotDraft.dst}
+            src={spotDraft.src}
+            radius={spotBrushRadius}
             view={view}
             canvasWidth={outputDims.width}
             canvasHeight={outputDims.height}
