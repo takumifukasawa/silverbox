@@ -391,22 +391,44 @@ button:disabled {
 
 .crop-handle {
   position: absolute;
-  width: 12px;
-  height: 12px;
-  margin: -6px;
+  width: 16px;
+  height: 16px;
+  margin: -8px;
   background: #fff;
   border: 1px solid #333;
   border-radius: 2px;
   touch-action: none;
+  transition:
+    transform 0.08s ease-out,
+    box-shadow 0.08s ease-out,
+    background 0.08s ease-out,
+    border-color 0.08s ease-out;
 }
 
-/* Enlarge the GRABBABLE area well past the visible 12px dot (≥20px hit target)
+/* Enlarge the GRABBABLE area well past the visible 16px dot (≥28px hit target)
    without changing how big the handle looks — an invisible ::after padding
    hitbox, same trick used below for React Flow's own handles. */
 .crop-handle::after {
   content: '';
   position: absolute;
-  inset: -5px;
+  inset: -6px;
+}
+
+/* Hover/active affordance (UX pack D): the cursor already says what a drag
+   will do (per-handle nwse/ns/ew/nesw-resize below); brighten + grow slightly
+   on hover so the handle also READS as grabbable before the pointer commits,
+   then hold an accent "engaged" color for the whole drag (native :active —
+   no JS drag-state needed, since the pointer stays down on the same element
+   for the entire gesture in every handler here). */
+.crop-handle:hover {
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35);
+  transform: scale(1.15);
+}
+
+.crop-handle:active {
+  background: #6a9fe8;
+  border-color: #6a9fe8;
+  box-shadow: 0 0 0 3px rgba(106, 159, 232, 0.45);
 }
 
 .crop-handle-nw {
@@ -589,36 +611,70 @@ button:disabled {
   position: absolute;
   pointer-events: auto;
   touch-action: none;
+  transition:
+    transform 0.08s ease-out,
+    box-shadow 0.08s ease-out,
+    background 0.08s ease-out,
+    border-color 0.08s ease-out;
+}
+
+/* Enlarge the GRABBABLE area well past the visible dot (≥28px hit target),
+   same ::after trick as .crop-handle — none of the three mask-handle
+   variants had this before (UX pack D round-5 finding: the radial mask's
+   control points read as too small AND unclear that they're grabbable). */
+.mask-handle::after {
+  content: '';
+  position: absolute;
+  inset: -6px;
 }
 
 .mask-handle-center {
-  width: 12px;
-  height: 12px;
-  margin: -6px;
+  width: 16px;
+  height: 16px;
+  margin: -8px;
   border-radius: 50%;
   background: #8ab4f8;
   border: 1px solid #1c2733;
   cursor: move;
+  /* subtle idle ring: reads as a GRABBABLE dot, not flat decoration */
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
 }
 
 .mask-handle-rim {
-  width: 10px;
-  height: 10px;
-  margin: -5px;
+  width: 16px;
+  height: 16px;
+  margin: -8px;
   border-radius: 50%;
   background: #fff;
   border: 1px solid #333;
   cursor: ew-resize;
+  box-shadow: 0 0 0 2px rgba(138, 180, 248, 0.35);
 }
 
 .mask-handle-endpoint {
-  width: 12px;
-  height: 12px;
-  margin: -6px;
+  width: 16px;
+  height: 16px;
+  margin: -8px;
   border-radius: 50%;
   background: #f0c674;
   border: 1px solid #333;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
   cursor: move;
+}
+
+/* Hover/active affordance (UX pack D), same convention as .crop-handle. */
+.mask-handle-center:hover,
+.mask-handle-rim:hover,
+.mask-handle-endpoint:hover {
+  transform: scale(1.15);
+}
+
+.mask-handle-center:active,
+.mask-handle-rim:active,
+.mask-handle-endpoint:active {
+  background: #6a9fe8;
+  border-color: #6a9fe8;
+  box-shadow: 0 0 0 3px rgba(106, 159, 232, 0.45);
 }
 
 /* Live preview while dragging a new local-adjustment shape (draw-to-create
@@ -742,6 +798,10 @@ button:disabled {
   touch-action: none;
   border-radius: 50%;
   box-sizing: border-box;
+  transition:
+    box-shadow 0.08s ease-out,
+    border-color 0.08s ease-out,
+    border-width 0.08s ease-out;
 }
 
 .spot-handle-dst {
@@ -756,27 +816,71 @@ button:disabled {
   cursor: move;
 }
 
+/* dst/src are sized to the SPOT'S OWN radius (the visible circle IS the
+   healed area, not a decorative dot) — resizing them on hover like the fixed
+   handles would misrepresent that area, so unlike .crop-handle/.mask-handle
+   the hover/active affordance here is border-only, no transform: scale. A
+   tiny spot's circle can still be well under the ≥28px hit target, so a
+   FIXED-size ::after (not a percentage inset, which would scale with the
+   variable diameter) guarantees a minimum grabbable area regardless of the
+   spot's radius; a large spot's own box already exceeds it and still
+   receives events across its full visible circle. */
+.spot-handle-dst::after,
+.spot-handle-src::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 28px;
+  height: 28px;
+  margin: -14px 0 0 -14px;
+}
+
+.spot-handle-dst:hover,
+.spot-handle-src:hover {
+  border-width: 2.5px;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.2);
+}
+
 .spot-handle-dst.selected,
 .spot-handle-src.selected {
   border-color: #fff;
   border-width: 2px;
 }
 
+.spot-handle-dst:active,
+.spot-handle-src:active {
+  border-color: #6a9fe8;
+  box-shadow: 0 0 0 3px rgba(106, 159, 232, 0.45);
+}
+
 .spot-handle-rim {
-  width: 10px;
-  height: 10px;
-  margin: -5px;
+  width: 16px;
+  height: 16px;
+  margin: -8px;
   background: #fff;
   border: 1px solid #333;
   cursor: ew-resize;
+  transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, background 0.08s ease-out, border-color 0.08s ease-out;
 }
 
-/* Enlarge the rim handle's GRABBABLE area well past its visible 10px dot
-   (≥20px hit target), same trick as .crop-handle/.mask-handle. */
+/* Enlarge the rim handle's GRABBABLE area well past its visible 16px dot
+   (≥28px hit target), same trick as .crop-handle/.mask-handle. */
 .spot-handle-rim::after {
   content: '';
   position: absolute;
-  inset: -5px;
+  inset: -6px;
+}
+
+.spot-handle-rim:hover {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35);
+}
+
+.spot-handle-rim:active {
+  background: #6a9fe8;
+  border-color: #6a9fe8;
+  box-shadow: 0 0 0 3px rgba(106, 159, 232, 0.45);
 }
 
 .spot-controls {

@@ -188,6 +188,26 @@ try {
     before: pastBeforeDrag,
     after: await historyPast(),
   });
+
+  console.log('verify-crop (UX pack D round-5: handle affordance — size + per-handle resize cursor):');
+  const seCursor = await handle.evaluate((el) => getComputedStyle(el).cursor);
+  check('SE corner handle cursor is nwse-resize (the cursor says what the drag will do)', seCursor === 'nwse-resize', seCursor);
+  // getComputedStyle's width/height reflect the element's own AUTHORED CSS
+  // box (16px) — getBoundingClientRect() would instead report the SCREEN size
+  // after the ancestor .crop-overlay's pan/zoom `transform: scale(view.scale)`
+  // is applied, which is unrelated to the affordance size we're checking here.
+  const seVisibleSize = await handle.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
+  });
+  check('SE corner handle visible dot is >=16px (bumped from 12px)', seVisibleSize.width >= 16 && seVisibleSize.height >= 16, seVisibleSize);
+  const nCursor = await page.locator('[data-testid="crop-handle-n"]').evaluate((el) => getComputedStyle(el).cursor);
+  check('N edge handle cursor is ns-resize', nCursor === 'ns-resize', nCursor);
+  const eCursor = await page.locator('[data-testid="crop-handle-e"]').evaluate((el) => getComputedStyle(el).cursor);
+  check('E edge handle cursor is ew-resize', eCursor === 'ew-resize', eCursor);
+  const cropRectCursor = await page.locator('[data-testid="crop-rect"]').evaluate((el) => getComputedStyle(el).cursor);
+  check('crop-rect body cursor is move', cropRectCursor === 'move', cropRectCursor);
+
   const draggedW = Math.round(baselineDims.width * geomAfterDrag.crop.w);
   const draggedH = Math.round(baselineDims.height * geomAfterDrag.crop.h);
   await page.locator('[data-testid="crop-done"]').click();

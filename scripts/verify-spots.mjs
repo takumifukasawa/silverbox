@@ -75,6 +75,17 @@ try {
   const activeSpotsNodeId = () => page.evaluate(() => window.__debug.activeSpotsNodeId());
   const spotState = () => page.evaluate(() => window.__debug.spotState());
   const setSpotBrushRadius = (r) => page.evaluate((v) => window.__debug.setSpotBrushRadius(v), r);
+  // Playwright's locator.fill() applies stricter step-precision validation
+  // than the browser itself for this slider's 0.001 step (rejects some
+  // otherwise-valid values as "Malformed value") — set the value through the
+  // native input value setter and dispatch a bubbling 'input' event instead,
+  // which is what a real drag fires and React's onChange listens for.
+  const setRangeValue = (testId, value) =>
+    page.locator(`[data-testid="${testId}"]`).evaluate((el, v) => {
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, String(v));
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }, value);
   const edgeList = (g) => g.edges.map((e) => `${e.source}->${e.target}${e.targetHandle ? ':' + e.targetHandle : ''}`).sort();
 
   /** Mean brightness (0..1) of a crop of the CURRENT preview's ENCODED output — a real GPU readback, not a lossy screenshot. */
@@ -301,6 +312,105 @@ try {
     before: spotBeforeDrag.dy,
     after: spotAfterDrag.dy,
     expectedDelta: expectedDy,
+  });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-spots (UX pack D round-5: selected-spot SLIDER resize — LR "resize the selected heal circle" behavior):');
+  // spot 0 is still selected from section 4's dst-handle drag; geometry is
+  // still identity here (the §1 anchor rotate check runs later in this
+  // file), so anchor radius == output radius exactly.
+  check('spot 0 is selected heading into the slider check', (await spotState()).selectedIndex === 0, (await spotState()).selectedIndex);
+  const sliderLabelText = await page.locator('[data-testid="spot-controls"] label').innerText();
+  check('slider label reads "Spot radius" while a spot is selected (legible state, not just "Brush radius")', sliderLabelText.includes('Spot radius'), sliderLabelText);
+  const brushRadiusBeforeSlider = (await spotState()).brushRadius;
+  const anchorRadiusBeforeSlider = (await spotsState(spotsNodeId)).spots[0].radius;
+  const pastBeforeSlider = await historyPast();
+  const slider = page.locator('[data-testid="spot-radius-slider"]');
+  await slider.scrollIntoViewIfNeeded();
+  // Three ticks of ONE slider session (mirrors CropOverlay's angle-slider
+  // coalescing pattern) should land as exactly one undo entry.
+  await setRangeValue('spot-radius-slider', 0.09);
+  await setRangeValue('spot-radius-slider', 0.1);
+  await setRangeValue('spot-radius-slider', 0.11);
+  const anchorRadiusAfterSlider = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('slider tick moved spots[0].radius (anchor space, identity geometry ⇒ equals the output-space slider value)', Math.abs(anchorRadiusAfterSlider - 0.11) < 0.005, {
+    before: anchorRadiusBeforeSlider,
+    after: anchorRadiusAfterSlider,
+  });
+  check('three slider ticks in one session coalesce into ONE undo entry', (await historyPast()) === pastBeforeSlider + 1, {
+    before: pastBeforeSlider,
+    after: await historyPast(),
+  });
+  const brushRadiusAfterSlider = (await spotState()).brushRadius;
+  check('brushRadius (next-spot size) is untouched while the slider edits a selection', brushRadiusAfterSlider === brushRadiusBeforeSlider, {
+    brushRadiusBeforeSlider,
+    brushRadiusAfterSlider,
+  });
+
+  // Clear the selection (toggling spot mode off/on resets selectedSpotIndex
+  // — appStore.ts's setSpotMode — and remounts SpotOverlay, so its slider
+  // session ref starts fresh too) and confirm the slider reverts to
+  // controlling the NEXT-spot brush radius, exactly as before this feature.
+  await setSpotModeUi(false);
+  await setSpotModeUi(true);
+  check('no selection after the mode toggle', (await spotState()).selectedIndex === null, (await spotState()).selectedIndex);
+  const noSelLabelText = await page.locator('[data-testid="spot-controls"] label').innerText();
+  check('slider label reverts to "Brush radius" with nothing selected', noSelLabelText.includes('Brush radius'), noSelLabelText);
+  const anchorRadiusBeforeNoSelSlider = (await spotsState(spotsNodeId)).spots[0].radius;
+  await setRangeValue('spot-radius-slider', 0.05);
+  const brushRadiusAfterNoSelSlider = (await spotState()).brushRadius;
+  check('with nothing selected, the slider only moves spotState().brushRadius', Math.abs(brushRadiusAfterNoSelSlider - 0.05) < 0.005, brushRadiusAfterNoSelSlider);
+  const anchorRadiusAfterNoSelSlider = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('spots[0].radius is untouched by the no-selection slider', anchorRadiusAfterNoSelSlider === anchorRadiusBeforeNoSelSlider, {
+    anchorRadiusBeforeNoSelSlider,
+    anchorRadiusAfterNoSelSlider,
+  });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-spots (UX pack D round-5: selected-spot WHEEL resize mirrors the slider rule):');
+  // Re-select spot 0 via a plain click (no drag) on its dst handle.
+  const dstHandleForWheel = page.locator('[data-testid="spot-handle-dst-0"]');
+  const dhwBox = await dstHandleForWheel.boundingBox();
+  await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  check('re-selected spot 0 via a plain click', (await spotState()).selectedIndex === 0, (await spotState()).selectedIndex);
+
+  const anchorRadiusBeforeWheel = (await spotsState(spotsNodeId)).spots[0].radius;
+  const pastBeforeWheel = await historyPast();
+  await page.mouse.wheel(0, -80);
+  await page.mouse.wheel(0, -80);
+  await page.waitForTimeout(50);
+  const anchorRadiusAfterWheel = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('wheel resized spots[0].radius while selected (mirrors the slider rule)', anchorRadiusAfterWheel !== anchorRadiusBeforeWheel, {
+    before: anchorRadiusBeforeWheel,
+    after: anchorRadiusAfterWheel,
+  });
+  check('two quick wheel ticks coalesce into ONE undo entry (idle-timeout session)', (await historyPast()) === pastBeforeWheel + 1, {
+    before: pastBeforeWheel,
+    after: await historyPast(),
+  });
+
+  // Clear the selection again and confirm the wheel reverts to brushRadius.
+  // setSpotModeUi clicks the toolbar toggle, which leaves the mouse hovering
+  // that button rather than the canvas — move it back over the canvas
+  // viewport first, or the wheel event never reaches CanvasView's listener.
+  await setSpotModeUi(false);
+  await setSpotModeUi(true);
+  await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
+  const brushRadiusBeforeNoSelWheel = (await spotState()).brushRadius;
+  const anchorRadiusBeforeNoSelWheel = (await spotsState(spotsNodeId)).spots[0].radius;
+  await page.mouse.wheel(0, -80);
+  await page.waitForTimeout(50);
+  const brushRadiusAfterNoSelWheel = (await spotState()).brushRadius;
+  check('with nothing selected, wheel only moves spotState().brushRadius', brushRadiusAfterNoSelWheel !== brushRadiusBeforeNoSelWheel, {
+    before: brushRadiusBeforeNoSelWheel,
+    after: brushRadiusAfterNoSelWheel,
+  });
+  const anchorRadiusAfterNoSelWheel = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('spots[0].radius is untouched by the no-selection wheel', anchorRadiusAfterNoSelWheel === anchorRadiusBeforeNoSelWheel, {
+    anchorRadiusBeforeNoSelWheel,
+    anchorRadiusAfterNoSelWheel,
   });
 
   // ---------------------------------------------------------------------

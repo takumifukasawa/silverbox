@@ -46,6 +46,7 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight, geometry, o
   const setSpotBrushRadius = useAppStore((s) => s.setSpotBrushRadius);
   const spots = node?.spots?.spots ?? [];
   const sessionRef = useRef<number | null>(null);
+  const sliderSessionRef = useRef<number | null>(null);
   const maxDim = Math.max(canvasWidth, canvasHeight);
   const ow = orientedWidth;
   const oh = orientedHeight;
@@ -148,6 +149,35 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight, geometry, o
     window.addEventListener('pointerup', onUp);
   };
 
+  // LR expectation (round-5 finding): with a spot SELECTED, the size
+  // slider/wheel resizes THAT spot instead of the next-spot brush radius —
+  // this is the only place that distinction is made; the wheel handler in
+  // CanvasView.tsx mirrors it independently (no shared code, since it has no
+  // access to this component's per-spot output-space radius already computed
+  // in outSpots). `spots[selectedSpotIndex]` guards against a stale index
+  // (e.g. after undo/redo past a point where this spot no longer exists).
+  const selectedSpot = selectedSpotIndex !== null ? spots[selectedSpotIndex] : undefined;
+  const selectedOutSpot = selectedSpotIndex !== null ? outSpots[selectedSpotIndex] : undefined;
+  const isEditingSelection = !!node && !!selectedSpot && !!selectedOutSpot;
+
+  const handleSliderChange = (outputRadius: number) => {
+    if (isEditingSelection && node && selectedSpotIndex !== null) {
+      sliderSessionRef.current ??= Date.now();
+      const anchorRadius = outputRadiusToAnchor(outputRadius, geometry, ow, oh);
+      updateSpot(
+        node.id,
+        selectedSpotIndex,
+        { radius: anchorRadius },
+        `spot-radius:${node.id}:${selectedSpotIndex}:${sliderSessionRef.current}`
+      );
+    } else {
+      setSpotBrushRadius(outputRadius);
+    }
+  };
+
+  const sliderValue = isEditingSelection ? selectedOutSpot!.radius : spotBrushRadius;
+  const sliderLabel = isEditingSelection ? 'Spot radius' : 'Brush radius';
+
   const pct = (v: number) => `${v * 100}%`;
 
   return (
@@ -216,18 +246,24 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight, geometry, o
       </div>
       <div className="spot-controls" data-testid="spot-controls" onPointerDown={(ev) => ev.stopPropagation()}>
         <label>
-          Brush radius
+          {sliderLabel}
           <input
             type="range"
             min={0.002}
             max={0.15}
             step={0.001}
-            value={spotBrushRadius}
+            value={sliderValue}
             data-testid="spot-radius-slider"
-            onChange={(ev) => setSpotBrushRadius(Number(ev.target.value))}
+            onPointerDown={() => {
+              if (isEditingSelection) sliderSessionRef.current = Date.now();
+            }}
+            onPointerUp={() => {
+              sliderSessionRef.current = null;
+            }}
+            onChange={(ev) => handleSliderChange(Number(ev.target.value))}
           />
           <span className="spot-radius-value" data-testid="spot-radius-value">
-            {(spotBrushRadius * 100).toFixed(1)}%
+            {(sliderValue * 100).toFixed(1)}%
           </span>
         </label>
       </div>

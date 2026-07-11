@@ -20,7 +20,12 @@ import {
   type GraphDoc,
   type LensParams,
 } from '../engine/graph/graphDoc';
-import { maskShapeOutputToAnchor, outputRadiusToAnchor, outputToAnchor } from '../engine/graph/anchorSpace';
+import {
+  anchorRadiusToOutput,
+  maskShapeOutputToAnchor,
+  outputRadiusToAnchor,
+  outputToAnchor,
+} from '../engine/graph/anchorSpace';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
@@ -323,18 +328,57 @@ export function CanvasView() {
   // element, so no propagation trickery is needed, just checking spotMode
   // fresh from the store on every event so this effect never needs to
   // re-register when the mode flips).
+  //
+  // Round-5 finding: mirrors SpotOverlay's slider rule — with a spot
+  // SELECTED, the wheel resizes THAT spot (LR behavior) instead of the
+  // next-spot brush radius. This effect has empty deps (registered once), so
+  // geometry/image can't be closed-over safely — both are re-read fresh from
+  // the store on every tick instead. A continuous scroll burst coalesces into
+  // ONE undo entry via an idle-timeout session (no pointerdown/up to bracket
+  // it, unlike the slider): the session key stays fixed until 500ms of wheel
+  // silence, then resets so the next scroll burst is its own undo entry.
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+    let wheelSpotSession: number | null = null;
+    let wheelSpotTimer: number | undefined;
     const onWheel = (ev: WheelEvent) => {
-      if (!useAppStore.getState().spotMode) return;
-      ev.preventDefault();
       const s = useAppStore.getState();
+      if (!s.spotMode) return;
+      ev.preventDefault();
       const factor = Math.exp(-ev.deltaY * 0.0015);
+      if (s.selectedSpotIndex !== null) {
+        const spotsNodeId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
+        const spotsNode = spotsNodeId ? s.graph.nodes.find((n) => n.id === spotsNodeId) : undefined;
+        const spot = spotsNode?.spots?.spots?.[s.selectedSpotIndex];
+        if (spotsNode && spot && s.image) {
+          const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+          const geom = inputNode?.geometry ?? defaultGeometryParams();
+          const dims = orientedDims(s.image.width, s.image.height, geom.orientation ?? defaultGeometryOrientation());
+          const outRadius = anchorRadiusToOutput(spot.radius, geom, dims.width, dims.height);
+          const nextOutRadius = Math.max(0.005, outRadius * factor);
+          const nextRadius = outputRadiusToAnchor(nextOutRadius, geom, dims.width, dims.height);
+          wheelSpotSession ??= Date.now();
+          clearTimeout(wheelSpotTimer);
+          wheelSpotTimer = window.setTimeout(() => {
+            wheelSpotSession = null;
+          }, 500);
+          s.updateSpot(
+            spotsNode.id,
+            s.selectedSpotIndex,
+            { radius: nextRadius },
+            `spot-radius-wheel:${spotsNode.id}:${s.selectedSpotIndex}:${wheelSpotSession}`
+          );
+          return;
+        }
+      }
       s.setSpotBrushRadius(s.spotBrushRadius * factor);
     };
     container.addEventListener('wheel', onWheel, { passive: false });
-    return () => container.removeEventListener('wheel', onWheel);
+    return () => {
+      clearTimeout(wheelSpotTimer);
+      container.removeEventListener('wheel', onWheel);
+    };
   }, []);
 
   // Keep the canvas element's own LAYOUT size in sync with outputDims

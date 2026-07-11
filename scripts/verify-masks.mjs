@@ -290,6 +290,28 @@ try {
     before: pastBeforeDrag,
     after: await historyPast(),
   });
+
+  console.log('verify-masks (UX pack D round-5: handle affordance — size + cursor legible per handle):');
+  const centerCursor = await centerHandle.evaluate((el) => getComputedStyle(el).cursor);
+  check('mask center handle cursor is move', centerCursor === 'move', centerCursor);
+  // getComputedStyle's width/height reflect the element's own AUTHORED CSS
+  // box (16px) — getBoundingClientRect() would instead report the SCREEN size
+  // after the ancestor .mask-overlay's pan/zoom `transform: scale(view.scale)`
+  // is applied, which is unrelated to the affordance size we're checking here.
+  const centerVisibleSize = await centerHandle.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
+  });
+  check('mask center handle visible dot is >=16px (bumped from 12px)', centerVisibleSize.width >= 16 && centerVisibleSize.height >= 16, centerVisibleSize);
+  const rimHandle = page.locator('[data-testid="mask-handle-rim"]');
+  const rimCursor = await rimHandle.evaluate((el) => getComputedStyle(el).cursor);
+  check('mask rim (resize) handle has a resize cursor', rimCursor === 'ew-resize', rimCursor);
+  const rimVisibleSize = await rimHandle.evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
+  });
+  check('mask rim handle visible dot is >=16px (bumped from 10px)', rimVisibleSize.width >= 16 && rimVisibleSize.height >= 16, rimVisibleSize);
+
   // restore the default centered mask before the linear-mask check
   await setMaskShape('mask-1', { type: 'radial', mode: 'add', cx: 0.5, cy: 0.5, radius: 0.25, feather: 0.5, invert: false });
 
