@@ -352,6 +352,38 @@ try {
     angle: geomSlider.angle,
   });
 
+  console.log('verify-crop (containment: the rect cannot be dragged/resized into the rotation void):');
+  // still at the slider's 30° — the valid area is the tilted source rect
+  const rectBoxC = await page.locator('[data-testid="crop-rect"]').boundingBox();
+  // MOVE: grab the rect body and shove it far past the top-left corner
+  await page.mouse.move(rectBoxC.x + rectBoxC.width / 2, rectBoxC.y + rectBoxC.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(rectBoxC.x + rectBoxC.width / 2 - 900, rectBoxC.y + rectBoxC.height / 2 - 700, { steps: 6 });
+  await page.mouse.up();
+  const geomMoved = await geometryState();
+  const movedVoid = worstVoid(geomMoved.crop, geomMoved.angle, baselineDims.width, baselineDims.height);
+  check('a move drag slides along the tilted boundary — no void enters the rect', movedVoid <= 1, {
+    movedVoid,
+    crop: geomMoved.crop,
+  });
+  // RESIZE: drag the NW handle far outward — growth must stop at the boundary
+  const nwBox = await page.locator('[data-testid="crop-handle-nw"]').boundingBox();
+  await page.mouse.move(nwBox.x + nwBox.width / 2, nwBox.y + nwBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(nwBox.x + nwBox.width / 2 - 900, nwBox.y + nwBox.height / 2 - 700, { steps: 6 });
+  await page.mouse.up();
+  const geomResized = await geometryState();
+  const resizedVoid = worstVoid(geomResized.crop, geomResized.angle, baselineDims.width, baselineDims.height);
+  check('a resize drag stops at the tilted boundary — no void enters the rect', resizedVoid <= 1, {
+    resizedVoid,
+    crop: geomResized.crop,
+  });
+  check(
+    'the resize did actually grow the rect toward the boundary (constraint is a stop, not a freeze)',
+    geomResized.crop.w > geomMoved.crop.w - 1e-6 && geomResized.crop.h > geomMoved.crop.h - 1e-6,
+    { before: geomMoved.crop, after: geomResized.crop }
+  );
+
   console.log('verify-crop (LR-style grids: thirds always in crop mode, fine grid while rotating):');
   await page.locator('[data-testid="crop-reset"]').click();
   check(

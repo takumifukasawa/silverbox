@@ -8,7 +8,7 @@ import {
   type GeometryCrop,
   type GeometryOrientation,
 } from '../engine/graph/graphDoc';
-import { fitRotatedCrop } from '../engine/graph/cropFit';
+import { clampMoveToRotatedFrame, constrainRectAlongPath, fitRotatedCrop } from '../engine/graph/cropFit';
 import type { ViewportState } from './useCanvasViewport';
 
 /** Corners + edges, clockwise from north-west (drag target ids double as CSS class suffixes). */
@@ -142,6 +142,28 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
       h = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, h));
       x = Math.min(Math.max(0, x), 1 - w);
       y = Math.min(Math.max(0, y), 1 - h);
+      // With a straighten angle in play the valid area is the TILTED source
+      // rectangle, so the [0,1] clamps above aren't enough — the rect could
+      // still be dragged into the (black) rotation void. Moves slide along
+      // the tilted boundary (closed-form center clamp); resizes stop at it
+      // (binary search along the drag path — exact, the valid set is convex).
+      // See cropFit.ts. At angle 0 the clamps above are already exact.
+      if (angle !== 0) {
+        const constrained =
+          kind === 'move'
+            ? clampMoveToRotatedFrame({ W: canvasWidth, H: canvasHeight, crop: { x, y, w, h }, angle })
+            : constrainRectAlongPath({
+                W: canvasWidth,
+                H: canvasHeight,
+                from: start.crop,
+                to: { x, y, w, h },
+                angle,
+              });
+        ({ x, y, w, h } = constrained);
+        // keep the schema's [0,1] contract (clampGeometry would do it anyway)
+        x = Math.min(Math.max(0, x), 1 - w);
+        y = Math.min(Math.max(0, y), 1 - h);
+      }
       commitCrop({ x, y, w, h });
     };
     const onUp = () => {

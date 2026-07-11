@@ -71,6 +71,8 @@ declare global {
         opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
       ): void;
       exportState(): { status: string; error: string | null };
+      /** Verify-only: deterministic store-level wiring for test setup (the drag-to-wire UI itself is ms13's coverage). */
+      connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
       /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
       exportBatchState(): { count: number; paths: string[] } | null;
       /** Current `<userData>/settings.json` state (loaded at boot / after any settingsUpdate). */
@@ -491,6 +493,9 @@ export function CanvasView() {
       },
       exportOutputsTo(target, path, opts) {
         void useAppStore.getState().exportSelectedOutputs(target, path, opts);
+      },
+      connectEdge(source, target, targetHandle) {
+        useAppStore.getState().connectEdge(source, target, targetHandle);
       },
       exportState() {
         const s = useAppStore.getState();

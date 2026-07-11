@@ -355,15 +355,19 @@ try {
   const secondOutputId = gWithSecondOutput.nodes.find((n) => n.kind === 'output' && n.id !== 'out').id;
   await page.locator(`.react-flow__node[data-id="${secondOutputId}"]`).click();
   await page.locator('[data-testid="output-name"]').fill('web');
-  // wire the second output straight off the input node (bypassing Develop) so it visibly differs from 'main'
-  const inSourceHandle = page.locator('.react-flow__node[data-id="in"] .react-flow__handle.source');
-  const secondTargetHandle = page.locator(`.react-flow__node[data-id="${secondOutputId}"] .react-flow__handle.target`);
-  const srcBox = await inSourceHandle.boundingBox();
-  const dstBox = await secondTargetHandle.boundingBox();
-  await page.mouse.move(srcBox.x + srcBox.width / 2, srcBox.y + srcBox.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(dstBox.x + dstBox.width / 2, dstBox.y + dstBox.height / 2, { steps: 8 });
-  await page.mouse.up();
+  // wire the second output straight off the input node (bypassing Develop) so
+  // it visibly differs from 'main' — via the store-level debug hook: a mouse
+  // drag-to-wire here flaked under parallel-suite CPU contention (the drag
+  // silently missed and the later export failed with "needs exactly one
+  // input"), and the drag gesture itself is ms13's coverage, not this
+  // script's concern.
+  await page.evaluate((target) => window.__debug.connectEdge('in', target), secondOutputId);
+  const gWired = await page.evaluate(() => window.__debug.graphState());
+  check(
+    'the second output is wired off the input node (setup)',
+    gWired.edges.some((e) => e.source === 'in' && e.target === secondOutputId),
+    gWired.edges.map((e) => `${e.source}->${e.target}`)
+  );
 
   await page.locator('[data-testid="export-button"]').click();
   await page.waitForSelector('[data-testid="export-dialog"]', { timeout: 5_000 });
