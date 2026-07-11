@@ -248,7 +248,7 @@ export function CanvasView() {
   // see NodeEditorPanel.tsx). planDoc keeps the SAME reference across such
   // edits; it — not graphForBuild directly — drives the render effect below.
   const planDoc = usePlanDoc(graphForBuild);
-  const { view, fit, oneToOne } = useCanvasViewport(
+  const { view, fit, oneToOne, setViewFree } = useCanvasViewport(
     containerRef,
     outputDims,
     wbPicking || colorKeyPicking || maskDrawMode !== null
@@ -836,7 +836,12 @@ export function CanvasView() {
           same `.canvas-view` (position:relative), so both siblings share the
           identical (0,0) origin — only the clipping differs. */}
       {!overlayVisible && cropMode && outputDims && (
-        <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />
+        <CropOverlay
+          view={view}
+          canvasWidth={outputDims.width}
+          canvasHeight={outputDims.height}
+          setViewFree={setViewFree}
+        />
       )}
       {!overlayVisible && <HistogramPanel />}
       {!overlayVisible && showBefore && (

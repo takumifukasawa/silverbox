@@ -207,7 +207,39 @@ try {
     { baselineDims, dimsAfterUndo }
   );
 
-  console.log('verify-crop (LR-style rotate: drag OUTSIDE a corner changes angle, one undo entry, crop box stays axis-aligned):');
+  console.log('verify-crop (LR-style rotate: auto-zoom, no void, screen-constant, reversible):');
+  // Plain-JS mirror of RESAMPLE_SHADER's rotate + its inverse map, so the
+  // no-void invariant is re-derived here independently of the app's own
+  // cropFit.ts. A rotated-plane point p is void-free iff its source
+  // q = rot(p − O, −a) + O lands inside [0,W]×[0,H].
+  const rot = (vx, vy, a) => {
+    const s = Math.sin(a);
+    const c = Math.cos(a);
+    return [vx * c + vy * s, -vx * s + vy * c];
+  };
+  // returns the worst out-of-bounds excess (px) over the 4 crop-rect corners;
+  // ≤ tol ⇒ void-free. W,H = oriented frame dims (orientation is identity here,
+  // so the baseline outputDims are exactly W×H).
+  const worstVoid = (crop, angleDeg, W, H) => {
+    const a = (angleDeg * Math.PI) / 180;
+    const Ox = W / 2;
+    const Oy = H / 2;
+    const corners = [
+      [crop.x, crop.y],
+      [crop.x + crop.w, crop.y],
+      [crop.x + crop.w, crop.y + crop.h],
+      [crop.x, crop.y + crop.h],
+    ];
+    let worst = 0;
+    for (const [nx, ny] of corners) {
+      const [qx, qy] = rot(nx * W - Ox, ny * H - Oy, -a);
+      const sx = qx + Ox;
+      const sy = qy + Oy;
+      worst = Math.max(worst, -sx, sx - W, -sy, sy - H);
+    }
+    return worst;
+  };
+
   // Fresh, known geometry + a fresh crop-mode entry (the previous section
   // left crop mode via "Done"), so this test doesn't depend on the dragged
   // crop rect from the section above.
@@ -225,41 +257,44 @@ try {
   const rotateZone = page.locator('[data-testid="crop-rotate-se"]');
   await rotateZone.scrollIntoViewIfNeeded();
   const rzBox = await rotateZone.boundingBox();
-  await page.mouse.move(rzBox.x + rzBox.width / 2, rzBox.y + rzBox.height / 2);
+  const rzCx = rzBox.x + rzBox.width / 2;
+  const rzCy = rzBox.y + rzBox.height / 2;
+  await page.mouse.move(rzCx, rzCy);
   await page.mouse.down();
-  // sweep the SE rotate zone further out and down — an angular drag around
-  // the crop rect's own center, not merely a radial one
-  await page.mouse.move(rzBox.x + rzBox.width / 2 + 10, rzBox.y + rzBox.height / 2 + 40, { steps: 8 });
+  // sweep the SE rotate zone around the crop rect's center to build an angle
+  await page.mouse.move(rzCx + 10, rzCy + 60, { steps: 8 });
   await page.mouse.up();
 
   const geomAfterRotate = await geometryState();
   const rectBoxAfterRotate = await cropRect.boundingBox();
-  check('outside-corner drag changed the angle (crop rect x/y/w/h untouched)', geomAfterRotate.angle !== geomBeforeRotate.angle, {
-    before: geomBeforeRotate,
-    after: geomAfterRotate,
+  check('outside-corner drag changed the angle', geomAfterRotate.angle !== geomBeforeRotate.angle, {
+    before: geomBeforeRotate.angle,
+    after: geomAfterRotate.angle,
   });
-  check(
-    "rotating left the crop rect's x/y/w/h exactly as committed (only angle moved)",
-    geomAfterRotate.crop.x === geomBeforeRotate.crop.x &&
-      geomAfterRotate.crop.y === geomBeforeRotate.crop.y &&
-      geomAfterRotate.crop.w === geomBeforeRotate.crop.w &&
-      geomAfterRotate.crop.h === geomBeforeRotate.crop.h,
-    { before: geomBeforeRotate.crop, after: geomAfterRotate.crop }
-  );
   check('outside-corner rotate drag is exactly one undo entry', (await historyPast()) === pastBeforeRotate + 1, {
     before: pastBeforeRotate,
     after: await historyPast(),
   });
+  // No-void invariant: after the drag, all 4 crop-rect corners map into the
+  // source box (re-derived here in plain JS, not read back from the app).
+  const voidExcess = worstVoid(geomAfterRotate.crop, geomAfterRotate.angle, baselineDims.width, baselineDims.height);
+  check('no-void: all 4 crop-rect corners map inside the source frame', voidExcess <= 1, {
+    voidExcess,
+    crop: geomAfterRotate.crop,
+    angle: geomAfterRotate.angle,
+  });
+  // Screen constancy: with the view auto-zoom compensation, the crop rect's
+  // on-screen bounding box is unchanged through the whole rotate drag.
   check(
-    "the crop rect's on-screen box stays axis-aligned and in the SAME place while rotating (its bounding box is unchanged)",
-    Math.abs(rectBoxAfterRotate.x - rectBoxBeforeRotate.x) < 1 &&
-      Math.abs(rectBoxAfterRotate.y - rectBoxBeforeRotate.y) < 1 &&
-      Math.abs(rectBoxAfterRotate.width - rectBoxBeforeRotate.width) < 1 &&
-      Math.abs(rectBoxAfterRotate.height - rectBoxBeforeRotate.height) < 1,
+    "the crop rect's on-screen box is pixel-stable through the rotate drag (auto-zoom compensation)",
+    Math.abs(rectBoxAfterRotate.x - rectBoxBeforeRotate.x) < 1.5 &&
+      Math.abs(rectBoxAfterRotate.y - rectBoxBeforeRotate.y) < 1.5 &&
+      Math.abs(rectBoxAfterRotate.width - rectBoxBeforeRotate.width) < 1.5 &&
+      Math.abs(rectBoxAfterRotate.height - rectBoxBeforeRotate.height) < 1.5,
     { rectBoxBeforeRotate, rectBoxAfterRotate }
   );
-  // the box being unrotated (not just unmoved) is the real "axis-aligned"
-  // claim — assert the actual computed transform has no skew/rotate component
+  // the box being unrotated (not skewed) is the real "axis-aligned" claim —
+  // assert the overlay's computed transform has no rotation/skew component
   const cropOverlayTransform = await page.locator('[data-testid="crop-overlay"]').evaluate((el) => getComputedStyle(el).transform);
   check(
     'the crop-overlay element itself carries only translate+uniform-scale (no rotation matrix component)',
@@ -268,12 +303,54 @@ try {
   );
 
   // ±45° clamp still holds via this new gesture too (existing invariant, not loosened)
-  await page.mouse.move(rzBox.x + rzBox.width / 2, rzBox.y + rzBox.height / 2);
+  await page.mouse.move(rzCx, rzCy);
   await page.mouse.down();
-  await page.mouse.move(rzBox.x + rzBox.width / 2 - 400, rzBox.y + rzBox.height / 2 + 400, { steps: 10 });
+  await page.mouse.move(rzCx - 400, rzCy + 400, { steps: 10 });
   await page.mouse.up();
   const geomClamped = await geometryState();
   check('the ±45° clamp still holds via the outside-corner gesture', Math.abs(geomClamped.angle) <= 45, geomClamped);
+
+  console.log('verify-crop (rotate reversibility: sweep out and back within one drag):');
+  // reset to a known full crop + angle 0, staying in crop mode
+  await page.locator('[data-testid="crop-reset"]').click();
+  const geomBeforeRev = await geometryState();
+  const relRotateZone = page.locator('[data-testid="crop-rotate-se"]');
+  const relBox = await relRotateZone.boundingBox();
+  const relCx = relBox.x + relBox.width / 2;
+  const relCy = relBox.y + relBox.height / 2;
+  // one drag: sweep out to build an angle, then back to the exact start point
+  await page.mouse.move(relCx, relCy);
+  await page.mouse.down();
+  await page.mouse.move(relCx + 20, relCy + 80, { steps: 8 });
+  await page.mouse.move(relCx, relCy, { steps: 8 });
+  await page.mouse.up();
+  const geomAfterRev = await geometryState();
+  check(
+    'sweeping the angle out and back restores the pre-drag crop (each of x/y/w/h within 1e-3)',
+    Math.abs(geomAfterRev.crop.x - geomBeforeRev.crop.x) < 1e-3 &&
+      Math.abs(geomAfterRev.crop.y - geomBeforeRev.crop.y) < 1e-3 &&
+      Math.abs(geomAfterRev.crop.w - geomBeforeRev.crop.w) < 1e-3 &&
+      Math.abs(geomAfterRev.crop.h - geomBeforeRev.crop.h) < 1e-3,
+    { before: geomBeforeRev.crop, after: geomAfterRev.crop }
+  );
+  check(
+    'sweeping the angle out and back restores the pre-drag angle (within 0.5°)',
+    Math.abs(geomAfterRev.angle - geomBeforeRev.angle) < 0.5,
+    { before: geomBeforeRev.angle, after: geomAfterRev.angle }
+  );
+
+  console.log('verify-crop (angle slider keeps the no-void invariant too):');
+  await page.locator('[data-testid="crop-reset"]').click();
+  // drive the actual slider (onAngleChange path), not the debug hook
+  await page.locator('[data-testid="crop-angle-slider"]').fill('30');
+  const geomSlider = await geometryState();
+  check('slider reached a large angle on a full crop', Math.abs(geomSlider.angle - 30) < 0.5, geomSlider);
+  const sliderVoid = worstVoid(geomSlider.crop, geomSlider.angle, baselineDims.width, baselineDims.height);
+  check('no-void holds via the slider path too', sliderVoid <= 1, {
+    sliderVoid,
+    crop: geomSlider.crop,
+    angle: geomSlider.angle,
+  });
 
   await page.locator('[data-testid="crop-reset"]').click();
   await page.locator('[data-testid="crop-done"]').click();

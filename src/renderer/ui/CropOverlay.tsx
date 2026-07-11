@@ -8,6 +8,7 @@ import {
   type GeometryCrop,
   type GeometryOrientation,
 } from '../engine/graph/graphDoc';
+import { fitRotatedCrop } from '../engine/graph/cropFit';
 import type { ViewportState } from './useCanvasViewport';
 
 /** Corners + edges, clockwise from north-west (drag target ids double as CSS class suffixes). */
@@ -33,6 +34,8 @@ interface Props {
   /** Render-output dims (px) — the crop rect is normalized against these. */
   canvasWidth: number;
   canvasHeight: number;
+  /** Programmatic view setter (also flips to 'free'); drives the rotate-gesture auto-zoom. */
+  setViewFree: (tx: number, ty: number, scale: number) => void;
 }
 
 /**
@@ -44,7 +47,7 @@ interface Props {
  * `canvasWidth`/`canvasHeight` here are the whole rotated frame, matching the
  * "crop is normalized against the rotated frame" contract in graphDoc.ts.
  */
-export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
+export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Props) {
   const graph = useAppStore((s) => s.graph);
   const setGeometry = useAppStore((s) => s.setGeometry);
   const toggleCropMode = useAppStore((s) => s.toggleCropMode);
@@ -150,28 +153,54 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
     window.addEventListener('pointerup', onUp);
   };
 
+  /**
+   * Angle slider: keeps the SAME no-void invariant as the rotate gesture, so a
+   * cropped/straightened image can't develop void corners when you drag the
+   * slider. Runs the shared anchor+fit (cropFit.ts) seeded from the CURRENT
+   * rect+angle and writes crop+angle together — but with NO view compensation
+   * (this isn't a screen-anchored gesture, so the viewport is left alone). The
+   * shrink is capped at scale 1, so the slider never GROWS the rect back;
+   * that's fine — reversibility is only promised for the drag gesture, which
+   * reseeds from a fixed drag-start rect.
+   */
   const onAngleChange = (value: number) => {
     angleSessionRef.current ??= Date.now();
-    setGeometry({ crop, angle: value, orientation }, `geometry:${angleSessionRef.current}`);
+    const { crop: nextCrop } = fitRotatedCrop({
+      W: canvasWidth,
+      H: canvasHeight,
+      crop0: crop,
+      angle0: angle,
+      angle: value,
+    });
+    setGeometry({ crop: nextCrop, angle: value, orientation }, `geometry:${angleSessionRef.current}`);
   };
 
   /**
-   * LR-style rotate (UX pack B §2): dragging the zone just OUTSIDE a corner
-   * (rather than the resize handle itself) straightens the photo instead of
-   * resizing the crop. The crop rect's own on-screen box never moves or
-   * skews during this drag — only `geometry.angle` changes, coalesced into
-   * ONE undo entry per drag (same `angleSessionRef`/session-key pattern the
-   * angle slider already uses, so both paths write the identical field).
+   * LR-style rotate (UX pack B §2), the real thing: dragging the zone just
+   * OUTSIDE a corner straightens the photo. The crop rect's on-screen box
+   * stays PIXEL-IDENTICAL through the whole drag while the image appears to
+   * rotate around the rect center AND zoom in just enough that the rect never
+   * contains void; dragging back toward the start angle reverses the zoom.
    *
-   * Angle is derived from the pointer's angular position around the crop
-   * rect's OWN on-screen center (via its live getBoundingClientRect(), not a
-   * reconstruction from `view`/canvasWidth/Height — simplest-correct given
-   * the rect can be any size/position). Screen space is y-down, so a
-   * visually CLOCKWISE pointer sweep is an INCREASING atan2 angle; the
-   * existing "+angle rotates the displayed image CCW" convention (see
-   * graphRenderer.ts's RESAMPLE_SHADER doc comment — untouched, not flipped
-   * here) means a clockwise drag must DECREASE geometry.angle, hence the
-   * negation below.
+   * Two coupled writes per pointer-move (batched into one undo entry via the
+   * shared `angleSessionRef` session key — same coalescing the slider uses):
+   *  1. geometry: crop+angle from fitRotatedCrop (cropFit.ts) — the rect
+   *     re-centers on the same source detail (perceived rect-center pivot,
+   *     converting the shader's frame-center pivot) and auto-shrinks by the
+   *     max scale ≤ 1 that keeps all four corners void-free, recomputed FRESH
+   *     from the drag-start rect each move so sweeping back to `angle0`
+   *     restores the drag-start crop exactly.
+   *  2. view: scale = view0.scale / s (the LR zoom), and tx/ty chosen so the
+   *     image point at the rect center lands at the SAME screen point the rect
+   *     center held at drag start. Rect screen width = w0·s·scale =
+   *     w0·view0.scale (constant), and its center is pinned — so the rect's
+   *     screen box is invariant.
+   *
+   * Angle delta comes from the pointer's angular sweep around the rect's
+   * (fixed) on-screen center. Screen space is y-down, so a visually CLOCKWISE
+   * sweep is an INCREASING atan2 angle; the "+angle rotates the image CCW"
+   * convention (RESAMPLE_SHADER, untouched) means a clockwise drag DECREASES
+   * geometry.angle, hence the negation.
    */
   const beginRotate = () => (ev: React.PointerEvent) => {
     ev.stopPropagation();
@@ -179,15 +208,39 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
     const rectEl = cropRectRef.current;
     if (!rectEl) return;
     const box = rectEl.getBoundingClientRect();
+    // fixed on-screen pivot (the rect center holds here for the whole drag)
     const centerX = box.left + box.width / 2;
     const centerY = box.top + box.height / 2;
     const startPointerAngle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX);
-    const baseAngle = angle;
+    const crop0 = crop;
+    const angle0 = angle;
+    const view0 = { tx: view.tx, ty: view.ty, scale: view.scale };
+    // container-relative screen position the rect center occupies at drag
+    // start (canvas transform is translate(tx,ty) scale(scale), origin 0,0)
+    const c0x = (crop0.x + crop0.w / 2) * canvasWidth;
+    const c0y = (crop0.y + crop0.h / 2) * canvasHeight;
+    const screenCx = view0.tx + c0x * view0.scale;
+    const screenCy = view0.ty + c0y * view0.scale;
+    const sessionKey = `geometry:${Date.now()}`;
     angleSessionRef.current = Date.now();
     const onMove = (e: PointerEvent) => {
       const curPointerAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
       const deltaDeg = -((curPointerAngle - startPointerAngle) * 180) / Math.PI;
-      onAngleChange(Math.min(45, Math.max(-45, baseAngle + deltaDeg)));
+      const nextAngle = Math.min(45, Math.max(-45, angle0 + deltaDeg));
+      const { crop: nextCrop, scale: s } = fitRotatedCrop({
+        W: canvasWidth,
+        H: canvasHeight,
+        crop0,
+        angle0,
+        angle: nextAngle,
+      });
+      setGeometry({ crop: nextCrop, angle: nextAngle, orientation }, sessionKey);
+      // pin the rect's screen box: keep its center under screenC0, scale up
+      // by 1/s so its screen size is unchanged
+      const scaleNew = view0.scale / s;
+      const cxNew = (nextCrop.x + nextCrop.w / 2) * canvasWidth;
+      const cyNew = (nextCrop.y + nextCrop.h / 2) * canvasHeight;
+      setViewFree(screenCx - cxNew * scaleNew, screenCy - cyNew * scaleNew, scaleNew);
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);

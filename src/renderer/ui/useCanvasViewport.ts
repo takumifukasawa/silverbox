@@ -67,6 +67,18 @@ export function useCanvasViewport(
     });
   }, []);
 
+  /**
+   * Programmatic view override that also flips to 'free' mode. Used by the
+   * crop overlay's LR-style rotate gesture, which drives tx/ty/scale directly
+   * each pointer-move so the crop rect's on-screen box stays pinned while the
+   * image rotates and zooms beneath it. Intentionally UNCLAMPED (unlike
+   * zoomAt): the gesture computes an exact scale from the auto-shrink fit, and
+   * a clamp here would let the rect's screen footprint drift.
+   */
+  const setViewFree = useCallback((tx: number, ty: number, scale: number) => {
+    setView({ mode: 'free', scale, tx, ty });
+  }, []);
+
   const oneToOne = useCallback(
     (mx?: number, my?: number) => {
       const container = containerRef.current;
@@ -149,5 +161,5 @@ export function useCanvasViewport(
     };
   }, [containerRef, zoomAt, fit, oneToOne]);
 
-  return { view, fit, oneToOne };
+  return { view, fit, oneToOne, setViewFree };
 }
