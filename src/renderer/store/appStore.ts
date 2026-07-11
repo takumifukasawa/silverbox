@@ -37,6 +37,7 @@ import {
 import { validateWgsl } from '../engine/shader/validateWgsl';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
+import { buildLutExport } from '../engine/color/lutExport';
 import {
   DEFAULT_SETTINGS,
   SIDECAR_SUFFIX,
@@ -240,6 +241,16 @@ interface AppState {
   setExportDialogOpen(open: boolean): void;
   /** Set after a successful exportSelectedOutputs batch — how many files, and their paths (dialog display / verify). */
   exportBatchInfo: { count: number; paths: string[] } | null;
+  /**
+   * LUT export (task #33): captures the ACTIVE output's color pipeline as a
+   * .cube + Unity/UE strip PNGs + WebGL snippet — pure function of the graph
+   * + wbModel (engine/color/lutExport.ts), no re-decode needed. `path` (a
+   * base path with no extension) bypasses the native save dialog, same
+   * convention as exportImage/exportSelectedOutputs's own `path` param.
+   */
+  exportLut(path?: string): Promise<void>;
+  /** Set after a successful exportLut — file count, their paths, and any color ops the LUT could not capture. */
+  exportLutInfo: { count: number; paths: string[]; skipped: string[] } | null;
   undo(): void;
   redo(): void;
   /** `<userData>/settings.json`, loaded at boot; DEFAULT_SETTINGS until that IPC round-trip resolves. */
@@ -537,6 +548,7 @@ export const useAppStore = create<AppState>((set, get) => {
   exportError: null,
   exportDialogOpen: false,
   exportBatchInfo: null,
+  exportLutInfo: null,
   histogram: null,
   scopeMode: 'histogram',
   scopeSamples: null,
@@ -1226,6 +1238,38 @@ export const useAppStore = create<AppState>((set, get) => {
         exportInfo: last,
         exportBatchInfo: { count: paths.length, paths },
       });
+    } catch (err) {
+      set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async exportLut(path) {
+    const { imagePath, fileName, graph, wbModel, imageStatus, exportStatus, activeOutputId } = get();
+    if (!imagePath || !fileName || imageStatus !== 'ready' || exportStatus === 'working') return;
+    let basePath = path ?? null;
+    if (!basePath) {
+      const result = await window.silverbox.exportLutDialog(imagePath.replace(/\.[^.]+$/, '') + '-lut.cube');
+      if (result.canceled) return;
+      basePath = result.path.replace(/\.cube$/i, '');
+    }
+    set({ exportStatus: 'working', exportError: null, exportLutInfo: null });
+    try {
+      const name = basePath.split(/[\\/]/).pop() || 'silverbox-lut';
+      const { cubeText, unityRgba, ueRgba, webglText, skipped } = buildLutExport(
+        graph,
+        wbModel,
+        activeOutputId ?? undefined,
+        name
+      );
+      const result = await window.silverbox.exportLut({
+        basePath,
+        name,
+        cubeText,
+        unityRgba: unityRgba.buffer as ArrayBuffer,
+        ueRgba: ueRgba.buffer as ArrayBuffer,
+        webglText,
+      });
+      set({ exportStatus: 'idle', exportLutInfo: { count: result.paths.length, paths: result.paths, skipped } });
     } catch (err) {
       set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
     }

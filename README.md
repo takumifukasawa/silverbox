@@ -54,6 +54,12 @@ not — are written down in [DESIGN.md](DESIGN.md).
   indicators, plus luma waveform, RGB parade and a vectorscope.
 - Before/after compare (`\`) and a grayscale check view (`G`), zoom/pan with
   fit and 1:1 views, undo/redo with gesture coalescing, drag & drop opening.
+- **LUT export** — the active output's color pipeline as a standard .cube,
+  Unity/Unreal strip PNGs and a WebGL sampling snippet, for bringing a
+  Silverbox look into a game engine. Geometry (crop/lens) never applies; any
+  spatial op (Detail, clarity/texture), custom WGSL node or masked local
+  adjustment can't be captured by a position-independent LUT and is instead
+  skipped and reported in the export dialog.
 
 ## Engine
 

@@ -14,6 +14,8 @@ export const IPC = {
   writeSidecar: 'sidecar:write',
   exportImageDialog: 'dialog:exportImage',
   exportEncode: 'export:encode',
+  exportLutDialog: 'dialog:exportLut',
+  exportLut: 'export:lut',
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
 } as const;
@@ -46,6 +48,10 @@ export interface SilverboxApi {
   exportImageDialog(defaultPath: string): Promise<OpenImageDialogResult>;
   /** Encode + write the developed pixels via sharp in the main process. */
   exportEncode(req: ExportEncodeRequest): Promise<ExportEncodeResult>;
+  /** Native save dialog for a LUT export base path (suggests a .cube name; the other 3 files land alongside it). */
+  exportLutDialog(defaultPath: string): Promise<OpenImageDialogResult>;
+  /** Write the .cube + Unity/UE strip PNGs + WebGL snippet computed in the renderer. */
+  exportLut(req: ExportLutRequest): Promise<ExportLutResult>;
   /** Filesystem path of a dropped File (webUtils; File.path is gone in Electron 32+). */
   getPathForFile(file: File): string;
   /** Read `<userData>/settings.json` (sanitized; created with defaults on first run). */
@@ -146,6 +152,30 @@ export interface ExportEncodeResult {
   width: number;
   height: number;
   bytes: number;
+}
+
+/**
+ * LUT export (task #33): the renderer computes every deliverable's bytes
+ * (pure color math — see engine/color/lutExport.ts) and hands them to the
+ * main process purely to write files (sharp for the PNGs, plain fs for the
+ * text ones) — same division of labor as ExportEncodeRequest.
+ */
+export interface ExportLutRequest {
+  /** `<dir>/<name>` with no extension; the 4 files are written as `<basePath>.cube` / `-unity.png` / `-ue.png` / `-webgl.txt`. */
+  basePath: string;
+  /** .cube TITLE + webgl snippet comment. */
+  name: string;
+  cubeText: string;
+  /** 1024×32 RGBA8 raw bytes (see lutExport.ts's buildStripPixels). */
+  unityRgba: ArrayBuffer;
+  /** 256×16 RGBA8 raw bytes. */
+  ueRgba: ArrayBuffer;
+  webglText: string;
+}
+
+export interface ExportLutResult {
+  /** [cubePath, unityPngPath, uePngPath, webglTxtPath], in that order. */
+  paths: string[];
 }
 
 declare global {

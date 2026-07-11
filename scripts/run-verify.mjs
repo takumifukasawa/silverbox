@@ -76,6 +76,7 @@ const ALL_SCRIPTS = [
   { name: 'exportsettings', file: 'verify-exportsettings.mjs' },
   { name: 'masks', file: 'verify-masks.mjs' },
   { name: 'colorkey', file: 'verify-colorkey.mjs' },
+  { name: 'lut', file: 'verify-lut.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

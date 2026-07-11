@@ -7,11 +7,14 @@ import {
   SIDECAR_SUFFIX,
   type ExportEncodeRequest,
   type ExportEncodeResult,
+  type ExportLutRequest,
+  type ExportLutResult,
   type OpenImageDialogResult,
   type PingResult,
   type Settings,
 } from '../../shared/ipc';
 import { encodeExport } from './imageExport';
+import { encodeLutExport } from './lutExport';
 import { readSettings, updateSettings } from './settings';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -91,6 +94,19 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.exportEncode, async (_ev, req: ExportEncodeRequest): Promise<ExportEncodeResult> => {
     return encodeExport(req);
+  });
+
+  ipcMain.handle(IPC.exportLutDialog, async (_ev, defaultPath: unknown): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showSaveDialog({
+      defaultPath: typeof defaultPath === 'string' ? defaultPath : undefined,
+      filters: [{ name: 'Adobe Cube LUT', extensions: ['cube'] }],
+    });
+    if (result.canceled || !result.filePath) return { canceled: true };
+    return { canceled: false, path: result.filePath, fileName: basename(result.filePath) };
+  });
+
+  ipcMain.handle(IPC.exportLut, async (_ev, req: ExportLutRequest): Promise<ExportLutResult> => {
+    return encodeLutExport(req);
   });
 
   ipcMain.handle(IPC.settingsGet, async (): Promise<Settings> => readSettings());

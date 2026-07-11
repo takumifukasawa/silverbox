@@ -29,6 +29,9 @@ export function ExportDialog() {
   const exportInfo = useAppStore((s) => s.exportInfo);
   const exportBatchInfo = useAppStore((s) => s.exportBatchInfo);
   const exportSelectedOutputs = useAppStore((s) => s.exportSelectedOutputs);
+  const exportLut = useAppStore((s) => s.exportLut);
+  const exportLutInfo = useAppStore((s) => s.exportLutInfo);
+  const imageStatus = useAppStore((s) => s.imageStatus);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
 
@@ -83,6 +86,10 @@ export function ExportDialog() {
 
   const runExport = () => {
     void exportSelectedOutputs(target || 'active', undefined, { quality: q, maxDim: maxDimValue, metadata, colorSpace });
+  };
+
+  const runLutExport = () => {
+    void exportLut();
   };
 
   return (
@@ -200,6 +207,29 @@ export function ExportDialog() {
               Save preset
             </button>
           </div>
+          <div className="export-dialog-row">
+            <button
+              type="button"
+              onClick={runLutExport}
+              disabled={exporting || imageStatus !== 'ready'}
+              data-testid="export-lut-button"
+              title="Export the active output's color pipeline as a .cube + Unity/Unreal strip LUTs + a WebGL snippet (geometry, spatial ops and masked local adjustments can't be captured — see the note below)"
+            >
+              {exporting ? 'Exporting…' : 'Export LUT (.cube + engine strips)'}
+            </button>
+          </div>
+          {exportLutInfo && (
+            <>
+              <span className="toolbar-dim" data-testid="export-lut-info">
+                lut: {exportLutInfo.count} file{exportLutInfo.count === 1 ? '' : 's'}
+              </span>
+              {exportLutInfo.skipped.length > 0 && (
+                <span className="toolbar-dim" data-testid="export-lut-skipped" title={exportLutInfo.skipped.join('\n')}>
+                  LUT excludes: {exportLutInfo.skipped.join('; ')}
+                </span>
+              )}
+            </>
+          )}
           {exportStatus === 'error' && (
             <span className="toolbar-error" title={exportError ?? ''}>
               export failed: {exportError}

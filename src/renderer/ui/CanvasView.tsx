@@ -71,6 +71,10 @@ declare global {
         opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
       ): void;
       exportState(): { status: string; error: string | null };
+      /** Verify-only: exercises the export dialog's "Export LUT…" action without a native save dialog (mirrors exportOutputsTo's pattern). */
+      exportLutTo(basePath: string): void;
+      /** Set once an exportLut call completes — file count, their paths, and any color ops it couldn't capture. */
+      exportLutState(): { count: number; paths: string[]; skipped: string[] } | null;
       /** Verify-only: deterministic store-level wiring for test setup (the drag-to-wire UI itself is ms13's coverage). */
       connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
       /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
@@ -500,6 +504,12 @@ export function CanvasView() {
       exportState() {
         const s = useAppStore.getState();
         return { status: s.exportStatus, error: s.exportError };
+      },
+      exportLutTo(basePath) {
+        void useAppStore.getState().exportLut(basePath);
+      },
+      exportLutState() {
+        return useAppStore.getState().exportLutInfo;
       },
       exportBatchState() {
         return useAppStore.getState().exportBatchInfo;
