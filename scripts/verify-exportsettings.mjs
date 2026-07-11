@@ -335,17 +335,28 @@ try {
     { restoredQuality, restoredMaxDim, restoredMetadata, restoredColorSpace }
   );
 
-  console.log('verify-exportsettings (autosaveSidecar checkbox is reachable from the dialog footer):');
-  const autosaveCheckbox = page.locator('[data-testid="export-autosave-checkbox"]');
-  check('autosave checkbox reflects the current (default true) setting', await autosaveCheckbox.isChecked(), true);
+  await page.locator('[data-testid="export-close-button"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="export-dialog"]') === null, { timeout: 5_000 });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (autosaveSidecar checkbox moved to the Settings dialog, UX pack C §4):');
+  check(
+    'the export dialog no longer carries the autosave checkbox',
+    (await page.locator('[data-testid="export-autosave-checkbox"]').count()) === 0,
+    await page.locator('[data-testid="export-autosave-checkbox"]').count()
+  );
+  await page.locator('[data-testid="settings-button"]').click();
+  await page.waitForSelector('[data-testid="settings-dialog"]', { timeout: 5_000 });
+  const autosaveCheckbox = page.locator('[data-testid="settings-autosave-checkbox"]');
+  check('settings dialog autosave checkbox reflects the current (default true) setting', await autosaveCheckbox.isChecked(), true);
   await autosaveCheckbox.click();
   await page.waitForFunction(() => window.__debug.settingsState().autosaveSidecar === false, { timeout: 5_000 });
   check('unchecking it turns settings.autosaveSidecar off', !(await page.evaluate(() => window.__debug.settingsState().autosaveSidecar)), true);
   await autosaveCheckbox.click();
   await page.waitForFunction(() => window.__debug.settingsState().autosaveSidecar === true, { timeout: 5_000 });
-
-  await page.locator('[data-testid="export-close-button"]').click();
-  await page.waitForFunction(() => document.querySelector('[data-testid="export-dialog"]') === null, { timeout: 5_000 });
+  // Escape closes the settings dialog (App.tsx chain)
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => document.querySelector('[data-testid="settings-dialog"]') === null, { timeout: 5_000 });
 
   // ---------------------------------------------------------------------
   console.log('verify-exportsettings (6. All outputs: two named outputs, both files written with the output-name suffix):');

@@ -14,7 +14,7 @@ import { LibrawDecoder } from './librawDecoder';
 import type { CameraColorInfo, CaptureInfo } from './RawDecoder';
 import { buildDecodeLut16, buildDecodeLut8 } from '../color/srgb';
 import { SRGB_TO_WORK } from '../color/workingSpace';
-import { parseSonyLensProfile, type LensProfile } from '../lens/sonyLensProfile';
+import { parseSonyLensModel, parseSonyLensProfile, type LensProfile } from '../lens/sonyLensProfile';
 
 export interface DecodeRequest {
   id: number;
@@ -44,6 +44,13 @@ export interface PreparedImage {
    * `lens.profile.enabled` is on.
    */
   profile?: LensProfile;
+  /**
+   * EXIF LensModel (task #51 §2), parsed from the ARW bytes — e.g. "FE 24mm
+   * F2.8 G". Absent for JPEG and non-Sony RAW (libraw's CaptureInfo carries the
+   * camera model but not the lens). Surfaced in the toolbar capture line + the
+   * Lens inspector's embedded-profile row.
+   */
+  lensModel?: string;
   decodeMs: number;
 }
 
@@ -195,6 +202,7 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
   // Parse the embedded Sony correction splines from the ORIGINAL bytes first —
   // libraw's decode() may detach/consume the buffer. Non-Sony/JPEG ⇒ null.
   const profile = parseSonyLensProfile(bytes) ?? undefined;
+  const lensModel = parseSonyLensModel(bytes) ?? undefined;
   const decoded = await new LibrawDecoder().decode(new Uint8Array(bytes));
   const pixels = decoded.width * decoded.height;
   const linear = linearizeRgb16(decoded.data, pixels, baselineExposureGain(baselineExposureEV));
@@ -211,6 +219,7 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
     color: decoded.color,
     capture: decoded.capture,
     ...(profile ? { profile } : {}),
+    ...(lensModel ? { lensModel } : {}),
     decodeMs: Math.round(performance.now() - t0),
   };
 }

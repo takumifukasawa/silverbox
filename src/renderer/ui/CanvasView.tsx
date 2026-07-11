@@ -14,11 +14,13 @@ import {
   defaultLensParams,
   DEVELOP_KIND,
   isIdentityGeometry,
+  orientedDims,
   planHasCpuReference,
   type GeometryParams,
   type GraphDoc,
   type LensParams,
 } from '../engine/graph/graphDoc';
+import { maskShapeOutputToAnchor, outputRadiusToAnchor, outputToAnchor } from '../engine/graph/anchorSpace';
 import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
@@ -246,6 +248,15 @@ export function CanvasView() {
   // regardless of whatever else happens to be selected in the node editor.
   const activeSpotsNodeId = spotMode ? findActiveSpotsNodeId(graph, activeOutputId) : null;
   const activeSpotsNode = graph.nodes.find((n) => n.id === activeSpotsNodeId);
+  // Mask/spot coords live in ANCHOR space (anchorSpace.ts): the committed
+  // (real) input-node geometry + the decoded image's ORIENTED dims are what
+  // the overlays and canvas gestures convert against. Overlays/gestures only
+  // ever run OUTSIDE crop mode (the modal tools are mutually exclusive), so
+  // this uses the true geometry — not cropMode's crop-suppressed graphForBuild.
+  const inputGeometry = graph.nodes.find((n) => n.kind === 'input')?.geometry ?? defaultGeometryParams();
+  const anchorDims = image
+    ? orientedDims(image.width, image.height, inputGeometry.orientation ?? defaultGeometryOrientation())
+    : null;
   // Crop mode previews the FULL (uncropped) straightened frame — the overlay
   // lets you re-adjust the crop rect against the whole image — so force crop
   // back to identity for RENDERING only; the true crop committed in the graph
@@ -385,7 +396,13 @@ export function CanvasView() {
       // redundant to the worker's own copy over the SAME doc — costs nothing
       // and needs no round trip just to learn whether it throws.
       try {
-        buildPlan(planDoc, { wb: wbModel, renderScale, outputId: activeOutputId ?? undefined });
+        buildPlan(planDoc, {
+          wb: wbModel,
+          renderScale,
+          outputId: activeOutputId ?? undefined,
+          srcWidth: image.width,
+          srcHeight: image.height,
+        });
         useAppStore.getState().setGraphBroken(false);
       } catch {
         useAppStore.getState().setGraphBroken(true);
@@ -487,6 +504,8 @@ export function CanvasView() {
         const plan = buildPlan(s.graph, {
           wb: s.wbModel,
           renderScale: Math.max(width, height) / Math.max(s.image.fullWidth, s.image.fullHeight),
+          srcWidth: width,
+          srcHeight: height,
         });
         // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
         if (!planHasCpuReference(plan)) return null;
@@ -903,7 +922,13 @@ export function CanvasView() {
           ? defaultLinearMaskShape()
           : { type: 'linear', mode: 'add', x0: start.x, y0: start.y, x1: end.x, y1: end.y, feather: 0.3, invert: false };
       }
-      useAppStore.getState().addLocalAdjustmentWithShape(clampMaskShape(shape));
+      // Gesture coords are in the OUTPUT frame (imagePointFromClient); the
+      // store holds ANCHOR-space coords, so convert before writing (no-op when
+      // geometry is identity — see anchorSpace.ts).
+      const anchorShape = anchorDims
+        ? maskShapeOutputToAnchor(clampMaskShape(shape), inputGeometry, anchorDims.width, anchorDims.height)
+        : clampMaskShape(shape);
+      useAppStore.getState().addLocalAdjustmentWithShape(clampMaskShape(anchorShape));
       setMaskDrawMode(null);
     };
     drawCleanupRef.current = () => {
@@ -973,7 +998,17 @@ export function CanvasView() {
       } else {
         src = end;
       }
-      commitSpot(dst, src, radius);
+      // dst/src/radius are OUTPUT-frame (imagePointFromClient + brush radius);
+      // the store holds ANCHOR-space coords, so convert before committing
+      // (no-op when geometry is identity — see anchorSpace.ts).
+      if (anchorDims) {
+        const dstA = outputToAnchor(dst.x, dst.y, inputGeometry, anchorDims.width, anchorDims.height);
+        const srcA = outputToAnchor(src.x, src.y, inputGeometry, anchorDims.width, anchorDims.height);
+        const radiusA = outputRadiusToAnchor(radius, inputGeometry, anchorDims.width, anchorDims.height);
+        commitSpot(dstA, srcA, radiusA);
+      } else {
+        commitSpot(dst, src, radius);
+      }
     };
     spotDraftCleanupRef.current = () => {
       window.removeEventListener('pointermove', onMove);
@@ -1009,22 +1044,28 @@ export function CanvasView() {
             canvasHeight={outputDims.height}
           />
         )}
-        {!overlayVisible && !cropMode && selectedMaskNode && outputDims && (
+        {!overlayVisible && !cropMode && selectedMaskNode && outputDims && anchorDims && (
           <MaskOverlay
             key={selectedMaskNode.id}
             node={selectedMaskNode}
             view={view}
             canvasWidth={outputDims.width}
             canvasHeight={outputDims.height}
+            geometry={inputGeometry}
+            orientedWidth={anchorDims.width}
+            orientedHeight={anchorDims.height}
           />
         )}
-        {!overlayVisible && !cropMode && spotMode && outputDims && (
+        {!overlayVisible && !cropMode && spotMode && outputDims && anchorDims && (
           <SpotOverlay
             key={activeSpotsNode?.id ?? 'none'}
             node={activeSpotsNode}
             view={view}
             canvasWidth={outputDims.width}
             canvasHeight={outputDims.height}
+            geometry={inputGeometry}
+            orientedWidth={anchorDims.width}
+            orientedHeight={anchorDims.height}
           />
         )}
         {!overlayVisible && spotDraft && outputDims && (

@@ -1,6 +1,8 @@
 /**
  * Masks milestone verify: mask nodes, mask-driven blend, "+ Local
- * Adjustment", named multiple outputs, sidecar schemaVersion 3.
+ * Adjustment", named multiple outputs, sidecar schemaVersion 4 (anchor-space
+ * mask/spot coords + the pre-v4 → anchor migration), the LR-style area
+ * preview, and the anchor-space "mask stays pinned across a rotation" fix.
  *  1. Baseline: default graph unchanged behavior; GPU==CPU parity.
  *  2. add-local-adjustment: one click ⇒ D/M/B wired as specified, exactly
  *     ONE new history entry; readbackMean unchanged (D identity ⇒ a==b).
@@ -234,6 +236,47 @@ try {
   await setMaskShape('mask-1', { type: 'radial', mode: 'add', cx: 0.5, cy: 0.5, radius: 0.25, feather: 0.5, invert: false });
 
   // ---------------------------------------------------------------------
+  console.log('verify-masks (§5 the mask edit overlay renders the LR-style AREA preview, not just handles):');
+  check(
+    'a selected radial mask shows a translucent area fill',
+    (await page.locator('[data-testid="mask-overlay"] .mask-area-fill').count()) === 1,
+    await page.locator('[data-testid="mask-overlay"] .mask-area-fill').count()
+  );
+  check(
+    'a selected radial mask shows the dashed feather circle',
+    (await page.locator('[data-testid="mask-overlay"] [data-testid="mask-area-feather"]').count()) === 1,
+    await page.locator('[data-testid="mask-overlay"] [data-testid="mask-area-feather"]').count()
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-masks (§1 anchor: a radial mask stays pinned to image content across a rotation):');
+  const maskAnchorBefore = (await maskState('mask-1')).shapes[0];
+  const meanBeforeMaskRotate = await gpuMean();
+  // Rotate 10°: under the OLD output-frame scheme this re-pointed the mask at
+  // different content; anchor space stores it relative to the IMAGE, so the
+  // stored shape must be byte-identical afterward — that invariance IS the fix.
+  await page.evaluate(() =>
+    window.__debug.setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 10, orientation: { quarterTurns: 0, flipH: false } })
+  );
+  await page.waitForTimeout(300);
+  const maskAnchorAfter = (await maskState('mask-1')).shapes[0];
+  check(
+    "rotating the image leaves the mask shape's stored anchor coords byte-identical",
+    JSON.stringify(maskAnchorAfter) === JSON.stringify(maskAnchorBefore),
+    { maskAnchorBefore, maskAnchorAfter }
+  );
+  const meanAfterMaskRotate = await gpuMean();
+  check(
+    'the rotation actually took effect on the render (mean changed)',
+    !meansMatch(meanAfterMaskRotate, meanBeforeMaskRotate, 1e-4),
+    { meanBeforeMaskRotate, meanAfterMaskRotate }
+  );
+  check('no page error rendering a mask through a non-identity geometry', pageErrors.length === 0, pageErrors);
+  await page.evaluate(() =>
+    window.__debug.setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0, orientation: { quarterTurns: 0, flipH: false } })
+  );
+
+  // ---------------------------------------------------------------------
   console.log('verify-masks (7. undo: one center-drag on the canvas handle = one history entry):');
   const centerHandle = page.locator('[data-testid="mask-handle-center"]');
   await centerHandle.scrollIntoViewIfNeeded();
@@ -335,7 +378,7 @@ try {
   await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
   const savedRaw = readFileSync(SIDECAR, 'utf8');
   const savedJson = JSON.parse(savedRaw);
-  check('saved sidecar is schemaVersion 3', savedJson.schemaVersion === 3, savedJson.schemaVersion);
+  check('saved sidecar is schemaVersion 4', savedJson.schemaVersion === 4, savedJson.schemaVersion);
   check(
     "blend's mask edge serializes port:'mask' (not targetHandle)",
     savedJson.graph.edges.some((e) => e.to === 'blend-1' && e.port === 'mask') &&
@@ -391,6 +434,68 @@ try {
     edgeList(v2Graph)
   );
   check('v2 fixture produced no page errors', pageErrors.length === 0, pageErrors);
+
+  console.log('verify-masks (§1 sidecar v3→v4: pre-v4 mask coords migrate output-frame → anchor space on load):');
+  if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
+  // A hand-written v3 fixture with a NON-identity geometry (a plain crop) and
+  // an (unconnected) mask node whose coords are in the OLD output frame. On
+  // load, migrateCoordsToAnchor converts them using the doc's own geometry +
+  // the decoded dims — for a pure crop the math is cx_anchor = cx_out·w + x.
+  const CROP = { x: 0.2, y: 0.1, w: 0.6, h: 0.7 };
+  const v3Fixture = JSON.stringify(
+    {
+      schemaVersion: 3,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      graph: {
+        nodes: [
+          { id: 'in', type: 'input', position: { x: 20, y: 60 }, geometry: { crop: CROP, angle: 0, orientation: { quarterTurns: 0, flipH: false } } },
+          { id: 'dev', type: 'Develop', position: { x: 220, y: 60 } },
+          {
+            id: 'mask-1',
+            type: 'mask',
+            position: { x: 220, y: 200 },
+            mask: { shapes: [{ type: 'radial', mode: 'add', cx: 0.5, cy: 0.5, radius: 0.25, feather: 0.5, invert: false }] },
+          },
+          { id: 'out', type: 'output', position: { x: 420, y: 60 } },
+        ],
+        edges: [
+          { id: 'e0', from: 'in', to: 'dev' },
+          { id: 'e1', from: 'dev', to: 'out' },
+        ],
+      },
+    },
+    null,
+    2
+  );
+  writeFileSync(SIDECAR, v3Fixture);
+  await openAndWait(ARW_PATH);
+  const migDims = await page.evaluate(() => window.__debug.imageState());
+  const W = migDims.width;
+  const H = migDims.height;
+  const migExpectedCx = 0.5 * CROP.w + CROP.x; // angle 0 ⇒ pure per-axis remap
+  const migExpectedCy = 0.5 * CROP.h + CROP.y;
+  const migExpectedRadius = (0.25 * Math.max(CROP.w * W, CROP.h * H)) / Math.max(W, H);
+  const migrated = (await maskState('mask-1')).shapes[0];
+  check('v3 mask cx migrated to anchor space (cx_out·crop.w + crop.x)', Math.abs(migrated.cx - migExpectedCx) < 1e-6, { migrated, migExpectedCx });
+  check('v3 mask cy migrated to anchor space (cy_out·crop.h + crop.y)', Math.abs(migrated.cy - migExpectedCy) < 1e-6, { migrated, migExpectedCy });
+  check('v3 mask radius migrated by the output→anchor max-dim ratio', Math.abs(migrated.radius - migExpectedRadius) < 1e-6, { migrated, migExpectedRadius });
+  // Loading a v3 fixture migrates in memory but does NOT mark the graph dirty
+  // (lazy migration — disk stays v3 until the user edits). Dirty it with a
+  // benign edit so ⌘S actually writes (and waitForFunction has a real
+  // transition to wait for), without touching the mask coords under test.
+  await updateNodeParam('dev', 'basic.ev', 0.01);
+  await page.waitForFunction(() => window.__debug.graphDirty(), { timeout: 5_000 });
+  await page.keyboard.press('Meta+s');
+  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+  const v4Saved = JSON.parse(readFileSync(SIDECAR, 'utf8'));
+  check('re-saving the migrated doc writes schemaVersion 4', v4Saved.schemaVersion === 4, v4Saved.schemaVersion);
+  const savedMaskShape = v4Saved.graph.nodes.find((n) => n.id === 'mask-1')?.mask?.shapes?.[0];
+  check('v4 sidecar stores the migrated anchor coords verbatim', JSON.stringify(savedMaskShape) === JSON.stringify(migrated), { savedMaskShape, migrated });
+  await openAndWait(ARW_PATH);
+  const reMigrated = (await maskState('mask-1')).shapes[0];
+  check('reloading the v4 sidecar does NOT convert again (v4 round-trips byte-stable)', JSON.stringify(reMigrated) === JSON.stringify(migrated), { migrated, reMigrated });
+  if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 
   console.log('verify-masks (8. unknown-key passthrough — wrapper and node level):');
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
@@ -557,6 +662,47 @@ try {
     Math.abs(shape.radius - expectedRadius) * Math.max(drawDims.width, drawDims.height) < 4,
     { expectedRadius, actualRadius: shape.radius }
   );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-masks (§5 the LIVE draw preview shows the affected AREA, not a bare outline):');
+  await page.locator('[data-testid="view-fit"]').click();
+  const pvBox = await drawCanvas.boundingBox();
+  // radial: a translucent fill + a dashed feather circle appear mid-drag
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  await page.mouse.move(pvBox.x + pvBox.width * 0.4, pvBox.y + pvBox.height * 0.4);
+  await page.mouse.down();
+  await page.mouse.move(pvBox.x + pvBox.width * 0.55, pvBox.y + pvBox.height * 0.4, { steps: 4 });
+  await page.waitForSelector('.mask-draw-overlay [data-testid="mask-area-radial"]', { timeout: 3_000 });
+  check(
+    'radial draw preview shows a translucent area fill',
+    (await page.locator('.mask-draw-overlay .mask-area-fill').count()) === 1,
+    await page.locator('.mask-draw-overlay .mask-area-fill').count()
+  );
+  check(
+    'radial draw preview shows a dashed feather circle',
+    (await page.locator('.mask-draw-overlay [data-testid="mask-area-feather"]').count()) === 1,
+    await page.locator('.mask-draw-overlay [data-testid="mask-area-feather"]').count()
+  );
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
+  // linear: three parallel guide lines + a translucent gradient band mid-drag
+  await page.locator('[data-testid="add-local-adjustment-linear"]').click();
+  await page.mouse.move(pvBox.x + pvBox.width * 0.3, pvBox.y + pvBox.height * 0.3);
+  await page.mouse.down();
+  await page.mouse.move(pvBox.x + pvBox.width * 0.6, pvBox.y + pvBox.height * 0.6, { steps: 4 });
+  await page.waitForSelector('.mask-draw-overlay [data-testid="mask-area-linear"]', { timeout: 3_000 });
+  check(
+    'linear draw preview shows three parallel guide lines (100%/50%/0%)',
+    (await page.locator('.mask-draw-overlay .mask-area-line').count()) === 3,
+    await page.locator('.mask-draw-overlay .mask-area-line').count()
+  );
+  check(
+    'linear draw preview shows the translucent gradient band',
+    (await page.locator('.mask-draw-overlay .mask-area-gradient').count()) === 1,
+    await page.locator('.mask-draw-overlay .mask-area-gradient').count()
+  );
+  await page.keyboard.press('Escape');
+  await page.mouse.up();
 
   check('no page errors across the masks-milestone checks', pageErrors.length === 0, pageErrors);
 } finally {

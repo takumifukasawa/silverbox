@@ -17,8 +17,9 @@ import {
 } from './customShaderNode';
 import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
 import { sanitizeCurvePoints } from '../color/toneCurve';
-import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams } from './maskNode';
-import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams } from './spotsNode';
+import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams, type MaskShape } from './maskNode';
+import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams, type Spot } from './spotsNode';
+import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -121,7 +122,7 @@ export interface SidecarDoc {
   unknown?: Record<string, unknown>;
 }
 
-export const SIDECAR_SCHEMA_VERSION = 3;
+export const SIDECAR_SCHEMA_VERSION = 4;
 
 // --- Geometry: non-destructive crop + straighten (input node only) ----------
 //
@@ -461,15 +462,26 @@ export function serializeGraphDoc(
 
 /**
  * Parse + validate a sidecar; throws with a reason on anything malformed.
- * Accepts BOTH schemaVersion 2 (today's shape: edges carry `targetHandle`
- * directly, no `mask` kind, no output `name`) and 3 (edges carry `port`,
- * formalizing the same concept) — a v2 sidecar loads byte-semantically
- * identically to before v3 existed. Unrecognized keys on the wrapper and on
- * each node/edge are preserved (as extra untyped properties riding along on
- * the parsed objects, or on the returned SidecarDoc's `unknown` for the
- * wrapper) so serializeGraphDoc can write them back verbatim (DESIGN §9).
+ * Accepts schemaVersion 2 (today's shape: edges carry `targetHandle` directly,
+ * no `mask` kind, no output `name`), 3 (edges carry `port`, formalizing the
+ * same concept), and 4 (mask/spot coords stored in ANCHOR space — see
+ * anchorSpace.ts). A v2 sidecar loads byte-semantically identically to before
+ * v3 existed. Unrecognized keys on the wrapper and on each node/edge are
+ * preserved (as extra untyped properties riding along on the parsed objects,
+ * or on the returned SidecarDoc's `unknown` for the wrapper) so
+ * serializeGraphDoc can write them back verbatim (DESIGN §9).
+ *
+ * Coordinate migration (v2/v3 → anchor space): pre-v4 docs stored mask/spot
+ * coords in the OLD post-geometry OUTPUT frame; they are converted to anchor
+ * space here using the doc's OWN input-node geometry (identity geometry ⇒
+ * no-op, so the overwhelming-majority untouched-geometry doc is unchanged).
+ * The conversion needs the oriented-frame aspect, supplied by the caller as
+ * `srcDims` (the decoded image's dims — appStore has them by open time). When
+ * `srcDims` is omitted AND geometry is non-identity the coords are left as-is
+ * (only reached by dimensionless callers — preset embedding, internal
+ * validation — which carry identity geometry).
  */
-export function parseGraphDoc(text: string): SidecarDoc {
+export function parseGraphDoc(text: string, srcDims?: { width: number; height: number }): SidecarDoc {
   const raw: unknown = JSON.parse(text);
   if (typeof raw !== 'object' || raw === null) throw new Error('graph doc must be an object');
   const wrapper = raw as {
@@ -479,7 +491,7 @@ export function parseGraphDoc(text: string): SidecarDoc {
     graph?: { nodes?: unknown; edges?: unknown };
   };
   const version = wrapper.schemaVersion;
-  if (version !== 2 && version !== 3) {
+  if (version !== 2 && version !== 3 && version !== 4) {
     throw new Error(`unsupported sidecar schemaVersion ${String(version)}`);
   }
   const rawNodes = wrapper.graph?.nodes;
@@ -493,9 +505,10 @@ export function parseGraphDoc(text: string): SidecarDoc {
       type: undefined,
     })) as unknown as GraphNode[],
     edges: rawEdges.map((e: Record<string, unknown>) => {
-      // v2 read the port straight off `targetHandle`; v3 formalizes it as
-      // `port` — either way it lands on the internal `targetHandle` field.
-      const portRaw = version === 3 ? e.port : e.targetHandle;
+      // v2 read the port straight off `targetHandle`; v3+ (v3 and v4)
+      // formalize it as `port` — either way it lands on the internal
+      // `targetHandle` field.
+      const portRaw = version === 2 ? e.targetHandle : e.port;
       const extra: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(e)) {
         if (k !== 'id' && k !== 'from' && k !== 'to' && k !== 'targetHandle' && k !== 'port') extra[k] = v;
@@ -565,6 +578,11 @@ export function parseGraphDoc(text: string): SidecarDoc {
       throw new Error(`edge ${e.id} has an invalid targetHandle`);
     }
   }
+  // pre-v4 mask/spot coords are in the OLD post-geometry OUTPUT frame — bring
+  // them into anchor space now, before validation/return (see this function's
+  // doc comment). Identity geometry (the common case) makes this a no-op.
+  if (version !== 4) migrateCoordsToAnchor(doc, srcDims);
+
   // every output resolves through a valid DAG (buildPlan is pure/side-effect-free — see its doc comment)
   const outputNodes = doc.nodes.filter((n) => n.kind === 'output');
   if (outputNodes.length === 0) throw new Error('graph has no output node');
@@ -580,6 +598,26 @@ export function parseGraphDoc(text: string): SidecarDoc {
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
     ...(Object.keys(unknownWrapper).length > 0 ? { unknown: unknownWrapper } : {}),
   };
+}
+
+/**
+ * In-place migrate a pre-v4 doc's mask/spot coords from the OLD post-geometry
+ * OUTPUT frame into anchor space (see parseGraphDoc's doc comment). No-op when
+ * the input node's geometry is identity, or when `srcDims` is missing and the
+ * geometry is non-identity (can't convert without the oriented aspect).
+ */
+function migrateCoordsToAnchor(doc: GraphDoc, srcDims?: { width: number; height: number }): void {
+  const inputNode = doc.nodes.find((n) => n.kind === 'input');
+  const geometry = inputNode?.geometry ?? defaultGeometryParams();
+  if (isIdentityGeometry(geometry) || !srcDims) return;
+  const oriented = orientedDims(srcDims.width, srcDims.height, geometry.orientation ?? defaultGeometryOrientation());
+  for (const n of doc.nodes) {
+    if (n.kind === MASK_KIND && n.mask) {
+      n.mask = { shapes: n.mask.shapes.map((s) => maskShapeOutputToAnchor(s, geometry, oriented.width, oriented.height)) };
+    } else if (n.kind === SPOTS_KIND && n.spots) {
+      n.spots = { spots: n.spots.spots.map((s) => spotOutputToAnchor(s, geometry, oriented.width, oriented.height)) };
+    }
+  }
 }
 
 /** Normalize an untrusted customShader payload; throws on structural garbage. */
@@ -743,6 +781,15 @@ export interface CompileContext {
    * match) = the doc's first output node, in `doc.nodes` array order.
    */
   outputId?: string;
+  /**
+   * Decoded image dims (pre-orientation), used ONLY to convert anchor-space
+   * mask/spot coords into the output frame the passes evaluate in (see
+   * anchorSpace.ts). Omitted (validation / LUT paths) ⇒ no conversion, which
+   * is correct there because those paths carry identity geometry (the map is
+   * the identity anyway).
+   */
+  srcWidth?: number;
+  srcHeight?: number;
 }
 
 /**
@@ -763,6 +810,21 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   const output = (ctx?.outputId !== undefined && outputs.find((n) => n.id === ctx.outputId)) || outputs[0]!;
   const inputNode = doc.nodes.find((n) => n.kind === 'input');
   if (!inputNode) throw new Error('graph has no input node');
+
+  // Anchor→output conversion context (see anchorSpace.ts): mask/spot coords
+  // are STORED in anchor space but the passes evaluate in the output frame, so
+  // convert when we pack their uniforms + build their CPU mirrors below. When
+  // the geometry map is the identity (untouched geometry) OR we weren't given
+  // the source dims, the shapes pass through unchanged — bit-exact.
+  const geometry = inputNode.geometry ?? defaultGeometryParams();
+  const orientedForAnchor =
+    ctx?.srcWidth !== undefined && ctx?.srcHeight !== undefined && !isIdentityGeometry(geometry)
+      ? orientedDims(ctx.srcWidth, ctx.srcHeight, geometry.orientation ?? defaultGeometryOrientation())
+      : null;
+  const toOutputMaskShape = (shape: MaskShape) =>
+    orientedForAnchor ? maskShapeAnchorToOutput(shape, geometry, orientedForAnchor.width, orientedForAnchor.height) : shape;
+  const toOutputSpot = (spot: Spot) =>
+    orientedForAnchor ? spotAnchorToOutput(spot, geometry, orientedForAnchor.width, orientedForAnchor.height) : spot;
 
   const steps: PlanStep[] = [];
   const memo = new Map<string, number>();
@@ -845,7 +907,10 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
         // input (`src`) is read only for frame-size context by the shader/
         // CPU mirror; its color is ignored entirely.
         const shapes = node.mask?.shapes ?? defaultMaskParams().shapes;
-        const shape = shapes[0] ?? defaultMaskParams().shapes[0]!;
+        // Convert the STORED anchor-space shape into the output frame the pass
+        // evaluates in; the GPU uniform AND the CPU mirror both use this same
+        // converted shape, so the GPU/CPU parity check stays green untouched.
+        const shape = toOutputMaskShape(shapes[0] ?? defaultMaskParams().shapes[0]!);
         steps.push({
           nodeId: id,
           type: 'passes',
@@ -865,11 +930,14 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
         if (spotsParams.spots.length === 0) {
           index = src;
         } else {
+          // Stored in anchor space; convert each spot into the output frame the
+          // pass evaluates in (see the mask branch above / anchorSpace.ts).
+          const outSpots = spotsParams.spots.map(toOutputSpot);
           steps.push({
             nodeId: id,
             type: 'passes',
             passes: [
-              { shaderId: 'spots/clone', wgsl: SPOTS_WGSL, uniforms: packSpotsUniform(spotsParams.spots).buffer as ArrayBuffer },
+              { shaderId: 'spots/clone', wgsl: SPOTS_WGSL, uniforms: packSpotsUniform(outSpots).buffer as ArrayBuffer },
             ],
             src,
             cpu: null,
@@ -919,7 +987,6 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
   };
 
   const plan: RenderPlan = { steps, output: resolve(output.id) };
-  const geometry = inputNode.geometry ?? defaultGeometryParams();
   if (!isIdentityGeometry(geometry)) {
     plan.geometry = {
       angleRad: (geometry.angle * Math.PI) / 180,

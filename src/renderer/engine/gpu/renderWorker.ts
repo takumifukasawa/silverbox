@@ -37,6 +37,8 @@ const rendererReady = new Promise<GraphRenderer>((resolve) => {
 let offscreenCanvas: OffscreenCanvas | null = null;
 /** Per-image WB model, rebuilt whenever a new 'image' command lands. */
 let wbModel: WbModel = createWbModel({});
+/** Decoded dims of the current preview image — fed to buildPlan for anchor-space mask/spot conversion. */
+let currentImageDims: { width: number; height: number } | null = null;
 /** Gen of the most recently applied 'image'/'render' command (see renderProtocol.ts). */
 let currentGen = 0;
 
@@ -113,7 +115,13 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
         // image (identical camera metadata to the preview in practice, but
         // never assumed — see this file's doc comment).
         const wb = createWbModel(req.image.color ?? {});
-        const plan = buildPlan(req.doc, { wb, renderScale: req.renderScale, outputId: req.outputId });
+        const plan = buildPlan(req.doc, {
+          wb,
+          renderScale: req.renderScale,
+          outputId: req.outputId,
+          srcWidth: req.image.width,
+          srcHeight: req.image.height,
+        });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result }, [result.data.buffer]);
         return;
@@ -147,6 +155,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
     case 'image': {
       currentGen = msg.gen;
       wbModel = createWbModel(msg.image.color ?? {});
+      currentImageDims = { width: msg.image.width, height: msg.image.height };
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -169,7 +178,13 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
           if (gen !== currentGen) return;
           const plan = buildPreviewPlan(
             msg.doc,
-            { wb: wbModel, renderScale: msg.renderScale, outputId: msg.outputId },
+            {
+              wb: wbModel,
+              renderScale: msg.renderScale,
+              outputId: msg.outputId,
+              srcWidth: currentImageDims?.width,
+              srcHeight: currentImageDims?.height,
+            },
             msg.showBefore
           );
           renderer.viewMode = msg.viewMode;

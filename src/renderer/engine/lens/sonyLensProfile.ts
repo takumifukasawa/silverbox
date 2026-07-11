@@ -46,6 +46,8 @@ const TAG_SUBIFDS = 0x014a;
 const TAG_VIGNETTING = 0x7032;
 const TAG_CA = 0x7035;
 const TAG_DISTORTION = 0x7037;
+const TAG_EXIF_IFD = 0x8769;
+const TAG_LENS_MODEL = 0xa434;
 
 interface IfdEntry {
   tag: number;
@@ -94,6 +96,19 @@ function readIfd(view: DataView, offset: number, le: boolean): IfdEntry[] | null
     entries.push({ tag, valueOffset, count: n });
   }
   return entries;
+}
+
+/** Read an ASCII string of `count` bytes at `offset` (trailing NUL/whitespace trimmed); null on out-of-bounds/empty. Endianness-independent (bytes). */
+function readAscii(view: DataView, offset: number, count: number): string | null {
+  if (offset < 0 || count <= 0 || offset + count > view.byteLength) return null;
+  let s = '';
+  for (let i = 0; i < count; i++) {
+    const c = view.getUint8(offset + i);
+    if (c === 0) break;
+    s += String.fromCharCode(c);
+  }
+  const trimmed = s.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 /** Read `count` signed int16s at `offset`; null on out-of-bounds. */
@@ -167,6 +182,38 @@ export function parseSonyLensProfile(buffer: ArrayBuffer): LensProfile | null {
       return { distortion: distortion[0]!, caRed: ca[0]!, caBlue: ca[1]!, vignette: vignette[0]! };
     }
     return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the EXIF LensModel string (tag 0xA434 in the ExifIFD, reached via
+ * IFD0's ExifIFD pointer tag 0x8769) from raw ARW bytes — e.g. "FE 24mm F2.8
+ * G". Reuses the same bounds-checked plaintext TIFF walk as
+ * parseSonyLensProfile; returns null on a JPEG/non-Sony/garbage buffer or a
+ * missing/empty tag, and never throws. (Camera model comes from libraw's
+ * CaptureInfo; this covers the lens, which libraw does not surface.)
+ */
+export function parseSonyLensModel(buffer: ArrayBuffer): string | null {
+  try {
+    const view = new DataView(buffer);
+    if (view.byteLength < 8) return null;
+    const bom = view.getUint16(0, false);
+    let le: boolean;
+    if (bom === 0x4949) le = true;
+    else if (bom === 0x4d4d) le = false;
+    else return null;
+    if (view.getUint16(2, le) !== 42) return null;
+    const ifd0 = readIfd(view, view.getUint32(4, le), le);
+    if (!ifd0) return null;
+    const exifPtr = ifd0.find((e) => e.tag === TAG_EXIF_IFD);
+    if (!exifPtr) return null;
+    const exif = readIfd(view, view.getUint32(exifPtr.valueOffset, le), le);
+    if (!exif) return null;
+    const lens = exif.find((e) => e.tag === TAG_LENS_MODEL);
+    if (!lens) return null;
+    return readAscii(view, lens.valueOffset, lens.count);
   } catch {
     return null;
   }

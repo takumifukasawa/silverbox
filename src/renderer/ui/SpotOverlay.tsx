@@ -1,16 +1,21 @@
 import { useRef } from 'react';
 import { useAppStore } from '../store/appStore';
 import { clampSpot, type Spot } from '../engine/graph/spotsNode';
-import type { GraphNode } from '../engine/graph/graphDoc';
+import type { GeometryParams, GraphNode } from '../engine/graph/graphDoc';
+import { anchorToOutput, outputRadiusToAnchor, outputToAnchor, spotAnchorToOutput } from '../engine/graph/anchorSpace';
 import type { ViewportState } from './useCanvasViewport';
 
 interface Props {
   /** The active chain's spots node (appStore.ts's findActiveSpotsNodeId) — undefined before the first spot is ever created. */
   node: GraphNode | undefined;
   view: ViewportState;
-  /** Render-output dims (px) — spot coordinates are normalized against these (see spotsNode.ts's doc comment). */
+  /** Render-output dims (px) — the frame the on-canvas handles are drawn in. */
   canvasWidth: number;
   canvasHeight: number;
+  /** The committed input-node geometry + decoded oriented dims for anchor↔output conversion (anchorSpace.ts). */
+  geometry: GeometryParams;
+  orientedWidth: number;
+  orientedHeight: number;
 }
 
 /**
@@ -32,7 +37,7 @@ interface Props {
  * The brush-radius slider lives here (not gated on `node` existing) so the
  * user can dial in a radius before ever creating a first spot.
  */
-export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
+export function SpotOverlay({ node, view, canvasWidth, canvasHeight, geometry, orientedWidth, orientedHeight }: Props) {
   const updateSpot = useAppStore((s) => s.updateSpot);
   const selectedSpotIndex = useAppStore((s) => s.selectedSpotIndex);
   const setSelectedSpotIndex = useAppStore((s) => s.setSelectedSpotIndex);
@@ -42,6 +47,12 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
   const spots = node?.spots?.spots ?? [];
   const sessionRef = useRef<number | null>(null);
   const maxDim = Math.max(canvasWidth, canvasHeight);
+  const ow = orientedWidth;
+  const oh = orientedHeight;
+  // Spots are stored in ANCHOR space (anchorSpace.ts); project to the OUTPUT
+  // frame for rendering. Drags convert the dragged OUTPUT position back to
+  // anchor before committing (identity geometry ⇒ both maps are the identity).
+  const outSpots = spots.map((s) => spotAnchorToOutput(s, geometry, ow, oh));
 
   const commit = (index: number, next: Spot) => {
     if (!node) return;
@@ -69,12 +80,14 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
     select(index);
     ev.stopPropagation();
     ev.preventDefault();
+    const startOut = anchorToOutput(spot.dx, spot.dy, geometry, ow, oh);
     const startX = ev.clientX;
     const startY = ev.clientY;
     const onMove = (e: PointerEvent) => {
       const dx = (e.clientX - startX) / view.scale / canvasWidth;
       const dy = (e.clientY - startY) / view.scale / canvasHeight;
-      commit(index, clampSpot({ ...spot, dx: spot.dx + dx, dy: spot.dy + dy }));
+      const a = outputToAnchor(startOut.x + dx, startOut.y + dy, geometry, ow, oh);
+      commit(index, clampSpot({ ...spot, dx: a.x, dy: a.y }));
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
@@ -89,12 +102,14 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
     select(index);
     ev.stopPropagation();
     ev.preventDefault();
+    const startOut = anchorToOutput(spot.sx, spot.sy, geometry, ow, oh);
     const startX = ev.clientX;
     const startY = ev.clientY;
     const onMove = (e: PointerEvent) => {
       const dx = (e.clientX - startX) / view.scale / canvasWidth;
       const dy = (e.clientY - startY) / view.scale / canvasHeight;
-      commit(index, clampSpot({ ...spot, sx: spot.sx + dx, sy: spot.sy + dy }));
+      const a = outputToAnchor(startOut.x + dx, startOut.y + dy, geometry, ow, oh);
+      commit(index, clampSpot({ ...spot, sx: a.x, sy: a.y }));
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
@@ -109,9 +124,10 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
     select(index);
     ev.stopPropagation();
     ev.preventDefault();
-    const centerPxX = spot.dx * canvasWidth;
-    const centerPxY = spot.dy * canvasHeight;
-    const startRadiusPx = spot.radius * maxDim;
+    const outSpot = spotAnchorToOutput(spot, geometry, ow, oh);
+    const centerPxX = outSpot.dx * canvasWidth;
+    const centerPxY = outSpot.dy * canvasHeight;
+    const startRadiusPx = outSpot.radius * maxDim;
     const startX = ev.clientX;
     const startY = ev.clientY;
     const onMove = (e: PointerEvent) => {
@@ -120,7 +136,8 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
       const handleX = centerPxX + startRadiusPx + dx;
       const handleY = centerPxY + dy;
       const radiusPx = Math.hypot(handleX - centerPxX, handleY - centerPxY);
-      commit(index, clampSpot({ ...spot, radius: Math.max(0.005, radiusPx / maxDim) }));
+      const outRadius = Math.max(0.005, radiusPx / maxDim);
+      commit(index, clampSpot({ ...spot, radius: outputRadiusToAnchor(outRadius, geometry, ow, oh) }));
     };
     const onUp = () => {
       window.removeEventListener('pointermove', onMove);
@@ -145,27 +162,28 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
         }}
       >
         <svg className="spot-overlay-svg" width={canvasWidth} height={canvasHeight}>
-          {spots.map((spot, i) => (
+          {outSpots.map((out, i) => (
             <line
               key={`connector-${i}`}
               className={`spot-connector${i === selectedSpotIndex ? ' selected' : ''}`}
-              x1={spot.dx * canvasWidth}
-              y1={spot.dy * canvasHeight}
-              x2={spot.sx * canvasWidth}
-              y2={spot.sy * canvasHeight}
+              x1={out.dx * canvasWidth}
+              y1={out.dy * canvasHeight}
+              x2={out.sx * canvasWidth}
+              y2={out.sy * canvasHeight}
             />
           ))}
         </svg>
-        {spots.map((spot, i) => {
-          const diameter = spot.radius * maxDim * 2;
+        {outSpots.map((out, i) => {
+          const spot = spots[i]!;
+          const diameter = out.radius * maxDim * 2;
           return (
             <div key={i}>
               <div
                 className={`spot-handle spot-handle-dst${i === selectedSpotIndex ? ' selected' : ''}`}
                 data-testid={`spot-handle-dst-${i}`}
                 style={{
-                  left: pct(spot.dx),
-                  top: pct(spot.dy),
+                  left: pct(out.dx),
+                  top: pct(out.dy),
                   width: diameter,
                   height: diameter,
                   marginLeft: -diameter / 2,
@@ -177,8 +195,8 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
                 className={`spot-handle spot-handle-src${i === selectedSpotIndex ? ' selected' : ''}`}
                 data-testid={`spot-handle-src-${i}`}
                 style={{
-                  left: pct(spot.sx),
-                  top: pct(spot.sy),
+                  left: pct(out.sx),
+                  top: pct(out.sy),
                   width: diameter,
                   height: diameter,
                   marginLeft: -diameter / 2,
@@ -189,7 +207,7 @@ export function SpotOverlay({ node, view, canvasWidth, canvasHeight }: Props) {
               <div
                 className="spot-handle spot-handle-rim"
                 data-testid={`spot-handle-rim-${i}`}
-                style={{ left: spot.dx * canvasWidth + spot.radius * maxDim, top: spot.dy * canvasHeight }}
+                style={{ left: out.dx * canvasWidth + out.radius * maxDim, top: out.dy * canvasHeight }}
                 onPointerDown={beginRimDrag(i, spot)}
               />
             </div>

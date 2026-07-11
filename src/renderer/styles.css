@@ -635,16 +635,71 @@ button:disabled {
   overflow: visible;
 }
 
-.mask-draw-overlay-shape {
+.mask-draw-overlay-center {
+  fill: #8ab4f8;
+}
+
+/* ---- LR-style mask AREA preview (UX pack C §5), shared by MaskDrawOverlay
+   (live gesture) and MaskOverlay (edit handles). Every stroke pairs a thin
+   dark under-stroke with a light stroke so it reads on both bright and dark
+   image regions. non-scaling-stroke keeps line weights constant under zoom. */
+.mask-overlay-area {
+  position: absolute;
+  left: 0;
+  top: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.mask-area-fill {
+  fill: rgba(255, 255, 255, 0.13);
+  stroke: none;
+}
+
+.mask-area-gradient {
+  pointer-events: none;
+}
+
+.mask-area-outline-under,
+.mask-area-line-under {
   fill: none;
-  stroke: #8ab4f8;
-  stroke-width: 1.5;
-  stroke-dasharray: 5 4;
+  stroke: rgba(0, 0, 0, 0.5);
+  stroke-width: 3;
   vector-effect: non-scaling-stroke;
 }
 
-.mask-draw-overlay-center {
-  fill: #8ab4f8;
+.mask-area-outline {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.9);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.mask-area-feather {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.7);
+  stroke-width: 1;
+  stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.mask-area-line {
+  stroke: rgba(255, 255, 255, 0.85);
+  vector-effect: non-scaling-stroke;
+}
+
+.mask-area-line-100 {
+  stroke-width: 2;
+}
+
+.mask-area-line-50 {
+  stroke-width: 1.5;
+  stroke-dasharray: 6 4;
+}
+
+.mask-area-line-0 {
+  stroke-width: 1;
+  stroke: rgba(255, 255, 255, 0.55);
 }
 
 /* ---- spot-removal editing overlay (task #50) ---- */

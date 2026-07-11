@@ -108,6 +108,7 @@ export function Toolbar() {
   const setSpotMode = useAppStore((s) => s.setSpotMode);
   const spotsCapNotice = useAppStore((s) => s.spotsCapNotice);
   const setExportDialogOpen = useAppStore((s) => s.setExportDialogOpen);
+  const setSettingsDialogOpen = useAppStore((s) => s.setSettingsDialogOpen);
   const [ping, setPing] = useState<PingResult | null>(null);
 
   useEffect(() => {
@@ -218,6 +219,13 @@ export function Toolbar() {
       >
         Export…
       </button>
+      <button
+        onClick={() => setSettingsDialogOpen(true)}
+        data-testid="settings-button"
+        title="App settings (autosave, baseline exposure, preview size)"
+      >
+        ⚙ Settings…
+      </button>
       <div className="toolbar-info">
         {sidecarNotice && (
           <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
@@ -250,6 +258,11 @@ export function Toolbar() {
             {cap && (
               <span>
                 {cap.cameraMake} {cap.cameraModel}
+              </span>
+            )}
+            {image.lensModel && (
+              <span data-testid="capture-lens" style={{ color: '#bbb' }}>
+                {image.lensModel}
               </span>
             )}
             {cap && cap.isoSpeed > 0 && <span>ISO {cap.isoSpeed}</span>}

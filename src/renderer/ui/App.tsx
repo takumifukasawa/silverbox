@@ -4,6 +4,7 @@ import { CanvasView } from './CanvasView';
 import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
 import { ExportDialog } from './ExportDialog';
+import { SettingsDialog } from './SettingsDialog';
 import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 
@@ -95,6 +96,9 @@ export function App() {
       }
       if (ev.key === 'Escape' && useAppStore.getState().exportDialogOpen) {
         useAppStore.getState().setExportDialogOpen(false);
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().settingsDialogOpen) {
+        useAppStore.getState().setSettingsDialogOpen(false);
       }
       if (ev.key === 'Escape' && useAppStore.getState().maskDrawMode !== null) {
         // draw-to-create masks (UX pack B §1): Escape cancels cleanly — no
@@ -213,6 +217,7 @@ export function App() {
       </div>
       <NodeEditorPanel />
       <ExportDialog />
+      <SettingsDialog />
       {dropActive && (
         <div className="drop-overlay" data-testid="drop-overlay">
           <div className="drop-overlay-inner">Drop a RAW / JPEG file to open</div>

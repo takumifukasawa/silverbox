@@ -15,7 +15,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { mkdtempSync, rmSync as rmSyncFs } from 'node:fs';
+import { mkdtempSync, rmSync as rmSyncFs, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
@@ -122,7 +122,18 @@ try {
 
   await page.waitForFunction(() => window.__debug?.settingsState() != null, { timeout: 15_000 });
   const defaultEV = await page.evaluate(() => window.__debug.settingsState().baselineExposureEV);
-  check('baselineExposureEV defaults to 0.35 (provisional, pending LR calibration)', defaultEV === 0.35, defaultEV);
+  // Read the source-of-truth default straight from shared/ipc.ts so a future
+  // Lightroom calibration that bumps DEFAULT_SETTINGS never has to touch this
+  // script (the interface line reads `: number;` — the regex skips it and hits
+  // the DEFAULT_SETTINGS literal).
+  const ipcSrc = readFileSync(join(projectRoot, 'shared', 'ipc.ts'), 'utf8');
+  const evMatch = ipcSrc.match(/baselineExposureEV:\s*([\d.]+)/);
+  const expectedDefaultEV = evMatch ? Number(evMatch[1]) : NaN;
+  check(
+    `baselineExposureEV defaults to DEFAULT_SETTINGS value (${expectedDefaultEV}, provisional, pending LR calibration)`,
+    defaultEV === expectedDefaultEV,
+    { defaultEV, expectedDefaultEV }
+  );
 
   await openAndWait(ARW_PATH);
   const rawMeanAtDefault = await imageMean();

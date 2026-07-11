@@ -291,6 +291,9 @@ interface AppState {
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
+  /** Settings dialog open/closed (Toolbar's "Settings…" gear button — see App.tsx's Escape chain). */
+  settingsDialogOpen: boolean;
+  setSettingsDialogOpen(open: boolean): void;
   /** Set after a successful exportSelectedOutputs batch — how many files, and their paths (dialog display / verify). */
   exportBatchInfo: { count: number; paths: string[] } | null;
   /**
@@ -711,6 +714,7 @@ export const useAppStore = create<AppState>((set, get) => {
   exportStatus: 'idle',
   exportError: null,
   exportDialogOpen: false,
+  settingsDialogOpen: false,
   exportBatchInfo: null,
   exportLutInfo: null,
   histogram: null,
@@ -769,7 +773,10 @@ export const useAppStore = create<AppState>((set, get) => {
           // itself throwing, an I/O-level issue) means this build genuinely
           // cannot understand the document on disk, so guard it from ⌘S
           try {
-            const parsed = parseGraphDoc(sidecar);
+            // Pass the decoded dims so a pre-v4 sidecar's mask/spot coords can
+            // be migrated from the old output frame into anchor space (see
+            // parseGraphDoc / anchorSpace.ts); identity-geometry docs no-op.
+            const parsed = parseGraphDoc(sidecar, { width: image.width, height: image.height });
             graph = parsed.graph;
             sidecarCreatedAt = parsed.createdAt ?? null;
             sidecarUnknownFields = parsed.unknown ?? null;
@@ -1582,6 +1589,9 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   },
 
+  setSettingsDialogOpen(open) {
+    set({ settingsDialogOpen: open });
+  },
   setExportDialogOpen(open) {
     set({ exportDialogOpen: open });
   },

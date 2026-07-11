@@ -345,6 +345,46 @@ try {
   });
 
   // ---------------------------------------------------------------------
+  console.log('verify-spots (§1 anchor: a spot stays pinned to image content across a rotation):');
+  // Recreate a single healing spot over the SAME dark region the scan found
+  // (identity geometry ⇒ anchor coords == the output-frame coords used above).
+  await setSpots(spotsNodeId, [{ dx: dstNorm.x, dy: dstNorm.y, sx: srcNorm.x, sy: srcNorm.y, radius: 0.12, feather: 0.3 }]);
+  await page.waitForTimeout(200);
+  const healedDstIdentity = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  check('spot heals the dark region at identity geometry', healedDstIdentity > preDstMean + 0.05, {
+    preDstMean,
+    healedDstIdentity,
+  });
+  const anchorBeforeRotate = (await spotsState(spotsNodeId)).spots[0];
+  const meanBeforeRotate = await gpuMean();
+  // Rotate 10°. Under the OLD output-frame scheme this re-normalized the spot
+  // against the post-geometry frame, dragging it off its blemish (the user's
+  // repro). Anchor space stores coords relative to the IMAGE, so a geometry
+  // change must leave spots[0] byte-identical — that invariance IS the fix.
+  await page.evaluate(() =>
+    window.__debug.setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 10, orientation: { quarterTurns: 0, flipH: false } })
+  );
+  await page.waitForTimeout(300);
+  const anchorAfterRotate = (await spotsState(spotsNodeId)).spots[0];
+  check(
+    "rotating the image leaves the spot's stored anchor coords byte-identical (pinned to image content, not the crop)",
+    JSON.stringify(anchorAfterRotate) === JSON.stringify(anchorBeforeRotate),
+    { anchorBeforeRotate, anchorAfterRotate }
+  );
+  const meanAfterRotate = await gpuMean();
+  check(
+    'the rotation actually took effect on the render (mean changed — proving geometry applied, not ignored)',
+    !meansMatch(meanAfterRotate, meanBeforeRotate, 1e-4),
+    { meanBeforeRotate, meanAfterRotate }
+  );
+  check('no page error rendering a spot through a non-identity geometry', pageErrors.length === 0, pageErrors);
+  // reset geometry + clear the probe spot before the round-trip section below
+  await page.evaluate(() =>
+    window.__debug.setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0, orientation: { quarterTurns: 0, flipH: false } })
+  );
+  await setSpots(spotsNodeId, []);
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (6. sidecar round-trip: save, reopen, spots list byte-equal, render mean equal):');
   const roundTripSpots = [
     { dx: 0.25, dy: 0.35, sx: 0.55, sy: 0.4, radius: 0.06, feather: 0.3 },
@@ -355,7 +395,7 @@ try {
   await page.keyboard.press('Meta+s');
   await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
   const savedJson = JSON.parse(readFileSync(SIDECAR, 'utf8'));
-  check('saved sidecar is schemaVersion 3', savedJson.schemaVersion === 3, savedJson.schemaVersion);
+  check('saved sidecar is schemaVersion 4', savedJson.schemaVersion === 4, savedJson.schemaVersion);
   const savedSpotsNode = savedJson.graph.nodes.find((n) => n.id === spotsNodeId);
   check("saved sidecar carries the spots node's type and list", savedSpotsNode?.type === 'spots' && savedSpotsNode?.spots?.spots?.length === 2, savedSpotsNode);
 

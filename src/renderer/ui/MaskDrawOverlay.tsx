@@ -1,4 +1,5 @@
 import type { ViewportState } from './useCanvasViewport';
+import { MaskShapePreview, type PreviewShape } from './MaskShapePreview';
 
 interface Props {
   mode: 'radial' | 'linear';
@@ -11,23 +12,26 @@ interface Props {
 }
 
 /**
- * Live outline shown WHILE dragging a new local-adjustment shape (draw-to-
- * create masks, UX pack B §1) — nothing is committed to the graph until
- * pointerup, this is purely a preview. Deliberately lighter than
- * MaskOverlay (no handles, no store writes): a sibling of the preview
- * <canvas>, inside the SAME pan/zoom transform, so it tracks the image
- * exactly regardless of zoom/pan (same contract as CropOverlay/MaskOverlay).
- * Radial: circle centered on the drag start, radius = drag distance (in the
- * SAME pixel-space-then-max-dimension-normalized convention maskNode.ts's
- * cpuMaskShape/MASK_WGSL use — visually, that normalization cancels out here
- * since this draws directly in canvas px, so the radius is simply the drag
- * distance). Linear: the start→current axis as a line.
+ * Live area preview shown WHILE dragging a new local-adjustment shape (draw-
+ * to-create masks) — nothing is committed to the graph until pointerup, this
+ * is purely a preview. A sibling of the preview <canvas>, inside the SAME
+ * pan/zoom transform, so it tracks the image exactly (same contract as
+ * CropOverlay/MaskOverlay). Both start/current are OUTPUT-frame normalized
+ * (CanvasView's imagePointFromClient), so they map straight into
+ * MaskShapePreview (UX pack C §5) — the SAME LR-style area rendering the
+ * post-create MaskOverlay uses. The feather values match what pointerup
+ * commits (radial 0.5, linear 0.3) so the preview reads the affected area, not
+ * just an outline.
  */
 export function MaskDrawOverlay({ mode, start, current, view, canvasWidth, canvasHeight }: Props) {
-  const cx = start.x * canvasWidth;
-  const cy = start.y * canvasHeight;
+  const maxDim = Math.max(canvasWidth, canvasHeight);
   const dxPx = (current.x - start.x) * canvasWidth;
   const dyPx = (current.y - start.y) * canvasHeight;
+
+  const shape: PreviewShape =
+    mode === 'radial'
+      ? { type: 'radial', cx: start.x, cy: start.y, radius: Math.hypot(dxPx, dyPx) / maxDim, feather: 0.5 }
+      : { type: 'linear', x0: start.x, y0: start.y, x1: current.x, y1: current.y, feather: 0.3 };
 
   return (
     <svg
@@ -37,14 +41,8 @@ export function MaskDrawOverlay({ mode, start, current, view, canvasWidth, canva
       height={canvasHeight}
       style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
     >
-      {mode === 'radial' ? (
-        <>
-          <circle className="mask-draw-overlay-shape" cx={cx} cy={cy} r={Math.hypot(dxPx, dyPx)} />
-          <circle className="mask-draw-overlay-center" cx={cx} cy={cy} r={3} />
-        </>
-      ) : (
-        <line className="mask-draw-overlay-shape" x1={cx} y1={cy} x2={cx + dxPx} y2={cy + dyPx} />
-      )}
+      <MaskShapePreview shape={shape} canvasWidth={canvasWidth} canvasHeight={canvasHeight} />
+      {mode === 'radial' && <circle className="mask-draw-overlay-center" cx={start.x * canvasWidth} cy={start.y * canvasHeight} r={3} />}
     </svg>
   );
 }

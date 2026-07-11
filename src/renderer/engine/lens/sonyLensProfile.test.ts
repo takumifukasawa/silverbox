@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   parseSonyLensProfile,
+  parseSonyLensModel,
   evalLinearSpline,
   distortionGain,
   caGain,
@@ -62,6 +63,21 @@ describe('parseSonyLensProfile', () => {
     const junk = new Uint8Array(4096);
     for (let i = 0; i < junk.length; i++) junk[i] = (i * 37) & 0xff;
     expect(parseSonyLensProfile(junk.buffer)).toBeNull();
+  });
+});
+
+describe('parseSonyLensModel', () => {
+  it('extracts the EXIF LensModel from the real ARW', () => {
+    // Ground truth from `exiftool -LensModel` on the default ARW (a7C II).
+    expect(parseSonyLensModel(bytesOf(ARW_PATH))).toBe('FE 24mm F2.8 G');
+  });
+
+  it('returns null for a JPEG and for garbage', () => {
+    expect(parseSonyLensModel(bytesOf(JPG_PATH))).toBeNull();
+    expect(parseSonyLensModel(new ArrayBuffer(0))).toBeNull();
+    const junk = new Uint8Array(4096);
+    for (let i = 0; i < junk.length; i++) junk[i] = (i * 37) & 0xff;
+    expect(parseSonyLensModel(junk.buffer)).toBeNull();
   });
 });
 

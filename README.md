@@ -21,8 +21,13 @@ What makes it different:
   the preview — the last valid shader keeps rendering while the error is
   shown with editor line numbers.
 - **git-native documents.** The sidecar (`<image>.silverbox.json`) is a
-  pretty-printed, stable JSON document (schemaVersion 2) carrying the graph,
-  its provenance and timestamps.
+  pretty-printed, stable JSON document (schemaVersion 4) carrying the graph,
+  its provenance and timestamps. Older sidecars still load: v2/v3 are read
+  transparently, and pre-v4 mask/spot coordinates — which were normalized
+  against the cropped/straightened output — are migrated on load into
+  "anchor space" (normalized against the oriented full frame, before crop and
+  rotation) so a spot or mask stays pinned to its image content when the crop
+  or angle changes.
 
 The principles behind these choices — and what Silverbox deliberately is
 not — are written down in [DESIGN.md](DESIGN.md).

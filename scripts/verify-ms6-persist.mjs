@@ -79,12 +79,12 @@ try {
   check('sidecar file exists next to the image', existsSync(SIDECAR), SIDECAR);
   const saved = JSON.parse(readFileSync(SIDECAR, 'utf8'));
   check(
-    // schemaVersion 3 (masks milestone): the version this build always
-    // writes now; a v2 sidecar still LOADS byte-semantically identically
-    // (see scripts/verify-masks.mjs's inline v2 fixture check) — only the
+    // schemaVersion 4 (anchor-space masks/spots, UX pack C §1): the version
+    // this build always writes now; a v2/v3 sidecar still LOADS (see
+    // scripts/verify-masks.mjs's inline v2/v3 fixture checks) — only the
     // number a *save* stamps on disk changed.
-    'sidecar is schemaVersion 3 with source block and the edited ev',
-    saved.schemaVersion === 3 &&
+    'sidecar is schemaVersion 4 with source block and the edited ev',
+    saved.schemaVersion === 4 &&
       saved.source?.fileName === 'DSC02993.ARW' &&
       saved.source?.kind === 'raw' &&
       typeof saved.createdAt === 'string' &&

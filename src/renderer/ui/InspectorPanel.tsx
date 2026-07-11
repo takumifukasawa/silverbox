@@ -444,6 +444,9 @@ function LensSection({ node }: { node: GraphNode }) {
   // The embedded profile lives on the decoded image (parsed from the ARW);
   // the checkbox is disabled + hinted when there is none (JPEG / non-Sony).
   const hasProfile = useAppStore((s) => !!s.image?.profile);
+  // EXIF LensModel (task #51 §2), shown next to the toggle so the user can see
+  // WHICH lens the embedded profile corrects (e.g. "FE 24mm F2.8 G").
+  const lensModel = useAppStore((s) => s.image?.lensModel);
   const lens = node.lens ?? defaultLensParams();
   const sessionRef = useRef<Partial<Record<keyof LensParams, number | null>>>({});
   const profileEnabled = lens.profile?.enabled ?? false;
@@ -459,6 +462,11 @@ function LensSection({ node }: { node: GraphNode }) {
           onChange={(ev) => setLens({ ...lens, profile: { enabled: ev.target.checked } }, null)}
         />
         Profile corrections (embedded)
+        {lensModel && (
+          <span className="lens-profile-model" data-testid="lens-profile-model" style={{ color: '#999', marginLeft: 6 }}>
+            {lensModel}
+          </span>
+        )}
       </label>
       {LENS_SLIDER_DEFS.map((d) => (
         <div

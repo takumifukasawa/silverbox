@@ -134,10 +134,11 @@ export interface Settings {
    * ONLY, at decode time — see librawDecoder.ts's noAutoBright doc comment
    * for why LibRaw's own auto-bright is unusable (colorspace-dependent), and
    * decodeWorker.ts's prepareRaw for where this is applied. JPEG ingest is
-   * display-referred already and is never touched. 0.35 is a provisional
+   * display-referred already and is never touched. 0.5 is a provisional
    * Lightroom/Resolve-style "baseline exposure" pending a side-by-side
    * calibration session against Lightroom (see the Lightroom-reference
-   * memory note) — a named, tunable "feel" constant, not derived from math.
+   * memory note) — a named, tunable "feel" constant, not derived from math
+   * (raised 0.35 → 0.5 after a round-3 hand test still read slightly dark).
    */
   baselineExposureEV: number;
   export: ExportSettingsShape;
@@ -149,7 +150,7 @@ export const DEFAULT_SETTINGS: Settings = {
   settingsVersion: SETTINGS_VERSION,
   autosaveSidecar: true,
   previewLongEdge: 2560,
-  baselineExposureEV: 0.35,
+  baselineExposureEV: 0.5,
   export: { quality: 90, maxDim: null, metadata: 'all', colorSpace: 'srgb' },
   exportPresets: [],
 };

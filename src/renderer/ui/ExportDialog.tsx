@@ -248,16 +248,8 @@ export function ExportDialog() {
           )}
         </div>
         <div className="export-dialog-footer">
-          <label className="export-dialog-autosave" title="Debounced (1s) sidecar autosave while an image is open — this lives in settings.json">
-            <input
-              type="checkbox"
-              checked={settings.autosaveSidecar}
-              data-testid="export-autosave-checkbox"
-              onChange={(ev) => void updateSettings({ autosaveSidecar: ev.target.checked })}
-            />
-            Autosave sidecar
-            <span className="toolbar-dim"> (settings.json)</span>
-          </label>
+          {/* The autosave checkbox moved to the Settings dialog (UX pack C §4)
+              — it felt out of place among export controls. */}
           <div className="export-dialog-footer-buttons">
             <button type="button" onClick={() => setOpen(false)} disabled={exporting} data-testid="export-close-button">
               Close
