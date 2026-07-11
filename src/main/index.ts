@@ -11,10 +11,12 @@ import {
   type ExportLutResult,
   type OpenImageDialogResult,
   type PingResult,
+  type PresetSummary,
   type Settings,
 } from '../../shared/ipc';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
+import { deletePreset, listPresets, readPreset, writePreset } from './presets';
 import { readSettings, updateSettings } from './settings';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -116,6 +118,18 @@ function registerIpc(): void {
       throw new Error('settingsUpdate: partial must be an object');
     }
     return updateSettings(partial as Partial<Settings>);
+  });
+
+  ipcMain.handle(IPC.presetsList, async (): Promise<PresetSummary[]> => listPresets());
+
+  ipcMain.handle(IPC.presetRead, async (_ev, slug: unknown): Promise<string | null> => readPreset(slug));
+
+  ipcMain.handle(IPC.presetWrite, async (_ev, slug: unknown, content: unknown): Promise<void> => {
+    await writePreset(slug, content);
+  });
+
+  ipcMain.handle(IPC.presetDelete, async (_ev, slug: unknown): Promise<void> => {
+    await deletePreset(slug);
   });
 }
 

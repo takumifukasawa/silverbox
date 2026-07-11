@@ -4,6 +4,7 @@ import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
 import { outputName, type AddableKind } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
+import { PresetsMenu } from './PresetsMenu';
 
 /**
  * "Add node ▾" menu (UI spec §2): customShader + blend + mask + output + the
@@ -170,6 +171,7 @@ export function Toolbar() {
           + Linear
         </button>
       </span>
+      <PresetsMenu />
       <button
         onClick={toggleMaskOverlay}
         disabled={!selectedIsMask}

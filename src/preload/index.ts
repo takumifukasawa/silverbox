@@ -14,6 +14,10 @@ const api: SilverboxApi = {
   getPathForFile: (file) => webUtils.getPathForFile(file),
   settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
   settingsUpdate: (partial) => ipcRenderer.invoke(IPC.settingsUpdate, partial),
+  presetsList: () => ipcRenderer.invoke(IPC.presetsList),
+  presetRead: (slug) => ipcRenderer.invoke(IPC.presetRead, slug),
+  presetWrite: (slug, content) => ipcRenderer.invoke(IPC.presetWrite, slug, content),
+  presetDelete: (slug) => ipcRenderer.invoke(IPC.presetDelete, slug),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

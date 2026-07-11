@@ -127,6 +127,14 @@ declare global {
       setMaskShape(nodeId: string, shape: MaskShape): void;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
+      /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
+      presetsState(): import('../../../shared/ipc').PresetSummary[];
+      /** Save the current graph as a whole-look preset named `name` (mirrors PresetsMenu's "Save"). */
+      savePreset(name: string): Promise<void>;
+      /** Apply a saved preset by slug (mirrors PresetsMenu's "Apply") — one undo entry. */
+      applyPreset(slug: string): Promise<void>;
+      /** Delete a saved preset by slug (mirrors PresetsMenu's "Delete"). */
+      deletePreset(slug: string): Promise<void>;
     };
   }
 }
@@ -624,6 +632,18 @@ export function CanvasView() {
       },
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;
+      },
+      presetsState() {
+        return useAppStore.getState().presets;
+      },
+      savePreset(name) {
+        return useAppStore.getState().savePreset(name);
+      },
+      applyPreset(slug) {
+        return useAppStore.getState().applyPreset(slug);
+      },
+      deletePreset(slug) {
+        return useAppStore.getState().deletePreset(slug);
       },
     };
     return () => {

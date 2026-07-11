@@ -38,11 +38,13 @@ import { validateWgsl } from '../engine/shader/validateWgsl';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
 import { buildLutExport } from '../engine/color/lutExport';
+import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
 import {
   DEFAULT_SETTINGS,
   SIDECAR_SUFFIX,
   type ExportColorSpace,
   type ExportMetadataPolicy,
+  type PresetSummary,
   type Settings,
 } from '../../../shared/ipc';
 
@@ -124,6 +126,20 @@ interface AppState {
   developClipboard: GraphDoc | null;
   copyDevelopSettings(): void;
   pasteDevelopSettings(): void;
+  /** `<userData>/presets/*.json` summaries (task #37); refreshed after save/delete and once at boot. */
+  presets: PresetSummary[];
+  /**
+   * Save the CURRENT graph as a whole-look preset file named `name`
+   * (captureLook — the exact copyDevelopSettings geometry-stripping
+   * contract). Same display name as an existing preset overwrites it (its
+   * slug/createdAt/unknown wrapper keys are reused — DESIGN §9 passthrough);
+   * a different name that sanitizes to the same slug disambiguates (-2, -3…).
+   */
+  savePreset(name: string): Promise<void>;
+  /** Apply a saved preset by slug — exactly the pasteDevelopSettings code path (applyLook), one undo entry. No-op without an open image. */
+  applyPreset(slug: string): Promise<void>;
+  /** Delete a saved preset's file; refreshes the list. No confirm dialog (see PresetsMenu's low-friction-but-not-accidental design). */
+  deletePreset(slug: string): Promise<void>;
   /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
@@ -369,17 +385,71 @@ function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppS
 }
 
 /**
+ * Sanitize to a filesystem/slug-safe token: letters/digits/underscore/hyphen
+ * only, runs of anything else collapse to a single hyphen, and a result
+ * that's empty after trimming falls back to `fallback`. Shared by
+ * suffixExportPath (output-file suffixes) and slugifyPresetName (preset
+ * filenames) — same sanitization family, different fallback words.
+ */
+function sanitizeToken(raw: string, fallback: string): string {
+  return raw.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || fallback;
+}
+
+/**
  * Insert `-<name>` before the extension of an export path, e.g.
  * `/x/DSC02993.jpg` + "second copy" -> `/x/DSC02993-second-copy.jpg` — used
  * only when exportSelectedOutputs resolves to 2+ output nodes (a single
- * target keeps the path exactly as given, today's behavior). `name` is
- * filesystem-sanitized: anything but letters/digits/underscore/hyphen becomes
- * a hyphen, runs collapse, and an empty result falls back to 'output'.
+ * target keeps the path exactly as given, today's behavior).
  */
 export function suffixExportPath(path: string, name: string): string {
-  const safe = name.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'output';
+  const safe = sanitizeToken(name, 'output');
   const m = /^(.*)(\.[^./\\]+)$/.exec(path);
   return m ? `${m[1]}-${safe}${m[2]}` : `${path}-${safe}`;
+}
+
+/**
+ * Preset filename slug (task #37): same sanitization family as
+ * suffixExportPath, 'preset' fallback for an empty/fully-stripped name.
+ * Collision disambiguation (-2, -3…) against a DIFFERENT same-slug preset
+ * happens in savePreset — this just produces the base candidate.
+ */
+export function slugifyPresetName(name: string): string {
+  return sanitizeToken(name, 'preset');
+}
+
+/**
+ * Whole-look capture (task #37 / copyDevelopSettings): strip the input
+ * node's geometry (crop/straighten/orientation stay per-photo) but keep its
+ * lens corrections (optical, not photo-specific the same way). This is the
+ * ENTIRE copyDevelopSettings body — both it and savePreset call this, so a
+ * preset is exactly "a named, persisted develop clipboard" the brief asks
+ * for, not a second implementation of the same idea.
+ */
+export function captureLook(graph: GraphDoc): GraphDoc {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: undefined } : n)),
+  };
+}
+
+/**
+ * Apply a captured look to `s`'s CURRENT graph: `look`'s nodes/edges replace
+ * the current graph wholesale, except the input node's geometry, which is
+ * preserved from whatever's open right now — a look must never carry
+ * another photo's crop. One undo entry (pushHistory's `null` = its own
+ * discrete entry, coalescing nothing). This is the entire body of
+ * pasteDevelopSettings; applyPreset (the preset "Apply" action) shares it
+ * unchanged, so paste and preset-apply are one implementation with one
+ * merge semantics.
+ */
+function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: GraphDoc } {
+  const currentInput = s.graph.nodes.find((n) => n.kind === 'input');
+  const currentGeometry = currentInput?.geometry;
+  const graph: GraphDoc = structuredClone({
+    ...look,
+    nodes: look.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: currentGeometry } : n)),
+  });
+  return { ...pushHistory(s, null), graph, graphDirty: true };
 }
 
 function getShader(graph: GraphDoc, nodeId: string): CustomShaderParams | null {
@@ -1092,13 +1162,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   copyDevelopSettings() {
     const { graph } = get();
-    // crop/orientation stay per-photo — strip the input node's geometry;
-    // lens IS copied (optical, not photo-specific in the same way).
-    const clipboard: GraphDoc = {
-      ...graph,
-      nodes: graph.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: undefined } : n)),
-    };
-    set({ developClipboard: structuredClone(clipboard) });
+    set({ developClipboard: structuredClone(captureLook(graph)) });
   },
 
   pasteDevelopSettings() {
@@ -1106,18 +1170,76 @@ export const useAppStore = create<AppState>((set, get) => {
     set((s) => {
       const clip = s.developClipboard;
       if (!clip) return {};
-      const currentInput = s.graph.nodes.find((n) => n.kind === 'input');
-      const currentGeometry = currentInput?.geometry;
-      const graph: GraphDoc = structuredClone({
-        ...clip,
-        nodes: clip.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: currentGeometry } : n)),
-      });
-      nextGraph = graph;
-      return { ...pushHistory(s, null), graph, graphDirty: true };
+      const patch = applyLook(s, clip);
+      nextGraph = patch.graph;
+      return patch;
     });
     // node ids referenced by the pasted custom nodes need fresh compiled
     // artifacts in THIS session's cache (same as opening a doc with shaders)
     if (nextGraph) revalidateShaders(nextGraph);
+  },
+
+  presets: [],
+
+  async savePreset(name) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const { graph } = get();
+    const baseSlug = slugifyPresetName(trimmed);
+    const list = await window.silverbox.presetsList();
+    // Same DISPLAY NAME as an existing preset = the update path (reuse its
+    // slug, its createdAt, and its on-disk unknown wrapper keys); a
+    // different name that happens to SANITIZE to the same slug disambiguates
+    // instead of colliding.
+    const sameName = list.find((p) => p.name === trimmed);
+    let slug = sameName?.slug ?? baseSlug;
+    if (!sameName) {
+      const taken = new Set(list.map((p) => p.slug));
+      for (let n = 2; taken.has(slug); n++) slug = `${baseSlug}-${n}`;
+    }
+    let unknownFields: Record<string, unknown> | undefined;
+    let createdAt = new Date().toISOString();
+    const existingText = await window.silverbox.presetRead(slug);
+    if (existingText) {
+      try {
+        const parsed = parsePresetFile(existingText);
+        unknownFields = parsed.unknown;
+        createdAt = parsed.createdAt;
+      } catch (err) {
+        // this slug's file on disk is unreadable — overwrite it cleanly
+        // rather than fail the save (promise-9 leaves the OLD file alone
+        // only until we deliberately replace it here)
+        console.warn(`overwriting unreadable preset file for slug "${slug}":`, err);
+      }
+    }
+    const content = serializePreset(trimmed, captureLook(graph), createdAt, unknownFields);
+    await window.silverbox.presetWrite(slug, content);
+    set({ presets: await window.silverbox.presetsList() });
+  },
+
+  async applyPreset(slug) {
+    if (get().imageStatus !== 'ready') return;
+    const text = await window.silverbox.presetRead(slug);
+    if (!text) return;
+    let look: GraphDoc;
+    try {
+      ({ look } = parsePresetFile(text));
+    } catch (err) {
+      console.warn(`preset "${slug}" could not be parsed:`, err);
+      return;
+    }
+    let nextGraph: GraphDoc | null = null;
+    set((s) => {
+      const patch = applyLook(s, look);
+      nextGraph = patch.graph;
+      return patch;
+    });
+    if (nextGraph) revalidateShaders(nextGraph);
+  },
+
+  async deletePreset(slug) {
+    await window.silverbox.presetDelete(slug);
+    set({ presets: await window.silverbox.presetsList() });
   },
 
   setGeometry(geo, coalesceKey) {
@@ -1309,6 +1431,9 @@ export const useAppStore = create<AppState>((set, get) => {
 if (typeof window !== 'undefined' && window.silverbox) {
   void window.silverbox.settingsGet().then((settings) => {
     useAppStore.setState({ settings });
+  });
+  void window.silverbox.presetsList().then((presets) => {
+    useAppStore.setState({ presets });
   });
 }
 

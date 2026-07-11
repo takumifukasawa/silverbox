@@ -18,6 +18,10 @@ export const IPC = {
   exportLut: 'export:lut',
   settingsGet: 'settings:get',
   settingsUpdate: 'settings:update',
+  presetsList: 'presets:list',
+  presetRead: 'presets:read',
+  presetWrite: 'presets:write',
+  presetDelete: 'presets:delete',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
@@ -58,6 +62,29 @@ export interface SilverboxApi {
   settingsGet(): Promise<Settings>;
   /** Merge `partial` into the persisted settings; returns the full, sanitized result. */
   settingsUpdate(partial: Partial<Settings>): Promise<Settings>;
+  /** List `<userData>/presets/*.json` summaries; a malformed file is skipped (never crashes the list). */
+  presetsList(): Promise<PresetSummary[]>;
+  /** Read one preset's raw JSON text by slug; null if it doesn't exist. */
+  presetRead(slug: string): Promise<string | null>;
+  /** Write (create or overwrite) one preset's raw JSON text by slug. */
+  presetWrite(slug: string, content: string): Promise<void>;
+  /** Delete one preset file by slug. */
+  presetDelete(slug: string): Promise<void>;
+}
+
+/**
+ * `<userData>/presets/<slug>.json` listing entry (task #37): individual
+ * whole-look JSON files, text-first and git-shareable — same philosophy as
+ * the sidecars (ROADMAP.md "Presets"). The renderer owns the file's actual
+ * shape (presetVersion/name/createdAt/look — see engine/graph/presetDoc.ts);
+ * main only reads/writes bytes and surfaces this minimal summary for the UI.
+ */
+export interface PresetSummary {
+  /** Filename stem (`<slug>.json`), filesystem-safe (letters/digits/_/-). */
+  slug: string;
+  /** User-facing display name (may differ from slug after sanitization). */
+  name: string;
+  createdAt: string;
 }
 
 /** EXIF policy for exported images (Toolbar's "export-metadata" select). */

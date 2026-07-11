@@ -60,6 +60,10 @@ not — are written down in [DESIGN.md](DESIGN.md).
   spatial op (Detail, clarity/texture), custom WGSL node or masked local
   adjustment can't be captured by a position-independent LUT and is instead
   skipped and reported in the export dialog.
+- **Develop presets** — save or apply a whole-look develop graph as a named,
+  git-shareable JSON file under the app data dir, with the same
+  capture/merge semantics as the develop clipboard (⌘⇧C/⌘⇧V) — a preset
+  never carries another photo's crop.
 
 ## Engine
 

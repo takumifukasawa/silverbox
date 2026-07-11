@@ -21,6 +21,11 @@ grayscale check views, zoom/fit/100%, coalesced undo/redo, JSON sidecars
 EXIF/ICC, drag & drop, linear wide-gamut working space (Rec.2020), LUT export
 (.cube + Unity/Unreal strip PNGs + WebGL snippet, capturing the active
 output's color pipeline with spatial/masked/custom ops reported as excluded).
+Develop presets: whole-look JSON files under the app data dir
+(`<userData>/presets/<slug>.json`), git-shareable like the sidecars —
+save/apply/delete a named look from the toolbar, sharing the develop
+clipboard's exact capture/merge semantics (geometry stays per-photo, so
+applying a preset never carries another image's crop).
 
 ## In flight / agreed order
 
@@ -30,17 +35,16 @@ output's color pipeline with spatial/masked/custom ops reported as excluded).
 2. ColorKey (secondary) mask node
 3. Spot removal (clone circles, non-destructive list)
 4. Image node (composite with / mask by another file, path reference)
-5. Presets (JSON files, app dir + git-shareable)
-6. Sidecar hot-reload on external change (the AI-editing loop)
-7. Sony embedded lens profile auto-correction (validated against the
+5. Sidecar hot-reload on external change (the AI-editing loop)
+6. Sony embedded lens profile auto-correction (validated against the
    in-camera JPEG). No per-lens database: every ARW embeds its own
    correction splines for whatever E-mount lens took it. Contactless
    /vintage glass uses the manual sliders + named lens presets; other
    makers come later via DNG opcode support (the semi-universal path),
    then per-maker parsing on demand.
-8. Denoise for high ISO (external-tool hook node first — see nice-to-have
+7. Denoise for high ISO (external-tool hook node first — see nice-to-have
    notes; bundled inference only if that proves insufficient)
-9. Headless CLI renderer (batch export against sidecars/presets)
+8. Headless CLI renderer (batch export against sidecars/presets)
 
 ## Should have (credibility gaps vs Lightroom/Resolve, mostly small)
 

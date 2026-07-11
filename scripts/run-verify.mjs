@@ -1,7 +1,7 @@
 /**
  * Parallel verify-suite runner.
  *
- * The 33 verify-*.mjs scripts each build the app, launch a windowless
+ * The 34 verify-*.mjs scripts each build the app, launch a windowless
  * Electron instance, and drive it. Run serially (the old `npm run verify`
  * chain, kept as `verify:serial`) that's ~15+ minutes. This runner builds
  * ONCE up front, then runs the scripts through a small concurrency pool
@@ -77,6 +77,7 @@ const ALL_SCRIPTS = [
   { name: 'masks', file: 'verify-masks.mjs' },
   { name: 'colorkey', file: 'verify-colorkey.mjs' },
   { name: 'lut', file: 'verify-lut.mjs' },
+  { name: 'presets', file: 'verify-presets.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 
