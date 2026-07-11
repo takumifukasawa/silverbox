@@ -50,6 +50,12 @@ not — are written down in [DESIGN.md](DESIGN.md).
 - **Lens corrections** — manual distortion, red/blue chromatic aberration
   and vignetting recovery, folded into the same single resample pass as the
   crop.
+- **Embedded lens profile (Sony)** — every ARW carries per-shot
+  distortion/CA/vignetting splines for whatever E-mount lens took it; the file
+  IS the profile, so there is no lens database. Distortion + chromatic
+  aberration auto-correct on by default for a fresh ARW open (validated
+  against the in-camera JPEG) and stack on top of the manual sliders;
+  vignetting is parsed but held off pending a clean scale-divisor fit.
 - **Scopes** — LR-style histogram (RGB + luminance, additive) with clipping
   indicators, plus luma waveform, RGB parade and a vectorscope.
 - Before/after compare (`\`) and a grayscale check view (`G`), zoom/pan with
@@ -97,14 +103,18 @@ window. Save the edit sidecar with ⌘S; Export… renders at full resolution.
 
 ## Verification
 
-The project is developed against an end-to-end Playwright harness instead of
-unit tests: every feature has a `scripts/verify-*.mjs` script that drives the
-real app (real RAW file, real GPU) and holds the GPU output to a CPU
-reference implementation of the same math, typically within 1/255 per
-channel — plus interaction checks through the actual UI.
+The project is developed primarily against an end-to-end Playwright harness:
+every feature has a `scripts/verify-*.mjs` script that drives the real app
+(real RAW file, real GPU) and holds the GPU output to a CPU reference
+implementation of the same math, typically within 1/255 per channel — plus
+interaction checks through the actual UI. A thin **vitest unit tier**
+(`npm run test:unit`, colocated `src/**/*.test.ts`) covers PURE functions
+where a full app launch is overkill — currently the Sony lens-profile parser
+and correction math; it runs as the `unit` entry inside the parallel suite.
 
 ```sh
-npm run verify           # everything (builds, launches, ~30 scripts)
+npm run verify           # everything (builds, launches; unit tier + ~35 scripts)
+npm run test:unit        # just the fast pure-function unit tier
 npm run verify:wb        # or any single area
 ```
 

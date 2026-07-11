@@ -286,6 +286,19 @@ export function sanitizeGeometry(raw: unknown, nodeId: string): GeometryParams {
 // fields default to 0 = identity, so an untouched input node stays a
 // bit-exact pass-through, same invariant geometry upholds.
 
+/**
+ * Sony embedded lens-profile toggle (task #34, F3b). The correction SPLINES
+ * live on the decoded image (parsed from the ARW bytes — see
+ * decodeWorker.ts / sonyLensProfile.ts); only this on/off flag is
+ * document/sidecar state. DEFAULT enabled true on a fresh open WHEN the image
+ * carries a profile (camera/LR behavior — set in appStore.openImageByPath);
+ * older sidecars with no `profile` key sanitize to enabled:false so their
+ * existing renders never change.
+ */
+export interface LensProfileState {
+  enabled: boolean;
+}
+
 export interface LensParams {
   /** −100..100; + straightens barrel distortion. */
   distortion: number;
@@ -295,12 +308,20 @@ export interface LensParams {
   caBlue: number;
   /** 0..100; corner illumination recovery. */
   vignette: number;
+  /** Sony embedded auto-correction toggle; stacks on TOP of the manual fields (LR-style). */
+  profile?: LensProfileState;
 }
 
 export function defaultLensParams(): LensParams {
-  return { distortion: 0, caRed: 0, caBlue: 0, vignette: 0 };
+  return { distortion: 0, caRed: 0, caBlue: 0, vignette: 0, profile: { enabled: false } };
 }
 
+/**
+ * True when the MANUAL corrections are all identity. Deliberately ignores
+ * `profile` — the profile's own activation (it needs the image's splines,
+ * which the doc can't see) is decided by the renderer (GraphRenderer). This
+ * keeps the manual-only pass-through invariant intact.
+ */
 export function isIdentityLens(l: LensParams): boolean {
   return l.distortion === 0 && l.caRed === 0 && l.caBlue === 0 && l.vignette === 0;
 }
@@ -313,6 +334,7 @@ export function clampLens(l: LensParams): LensParams {
     caRed: clamp(l.caRed, -100, 100),
     caBlue: clamp(l.caBlue, -100, 100),
     vignette: clamp(l.vignette, 0, 100),
+    ...(l.profile ? { profile: { enabled: l.profile.enabled } } : {}),
   };
 }
 
@@ -326,11 +348,26 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
     if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`lens ${path} must be a finite number`);
     return v;
   };
+  // Profile toggle is additive: a sidecar with no `profile` key (every
+  // pre-F3b sidecar) sanitizes to enabled:false, leaving its render unchanged.
+  const rawProfile = src.profile;
+  let profile: LensProfileState = { enabled: false };
+  if (rawProfile !== undefined) {
+    if (typeof rawProfile !== 'object' || rawProfile === null) {
+      throw new Error(`${nodeId}.lens.profile must be an object`);
+    }
+    const enabled = (rawProfile as { enabled?: unknown }).enabled;
+    if (enabled !== undefined && typeof enabled !== 'boolean') {
+      throw new Error(`${nodeId}.lens.profile.enabled must be a boolean`);
+    }
+    profile = { enabled: enabled === true };
+  }
   return clampLens({
     distortion: num(src.distortion, base.distortion, `${nodeId}.lens.distortion`),
     caRed: num(src.caRed, base.caRed, `${nodeId}.lens.caRed`),
     caBlue: num(src.caBlue, base.caBlue, `${nodeId}.lens.caBlue`),
     vignette: num(src.vignette, base.vignette, `${nodeId}.lens.vignette`),
+    profile,
   });
 }
 
@@ -859,7 +896,12 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
     };
   }
   const lens = inputNode.lens ?? defaultLensParams();
-  if (!isIdentityLens(lens)) {
+  // Emit plan.lens when the MANUAL fields are non-identity OR the embedded
+  // profile is toggled on. Whether the profile actually does work (the image
+  // must carry splines) is the renderer's call — see GraphRenderer; a
+  // profile-on doc opened against a JPEG/non-Sony image resamples to nothing
+  // and the renderer skips the pass, preserving the bit-exact invariant.
+  if (!isIdentityLens(lens) || lens.profile?.enabled) {
     plan.lens = lens;
   }
   return plan;

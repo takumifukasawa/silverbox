@@ -26,6 +26,16 @@ Develop presets: whole-look JSON files under the app data dir
 save/apply/delete a named look from the toolbar, sharing the develop
 clipboard's exact capture/merge semantics (geometry stays per-photo, so
 applying a preset never carries another image's crop).
+Sony embedded lens-profile auto-correction: every ARW carries per-shot
+distortion/CA/vignetting splines for whatever E-mount lens took it (the file
+IS the profile — no lens database), parsed straight from the makernote tags
+and applied in the same resample pass as crop/lens, stacking on top of the
+manual sliders (LR-style). Scope: distortion + chromatic aberration ship
+(validated against the in-camera JPEG — corner NCC 0.67 corrected vs 0.06
+uncorrected); vignetting is parsed but held OFF because its knot-scale divisor
+would not fit the JPEG radial falloff cleanly (the camera's creative tone
+curve dominates the residual). On by default for a fresh ARW open, off for a
+JPEG/non-Sony image; the DNG-opcode path for other makers stays future work.
 
 ## In flight / agreed order
 
@@ -36,15 +46,13 @@ applying a preset never carries another image's crop).
 3. Spot removal (clone circles, non-destructive list)
 4. Image node (composite with / mask by another file, path reference)
 5. Sidecar hot-reload on external change (the AI-editing loop)
-6. Sony embedded lens profile auto-correction (validated against the
-   in-camera JPEG). No per-lens database: every ARW embeds its own
-   correction splines for whatever E-mount lens took it. Contactless
-   /vintage glass uses the manual sliders + named lens presets; other
-   makers come later via DNG opcode support (the semi-universal path),
-   then per-maker parsing on demand.
-7. Denoise for high ISO (external-tool hook node first — see nice-to-have
+6. Denoise for high ISO (external-tool hook node first — see nice-to-have
    notes; bundled inference only if that proves insufficient)
-8. Headless CLI renderer (batch export against sidecars/presets)
+7. Headless CLI renderer (batch export against sidecars/presets)
+
+Other-maker lens correction (DNG opcodes — the semi-universal path — then
+per-maker parsing on demand; contactless/vintage glass keeps the manual
+sliders) follows from the Sony embedded-profile work now in Implemented.
 
 ## Should have (credibility gaps vs Lightroom/Resolve, mostly small)
 

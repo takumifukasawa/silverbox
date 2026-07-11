@@ -20,7 +20,14 @@
  * crosses back to the CPU, no matter the preview's pixel count.
  */
 import type { PreparedImage } from '../decoder/decodeWorker';
-import { orientedDims, type RenderPlan } from '../graph/graphDoc';
+import { isIdentityLens, orientedDims, type RenderPlan } from '../graph/graphDoc';
+import {
+  distortionNormalizer,
+  DISTORTION_KNOT_SCALE,
+  CA_KNOT_SCALE,
+  LENS_PROFILE_MAX_KNOTS,
+  type LensProfile,
+} from '../lens/sonyLensProfile';
 import { WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 import { WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 import type { ExportColorSpace } from '../../../../shared/ipc';
@@ -42,6 +49,23 @@ const LENS_CA_STRENGTH = 0.004;
 const LENS_VIG_R2 = 0.7;
 /** Vignette recovery gain's r⁴ coefficient at vignette=100 (corner). */
 const LENS_VIG_R4 = 0.7;
+
+// --- Sony embedded lens-profile (task #34, F3b) ------------------------------
+// The profile's distortion + CA corrections REPLACE the manual polynomial with
+// the file's own splines (uploaded as knot tables, evaluated in WGSL) and
+// STACK on top of the manual sliders (LR-style: profile first, manual on top —
+// multiplicative factors, so manual=0 leaves pure-profile and profile-off
+// leaves pure-manual, both bit-identical to before this feature).
+//
+// VIGNETTING: the Sony vignette knots' scale DIVISOR is undocumented and could
+// not be pinned to a single power of two by the JPEG radial-falloff fit (see
+// scripts/analyze-vignette-divisor.mjs / the report), so profile vignetting
+// ships OFF — distortion + CA only. Flip LENS_PROFILE_VIGNETTE_ON to true (and
+// set the divisor) once a clean fit exists; the WGSL path is already wired.
+const LENS_PROFILE_VIGNETTE_ON = false;
+const LENS_PROFILE_VIGNETTE_DIVISOR = 16384; // 2^-14 family placeholder; unused while OFF
+/** Knot-table cap uploaded to the GPU (Sony ships 11; padded to this). Must match the WGSL array sizes. */
+const LENS_PROFILE_KNOT_CAP = LENS_PROFILE_MAX_KNOTS; // 16 → 4 vec4f per table
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex
@@ -303,6 +327,45 @@ struct ResampleParams {
   p2: vec4f,
 }
 @group(0) @binding(2) var<uniform> u: ResampleParams;
+
+// Sony embedded lens-profile knot tables (task #34). Each curve is capped at
+// ${LENS_PROFILE_KNOT_CAP} knots = 4 vec4f. hdr flags each curve on/off + its
+// live knot count; cfg carries the distortion normalizer s and the vignette
+// divisor. When hdr.x/z/w are 0 the corresponding factor is 1 (pure manual /
+// bit-exact) — that is how a profile-off render costs nothing extra here.
+struct LensProfile {
+  hdr: vec4f, // x = distortion on(0/1), y = distortion knot count, z = CA knot count, w = vignette knot count (0 = off)
+  cfg: vec4f, // x = distortion s (edge-max normalizer), y = vignette divisor, z/w unused
+  dist: array<vec4f, 4>,
+  caR: array<vec4f, 4>,
+  caB: array<vec4f, 4>,
+  vig: array<vec4f, 4>,
+}
+@group(0) @binding(3) var<uniform> prof: LensProfile;
+
+const PROF_DIST_SCALE = ${DISTORTION_KNOT_SCALE}; // 2^-14
+const PROF_CA_SCALE = ${CA_KNOT_SCALE};           // 2^-21
+
+fn comp(v: vec4f, m: i32) -> f32 {
+  return select(select(v.x, v.y, m == 1), select(v.z, v.w, m == 3), m >= 2);
+}
+
+// Linear spline through evenly-spaced knots (knot i at parameter i); clamps
+// past the ends. Mirrors evalLinearSpline() in sonyLensProfile.ts. x is in
+// knot-index units. Packed as 4 vec4f (16 knots).
+fn splineEval(tbl: array<vec4f, 4>, n: i32, x: f32) -> f32 {
+  if (n <= 0) { return 0.0; }
+  var vv = tbl;
+  let nf = f32(n - 1);
+  let xc = clamp(x, 0.0, nf);
+  let i0 = i32(floor(xc));
+  let i1 = min(i0 + 1, n - 1);
+  let f = xc - floor(xc);
+  let k0 = comp(vv[i0 >> 2u], i0 & 3);
+  let k1 = comp(vv[i1 >> 2u], i1 & 3);
+  return mix(k0, k1, f);
+}
+
 ${FULLSCREEN_VS}
 fn rotate(v: vec2f, angleRad: f32) -> vec2f {
   let s = sin(angleRad);
@@ -352,11 +415,20 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let p = cropOrigin + pos.xy;
   let q = rotate(p - orientedCenter, -u.p1.x) + orientedCenter;
 
-  // 2. lens distortion (oriented frame)
+  // 2. lens distortion (oriented frame). Manual polynomial × embedded-profile
+  // spline (hdr.x, normalized by the edge-max s = cfg.x): both are radial
+  // factors on rel, so they stack — manual=0 ⇒ pure profile, profile-off ⇒
+  // pure manual (bit-exact vs before this feature).
   let rel = q - orientedCenter;
   let rn = length(rel) / cornerRadius;
   let kd = u.p1.y;
-  let qd = orientedCenter + rel * (1.0 + kd * rn * rn);
+  var distFactor = 1.0 + kd * rn * rn;
+  if (prof.hdr.x > 0.5) {
+    let dn = i32(prof.hdr.y);
+    let gd = 1.0 + PROF_DIST_SCALE * splineEval(prof.dist, dn, f32(dn - 1) * rn);
+    distFactor = distFactor * (gd / prof.cfg.x);
+  }
+  let qd = orientedCenter + rel * distFactor;
 
   // Outside the source frame — the rotation void past the photo's corners, or
   // lens distortion pulling the sample past the border — cut hard to black
@@ -368,12 +440,22 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
     return vec4f(0.0, 0.0, 0.0, 1.0);
   }
 
-  // 3. chromatic aberration — per-channel radial scale of the distorted position (oriented frame)
+  // 3. chromatic aberration — per-channel radial scale of the distorted
+  // position (oriented frame). Manual (1+k) × embedded-profile spline gain
+  // (hdr.z) at the distortion-corrected normalized radius rnD.
   let relD = qd - orientedCenter;
+  let rnD = length(relD) / cornerRadius;
   let kr = u.p1.z;
   let kb = u.p1.w;
-  let qr = orientedCenter + relD * (1.0 + kr);
-  let qb = orientedCenter + relD * (1.0 + kb);
+  var scaleR = 1.0 + kr;
+  var scaleB = 1.0 + kb;
+  if (prof.hdr.z > 0.5) {
+    let cn = i32(prof.hdr.z);
+    scaleR = scaleR * (1.0 + PROF_CA_SCALE * splineEval(prof.caR, cn, f32(cn - 1) * rnD));
+    scaleB = scaleB * (1.0 + PROF_CA_SCALE * splineEval(prof.caB, cn, f32(cn - 1) * rnD));
+  }
+  let qr = orientedCenter + relD * scaleR;
+  let qb = orientedCenter + relD * scaleB;
 
   // 3b. map each oriented-frame sample point to the real decoded-texture SOURCE frame
   let sr = orientInverse(qr, srcDims.x, srcDims.y, k, flip);
@@ -383,10 +465,15 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let g = textureSampleLevel(src, geomSampler, sd / srcDims, 0.0).g;
   let b = textureSampleLevel(src, geomSampler, sb / srcDims, 0.0).b;
 
-  // 4. vignetting recovery, linear space, rn of the distortion-corrected position
-  let rnD = length(relD) / cornerRadius;
+  // 4. vignetting recovery, linear space, rn of the distortion-corrected
+  // position. Manual polynomial × embedded-profile spline gain (hdr.w; ships
+  // OFF — divisor undetermined, see LENS_PROFILE_VIGNETTE_ON).
   let vig = u.p2.x;
-  let gain = 1.0 + vig * (${LENS_VIG_R2} * rnD * rnD + ${LENS_VIG_R4} * rnD * rnD * rnD * rnD);
+  var gain = 1.0 + vig * (${LENS_VIG_R2} * rnD * rnD + ${LENS_VIG_R4} * rnD * rnD * rnD * rnD);
+  if (prof.hdr.w > 0.5) {
+    let vn = i32(prof.hdr.w);
+    gain = gain * (1.0 + splineEval(prof.vig, vn, f32(vn - 1) * rnD) / prof.cfg.y);
+  }
   return vec4f(r * gain, g * gain, b * gain, 1.0);
 }
 `;
@@ -475,9 +562,21 @@ export class GraphRenderer {
   private planGeometry: PlanGeometry | undefined = undefined;
   /** Non-null only when the current plan has non-identity lens corrections. */
   private planLens: PlanLens | undefined = undefined;
+  /** The current image's embedded Sony correction splines (task #34), or undefined (JPEG/non-Sony). */
+  private profile: LensProfile | undefined = undefined;
+  /**
+   * Whether the resample pass must actually run for lens reasons this plan:
+   * manual non-identity OR (profile toggled on AND the image carries a
+   * profile). Distinct from `planLens` presence — a profile-on doc opened
+   * against a JPEG has planLens set but nothing to correct, so this stays
+   * false and the pass is skipped (bit-exact invariant).
+   */
+  private lensActive = false;
   /** Resample target for geometry+lens (crop/straighten/distortion/CA/vignette); dims = (width, height) above. */
   private baseTexture: GPUTexture | null = null;
   private resampleUniform: GPUBuffer | null = null;
+  /** Profile knot tables uniform (binding 3 of the resample pass); present whenever the resample pass runs. */
+  private resampleProfileUniform: GPUBuffer | null = null;
   private resamplePipelineCache: GPURenderPipeline | null = null;
   private resampleSamplerCache: GPUSampler | null = null;
   /** Export-only encode pipelines, keyed by shader id ('encode/srgb' | 'encode/p3'); the preview's own pipelines are separate fixed fields above. */
@@ -613,8 +712,12 @@ export class GraphRenderer {
     this.baseTexture = null;
     this.destroyBuffer(this.resampleUniform);
     this.resampleUniform = null;
+    this.destroyBuffer(this.resampleProfileUniform);
+    this.resampleProfileUniform = null;
     this.planGeometry = undefined;
     this.planLens = undefined;
+    this.lensActive = false;
+    this.profile = image.profile;
     this.srcWidth = width;
     this.srcHeight = height;
     this.width = width;
@@ -686,6 +789,51 @@ export class GraphRenderer {
     data[8] = lens ? lens.vignette / 100 : 0;
     data[9] = geometry?.orientation.quarterTurns ?? 0;
     data[10] = geometry?.orientation.flipH ? 1 : 0;
+    return data;
+  }
+
+  /** True when the embedded profile should actually run for this plan (toggle on AND image carries splines). */
+  private static profileActive(lens: PlanLens | undefined, profile: LensProfile | undefined): boolean {
+    return !!(lens?.profile?.enabled && profile);
+  }
+
+  /** True when the resample pass must run for lens reasons (manual non-identity OR active profile). */
+  private static lensActiveFor(lens: PlanLens | undefined, profile: LensProfile | undefined): boolean {
+    if (!lens) return false;
+    return !isIdentityLens(lens) || GraphRenderer.profileActive(lens, profile);
+  }
+
+  /**
+   * Pack the LensProfile uniform (see the RESAMPLE_SHADER struct): 72 floats =
+   * hdr(4) + cfg(4) + 4 knot tables × 16. All-zero (the profile-inactive case)
+   * means hdr.x/z/w = 0, so every spline factor collapses to 1 — the pass runs
+   * only for geometry/manual and stays bit-exact. `orientW/H` are the ORIENTED
+   * frame dims, used to compute the distortion normalizer s (edge-max).
+   */
+  private static profileUniformData(
+    lens: PlanLens | undefined,
+    profile: LensProfile | undefined,
+    orientW: number,
+    orientH: number
+  ): Float32Array {
+    const data = new Float32Array(8 + 4 * LENS_PROFILE_KNOT_CAP);
+    if (!GraphRenderer.profileActive(lens, profile) || !profile) return data;
+    const writeTable = (offset: number, knots: number[]) => {
+      for (let i = 0; i < knots.length && i < LENS_PROFILE_KNOT_CAP; i++) data[offset + i] = knots[i]!;
+    };
+    const dN = Math.min(profile.distortion.length, LENS_PROFILE_KNOT_CAP);
+    const caN = Math.min(profile.caRed.length, LENS_PROFILE_KNOT_CAP);
+    const vN = LENS_PROFILE_VIGNETTE_ON ? Math.min(profile.vignette.length, LENS_PROFILE_KNOT_CAP) : 0;
+    data[0] = 1; // distortion on
+    data[1] = dN;
+    data[2] = caN;
+    data[3] = vN; // 0 while vignetting ships off
+    data[4] = distortionNormalizer(profile.distortion, orientW, orientH); // s
+    data[5] = LENS_PROFILE_VIGNETTE_DIVISOR;
+    writeTable(8, profile.distortion);
+    writeTable(8 + LENS_PROFILE_KNOT_CAP, profile.caRed);
+    writeTable(8 + 2 * LENS_PROFILE_KNOT_CAP, profile.caBlue);
+    writeTable(8 + 3 * LENS_PROFILE_KNOT_CAP, profile.vignette);
     return data;
   }
 
@@ -838,10 +986,13 @@ export class GraphRenderer {
     const { width: nextWidth, height: nextHeight } = GraphRenderer.baseDims(plan, this.srcWidth, this.srcHeight);
     const dimsChanged = nextWidth !== this.width || nextHeight !== this.height;
 
-    // The resample pass activates when EITHER geometry or lens is
-    // non-identity — both fold into the same pass, so a lens-only edit still
-    // needs the base texture even though geometry itself stays absent.
-    if (plan.geometry || plan.lens) {
+    // The resample pass activates when EITHER geometry or lens is active —
+    // both fold into the same pass, so a lens-only edit still needs the base
+    // texture even though geometry itself stays absent. "Lens active" folds in
+    // the embedded profile: a profile-on doc against a JPEG (no splines on the
+    // image) is NOT active and skips the pass, staying bit-exact.
+    const lensActive = GraphRenderer.lensActiveFor(plan.lens, this.profile);
+    if (plan.geometry || lensActive) {
       if (!this.baseTexture || this.baseTexture.width !== nextWidth || this.baseTexture.height !== nextHeight) {
         this.destroyTexture(this.baseTexture);
         this.baseTexture = this.createTexture({
@@ -860,14 +1011,29 @@ export class GraphRenderer {
         0,
         this.resampleUniformData(plan.geometry, plan.lens, this.srcWidth, this.srcHeight)
       );
+      const orient = plan.geometry?.orientation ?? { quarterTurns: 0 as const, flipH: false };
+      const od = orientedDims(this.srcWidth, this.srcHeight, orient);
+      this.destroyBuffer(this.resampleProfileUniform);
+      this.resampleProfileUniform = this.createBuffer({
+        size: (8 + 4 * LENS_PROFILE_KNOT_CAP) * 4,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(
+        this.resampleProfileUniform,
+        0,
+        GraphRenderer.profileUniformData(plan.lens, this.profile, od.width, od.height)
+      );
     } else {
       this.destroyTexture(this.baseTexture);
       this.baseTexture = null;
       this.destroyBuffer(this.resampleUniform);
       this.resampleUniform = null;
+      this.destroyBuffer(this.resampleProfileUniform);
+      this.resampleProfileUniform = null;
     }
     this.planGeometry = plan.geometry;
     this.planLens = plan.lens;
+    this.lensActive = lensActive;
 
     if (dimsChanged) {
       for (const t of this.stepTextures) this.destroyTexture(t);
@@ -953,12 +1119,13 @@ export class GraphRenderer {
    * as every other pass in the chain (they all re-record each render() too).
    */
   private effectiveSourceView(encoder: GPUCommandEncoder): GPUTextureView {
-    if (!this.planGeometry && !this.planLens) return this.source!.createView();
+    if (!this.planGeometry && !this.lensActive) return this.source!.createView();
     const target = this.baseTexture!.createView();
     this.addPass(encoder, target, this.resamplePipeline(), [
       { binding: 0, resource: this.source!.createView() },
       { binding: 1, resource: this.resampleSampler() },
       { binding: 2, resource: { buffer: this.resampleUniform! } },
+      { binding: 3, resource: { buffer: this.resampleProfileUniform! } },
     ]);
     return target;
   }
@@ -1055,15 +1222,31 @@ export class GraphRenderer {
     try {
       const encoder = device.createCommandEncoder();
       let baseView = source.createView();
-      if (plan.geometry || plan.lens) {
+      // Export uses the PASSED image's profile (this is a stateless render over
+      // `image`, independent of the preview's setImage()).
+      const lensActive = GraphRenderer.lensActiveFor(plan.lens, image.profile);
+      if (plan.geometry || lensActive) {
         const base = makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT);
         const uniform = this.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
         tempBuffers.push(uniform);
         device.queue.writeBuffer(uniform, 0, this.resampleUniformData(plan.geometry, plan.lens, srcWidth, srcHeight));
+        const orient = plan.geometry?.orientation ?? { quarterTurns: 0 as const, flipH: false };
+        const od = orientedDims(srcWidth, srcHeight, orient);
+        const profileUniform = this.createBuffer({
+          size: (8 + 4 * LENS_PROFILE_KNOT_CAP) * 4,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        tempBuffers.push(profileUniform);
+        device.queue.writeBuffer(
+          profileUniform,
+          0,
+          GraphRenderer.profileUniformData(plan.lens, image.profile, od.width, od.height)
+        );
         this.addPass(encoder, base.createView(), this.resamplePipeline(), [
           { binding: 0, resource: source.createView() },
           { binding: 1, resource: this.resampleSampler() },
           { binding: 2, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: profileUniform } },
         ]);
         baseView = base.createView();
       }

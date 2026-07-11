@@ -70,6 +70,15 @@ export interface SilverboxApi {
   presetWrite(slug: string, content: string): Promise<void>;
   /** Delete one preset file by slug. */
   presetDelete(slug: string): Promise<void>;
+  /**
+   * Test-harness flags read from the main-process env at preload time; all
+   * false in normal use. `isTest` mirrors SILVERBOX_TEST (the verify suite);
+   * `lensProfileAutoDefault` (SILVERBOX_TEST_LENS_PROFILE_DEFAULT) re-enables
+   * the "embedded profile ON for fresh opens" default INSIDE the suite — off
+   * for the 20 pre-F3b scripts (so their bit-exact CPU baselines are intact),
+   * on only for verify-lensprofile which exercises that default.
+   */
+  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean };
 }
 
 /**

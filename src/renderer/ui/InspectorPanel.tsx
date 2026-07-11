@@ -423,7 +423,7 @@ function CurvePreview({ node }: { node: GraphNode }) {
   );
 }
 
-const LENS_SLIDER_DEFS: { key: keyof LensParams; label: string; min: number; max: number }[] = [
+const LENS_SLIDER_DEFS: { key: 'distortion' | 'caRed' | 'caBlue' | 'vignette'; label: string; min: number; max: number }[] = [
   { key: 'distortion', label: 'Distortion', min: -100, max: 100 },
   { key: 'caRed', label: 'CA Red', min: -100, max: 100 },
   { key: 'caBlue', label: 'CA Blue', min: -100, max: 100 },
@@ -440,11 +440,25 @@ const LENS_SLIDER_DEFS: { key: keyof LensParams; label: string; min: number; max
  */
 function LensSection({ node }: { node: GraphNode }) {
   const setLens = useAppStore((s) => s.setLens);
+  // The embedded profile lives on the decoded image (parsed from the ARW);
+  // the checkbox is disabled + hinted when there is none (JPEG / non-Sony).
+  const hasProfile = useAppStore((s) => !!s.image?.profile);
   const lens = node.lens ?? defaultLensParams();
   const sessionRef = useRef<Partial<Record<keyof LensParams, number | null>>>({});
+  const profileEnabled = lens.profile?.enabled ?? false;
 
   return (
     <Section title="Lens Corrections">
+      <label className="lens-profile-row" title={hasProfile ? undefined : 'No embedded profile (JPEG or non-Sony image)'}>
+        <input
+          type="checkbox"
+          data-testid="lens-profile-toggle"
+          disabled={!hasProfile}
+          checked={hasProfile && profileEnabled}
+          onChange={(ev) => setLens({ ...lens, profile: { enabled: ev.target.checked } }, null)}
+        />
+        Profile corrections (embedded)
+      </label>
       {LENS_SLIDER_DEFS.map((d) => (
         <div
           key={d.key}

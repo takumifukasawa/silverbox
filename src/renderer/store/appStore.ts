@@ -7,6 +7,7 @@ import {
   clampGeometry,
   clampLens,
   defaultGraphDoc,
+  defaultLensParams,
   defaultParams,
   DEVELOP_KIND,
   nextId,
@@ -663,6 +664,7 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarUnreadable = false;
       let sidecarCreatedAt: string | null = null;
       let sidecarUnknownFields: Record<string, unknown> | null = null;
+      let usedSidecar = false;
       try {
         const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
         if (sidecar !== null) {
@@ -674,6 +676,7 @@ export const useAppStore = create<AppState>((set, get) => {
             graph = parsed.graph;
             sidecarCreatedAt = parsed.createdAt ?? null;
             sidecarUnknownFields = parsed.unknown ?? null;
+            usedSidecar = true;
           } catch (err) {
             sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
             sidecarUnreadable = true;
@@ -705,6 +708,26 @@ export const useAppStore = create<AppState>((set, get) => {
           return n;
         }),
       };
+      // Embedded lens profile (task #34): default it ON for a FRESH open (no
+      // sidecar on disk) when the image actually carries correction splines —
+      // matching the camera/LR out-of-box behavior. A restored sidecar keeps
+      // whatever it stored (older sidecars with no `profile` key sanitize to
+      // enabled:false, so their renders never change).
+      // Suppressed inside the verify suite (testFlags.isTest) except for
+      // verify-lensprofile (lensProfileAutoDefault), so the 20 pre-F3b scripts
+      // keep their resample-free, CPU-referenceable baselines.
+      const flags = window.silverbox.testFlags;
+      const autoDefaultAllowed = !flags.isTest || flags.lensProfileAutoDefault;
+      if (autoDefaultAllowed && !usedSidecar && image.profile) {
+        graph = {
+          ...graph,
+          nodes: graph.nodes.map((n) =>
+            n.kind === 'input'
+              ? { ...n, lens: { ...(n.lens ?? defaultLensParams()), profile: { enabled: true } } }
+              : n
+          ),
+        };
+      }
       // node ids of the previous doc must never alias into stale shaders
       clearCustomShaderArtifacts();
       mirrorShaderArtifactClear();

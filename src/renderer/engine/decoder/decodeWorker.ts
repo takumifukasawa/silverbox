@@ -14,6 +14,7 @@ import { LibrawDecoder } from './librawDecoder';
 import type { CameraColorInfo, CaptureInfo } from './RawDecoder';
 import { buildDecodeLut16, buildDecodeLut8 } from '../color/srgb';
 import { SRGB_TO_WORK } from '../color/workingSpace';
+import { parseSonyLensProfile, type LensProfile } from '../lens/sonyLensProfile';
 
 export interface DecodeRequest {
   id: number;
@@ -35,6 +36,14 @@ export interface PreparedImage {
   flip: number;
   color?: CameraColorInfo;
   capture?: CaptureInfo;
+  /**
+   * Sony embedded lens-correction splines (task #34), parsed from the ARW
+   * bytes before libraw consumes them. Absent for JPEG and non-Sony RAW. The
+   * knots are relative to the DECODED raster corner (see decode note below);
+   * the render (GraphRenderer resample pass) uses them when the input node's
+   * `lens.profile.enabled` is on.
+   */
+  profile?: LensProfile;
   decodeMs: number;
 }
 
@@ -183,6 +192,9 @@ function baselineExposureGain(ev: number): number {
 
 async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineExposureEV: number): Promise<PreparedImage> {
   const t0 = performance.now();
+  // Parse the embedded Sony correction splines from the ORIGINAL bytes first —
+  // libraw's decode() may detach/consume the buffer. Non-Sony/JPEG ⇒ null.
+  const profile = parseSonyLensProfile(bytes) ?? undefined;
   const decoded = await new LibrawDecoder().decode(new Uint8Array(bytes));
   const pixels = decoded.width * decoded.height;
   const linear = linearizeRgb16(decoded.data, pixels, baselineExposureGain(baselineExposureEV));
@@ -198,6 +210,7 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
     flip: decoded.flip,
     color: decoded.color,
     capture: decoded.capture,
+    ...(profile ? { profile } : {}),
     decodeMs: Math.round(performance.now() - t0),
   };
 }

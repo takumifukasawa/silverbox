@@ -18,6 +18,13 @@ const api: SilverboxApi = {
   presetRead: (slug) => ipcRenderer.invoke(IPC.presetRead, slug),
   presetWrite: (slug, content) => ipcRenderer.invoke(IPC.presetWrite, slug, content),
   presetDelete: (slug) => ipcRenderer.invoke(IPC.presetDelete, slug),
+  // Static env-derived flags (sandbox:false → preload has process.env). See
+  // SilverboxApi.testFlags. Read once at preload time — the verify scripts set
+  // these before launching electron.
+  testFlags: {
+    isTest: process.env.SILVERBOX_TEST === '1',
+    lensProfileAutoDefault: process.env.SILVERBOX_TEST_LENS_PROFILE_DEFAULT === '1',
+  },
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

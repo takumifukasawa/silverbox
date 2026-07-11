@@ -1,8 +1,10 @@
 /**
  * Parallel verify-suite runner.
  *
- * The 34 verify-*.mjs scripts each build the app, launch a windowless
- * Electron instance, and drive it. Run serially (the old `npm run verify`
+ * Most entries are verify-*.mjs scripts that each build the app, launch a
+ * windowless Electron instance, and drive it (plus the fast `unit` vitest
+ * tier, a plain `command` entry — see runScript). Run serially (the old
+ * `npm run verify`
  * chain, kept as `verify:serial`) that's ~15+ minutes. This runner builds
  * ONCE up front, then runs the scripts through a small concurrency pool
  * (default 3 at a time, override with SILVERBOX_VERIFY_JOBS), isolating the
@@ -44,6 +46,9 @@ const SRC_JPG = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 // kept as pool order). `exclusive: true` scripts never enter the pool — they
 // run serially, after every pooled job has finished.
 const ALL_SCRIPTS = [
+  // Pure-function unit tier (vitest) — no electron/playwright, just a plain
+  // command. Fast, so it leads the pool. See runScript's `command` handling.
+  { name: 'unit', command: ['npx', 'vitest', 'run'] },
   { name: 'ms0', file: 'verify-ms0-decode.mjs' },
   { name: 'ms1', file: 'verify-ms1-app.mjs' },
   { name: 'ms2', file: 'verify-ms2-decode-display.mjs' },
@@ -78,10 +83,11 @@ const ALL_SCRIPTS = [
   { name: 'colorkey', file: 'verify-colorkey.mjs' },
   { name: 'lut', file: 'verify-lut.mjs' },
   { name: 'presets', file: 'verify-presets.mjs' },
+  { name: 'lensprofile', file: 'verify-lensprofile.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 
-const SMOKE_NAMES = new Set(['ms1', 'develop', 'ms10', 'cst']);
+const SMOKE_NAMES = new Set(['unit', 'ms1', 'develop', 'ms10', 'cst']);
 
 const selected = smokeMode ? ALL_SCRIPTS.filter((s) => SMOKE_NAMES.has(s.name)) : ALL_SCRIPTS;
 const poolJobs = selected.filter((s) => !s.exclusive);
@@ -126,12 +132,15 @@ function setupIsolation(name) {
 }
 
 /** Run one verify script to completion, capturing its output to a log file. */
-function runScript({ name, file }, { extraEnv } = {}) {
+function runScript({ name, file, command }, { extraEnv } = {}) {
   return new Promise((resolve) => {
     const start = Date.now();
     const logPath = join(logDir, `${name}.log`);
     const logFd = openSync(logPath, 'w');
-    const child = spawn('node', [join(projectRoot, 'scripts', file)], {
+    // `command` entries (e.g. the vitest unit tier) run a plain argv; the rest
+    // run `node scripts/<file>`.
+    const [cmd, ...args] = command ?? ['node', join(projectRoot, 'scripts', file)];
+    const child = spawn(cmd, args, {
       cwd: projectRoot,
       env: extraEnv ?? process.env,
     });

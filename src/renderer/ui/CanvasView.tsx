@@ -92,6 +92,15 @@ declare global {
       geometryState(): GeometryParams;
       setLens(lens: LensParams): void;
       lensState(): LensParams;
+      /** Sony embedded lens-profile (task #34): the parsed splines on the current image + the doc's enabled flag. */
+      lensProfileState(): {
+        hasProfile: boolean;
+        enabled: boolean;
+        distortion: number[] | null;
+        caRed: number[] | null;
+        caBlue: number[] | null;
+        vignette: number[] | null;
+      };
       outputDims(): { width: number; height: number } | null;
       /** WB eyedropper solver unit check: solves + applies gains to `rgb`, using the live per-image wbModel. */
       wbSolveCheck(rgb: [number, number, number]): {
@@ -605,6 +614,19 @@ export function CanvasView() {
         const s = useAppStore.getState();
         const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
         return inputNode?.lens ?? defaultLensParams();
+      },
+      lensProfileState() {
+        const s = useAppStore.getState();
+        const profile = s.image?.profile ?? null;
+        const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
+        return {
+          hasProfile: !!profile,
+          enabled: inputNode?.lens?.profile?.enabled ?? false,
+          distortion: profile?.distortion ?? null,
+          caRed: profile?.caRed ?? null,
+          caBlue: profile?.caBlue ?? null,
+          vignette: profile?.vignette ?? null,
+        };
       },
       outputDims() {
         return outputDimsRef.current;
