@@ -423,6 +423,27 @@ function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppS
 /** Default brush radius for a fresh spot (task #50): ~1.5% of the max output dimension. */
 const DEFAULT_SPOT_BRUSH_RADIUS = 0.015;
 
+type CanvasTool = 'crop' | 'spot' | 'maskDraw' | 'wbPick' | 'colorKeyPick';
+
+/**
+ * One modal canvas tool at a time (Lightroom behavior): ACTIVATING any of
+ * crop / spot removal / mask draw / the two eyedroppers deactivates the
+ * others, so the canvas pointer, wheel, and cursor are never contested by
+ * two tools at once (e.g. a WB-pick click must not also start a spot
+ * gesture, and crop's full-viewport overlay must not sit over an armed
+ * spot mode). Every tool ACTIVATION spreads this patch; deactivation paths
+ * never need it.
+ */
+function deactivateOtherTools(except: CanvasTool): Partial<AppState> {
+  return {
+    ...(except !== 'crop' ? { cropMode: false } : {}),
+    ...(except !== 'spot' ? { spotMode: false, selectedSpotIndex: null } : {}),
+    ...(except !== 'maskDraw' ? { maskDrawMode: null } : {}),
+    ...(except !== 'wbPick' ? { wbPicking: false } : {}),
+    ...(except !== 'colorKeyPick' ? { colorKeyPicking: false } : {}),
+  };
+}
+
 /** The output node the preview/export currently targets — same "selected or first" rule used throughout (addOpNode, exportSelectedOutputs, buildLocalAdjustmentPatch). */
 function activeOutputNode(graph: GraphDoc, activeOutputId: string | null): GraphNode | undefined {
   const outputs = graph.nodes.filter((n) => n.kind === 'output');
@@ -1111,11 +1132,17 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   setMaskDrawMode(mode) {
-    set({ maskDrawMode: mode });
+    set(mode !== null ? { maskDrawMode: mode, ...deactivateOtherTools('maskDraw') } : { maskDrawMode: null });
   },
 
   setSpotMode(active) {
-    set((s) => (s.spotMode === active ? {} : { spotMode: active, selectedSpotIndex: active ? s.selectedSpotIndex : null }));
+    set((s) =>
+      s.spotMode === active
+        ? {}
+        : active
+          ? { spotMode: true, ...deactivateOtherTools('spot') }
+          : { spotMode: false, selectedSpotIndex: null }
+    );
   },
 
   setSelectedSpotIndex(index) {
@@ -1394,15 +1421,15 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   toggleCropMode() {
-    set((s) => ({ cropMode: !s.cropMode }));
+    set((s) => (s.cropMode ? { cropMode: false } : { cropMode: true, ...deactivateOtherTools('crop') }));
   },
 
   setWbPicking(picking) {
-    set({ wbPicking: picking });
+    set(picking ? { wbPicking: true, ...deactivateOtherTools('wbPick') } : { wbPicking: false });
   },
 
   setColorKeyPicking(picking) {
-    set({ colorKeyPicking: picking });
+    set(picking ? { colorKeyPicking: true, ...deactivateOtherTools('colorKeyPick') } : { colorKeyPicking: false });
   },
 
   copyDevelopSettings() {

@@ -404,6 +404,29 @@ try {
   console.log('verify-spots (active-chain targeting: activeSpotsNodeId resolves to the same node):');
   check('activeSpotsNodeId() resolves to the spots node', (await activeSpotsNodeId()) === spotsNodeId, await activeSpotsNodeId());
 
+  // ---------------------------------------------------------------------
+  console.log('verify-spots (modal tools are mutually exclusive — one canvas tool at a time):');
+  // spot mode is currently ON (cap section above); activating crop must turn it off
+  const isActive = (testid) =>
+    page.locator(`[data-testid="${testid}"]`).evaluate((el) => el.classList.contains('active'));
+  await page.locator('[data-testid="crop-toggle"]').click();
+  check('activating crop deactivates spot mode', !(await spotState()).mode && (await isActive('crop-toggle')), {
+    spotMode: (await spotState()).mode,
+    crop: await isActive('crop-toggle'),
+  });
+  await page.locator('[data-testid="spots-toggle"]').click();
+  check('activating spots deactivates crop mode', (await spotState()).mode && !(await isActive('crop-toggle')), {
+    spotMode: (await spotState()).mode,
+    crop: await isActive('crop-toggle'),
+  });
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  check(
+    'activating mask draw deactivates spot mode',
+    !(await spotState()).mode && (await isActive('add-local-adjustment-radial')),
+    { spotMode: (await spotState()).mode, radial: await isActive('add-local-adjustment-radial') }
+  );
+  await page.keyboard.press('Escape');
+
   check('no page errors across the spots verify checks', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();
