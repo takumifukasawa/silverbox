@@ -57,6 +57,8 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
   const orientation = geometry.orientation ?? defaultGeometryOrientation();
 
   const [dragging, setDragging] = useState(false);
+  /** True while a rotate-zone drag is in flight — swaps the thirds grid for the fine straighten grid (LR behavior). */
+  const [rotating, setRotating] = useState(false);
   const [ratioKey, setRatioKey] = useState('free');
   const dragRef = useRef<{ crop: GeometryCrop; startX: number; startY: number } | null>(null);
   const sessionRef = useRef<number | null>(null);
@@ -223,6 +225,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
     const screenCy = view0.ty + c0y * view0.scale;
     const sessionKey = `geometry:${Date.now()}`;
     angleSessionRef.current = Date.now();
+    setRotating(true);
     const onMove = (e: PointerEvent) => {
       const curPointerAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
       const deltaDeg = -((curPointerAngle - startPointerAngle) * 180) / Math.PI;
@@ -246,6 +249,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
       angleSessionRef.current = null;
+      setRotating(false);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -313,8 +317,20 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
           style={{ left: pct(crop.x), top: pct(crop.y), width: pct(crop.w), height: pct(crop.h) }}
           onPointerDown={beginDrag('move')}
         >
-          {dragging && (
-            <div className="crop-thirds">
+          {/* LR-style tool overlay: the rule-of-thirds grid is ALWAYS visible
+              in crop mode; a rotate drag swaps in the fine straighten grid
+              (every 5%) for horizon alignment, exactly like Lightroom. */}
+          {rotating ? (
+            <div className="crop-thirds" data-testid="crop-grid-fine">
+              {Array.from({ length: 19 }, (_, i) => (i + 1) * 5).map((p) => (
+                <div key={`v${p}`} className="crop-thirds-v crop-grid-fine-line" style={{ left: `${p}%` }} />
+              ))}
+              {Array.from({ length: 19 }, (_, i) => (i + 1) * 5).map((p) => (
+                <div key={`h${p}`} className="crop-thirds-h crop-grid-fine-line" style={{ top: `${p}%` }} />
+              ))}
+            </div>
+          ) : (
+            <div className={`crop-thirds${dragging ? ' crop-thirds--active' : ''}`} data-testid="crop-grid-thirds">
               <div className="crop-thirds-v" style={{ left: '33.333%' }} />
               <div className="crop-thirds-v" style={{ left: '66.667%' }} />
               <div className="crop-thirds-h" style={{ top: '33.333%' }} />

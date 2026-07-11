@@ -358,6 +358,16 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let kd = u.p1.y;
   let qd = orientedCenter + rel * (1.0 + kd * rn * rn);
 
+  // Outside the source frame — the rotation void past the photo's corners, or
+  // lens distortion pulling the sample past the border — cut hard to black
+  // instead of letting the sampler's clamp addressing smear the edge texels
+  // across the wedge: the photo ends where the photo ends. Tested on the
+  // post-distortion position (what the g channel samples); the CA offsets
+  // below are sub-texel-scale and not worth a per-channel cut.
+  if (qd.x < 0.0 || qd.y < 0.0 || qd.x > orientedDims.x || qd.y > orientedDims.y) {
+    return vec4f(0.0, 0.0, 0.0, 1.0);
+  }
+
   // 3. chromatic aberration — per-channel radial scale of the distorted position (oriented frame)
   let relD = qd - orientedCenter;
   let kr = u.p1.z;

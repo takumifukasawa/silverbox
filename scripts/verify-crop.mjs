@@ -352,9 +352,65 @@ try {
     angle: geomSlider.angle,
   });
 
+  console.log('verify-crop (LR-style grids: thirds always in crop mode, fine grid while rotating):');
+  await page.locator('[data-testid="crop-reset"]').click();
+  check(
+    'rule-of-thirds grid is visible at rest in crop mode (no drag in flight)',
+    (await page.locator('[data-testid="crop-grid-thirds"]').count()) === 1 &&
+      (await page.locator('[data-testid="crop-grid-fine"]').count()) === 0,
+    {
+      thirds: await page.locator('[data-testid="crop-grid-thirds"]').count(),
+      fine: await page.locator('[data-testid="crop-grid-fine"]').count(),
+    }
+  );
+  const gridRz = await page.locator('[data-testid="crop-rotate-se"]').boundingBox();
+  await page.mouse.move(gridRz.x + gridRz.width / 2, gridRz.y + gridRz.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(gridRz.x + gridRz.width / 2 + 5, gridRz.y + gridRz.height / 2 + 15, { steps: 3 });
+  check(
+    'a rotate drag swaps in the fine straighten grid mid-drag',
+    (await page.locator('[data-testid="crop-grid-fine"]').count()) === 1 &&
+      (await page.locator('[data-testid="crop-grid-thirds"]').count()) === 0,
+    {
+      thirds: await page.locator('[data-testid="crop-grid-thirds"]').count(),
+      fine: await page.locator('[data-testid="crop-grid-fine"]').count(),
+    }
+  );
+  await page.mouse.up();
+  check(
+    'releasing the rotate drag restores the thirds grid',
+    (await page.locator('[data-testid="crop-grid-thirds"]').count()) === 1 &&
+      (await page.locator('[data-testid="crop-grid-fine"]').count()) === 0,
+    {
+      thirds: await page.locator('[data-testid="crop-grid-thirds"]').count(),
+      fine: await page.locator('[data-testid="crop-grid-fine"]').count(),
+    }
+  );
+
   await page.locator('[data-testid="crop-reset"]').click();
   await page.locator('[data-testid="crop-done"]').click();
   await waitForOutputDims(baselineDims.width, baselineDims.height);
+
+  console.log('verify-crop (rotation void renders BLACK, not clamp-smeared edge texels):');
+  // Full crop + a committed angle leaves void wedges at the output corners
+  // (the unconstrained debug-hook path, exactly what hand-written sidecars
+  // can contain). RESAMPLE must cut those to black — before this check the
+  // sampler's clamp addressing smeared the border pixels across the wedge.
+  await setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 10 });
+  await waitForOutputDims(baselineDims.width, baselineDims.height);
+  const cornerPx = await page.evaluate(([w, h]) => window.__debug.encodedCropForVerify(0, 0, 4, 4), [
+    baselineDims.width,
+    baselineDims.height,
+  ]);
+  const cornerMax = Math.max(...cornerPx.filter((_, i) => i % 4 !== 3)); // ignore alpha
+  check('a 4×4 corner probe inside the rotation void is pure black', cornerMax === 0, { cornerMax });
+  const centerPx = await page.evaluate(
+    ([w, h]) => window.__debug.encodedCropForVerify(Math.floor(w / 2), Math.floor(h / 2), 4, 4),
+    [baselineDims.width, baselineDims.height]
+  );
+  const centerMax = Math.max(...centerPx.filter((_, i) => i % 4 !== 3));
+  check('the image center still renders real (non-black) pixels', centerMax > 0, { centerMax });
+  await setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 });
 
   console.log('verify-crop (sidecar round-trip):');
   await setGeometry({ crop: { x: 0.1, y: 0.2, w: 0.6, h: 0.5 }, angle: 7.5 });

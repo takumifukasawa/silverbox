@@ -337,6 +337,19 @@ button:disabled {
   background: rgba(255, 255, 255, 0.5);
 }
 
+/* Resize/move drags brighten the (always-on) thirds grid for alignment. */
+.crop-thirds--active .crop-thirds-v,
+.crop-thirds--active .crop-thirds-h {
+  background: rgba(255, 255, 255, 0.8);
+}
+
+/* Fine straighten grid shown while a rotate-zone drag is in flight (LR's
+   crop-tool behavior): denser (every 5%) but dimmer than the thirds lines,
+   so the horizon reference doesn't overpower the image. */
+.crop-grid-fine-line {
+  background: rgba(255, 255, 255, 0.28);
+}
+
 .crop-handle {
   position: absolute;
   width: 12px;
