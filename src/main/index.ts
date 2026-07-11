@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { watch, type FSWatcher } from 'node:fs';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -6,6 +6,8 @@ import { join, dirname, basename } from 'node:path';
 import {
   IPC,
   SIDECAR_SUFFIX,
+  type CliRenderJob,
+  type CliRenderResult,
   type ExportEncodeRequest,
   type ExportEncodeResult,
   type ExportLutRequest,
@@ -15,6 +17,7 @@ import {
   type PresetSummary,
   type Settings,
 } from '../../shared/ipc';
+import { CLI_USAGE, buildCliRenderJob, formatCliProgress, parseCliArgs } from './cliArgs';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
 import { deletePreset, listPresets, readPreset, writePreset } from './presets';
@@ -23,6 +26,17 @@ import { readSettings, updateSettings } from './settings';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const IMAGE_EXTENSIONS = ['arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'orf', 'rw2', 'dng', 'pef', 'srw', 'x3f', 'jpg', 'jpeg'];
+
+/**
+ * Headless CLI renderer: `electron . --render <args>` (see bin/silverbox-render
+ * and the "render" npm script) — everything after `--render` is the CLI's
+ * own argv, parsed in ./cliArgs. Detected from raw process.argv (before
+ * Electron/Chromium have stripped their own flags) so this decision is made
+ * BEFORE any window gets created.
+ */
+const RENDER_FLAG_INDEX = process.argv.indexOf('--render');
+const isCliRenderMode = RENDER_FLAG_INDEX !== -1;
+const cliArgv = isCliRenderMode ? process.argv.slice(RENDER_FLAG_INDEX + 1) : [];
 
 function assertSidecarPath(path: unknown): string {
   if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
@@ -203,9 +217,23 @@ function registerIpc(): void {
  * The window is never shown at all — WebGPU renders and readbacks don't need
  * a visible window, backgroundThrottling:false keeps timers/rAF at full
  * rate, and CDP screenshots force their own frame capture. The macOS
- * accessory policy also keeps the app out of the Dock.
+ * accessory policy also keeps the app out of the Dock. `headless` folds in
+ * the CLI's own `--render` mode too: it forces the exact same windowless path
+ * WITHOUT requiring SILVERBOX_TEST (a real user running the CLI never sets
+ * that env var).
  */
 const testMode = process.env['SILVERBOX_TEST'] === '1';
+const headless = testMode || isCliRenderMode;
+
+if (isCliRenderMode) {
+  // Force the real fresh-open defaults (lens profile, base curve) regardless
+  // of SILVERBOX_TEST — see SilverboxApi.testFlags's `forceDefaults` doc
+  // comment. Set here, in main, before any window/preload gets created:
+  // preload reads process.env at renderer-process spawn time (the same
+  // inheritance SILVERBOX_TEST itself already relies on), so this must land
+  // before the first `new BrowserWindow(...)` call below.
+  process.env['SILVERBOX_CLI_RENDER'] = '1';
+}
 
 // Verify-suite parallelism: every script that shows up here mutates
 // <userData>/settings.json (autosave, presets, …). Running the suite's
@@ -213,16 +241,17 @@ const testMode = process.env['SILVERBOX_TEST'] === '1';
 // stomp each other's settings.json. In test mode only, an explicit
 // SILVERBOX_USER_DATA env var repoints Electron's userData dir before
 // anything (readSettings included) touches it — the runner assigns each
-// pooled script its own fresh temp directory here.
+// pooled script its own fresh temp directory here (verify-cli.mjs mints its
+// own the same way for its --preset-by-name check).
 const testUserData = process.env['SILVERBOX_USER_DATA'];
 if (testMode && testUserData) app.setPath('userData', testUserData);
 
-function createWindow(): void {
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1440,
     height: 960,
     backgroundColor: '#1e1e1e',
-    show: !testMode,
+    show: !headless,
     webPreferences: {
       preload: join(__dirname, '../preload/index.mjs'),
       // ESM preload requires an unsandboxed renderer; contextIsolation stays on.
@@ -243,14 +272,91 @@ function createWindow(): void {
   } else {
     void win.loadFile(join(__dirname, '../renderer/index.html'));
   }
+  return win;
+}
+
+/**
+ * `--render`'s whole lifecycle: parse argv (already read before app.whenReady
+ * — see cliArgv above), print usage/errors and exit for bad usage, else
+ * create the hidden window, hand it the job once the renderer signals ready
+ * (cli:ready — closes the mount race, see App.tsx), and stream results back
+ * as they render (cli:progress) until the batch finishes (cli:done). Exit
+ * code: 2 for bad usage, 1 if any file errored, 0 otherwise — set via
+ * app.exit() (never process.exit(), which wouldn't flush Electron's own
+ * teardown).
+ */
+async function runCliMode(): Promise<void> {
+  const parsed = parseCliArgs(cliArgv);
+  if ('error' in parsed) {
+    console.error(`silverbox-render: ${parsed.error}\n`);
+    console.error(CLI_USAGE);
+    app.exit(2);
+    return;
+  }
+  if (parsed.help) {
+    console.log(CLI_USAGE);
+    app.exit(0);
+    return;
+  }
+  if (parsed.images.length === 0) {
+    console.error('silverbox-render: no input images given\n');
+    console.error(CLI_USAGE);
+    app.exit(2);
+    return;
+  }
+
+  const job = buildCliRenderJob(parsed, process.cwd());
+  const win = createWindow();
+  let hadError = false;
+
+  const onProgress = (_ev: unknown, result: CliRenderResult): void => {
+    if ('error' in result) hadError = true;
+    const { stderr, line } = formatCliProgress(result, parsed.json);
+    (stderr ? process.stderr : process.stdout).write(line + '\n');
+  };
+  ipcMain.on(IPC.cliProgress, onProgress);
+
+  // A renderer crash / an unhandled hang must not wedge a CI job forever —
+  // 10 minutes comfortably covers even a large batch on modest hardware.
+  const CLI_TIMEOUT_MS = 10 * 60 * 1000;
+  let timedOut = false;
+  await new Promise<void>((resolveJob) => {
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      console.error('silverbox-render: timed out waiting for the render to finish');
+      resolveJob();
+    }, CLI_TIMEOUT_MS);
+    ipcMain.once(IPC.cliDone, () => {
+      clearTimeout(timeout);
+      resolveJob();
+    });
+    ipcMain.once(IPC.cliReady, () => {
+      win.webContents.send(IPC.cliRun, job);
+    });
+  });
+  ipcMain.removeListener(IPC.cliProgress, onProgress);
+  app.exit(timedOut || hadError ? 1 : 0);
 }
 
 void app.whenReady().then(async () => {
-  if (testMode && process.platform === 'darwin') app.setActivationPolicy('accessory');
+  if (headless && process.platform === 'darwin') {
+    app.setActivationPolicy('accessory');
+    app.dock?.hide();
+  }
+  // No native menu bar for a batch CLI invocation (verify-cli.mjs's "runs
+  // windowless, no focus/UI side effects" contract) — left untouched for the
+  // normal app and the verify suite, both of which still want it.
+  if (isCliRenderMode) Menu.setApplicationMenu(null);
   // Load (and, on first run, create) settings.json before the renderer can
   // possibly ask for it over IPC.
   await readSettings();
   registerIpc();
+
+  if (isCliRenderMode) {
+    await runCliMode();
+    return;
+  }
+
   createWindow();
 
   app.on('activate', () => {

@@ -46,6 +46,8 @@ import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
 import {
   DEFAULT_SETTINGS,
   SIDECAR_SUFFIX,
+  type CliRenderJob,
+  type CliRenderResult,
   type ExportColorSpace,
   type ExportMetadataPolicy,
   type PresetSummary,
@@ -185,7 +187,14 @@ interface AppState {
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
   setLens(lens: LensParams, coalesceKey: string | null): void;
-  openImageByPath(path: string): Promise<void>;
+  /**
+   * `opts.skipSidecar` (headless CLI's `--preset` path only — see
+   * runCliRender): open as if no sidecar existed at all, even if one is on
+   * disk — the fresh-open defaults (lens profile, base curve) still apply
+   * exactly as a truly-fresh open would, and the input node's geometry stays
+   * identity, which is what a preset's applyLook then preserves.
+   */
+  openImageByPath(path: string, opts?: { skipSidecar?: boolean }): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
@@ -327,6 +336,21 @@ interface AppState {
     path?: string,
     opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
   ): Promise<void>;
+  /**
+   * Headless CLI renderer's whole batch (main/index.ts's `--render` mode):
+   * opens each image fresh (its own sidecar, or `job.preset` applied on the
+   * default doc — see openImageByPath's `skipSidecar`), resolves
+   * `job.output` against the doc's output nodes (a name, `'all'`, or the
+   * first when null), and writes one file per resolved output via the same
+   * `exportOnePath` body every other export path shares. Never throws for a
+   * single image's failure — `onResult` receives a `{input,error}` object
+   * instead and the loop continues to the next image (CLI contract: exit 1,
+   * not abort). `onResult` fires once per rendered FILE (so `output: 'all'`
+   * on a multi-output doc reports one line per output, all sharing the same
+   * `input`), streamed as the render completes rather than batched at the
+   * end, so main can print progress live.
+   */
+  runCliRender(job: CliRenderJob, onResult: (result: CliRenderResult) => void): Promise<void>;
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
@@ -541,6 +565,23 @@ export function suffixExportPath(path: string, name: string): string {
   const safe = sanitizeToken(name, 'output');
   const m = /^(.*)(\.[^./\\]+)$/.exec(path);
   return m ? `${m[1]}-${safe}${m[2]}` : `${path}-${safe}`;
+}
+
+/**
+ * Headless CLI renderer's default output path for one input (main/index.ts's
+ * `--render` mode, job.outDir): `<input-stem>.jpg`, either alongside the
+ * input (outDir null, matching exportImage's own dialog-default naming) or
+ * inside `outDir` (basename only — the input's own directory is dropped, not
+ * mirrored). Plain string ops rather than node's `path` module: this file is
+ * renderer code (bundled for the browser-like renderer process), and macOS
+ * paths are POSIX regardless (DESIGN.md's macOS-only scope for now).
+ */
+export function cliOutputPath(input: string, outDir: string | null): string {
+  const stem = input.replace(/\.[^./]+$/, '');
+  const base = `${stem}.jpg`;
+  if (!outDir) return base;
+  const name = base.slice(base.lastIndexOf('/') + 1);
+  return `${outDir.replace(/\/+$/, '')}/${name}`;
 }
 
 /**
@@ -813,6 +854,26 @@ export const useAppStore = create<AppState>((set, get) => {
     });
   };
 
+  /**
+   * Resolve `job.preset` (headless CLI, `--preset`) to its raw JSON text: a
+   * PATH reads the file directly; a NAME looks it up against
+   * `<userData>/presets` by display name first, then by slug (a user who
+   * already knows a preset's slug — e.g. copy-pasted from another sidecar —
+   * shouldn't have to know its display name too).
+   */
+  const readCliPresetText = async (ref: NonNullable<CliRenderJob['preset']>): Promise<string> => {
+    if (ref.kind === 'path') {
+      const buf = await window.silverbox.readFile(ref.value);
+      return new TextDecoder().decode(buf);
+    }
+    const list = await window.silverbox.presetsList();
+    const slug = list.find((p) => p.name === ref.value)?.slug ?? list.find((p) => p.slug === ref.value)?.slug;
+    if (!slug) throw new Error(`preset not found: ${ref.value}`);
+    const text = await window.silverbox.presetRead(slug);
+    if (text === null) throw new Error(`preset not found: ${ref.value}`);
+    return text;
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -858,7 +919,7 @@ export const useAppStore = create<AppState>((set, get) => {
   spotsCapNotice: null,
   gpuError: null,
 
-  async openImageByPath(path: string) {
+  async openImageByPath(path: string, opts?: { skipSidecar?: boolean }) {
     // a pending autosave from whatever image was open belongs to THAT
     // image/path; never let it fire against the one we're about to open
     cancelAutosaveTimer();
@@ -888,7 +949,10 @@ export const useAppStore = create<AppState>((set, get) => {
       // it too, not against nothing.
       let sidecarRawText: string | null = null;
       try {
-        const sidecar = await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
+        // skipSidecar (headless CLI's --preset path): behave as if nothing
+        // were on disk at all, even when a sidecar genuinely exists — see
+        // AppState.openImageByPath's doc comment.
+        const sidecar = opts?.skipSidecar ? null : await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
         sidecarRawText = sidecar;
         if (sidecar !== null) {
           // the sidecar file EXISTS — a parse failure here (unlike readSidecar
@@ -940,10 +1004,13 @@ export const useAppStore = create<AppState>((set, get) => {
       // whatever it stored (older sidecars with no `profile` key sanitize to
       // enabled:false, so their renders never change).
       // Suppressed inside the verify suite (testFlags.isTest) except for
-      // verify-lensprofile (lensProfileAutoDefault), so the 20 pre-F3b scripts
-      // keep their resample-free, CPU-referenceable baselines.
+      // verify-lensprofile (lensProfileAutoDefault) and the headless CLI
+      // renderer (forceDefaults — see SilverboxApi.testFlags's doc comment;
+      // the CLI must match a fresh open's real look even under
+      // verify-cli.mjs's own SILVERBOX_TEST=1 isolation), so the other
+      // scripts keep their resample-free, CPU-referenceable baselines.
       const flags = window.silverbox.testFlags;
-      const autoDefaultAllowed = !flags.isTest || flags.lensProfileAutoDefault;
+      const autoDefaultAllowed = !flags.isTest || flags.lensProfileAutoDefault || flags.forceDefaults;
       if (autoDefaultAllowed && !usedSidecar && image.profile) {
         graph = {
           ...graph,
@@ -961,9 +1028,10 @@ export const useAppStore = create<AppState>((set, get) => {
       // and restored sidecars are never touched (a restored doc keeps whatever
       // it stored, so a user who deleted the curve reopens without it).
       // Suppressed inside the verify suite (testFlags.isTest) except for
-      // verify-basecurve (baseCurveDefault), so the other scripts keep their
-      // untouched fresh-ARW baselines — same mechanism as the lens default.
-      const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault;
+      // verify-basecurve (baseCurveDefault) and the headless CLI renderer
+      // (forceDefaults), so the other scripts keep their untouched fresh-ARW
+      // baselines — same mechanism as the lens default.
+      const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault || flags.forceDefaults;
       if (baseCurveAllowed && !usedSidecar && kind === 'raw') {
         const curve = baseCurveForModel(image.capture?.cameraModel);
         graph = {
@@ -1793,6 +1861,76 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     } catch (err) {
       set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async runCliRender(job, onResult) {
+    for (const input of job.images) {
+      const startedAt = Date.now();
+      try {
+        // job.preset REPLACES the sidecar entirely (see openImageByPath's
+        // skipSidecar doc comment): open as a truly fresh doc with identity
+        // geometry, which is all applyLook below actually preserves — the
+        // fresh-open defaults (lens profile, base curve) it also seeds get
+        // superseded a moment later when applyLook replaces the nodes/edges
+        // wholesale with the preset's own, so only the identity geometry
+        // survives into the final render.
+        await get().openImageByPath(input, { skipSidecar: job.preset !== null });
+        if (get().imageStatus !== 'ready') {
+          throw new Error(get().imageError ?? `failed to open ${input}`);
+        }
+        if (job.preset !== null) {
+          const text = await readCliPresetText(job.preset);
+          const { look } = parsePresetFile(text);
+          let nextGraph: GraphDoc | null = null;
+          set((s) => {
+            const patch = applyLook(s, look);
+            nextGraph = patch.graph;
+            return patch;
+          });
+          if (nextGraph) revalidateShaders(nextGraph);
+        }
+
+        const outputs = get().graph.nodes.filter((n) => n.kind === 'output');
+        const targets =
+          job.output === 'all'
+            ? outputs
+            : job.output !== null
+              ? outputs.filter((n) => outputName(n) === job.output)
+              : outputs.slice(0, 1); // no --output: the doc's first, per the CLI contract
+        if (targets.length === 0) {
+          throw new Error(
+            job.output !== null && job.output !== 'all' ? `no output named "${job.output}"` : 'document has no output nodes'
+          );
+        }
+
+        const basePath = cliOutputPath(input, job.outDir);
+        const used = new Set<string>();
+        for (const node of targets) {
+          // same disambiguation as exportSelectedOutputs: single target keeps
+          // the base path as-is, 2+ (an explicit 'all') get suffixed, with a
+          // numeric tiebreaker for colliding output names.
+          let outPath = targets.length > 1 ? suffixExportPath(basePath, outputName(node)) : basePath;
+          for (let n = 2; used.has(outPath); n++) outPath = suffixExportPath(basePath, `${outputName(node)}-${n}`);
+          used.add(outPath);
+          const result = await exportOnePath(outPath, node.id, {
+            quality: job.quality,
+            maxDim: job.maxDim,
+            metadata: job.metadata,
+            colorSpace: job.colorSpace,
+          });
+          onResult({
+            input,
+            output: outPath,
+            width: result.width,
+            height: result.height,
+            bytes: result.bytes,
+            ms: Date.now() - startedAt,
+          });
+        }
+      } catch (err) {
+        onResult({ input, error: err instanceof Error ? err.message : String(err) });
+      }
     }
   },
 

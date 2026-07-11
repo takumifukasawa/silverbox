@@ -1,0 +1,32 @@
+#!/usr/bin/env node
+// Thin wrapper for the headless CLI renderer (ROADMAP "Headless CLI
+// renderer"): the actual render pipeline is WebGPU inside Electron's
+// renderer process, so a plain Node CLI can't run it directly — this just
+// spawns the project's own Electron binary in `--render` mode (see
+// src/main/index.ts's isCliRenderMode) and forwards argv/exit code as-is.
+//
+// Requires a build (`npm run build`) to exist at ./out first, same as
+// running the app itself — this wrapper does not build.
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const electronBin = join(projectRoot, 'node_modules', '.bin', 'electron');
+
+// Pass the app path ABSOLUTE (not '.') and deliberately do NOT set `cwd` on
+// the child: image/--out/--preset paths on the command line must resolve
+// against the user's actual shell cwd (see cliArgs.ts's buildCliRenderJob,
+// which resolves against Electron main's own process.cwd()) — if this
+// process's cwd were forced to projectRoot instead, a relative image path
+// would resolve against the WRONG directory.
+const child = spawn(electronBin, [projectRoot, '--render', ...process.argv.slice(2)], {
+  stdio: 'inherit',
+});
+child.on('error', (err) => {
+  console.error(`silverbox-render: failed to launch electron (${err.message})`);
+  process.exit(1);
+});
+child.on('exit', (code, signal) => {
+  process.exit(code ?? (signal ? 1 : 0));
+});

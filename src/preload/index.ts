@@ -1,5 +1,5 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron';
-import { IPC, type SilverboxApi } from '../../shared/ipc';
+import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
+import { IPC, type CliRenderJob, type SilverboxApi } from '../../shared/ipc';
 
 const api: SilverboxApi = {
   ping: () => ipcRenderer.invoke(IPC.ping),
@@ -31,7 +31,16 @@ const api: SilverboxApi = {
     isTest: process.env.SILVERBOX_TEST === '1',
     lensProfileAutoDefault: process.env.SILVERBOX_TEST_LENS_PROFILE_DEFAULT === '1',
     baseCurveDefault: process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT === '1',
+    forceDefaults: process.env.SILVERBOX_CLI_RENDER === '1',
   },
+  onCliRun: (callback) => {
+    const listener = (_ev: IpcRendererEvent, job: CliRenderJob) => callback(job);
+    ipcRenderer.on(IPC.cliRun, listener);
+    return () => ipcRenderer.removeListener(IPC.cliRun, listener);
+  },
+  cliReady: () => ipcRenderer.send(IPC.cliReady),
+  cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
+  cliDone: () => ipcRenderer.send(IPC.cliDone),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

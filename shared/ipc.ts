@@ -24,6 +24,13 @@ export const IPC = {
   presetRead: 'presets:read',
   presetWrite: 'presets:write',
   presetDelete: 'presets:delete',
+  // Headless CLI renderer (`electron . --render …` — see main/index.ts):
+  // main pushes ONE job to the renderer once it signals ready, then the
+  // renderer streams results back one at a time as they render.
+  cliReady: 'cli:ready',
+  cliRun: 'cli:run',
+  cliProgress: 'cli:progress',
+  cliDone: 'cli:done',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
@@ -98,9 +105,62 @@ export interface SilverboxApi {
    * "default base curve seeded on fresh ARW opens" default INSIDE the suite —
    * off for every other script (so seeding a tone curve never shifts their
    * fresh-ARW baselines), on only for verify-basecurve which exercises it.
+   * `forceDefaults` mirrors SILVERBOX_CLI_RENDER, set by main ONLY for the
+   * `--render` CLI mode (see main/index.ts) — it forces BOTH auto-defaults
+   * on regardless of `isTest`, because the CLI must match a fresh open's
+   * real look (base curve + lens profile) even when verify-cli.mjs itself
+   * runs under SILVERBOX_TEST=1 for its own windowless/userData isolation.
    */
-  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean; baseCurveDefault: boolean };
+  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean; baseCurveDefault: boolean; forceDefaults: boolean };
+  /**
+   * Subscribe to main's ONE-TIME `--render` job push (headless CLI mode
+   * only — see main/index.ts). Returns an unsubscribe function; the
+   * renderer calls `cliReady()` right after registering so main knows it's
+   * safe to send (avoids a race against React mount).
+   */
+  onCliRun(callback: (job: CliRenderJob) => void): () => void;
+  /** Tell main the renderer's CLI listener is registered and ready for the job. */
+  cliReady(): void;
+  /** Stream one rendered file's result (or error) back to main as it completes. */
+  cliProgress(result: CliRenderResult): void;
+  /** Tell main every image in the job has been attempted; main prints the summary and exits. */
+  cliDone(): void;
 }
+
+/**
+ * A preset reference resolved by main from the CLI's `--preset <name|path>`
+ * argument (see src/main/cliArgs.ts): a value ending in `.json` is a FILE
+ * PATH (already resolved absolute against the launch cwd); anything else is
+ * a NAME looked up against `<userData>/presets` (by display name, falling
+ * back to slug) — same two-way lookup semantics as the UI's preset picker.
+ */
+export type CliRenderPresetRef = { kind: 'path'; value: string } | { kind: 'name'; value: string };
+
+/**
+ * The whole batch job for one `--render` invocation, built by main
+ * (src/main/cliArgs.ts's buildCliRenderJob) from parsed argv + the launch
+ * cwd — every path here is already absolute, so the renderer never needs to
+ * know what directory the CLI was invoked from.
+ */
+export interface CliRenderJob {
+  /** Absolute paths, in argv order. */
+  images: string[];
+  /** Absolute output directory; null = alongside each input. */
+  outDir: string | null;
+  /** null = use each image's own sidecar (or the default look if none). */
+  preset: CliRenderPresetRef | null;
+  /** A named output, `'all'` (every output, suffixed), or null = the doc's first. */
+  output: string | null;
+  quality: number;
+  maxDim: number | null;
+  metadata: ExportMetadataPolicy;
+  colorSpace: ExportColorSpace;
+}
+
+/** One rendered file's result, or one image's failure — streamed via cliProgress, one per line under `--json` (NDJSON). */
+export type CliRenderResult =
+  | { input: string; output: string; width: number; height: number; bytes: number; ms: number }
+  | { input: string; error: string };
 
 /**
  * `<userData>/presets/<slug>.json` listing entry (task #37): individual

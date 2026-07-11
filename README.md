@@ -118,6 +118,45 @@ npm run package    # build an unsigned Silverbox.app into dist/
 Open an image with the Open… button, ⌘O, or by dropping a file onto the
 window. Save the edit sidecar with ⌘S; Export… renders at full resolution.
 
+## CLI rendering
+
+Batch export from the command line — `git pull` a photo repo, run the CLI,
+get JPEGs — without opening a window. It's an argv mode of the same app
+(`electron . --render …`, reusing the windowless machinery the verify suite
+runs on): a hidden window loads, decodes each image full-resolution, applies
+its sidecar (or the default look, or `--preset`), renders, and exits.
+
+```sh
+npm run build                                   # once, or after pulling changes
+
+# 1. Everything's own sidecar (or the default look if none), alongside each input
+npm run render -- ~/photos/2026-07-11/*.ARW
+
+# 2. A named preset instead of each image's sidecar, into a specific folder
+npm run render -- --preset bw-punchy --out ~/exports *.ARW
+
+# 3. Every named output, smaller/faster for a web gallery, NDJSON progress
+npm run render -- --output all --quality 75 --max-dim 2048 --json photo.ARW > log.ndjson
+```
+
+Once installed (`npm link`, or globally via a package registry), the same
+commands work through the `silverbox-render` binary (`bin/silverbox-render`,
+a thin wrapper that just execs the project's own Electron with `--render`):
+`silverbox-render --preset bw-punchy --out ~/exports *.ARW`. Full flag
+reference: `npm run render -- --help`.
+
+Without `--preset`, each image uses its own sidecar if one exists, else the
+same default look a fresh open in the app shows (baseline exposure + the
+camera-matched base curve + the embedded Sony lens profile, when present) —
+the CLI never silently renders a plainer image than the app would. With
+`--preset <name|path>`, the preset's look is applied on top of identity
+geometry (a value ending in `.json` is read as a preset file, anything else
+is looked up by name in `<userData>/presets`) — the same as the UI's "Apply
+preset" on a fresh open; there's no interactive crop to preserve in a batch.
+
+Exit codes: `0` every file rendered, `1` one or more files failed (the rest
+still render, and each failure is reported), `2` bad usage.
+
 ## Verification
 
 The project is developed primarily against an end-to-end Playwright harness:
@@ -130,7 +169,7 @@ where a full app launch is overkill — currently the Sony lens-profile parser
 and correction math; it runs as the `unit` entry inside the parallel suite.
 
 ```sh
-npm run verify           # everything (builds, launches; unit tier + ~35 scripts)
+npm run verify           # everything (builds, launches; unit tier + ~40 scripts)
 npm run test:unit        # just the fast pure-function unit tier
 npm run verify:wb        # or any single area
 ```

@@ -162,6 +162,22 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, []);
 
+  // Headless CLI renderer (main/index.ts's `--render` mode): register the
+  // job listener, then tell main we're ready — main holds the job until this
+  // fires, so there is no race against React mounting (registering the IPC
+  // listener BEFORE calling cliReady() closes that window). Harmless no-op
+  // outside `--render` (main never sends cli:run otherwise).
+  useEffect(() => {
+    const unsubscribe = window.silverbox.onCliRun((job) => {
+      void (async () => {
+        await useAppStore.getState().runCliRender(job, (result) => window.silverbox.cliProgress(result));
+        window.silverbox.cliDone();
+      })();
+    });
+    window.silverbox.cliReady();
+    return unsubscribe;
+  }, []);
+
   // Drag & drop open (UI spec §14): window-level handlers, Files-only, a
   // depth counter to absorb nested enter/leave, drop resolves the path via
   // webUtils.getPathForFile (File.path is gone in Electron 32+).

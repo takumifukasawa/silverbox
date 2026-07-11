@@ -56,17 +56,31 @@ in-app graph untouched with a warning, and saving over it is still allowed
 suppressed by comparing disk content against what this session last wrote,
 not against the live in-memory graph — so an edit made between save and the
 watcher's echo never gets misread as an external change.
+Masks: Radial and Linear mask nodes, a mask port on blend, and "+ Local
+Adjustment" (one click builds a Develop + Mask + Blend rig wired to the
+active output); ColorKey (secondary) mask node for hue/sat/lum keying with
+per-axis smoothstep falloff. Sidecar schemaVersion 3/4 (ports on edges,
+unknown-field passthrough, named multiple outputs, anchor-space mask/spot
+coordinates so a mask stays pinned to its image content across crop/rotate).
+Headless CLI renderer (batch export against sidecars/presets): `electron .
+--render <images…>` (also `npm run render --` and the `bin/silverbox-render`
+wrapper) is an argv mode of the same app — no bundled node-only renderer,
+since the develop pipeline is WebGPU inside the renderer process. A hidden
+window (the same windowless machinery the verify suite runs on, forced on
+even without SILVERBOX_TEST) opens each image via its own sidecar, or the
+same fresh-open default look the app itself shows (baseline exposure + base
+curve + embedded lens profile), or a named/path preset applied like the UI's
+"Apply preset" on a fresh open; renders one or every named output
+(`--output`); writes JPEG/PNG with the usual quality/max-dim/metadata/
+color-space controls; reports progress as it goes (NDJSON under `--json`).
+Continues past a single file's failure (exit 1, each error reported)
+rather than aborting the whole batch.
 
 ## In flight / agreed order
 
-1. Masks: Radial/Linear nodes + mask port on blend + "+ Local Adjustment"
-   (sidecar schemaVersion 3, ports on edges, unknown-field passthrough,
-   named multiple outputs ride the same bump)
-2. ColorKey (secondary) mask node
-3. Image node (composite with / mask by another file, path reference)
-4. Denoise for high ISO (external-tool hook node first — see nice-to-have
-   notes; bundled inference only if that proves insufficient)
-5. Headless CLI renderer (batch export against sidecars/presets)
+Nothing currently in flight — every previously agreed item above has
+shipped. See "Nice to have" below for what's next; Image node (composite
+with / mask by another file) and Denoise both moved there, unstarted.
 
 Other-maker lens correction (DNG opcodes — the semi-universal path — then
 per-maker parsing on demand; contactless/vintage glass keeps the manual
@@ -121,6 +135,8 @@ offset (value decided in the Lightroom calibration session).
   node** (pipe through a user-configured command, cache keyed by input
   hash — stays intent-data, no bundled ML runtime); in-app ONNX only if
   that proves insufficient
+- Image node: composite with / mask by another file (path reference) — a
+  second image feeding a node graph the way a mask node feeds a shape today
 - **Golden renders** (`silverbox check`): commit a thumbnail/hash next to
   each sidecar and let the CLI re-render and report ΔE — a photo archive
   that owns a regression test suite; engine updates become detectable
