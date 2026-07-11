@@ -97,6 +97,33 @@ try {
     { afterWheel, afterDrag }
   );
 
+  console.log('verify-ms9 (round-6: trackpad pinch — ctrlKey wheel — zooms the viewport):');
+  // Playwright's page.mouse.wheel() can't set ctrlKey, so dispatch a real
+  // WheelEvent by hand — this is exactly how Chromium/Electron represents a
+  // macOS trackpad pinch (there's no separate pinch/gesture event).
+  const dispatchCtrlWheel = (deltaY) =>
+    page.locator('.canvas-viewport').evaluate((el, dy) => {
+      const rect = el.getBoundingClientRect();
+      el.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: dy,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }, deltaY);
+  const beforePinch = await viewState();
+  await dispatchCtrlWheel(-5); // typical single-event pinch deltaY magnitude
+  await page.waitForTimeout(30);
+  const afterPinch = await viewState();
+  check('ctrl+wheel (trackpad pinch) zooms in', afterPinch.scale > beforePinch.scale, {
+    before: beforePinch.scale,
+    after: afterPinch.scale,
+  });
+
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms9-zoom.png') });
   console.log('screenshot: test-artifacts/ms9-zoom.png');
 } finally {

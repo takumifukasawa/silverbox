@@ -464,6 +464,91 @@ try {
   check('the image center still renders real (non-black) pixels', centerMax > 0, { centerMax });
   await setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 });
 
+  console.log('verify-crop (round-6: anchored resize clamp — E handle stops at the frame edge instead of shoving the LEFT side):');
+  await setGeometry({ crop: { x: 0.6, y: 0.3, w: 0.3, h: 0.3 }, angle: 0 });
+  await waitForOutputDims(Math.round(baselineDims.width * 0.3), Math.round(baselineDims.height * 0.3), 1);
+  await page.locator('[data-testid="crop-toggle"]').click();
+  await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
+
+  const geomBeforeE = await geometryState();
+  const eHandle = page.locator('[data-testid="crop-handle-e"]');
+  await eHandle.scrollIntoViewIfNeeded();
+  const eBox = await eHandle.boundingBox();
+  await page.mouse.move(eBox.x + eBox.width / 2, eBox.y + eBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(eBox.x + 900, eBox.y, { steps: 6 }); // drag far past the right edge
+  await page.mouse.up();
+  const geomAfterE = await geometryState();
+  check('E-handle drag past the right edge leaves x unchanged (left edge never moves)', Math.abs(geomAfterE.crop.x - geomBeforeE.crop.x) < 1e-9, {
+    before: geomBeforeE.crop.x,
+    after: geomAfterE.crop.x,
+  });
+  check(
+    'E-handle drag caps w at exactly 1 - x (right edge stops at the frame boundary)',
+    Math.abs(geomAfterE.crop.w - (1 - geomAfterE.crop.x)) < 1e-6,
+    geomAfterE.crop
+  );
+
+  console.log('verify-crop (round-6: W handle pins the RIGHT edge instead of shoving it):');
+  // Still inside crop mode (never exited after the E-handle section above) —
+  // crop mode previews the FULL frame regardless of the committed crop (see
+  // the component doc comment), so outputDims does NOT track this setGeometry
+  // call; only geometryState() does. Don't waitForOutputDims here.
+  await setGeometry({ crop: { x: 0.1, y: 0.3, w: 0.3, h: 0.3 }, angle: 0 });
+  const geomBeforeW = await geometryState();
+  const rightEdgeBeforeW = geomBeforeW.crop.x + geomBeforeW.crop.w;
+  const wHandle = page.locator('[data-testid="crop-handle-w"]');
+  await wHandle.scrollIntoViewIfNeeded();
+  const wBox = await wHandle.boundingBox();
+  await page.mouse.move(wBox.x + wBox.width / 2, wBox.y + wBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(wBox.x - 900, wBox.y, { steps: 6 }); // drag far past the left edge
+  await page.mouse.up();
+  const geomAfterW = await geometryState();
+  const rightEdgeAfterW = geomAfterW.crop.x + geomAfterW.crop.w;
+  check('W-handle drag past the left edge pins the right edge (x+w unchanged)', Math.abs(rightEdgeAfterW - rightEdgeBeforeW) < 1e-6, {
+    before: rightEdgeBeforeW,
+    after: rightEdgeAfterW,
+  });
+  check('W-handle drag stops at x = 0 (never shoves the right edge along with it)', Math.abs(geomAfterW.crop.x) < 1e-9, geomAfterW.crop);
+
+  console.log('verify-crop (round-6: corner + ratio-lock resize clamp — the driven axis cannot push past its own anchor):');
+  await page.locator('[data-testid="crop-ratio"]').selectOption('1:1');
+  // Same crop-mode caveat as the W-handle section above: no waitForOutputDims.
+  await setGeometry({ crop: { x: 0.6, y: 0.6, w: 0.3, h: 0.3 }, angle: 0 });
+  const geomBeforeSE = await geometryState();
+  const seHandle2 = page.locator('[data-testid="crop-handle-se"]');
+  await seHandle2.scrollIntoViewIfNeeded();
+  const seBox2 = await seHandle2.boundingBox();
+  await page.mouse.move(seBox2.x + seBox2.width / 2, seBox2.y + seBox2.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(seBox2.x + 900, seBox2.y + 900, { steps: 6 }); // drag far past both edges
+  await page.mouse.up();
+  const geomAfterSE = await geometryState();
+  check('SE corner + ratio lock: x unchanged (west edge never shoved)', Math.abs(geomAfterSE.crop.x - geomBeforeSE.crop.x) < 1e-9, geomAfterSE.crop);
+  check('SE corner + ratio lock: y unchanged (north edge never shoved)', Math.abs(geomAfterSE.crop.y - geomBeforeSE.crop.y) < 1e-9, geomAfterSE.crop);
+  check(
+    'SE corner + ratio lock: rect stays inside the frame ([0,1] on both axes)',
+    geomAfterSE.crop.x + geomAfterSE.crop.w <= 1 + 1e-6 && geomAfterSE.crop.y + geomAfterSE.crop.h <= 1 + 1e-6,
+    geomAfterSE.crop
+  );
+  const seOutputAr = (geomAfterSE.crop.w * baselineDims.width) / (geomAfterSE.crop.h * baselineDims.height);
+  check('SE corner + ratio lock: aspect ratio survived the clamp (output w/h ≈ 1:1)', Math.abs(seOutputAr - 1) < 0.02, {
+    crop: geomAfterSE.crop,
+    seOutputAr,
+  });
+
+  console.log('verify-crop (round-6: rotate zones show a permanent glyph affordance, not just an invisible hit zone):');
+  check('4 rotate-zone glyphs render in crop mode', (await page.locator('[data-testid="crop-rotate-glyph"]').count()) === 4, {
+    count: await page.locator('[data-testid="crop-rotate-glyph"]').count(),
+  });
+
+  // restore Free ratio + identity, exit crop mode — back to baseline for the sections below
+  await page.locator('[data-testid="crop-ratio"]').selectOption('free');
+  await page.locator('[data-testid="crop-reset"]').click();
+  await page.locator('[data-testid="crop-done"]').click();
+  await waitForOutputDims(baselineDims.width, baselineDims.height);
+
   console.log('verify-crop (sidecar round-trip):');
   await setGeometry({ crop: { x: 0.1, y: 0.2, w: 0.6, h: 0.5 }, angle: 7.5 });
   const sidecarW = Math.round(baselineDims.width * 0.6);

@@ -414,6 +414,41 @@ try {
   });
 
   // ---------------------------------------------------------------------
+  console.log('verify-spots (round-6: ctrl+wheel (trackpad pinch) zooms even while spot mode owns the plain wheel):');
+  // Playwright's page.mouse.wheel() can't set ctrlKey, so dispatch a real
+  // WheelEvent — the same technique verify-ms9-viewport.mjs uses to
+  // reproduce a macOS trackpad pinch in Chromium/Electron.
+  const dispatchCtrlWheel = (deltaY) =>
+    page.locator('.canvas-viewport').evaluate((el, dy) => {
+      const rect = el.getBoundingClientRect();
+      el.dispatchEvent(
+        new WheelEvent('wheel', {
+          deltaY: dy,
+          clientX: rect.left + rect.width / 2,
+          clientY: rect.top + rect.height / 2,
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    }, deltaY);
+  const scaleBeforePinch = (await canvasView()).scale;
+  const brushRadiusBeforePinch = (await spotState()).brushRadius;
+  await dispatchCtrlWheel(-5);
+  await page.waitForTimeout(30);
+  const scaleAfterPinch = (await canvasView()).scale;
+  const brushRadiusAfterPinch = (await spotState()).brushRadius;
+  check('ctrl+wheel changes canvasView().scale while spot mode is active', scaleAfterPinch !== scaleBeforePinch, {
+    scaleBeforePinch,
+    scaleAfterPinch,
+  });
+  check(
+    "ctrl+wheel does NOT touch spotState().brushRadius (spot mode's own wheel listener ignores ctrlKey)",
+    brushRadiusAfterPinch === brushRadiusBeforePinch,
+    { brushRadiusBeforePinch, brushRadiusAfterPinch }
+  );
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (5. delete selected spot via Backspace; clear-all via the inspector):');
   // Click (no drag) selects the spot without mutating the graph.
   const dstHandleForSelect = page.locator('[data-testid="spot-handle-dst-0"]');

@@ -29,6 +29,67 @@ const RATIO_OPTIONS: { key: string; label: string; ar: number | null }[] = [
   { key: '16:9', label: '16:9', ar: 16 / 9 },
 ];
 
+/**
+ * Caps a resize handle's driving axis/axes at the FIXED anchor edge(s)
+ * implied by `kind` — e.g. the 'e' handle's WEST edge (`start.x`) never
+ * moves, so `w` is capped at `1 - start.x` rather than letting the generic
+ * [0,1] position clamp further down shove that west edge inward once `w`
+ * exceeds the room to its right (round-6 bug: dragging 'e' past the right
+ * edge dragged the LEFT edge along with it, because `x = min(x, 1 - w)` is
+ * anchor-blind about which edge is supposed to stay put).
+ *
+ * For 'w'/'n' the fixed edge is the FAR one (right/bottom): the drag moves
+ * `x`/`y` directly, so instead of capping the size we clamp the position and
+ * re-derive the size from the (still-fixed) far edge. No-op on axes `kind`
+ * doesn't touch (e.g. an 'n' drag leaves x/w alone entirely).
+ */
+function anchorClamp(kind: HandleId, start: GeometryCrop, x: number, y: number, w: number, h: number) {
+  if (kind.includes('e')) {
+    w = Math.min(w, 1 - start.x);
+  } else if (kind.includes('w')) {
+    x = Math.max(0, x);
+    w = start.x + start.w - x;
+  }
+  if (kind.includes('s')) {
+    h = Math.min(h, 1 - start.y);
+  } else if (kind.includes('n')) {
+    y = Math.max(0, y);
+    h = start.y + start.h - y;
+  }
+  return { x, y, w, h };
+}
+
+/**
+ * Re-applies the anchor rule AFTER the ratio-lock recompute, which can push
+ * the DERIVED axis (the one ratio-lock computes FROM the already-capped
+ * driving axis — e.g. `h` derived from `w` for an 'e' or corner drag) past
+ * its OWN frame anchor even though the driving axis was already capped by
+ * `anchorClamp` above. A corner+ratio drag is the case that needs this: e.g.
+ * 'ne' caps `w` at the east room, then derives `h` from that `w` — but `h`
+ * can still overshoot the north anchor if the ratio is tall enough.
+ *
+ * Hard-capping the derived axis alone would silently break the aspect ratio,
+ * so instead this scales BOTH axes back by the same factor and re-derives
+ * the anchor position(s) from the smaller size. One pass is always enough:
+ * shrinking a size that already satisfied its own anchor bound can't make it
+ * violate that bound, so the driving axis's cap (from the first pass) never
+ * needs re-checking here.
+ */
+function anchorClampRatioLocked(kind: HandleId, start: GeometryCrop, x: number, y: number, w: number, h: number) {
+  const wRoom = kind.includes('e') ? 1 - start.x : kind.includes('w') ? start.x + start.w : Infinity;
+  const hRoom = kind.includes('s') ? 1 - start.y : kind.includes('n') ? start.y + start.h : Infinity;
+  const scale = Math.min(1, w > 0 ? wRoom / w : 1, h > 0 ? hRoom / h : 1);
+  if (scale < 1) {
+    w *= scale;
+    h *= scale;
+  }
+  if (kind.includes('w')) x = start.x + start.w - w;
+  else if (kind.includes('e')) x = start.x;
+  if (kind.includes('n')) y = start.y + start.h - h;
+  else if (kind.includes('s')) y = start.y;
+  return { x, y, w, h };
+}
+
 interface Props {
   view: ViewportState;
   /** Render-output dims (px) — the crop rect is normalized against these. */
@@ -111,6 +172,12 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
           h = start.crop.h + dy;
         }
 
+        // Anchor-aware clamp: cap the DRIVING axis at its fixed opposite edge
+        // BEFORE any ratio-lock math runs, so a drag that would grow past
+        // the frame boundary stops there instead of shoving the anchor edge
+        // inward (round-6 bug — see anchorClamp's doc comment).
+        ({ x, y, w, h } = anchorClamp(kind, start.crop, x, y, w, h));
+
         // Aspect-ratio lock (normalized crop fractions, ratio in OUTPUT px —
         // account for the source's own aspect: outputAr = (w*canvasWidth) /
         // (h*canvasHeight)). Corners + vertical edges (e/w) drive off the
@@ -136,6 +203,13 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
             }
             h = hNew;
           }
+
+          // The ratio recompute above can grow the DERIVED axis past ITS
+          // OWN anchor (e.g. a corner+ratio drag: capping `w` still leaves
+          // room for the derived `h` to overshoot the north/south anchor).
+          // Scale both axes back together so the lock survives — see
+          // anchorClampRatioLocked's doc comment.
+          ({ x, y, w, h } = anchorClampRatioLocked(kind, start.crop, x, y, w, h));
         }
       }
       w = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, w));
@@ -370,7 +444,30 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
               data-testid={`crop-rotate-${c}`}
               title="Drag to straighten"
               onPointerDown={beginRotate()}
-            />
+            >
+              {/* Round-6 affordance: the rotate zone is otherwise invisible
+                  until the cursor happens to enter it — a small curved-arrow
+                  glyph marks it at rest (dim), brightening to full white on
+                  hover via the plain CSS descendant selector below (that's
+                  why the glyph lives INSIDE the zone element). Same arc
+                  geometry as the zone's own custom cursor image (styles.css)
+                  for visual consistency; pointer-events:none so the zone div
+                  keeps handling the drag, not the svg. */}
+              <svg
+                className="crop-rotate-glyph"
+                data-testid="crop-rotate-glyph"
+                width="14"
+                height="14"
+                viewBox="0 0 22 22"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <path d="M11 3a8 8 0 1 1-6.5 3.3" fill="none" stroke="#000" strokeOpacity="0.55" strokeWidth="2.6" strokeLinecap="round" />
+                <path d="M11 3a8 8 0 1 1-6.5 3.3" fill="none" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" />
+                <path d="M2.5 4.5l1.7 2.3 2.3-1" fill="none" stroke="#000" strokeOpacity="0.55" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M2.5 4.5l1.7 2.3 2.3-1" fill="none" stroke="#fff" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
           ))}
           {HANDLES.map((h) => (
             <div

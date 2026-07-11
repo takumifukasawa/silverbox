@@ -31,12 +31,14 @@ export function useCanvasViewport(
    */
   suppressPan = false,
   /**
-   * True while the wheel must NOT zoom the viewport — spot mode (task #50)
-   * repurposes the plain wheel gesture to adjust the brush radius instead
-   * (CanvasView.tsx registers its own wheel listener on the same container;
-   * this just opts the zoom handler out so the two don't fight over the same
-   * event). preventDefault still fires either way, so the page itself never
-   * scrolls underneath the canvas.
+   * True while the PLAIN wheel must NOT zoom the viewport — spot mode (task
+   * #50) repurposes it to adjust the brush radius instead (CanvasView.tsx
+   * registers its own wheel listener on the same container; this just opts
+   * the zoom handler out so the two don't fight over the same event).
+   * ctrlKey wheel (trackpad pinch, round-6) is NEVER suppressed — pinch must
+   * keep zooming even while a mode owns the plain wheel, see onWheel below.
+   * preventDefault still fires either way, so the page itself never scrolls
+   * underneath the canvas.
    */
   suppressWheelZoom = false
 ) {
@@ -118,9 +120,19 @@ export function useCanvasViewport(
 
     const onWheel = (ev: WheelEvent) => {
       ev.preventDefault();
-      if (suppressWheelZoomRef.current) return;
+      // Trackpad pinch arrives in Chromium as a `wheel` event with
+      // ctrlKey:true (there's no separate gesture event) — it must ALWAYS
+      // zoom, even while suppressWheelZoom opts the plain wheel out for spot
+      // mode's brush-radius gesture (task #50/round-6), so pinch keeps
+      // working no matter what the plain wheel is repurposed for.
+      if (suppressWheelZoomRef.current && !ev.ctrlKey) return;
       const rect = container.getBoundingClientRect();
-      const factor = Math.exp(-ev.deltaY * 0.0015);
+      // Pinch deltaY per event is small (~1-10 for a typical two-finger
+      // pinch, vs ~100+ per notch for a real scroll wheel), so it needs a
+      // much stronger coefficient to feel like zooming rather than a crawl:
+      // exp(-deltaY * 0.01) is the constant Chromium/Safari apps commonly
+      // tune pinch-to-zoom to (e.g. ~10% scale change for a deltaY of ~10).
+      const factor = Math.exp(-ev.deltaY * (ev.ctrlKey ? 0.01 : 0.0015));
       zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, viewRef.current.scale * factor);
     };
 

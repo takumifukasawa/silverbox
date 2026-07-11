@@ -345,6 +345,12 @@ export function CanvasView() {
     const onWheel = (ev: WheelEvent) => {
       const s = useAppStore.getState();
       if (!s.spotMode) return;
+      // Trackpad pinch (ctrlKey wheel, round-6): let it fall through to
+      // useCanvasViewport's own listener on the SAME container instead —
+      // don't preventDefault here (that listener already does), and don't
+      // touch the brush radius, or pinch would stop zooming the moment spot
+      // mode repurposes the plain wheel.
+      if (ev.ctrlKey) return;
       ev.preventDefault();
       const factor = Math.exp(-ev.deltaY * 0.0015);
       if (s.selectedSpotIndex !== null) {

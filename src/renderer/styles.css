@@ -523,6 +523,24 @@ button:disabled {
   transform: translate(-24px, 24px);
 }
 
+/* Round-6: the rotate zones above have no visible affordance at rest — this
+   glyph (rendered as a CHILD of the zone, see CropOverlay.tsx) marks each one
+   permanently while crop mode is active, dim at rest and brightening to full
+   opacity on hover via the plain descendant selector below. pointer-events:
+   none keeps the zone div itself handling the drag. */
+.crop-rotate-glyph {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  pointer-events: none;
+  opacity: 0.45;
+  transition: opacity 0.1s ease-out;
+}
+
+.crop-rotate-zone:hover .crop-rotate-glyph {
+  opacity: 1;
+}
+
 .crop-controls {
   position: absolute;
   left: 50%;
