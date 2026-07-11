@@ -14,6 +14,9 @@ import type { ViewportState } from './useCanvasViewport';
 const HANDLES = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as const;
 type HandleId = (typeof HANDLES)[number];
 
+/** The 4 corners get a rotate zone (LR-style: drag OUTSIDE the corner to straighten). */
+const ROTATE_CORNERS = ['nw', 'ne', 'se', 'sw'] as const;
+
 /** Aspect-ratio lock options (UI spec §item4): output-px width/height; 'free'/'original' are resolved dynamically. */
 const RATIO_OPTIONS: { key: string; label: string; ar: number | null }[] = [
   { key: 'free', label: 'Free', ar: null },
@@ -55,6 +58,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
   const dragRef = useRef<{ crop: GeometryCrop; startX: number; startY: number } | null>(null);
   const sessionRef = useRef<number | null>(null);
   const angleSessionRef = useRef<number | null>(null);
+  const cropRectRef = useRef<HTMLDivElement>(null);
 
   // `canvasWidth`/`canvasHeight` are the ORIENTED full-frame dims (see the
   // component doc comment) — exactly what an output-px aspect ratio needs.
@@ -151,6 +155,49 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
     setGeometry({ crop, angle: value, orientation }, `geometry:${angleSessionRef.current}`);
   };
 
+  /**
+   * LR-style rotate (UX pack B §2): dragging the zone just OUTSIDE a corner
+   * (rather than the resize handle itself) straightens the photo instead of
+   * resizing the crop. The crop rect's own on-screen box never moves or
+   * skews during this drag — only `geometry.angle` changes, coalesced into
+   * ONE undo entry per drag (same `angleSessionRef`/session-key pattern the
+   * angle slider already uses, so both paths write the identical field).
+   *
+   * Angle is derived from the pointer's angular position around the crop
+   * rect's OWN on-screen center (via its live getBoundingClientRect(), not a
+   * reconstruction from `view`/canvasWidth/Height — simplest-correct given
+   * the rect can be any size/position). Screen space is y-down, so a
+   * visually CLOCKWISE pointer sweep is an INCREASING atan2 angle; the
+   * existing "+angle rotates the displayed image CCW" convention (see
+   * graphRenderer.ts's RESAMPLE_SHADER doc comment — untouched, not flipped
+   * here) means a clockwise drag must DECREASE geometry.angle, hence the
+   * negation below.
+   */
+  const beginRotate = () => (ev: React.PointerEvent) => {
+    ev.stopPropagation();
+    ev.preventDefault();
+    const rectEl = cropRectRef.current;
+    if (!rectEl) return;
+    const box = rectEl.getBoundingClientRect();
+    const centerX = box.left + box.width / 2;
+    const centerY = box.top + box.height / 2;
+    const startPointerAngle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX);
+    const baseAngle = angle;
+    angleSessionRef.current = Date.now();
+    const onMove = (e: PointerEvent) => {
+      const curPointerAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX);
+      const deltaDeg = -((curPointerAngle - startPointerAngle) * 180) / Math.PI;
+      onAngleChange(Math.min(45, Math.max(-45, baseAngle + deltaDeg)));
+    };
+    const onUp = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      angleSessionRef.current = null;
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
   /** Selecting a new ratio re-fits the CURRENT rect immediately: a centered shrink of whichever axis is too big (one undo entry); Free changes nothing. */
   const onRatioChange = (key: string) => {
     setRatioKey(key);
@@ -207,6 +254,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
           style={{ left: pct(crop.x + crop.w), top: pct(crop.y), width: pct(1 - crop.x - crop.w), height: pct(crop.h) }}
         />
         <div
+          ref={cropRectRef}
           className="crop-rect"
           data-testid="crop-rect"
           style={{ left: pct(crop.x), top: pct(crop.y), width: pct(crop.w), height: pct(crop.h) }}
@@ -220,6 +268,19 @@ export function CropOverlay({ view, canvasWidth, canvasHeight }: Props) {
               <div className="crop-thirds-h" style={{ top: '66.667%' }} />
             </div>
           )}
+          {/* Rotate zones render FIRST (underneath, in DOM/paint order) so the
+              resize handles — same corner anchor, smaller hit radius — win
+              the pointer for clicks close to the corner; the rotate ring only
+              catches drags starting further out (near-but-outside). */}
+          {ROTATE_CORNERS.map((c) => (
+            <div
+              key={`rotate-${c}`}
+              className={`crop-rotate-zone crop-rotate-zone-${c}`}
+              data-testid={`crop-rotate-${c}`}
+              title="Drag to straighten"
+              onPointerDown={beginRotate()}
+            />
+          ))}
           {HANDLES.map((h) => (
             <div
               key={h}

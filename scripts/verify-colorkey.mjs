@@ -94,7 +94,16 @@ try {
   // ---------------------------------------------------------------------
   console.log('verify-colorkey (setup: default graph + Local Adjustment):');
   await openAndWait(ARW_PATH);
-  await page.locator('[data-testid="add-local-adjustment"]').click();
+  // "+ Radial" enters draw-to-create mode (UX pack B §1); a click with no
+  // drag still creates the usual D/M/B rig (default-radius radial at the
+  // click point) — this test only cares about the rig existing, not shape.
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  const laCanvas = page.locator('.canvas-view-canvas');
+  await laCanvas.scrollIntoViewIfNeeded();
+  const laBox = await laCanvas.boundingBox();
+  await page.mouse.move(laBox.x + laBox.width / 2, laBox.y + laBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
   const gAfterLA = await graphState();
   check(
     'D/M/B wired as usual (mask-1 feeds blend-1:mask)',

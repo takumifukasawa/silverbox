@@ -10,6 +10,7 @@ import {
   defaultParams,
   DEVELOP_KIND,
   nextId,
+  outputName,
   parseGraphDoc,
   serializeGraphDoc,
   type AddableKind,
@@ -154,6 +155,22 @@ interface AppState {
    * rewires the output to B, and selects M.
    */
   addLocalAdjustment(): void;
+  /**
+   * Draw-to-create variant (UX pack B §1): identical one-history-entry D/M/B
+   * rig, but `shape` (the user's drag on the canvas — see CanvasView.tsx's
+   * mask-draw gesture) becomes Mask M's shapes[0] instead of the default
+   * centered radial. `addLocalAdjustment()` above stays available unchanged
+   * for callers that just want the default rig (verify scripts included).
+   */
+  addLocalAdjustmentWithShape(shape: MaskShape): void;
+  /**
+   * LR-style draw-to-create mask mode (UX pack B §1): non-null while the
+   * canvas is in "draw a new local-adjustment shape" mode (crosshair cursor,
+   * pan suppressed) — set by the toolbar's "+ Radial"/"+ Linear" buttons,
+   * cleared on commit (mouseup) or cancel (Escape, see App.tsx).
+   */
+  maskDrawMode: 'radial' | 'linear' | null;
+  setMaskDrawMode(mode: 'radial' | 'linear' | null): void;
   /** Async GPU failure surfaced from the render worker (device loss etc.) — mirrors the pre-worker GraphRenderer rejection UI. */
   gpuError: string | null;
   setGpuError(message: string | null): void;
@@ -187,11 +204,42 @@ interface AppState {
   setHistogram(histogram: HistogramData | null): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
-  /** Develop at full resolution and write .jpg/.png (dialog when no path). */
+  /**
+   * Develop at full resolution and write .jpg/.png (dialog when no path).
+   * Exports the ACTIVE output (`opts.outputId` overrides it) — the single-
+   * file path every verify script's `exportImageTo`/toolbar "Export…" used
+   * before the export dialog existed; unaffected by the dialog's "All
+   * outputs" mode, which goes through `exportSelectedOutputs` instead.
+   */
   exportImage(
+    path?: string,
+    opts?: {
+      quality?: number;
+      maxDim?: number | null;
+      metadata?: ExportMetadataPolicy;
+      colorSpace?: ExportColorSpace;
+      outputId?: string;
+    }
+  ): Promise<void>;
+  /**
+   * Export dialog's "output" selector (UX pack B §4): `target` is a specific
+   * output node id, `'active'` (the currently previewed output — the
+   * dialog's default selection), or `'all'` (every output node, one file
+   * each). A single resolved target reuses `path` as-is (current behavior,
+   * no suffix); 2+ targets get `<path>-<outputName>.<ext>` per file (see
+   * `suffixExportPath`). One native save-dialog prompt for the whole batch
+   * (unless `path` is pre-supplied, e.g. by a verify script).
+   */
+  exportSelectedOutputs(
+    target: 'active' | 'all' | string,
     path?: string,
     opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
   ): Promise<void>;
+  /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
+  exportDialogOpen: boolean;
+  setExportDialogOpen(open: boolean): void;
+  /** Set after a successful exportSelectedOutputs batch — how many files, and their paths (dialog display / verify). */
+  exportBatchInfo: { count: number; paths: string[] } | null;
   undo(): void;
   redo(): void;
   /** `<userData>/settings.json`, loaded at boot; DEFAULT_SETTINGS until that IPC round-trip resolves. */
@@ -229,6 +277,98 @@ function pushHistory(s: AppState, key: string | null): { history: GraphHistory }
 
 export function isJpegFileName(name: string): boolean {
   return /\.(jpg|jpeg)$/i.test(name);
+}
+
+/**
+ * Shared body of addLocalAdjustment()/addLocalAdjustmentWithShape(): one
+ * undo entry builds Develop D (defaults) + Mask M (`shape`, or the default
+ * centered radial when omitted) + Blend B (a = the node currently feeding
+ * the active output, b = D, mask = M), rewires the output to B, and selects
+ * M. Pure function of state (no `set`/`get`) so both store actions — and the
+ * draw-to-create gesture in CanvasView.tsx, indirectly, via
+ * addLocalAdjustmentWithShape — share exactly one implementation.
+ */
+function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppState> {
+  const g = s.graph;
+  const outputs = g.nodes.filter((n) => n.kind === 'output');
+  const activeOutput = (s.activeOutputId && outputs.find((n) => n.id === s.activeOutputId)) || outputs[0];
+  if (!activeOutput) return {};
+  const inEdge = g.edges.find((e) => e.target === activeOutput.id);
+  if (!inEdge) return {};
+  const sourceId = inEdge.source;
+
+  // Layout (spec-aligned left-to-right reading order): the Blend takes
+  // the OUTPUT's old slot; the output itself shifts right ~200px to make
+  // room. Develop sits above the blend, Mask below it — so the chain
+  // reads source → (D above / M below) → blend → output, not blend
+  // stranded to the right of a stationary output (#pointer-drag-lag's
+  // sibling UX bug — the old layout had Blend land right of Output).
+  const outX = activeOutput.position.x;
+  const outY = activeOutput.position.y;
+
+  const devId = nextId(g, 'dev');
+  const devNode: GraphNode = {
+    id: devId,
+    kind: DEVELOP_KIND,
+    position: { x: outX, y: outY - 130 },
+    develop: defaultDevelopParams(),
+  };
+  const maskId = nextId({ ...g, nodes: [...g.nodes, devNode] }, 'mask');
+  const maskNode: GraphNode = {
+    id: maskId,
+    kind: MASK_KIND,
+    position: { x: outX, y: outY + 130 },
+    mask: { shapes: shape ? [shape] : defaultMaskParams().shapes },
+  };
+  const blendId = nextId({ ...g, nodes: [...g.nodes, devNode, maskNode] }, 'blend');
+  const blendNode: GraphNode = {
+    id: blendId,
+    kind: BLEND_KIND,
+    position: { x: outX, y: outY },
+    // Masked blend: `amount` now acts as an adjustment strength (spec
+    // §3), defaulting to 1 (full D within the mask, none outside) — the
+    // Lightroom-style local-adjustment behavior, distinct from a plain
+    // unmasked Blend node's 0.5 straight-mix default (BLEND_PARAM_DEFS,
+    // untouched — this only changes what THIS auto-created node starts at).
+    params: { amount: 1 },
+  };
+
+  let scratch: GraphDoc = {
+    ...g,
+    nodes: [
+      ...g.nodes.map((n) => (n.id === activeOutput.id ? { ...n, position: { x: outX + 200, y: outY } } : n)),
+      devNode,
+      maskNode,
+      blendNode,
+    ],
+    edges: g.edges.filter((e) => e.id !== inEdge.id),
+  };
+  const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+    const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+    scratch = { ...scratch, edges: [...scratch.edges, edge] };
+  };
+  addEdge(sourceId, devId);
+  addEdge(sourceId, maskId);
+  addEdge(sourceId, blendId, 'a');
+  addEdge(devId, blendId, 'b');
+  addEdge(maskId, blendId, 'mask');
+  addEdge(blendId, activeOutput.id);
+
+  return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: maskId };
+}
+
+/**
+ * Insert `-<name>` before the extension of an export path, e.g.
+ * `/x/DSC02993.jpg` + "second copy" -> `/x/DSC02993-second-copy.jpg` — used
+ * only when exportSelectedOutputs resolves to 2+ output nodes (a single
+ * target keeps the path exactly as given, today's behavior). `name` is
+ * filesystem-sanitized: anything but letters/digits/underscore/hyphen becomes
+ * a hyphen, runs collapse, and an empty result falls back to 'output'.
+ */
+export function suffixExportPath(path: string, name: string): string {
+  const safe = name.trim().replace(/[^a-zA-Z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'output';
+  const m = /^(.*)(\.[^./\\]+)$/.exec(path);
+  return m ? `${m[1]}-${safe}${m[2]}` : `${path}-${safe}`;
 }
 
 function getShader(graph: GraphDoc, nodeId: string): CustomShaderParams | null {
@@ -338,6 +478,50 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   };
 
+  /**
+   * Decode the source image fresh at full resolution, render ONE output, and
+   * encode+write it to `targetPath` — the whole body of the pre-dialog
+   * exportImage, factored out so both the single-output path (exportImage,
+   * unchanged behavior) and the export dialog's multi-output batch
+   * (exportSelectedOutputs) share it. A fresh `loadImage()` per call is
+   * required, not just convenient: renderToPixels TRANSFERS the prepared
+   * image's data buffer to the render worker (see renderClient.ts), so a
+   * `PreparedImage` is single-use and can't be reused across output nodes.
+   */
+  const exportOnePath = async (
+    targetPath: string,
+    outputId: string | undefined,
+    opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
+  ): Promise<{ width: number; height: number; bytes: number }> => {
+    const { imagePath, fileName, graph, renderer } = get();
+    if (!imagePath || !fileName || !renderer) throw new Error('no image open');
+    const bytes = await window.silverbox.readFile(imagePath);
+    const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
+    const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER, get().settings.baselineExposureEV);
+    const colorSpace = opts?.colorSpace ?? 'srgb';
+    const { data, width, height } = await renderer.renderToPixels(full, graph, 1, colorSpace, outputId);
+    const cap = full.capture;
+    return window.silverbox.exportEncode({
+      data: data.buffer,
+      width,
+      height,
+      outPath: targetPath,
+      quality: Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))),
+      maxDim: opts?.maxDim ?? null,
+      metadata: opts?.metadata ?? 'all',
+      colorSpace,
+      meta: {
+        ...(cap?.cameraMake ? { cameraMake: cap.cameraMake } : {}),
+        ...(cap?.cameraModel ? { cameraModel: cap.cameraModel } : {}),
+        ...(cap?.isoSpeed ? { isoSpeed: cap.isoSpeed } : {}),
+        ...(cap?.shutter ? { shutter: cap.shutter } : {}),
+        ...(cap?.aperture ? { aperture: cap.aperture } : {}),
+        ...(cap?.focalLength ? { focalLength: cap.focalLength } : {}),
+        ...(cap?.timestamp ? { timestampIso: new Date(cap.timestamp).toISOString() } : {}),
+      },
+    });
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -351,6 +535,8 @@ export const useAppStore = create<AppState>((set, get) => {
   renderer: null,
   exportStatus: 'idle',
   exportError: null,
+  exportDialogOpen: false,
+  exportBatchInfo: null,
   histogram: null,
   scopeMode: 'histogram',
   scopeSamples: null,
@@ -370,6 +556,7 @@ export const useAppStore = create<AppState>((set, get) => {
   settings: DEFAULT_SETTINGS,
   activeOutputId: null,
   maskOverlay: false,
+  maskDrawMode: null,
   gpuError: null,
 
   async openImageByPath(path: string) {
@@ -385,7 +572,7 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
     try {
       const bytes = await window.silverbox.readFile(path);
-      const image = await loadImage(bytes, kind, get().settings.previewLongEdge);
+      const image = await loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV);
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
       // untouched until the user saves over it) with a toolbar notice.
@@ -711,74 +898,15 @@ export const useAppStore = create<AppState>((set, get) => {
   // feeding the active output, b = D, mask = M), rewires the output to B,
   // and selects M.
   addLocalAdjustment() {
-    set((s) => {
-      const g = s.graph;
-      const outputs = g.nodes.filter((n) => n.kind === 'output');
-      const activeOutput = (s.activeOutputId && outputs.find((n) => n.id === s.activeOutputId)) || outputs[0];
-      if (!activeOutput) return {};
-      const inEdge = g.edges.find((e) => e.target === activeOutput.id);
-      if (!inEdge) return {};
-      const sourceId = inEdge.source;
+    set((s) => buildLocalAdjustmentPatch(s));
+  },
 
-      // Layout (spec-aligned left-to-right reading order): the Blend takes
-      // the OUTPUT's old slot; the output itself shifts right ~200px to make
-      // room. Develop sits above the blend, Mask below it — so the chain
-      // reads source → (D above / M below) → blend → output, not blend
-      // stranded to the right of a stationary output (#pointer-drag-lag's
-      // sibling UX bug — the old layout had Blend land right of Output).
-      const outX = activeOutput.position.x;
-      const outY = activeOutput.position.y;
+  addLocalAdjustmentWithShape(shape) {
+    set((s) => buildLocalAdjustmentPatch(s, shape));
+  },
 
-      const devId = nextId(g, 'dev');
-      const devNode: GraphNode = {
-        id: devId,
-        kind: DEVELOP_KIND,
-        position: { x: outX, y: outY - 130 },
-        develop: defaultDevelopParams(),
-      };
-      const maskId = nextId({ ...g, nodes: [...g.nodes, devNode] }, 'mask');
-      const maskNode: GraphNode = {
-        id: maskId,
-        kind: MASK_KIND,
-        position: { x: outX, y: outY + 130 },
-        mask: defaultMaskParams(),
-      };
-      const blendId = nextId({ ...g, nodes: [...g.nodes, devNode, maskNode] }, 'blend');
-      const blendNode: GraphNode = {
-        id: blendId,
-        kind: BLEND_KIND,
-        position: { x: outX, y: outY },
-        // Masked blend: `amount` now acts as an adjustment strength (spec
-        // §3), defaulting to 1 (full D within the mask, none outside) — the
-        // Lightroom-style local-adjustment behavior, distinct from a plain
-        // unmasked Blend node's 0.5 straight-mix default (BLEND_PARAM_DEFS,
-        // untouched — this only changes what THIS auto-created node starts at).
-        params: { amount: 1 },
-      };
-
-      let scratch: GraphDoc = {
-        ...g,
-        nodes: [
-          ...g.nodes.map((n) => (n.id === activeOutput.id ? { ...n, position: { x: outX + 200, y: outY } } : n)),
-          devNode,
-          maskNode,
-          blendNode,
-        ],
-        edges: g.edges.filter((e) => e.id !== inEdge.id),
-      };
-      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
-        const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
-        scratch = { ...scratch, edges: [...scratch.edges, edge] };
-      };
-      addEdge(sourceId, devId);
-      addEdge(sourceId, maskId);
-      addEdge(sourceId, blendId, 'a');
-      addEdge(devId, blendId, 'b');
-      addEdge(maskId, blendId, 'mask');
-      addEdge(blendId, activeOutput.id);
-
-      return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: maskId };
-    });
+  setMaskDrawMode(mode) {
+    set({ maskDrawMode: mode });
   },
 
   shaderRev: 0,
@@ -1005,7 +1133,7 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async exportImage(path, opts) {
-    const { imagePath, fileName, graph, renderer, imageStatus, exportStatus, activeOutputId } = get();
+    const { imagePath, fileName, renderer, imageStatus, exportStatus, activeOutputId } = get();
     if (!imagePath || !fileName || !renderer || imageStatus !== 'ready' || exportStatus === 'working') return;
     let target = path ?? null;
     if (!target) {
@@ -1015,48 +1143,61 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     set({ exportStatus: 'working', exportError: null, exportInfo: null });
     try {
-      const bytes = await window.silverbox.readFile(imagePath);
-      const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
-      const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER);
-      const colorSpace = opts?.colorSpace ?? 'srgb';
-      // buildPlan runs worker-side now (renderToPixels ships the doc, not a
-      // plan — RenderPlan's cpu closures aren't structured-cloneable); the
-      // full-res image's data buffer is TRANSFERRED, not copied (see
-      // renderClient.ts) — `full` is loaded fresh for this export and never
-      // reused afterward. Export honors the currently SELECTED output
-      // (named outputs, spec §6) — undefined = the doc's first, same default
-      // buildPlan itself applies.
-      const { data, width, height } = await renderer.renderToPixels(
-        full,
-        graph,
-        1,
-        colorSpace,
-        activeOutputId ?? undefined
-      );
-      // encoding (resize, JPEG/PNG, ICC, EXIF) happens in main via sharp
-      const cap = full.capture;
-      const result = await window.silverbox.exportEncode({
-        data: data.buffer,
-        width,
-        height,
-        outPath: target,
-        quality: Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))),
-        maxDim: opts?.maxDim ?? null,
-        metadata: opts?.metadata ?? 'all',
-        colorSpace,
-        meta: {
-          ...(cap?.cameraMake ? { cameraMake: cap.cameraMake } : {}),
-          ...(cap?.cameraModel ? { cameraModel: cap.cameraModel } : {}),
-          ...(cap?.isoSpeed ? { isoSpeed: cap.isoSpeed } : {}),
-          ...(cap?.shutter ? { shutter: cap.shutter } : {}),
-          ...(cap?.aperture ? { aperture: cap.aperture } : {}),
-          ...(cap?.focalLength ? { focalLength: cap.focalLength } : {}),
-          ...(cap?.timestamp ? { timestampIso: new Date(cap.timestamp).toISOString() } : {}),
-        },
-      });
+      // Export honors the currently SELECTED output (named outputs, spec §6)
+      // unless the caller overrides it — undefined = the doc's first, same
+      // default buildPlan itself applies.
+      const result = await exportOnePath(target, opts?.outputId ?? activeOutputId ?? undefined, opts);
       set({
         exportStatus: 'idle',
         exportInfo: { width: result.width, height: result.height, bytes: result.bytes },
+      });
+    } catch (err) {
+      set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  setExportDialogOpen(open) {
+    set({ exportDialogOpen: open });
+  },
+
+  async exportSelectedOutputs(target, path, opts) {
+    const { imagePath, fileName, graph, renderer, imageStatus, exportStatus, activeOutputId } = get();
+    if (!imagePath || !fileName || !renderer || imageStatus !== 'ready' || exportStatus === 'working') return;
+    const outputs = graph.nodes.filter((n) => n.kind === 'output');
+    const targets =
+      target === 'all'
+        ? outputs
+        : target === 'active'
+          ? (() => {
+              const active = (activeOutputId && outputs.find((n) => n.id === activeOutputId)) || outputs[0];
+              return active ? [active] : [];
+            })()
+          : outputs.filter((n) => n.id === target);
+    if (targets.length === 0) return;
+
+    let basePath = path ?? null;
+    if (!basePath) {
+      const result = await window.silverbox.exportImageDialog(imagePath.replace(/\.[^.]+$/, '') + '.jpg');
+      if (result.canceled) return;
+      basePath = result.path;
+    }
+
+    set({ exportStatus: 'working', exportError: null, exportInfo: null, exportBatchInfo: null });
+    try {
+      const paths: string[] = [];
+      let last: { width: number; height: number; bytes: number } | null = null;
+      for (const node of targets) {
+        // single output = no suffix (current behavior); 2+ (an explicit "all
+        // outputs" export) suffix each file with its output name so nothing
+        // silently overwrites the previous one.
+        const outPath = targets.length > 1 ? suffixExportPath(basePath, outputName(node)) : basePath;
+        last = await exportOnePath(outPath, node.id, opts);
+        paths.push(outPath);
+      }
+      set({
+        exportStatus: 'idle',
+        exportInfo: last,
+        exportBatchInfo: { count: paths.length, paths },
       });
     } catch (err) {
       set({ exportStatus: 'error', exportError: err instanceof Error ? err.message : String(err) });

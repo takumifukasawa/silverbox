@@ -3,6 +3,7 @@ import { Toolbar } from './Toolbar';
 import { CanvasView } from './CanvasView';
 import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
+import { ExportDialog } from './ExportDialog';
 import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 
@@ -61,6 +62,12 @@ export function App() {
         ev.preventDefault();
         void useAppStore.getState().saveGraph();
       }
+      if (cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'e') {
+        if (isTextEntry(ev.target)) return;
+        if (useAppStore.getState().imageStatus !== 'ready') return;
+        ev.preventDefault();
+        useAppStore.getState().setExportDialogOpen(true);
+      }
       if (!cmd && !ev.altKey && (ev.key === '\\' || ev.key.toLowerCase() === 'g')) {
         // viewer toggles (LR-style \ = before/after); never steal from inputs
         if (isTextEntry(ev.target)) return;
@@ -85,6 +92,15 @@ export function App() {
         if (isTextEntry(ev.target)) return;
         ev.preventDefault();
         useAppStore.getState().pasteDevelopSettings();
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().exportDialogOpen) {
+        useAppStore.getState().setExportDialogOpen(false);
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().maskDrawMode !== null) {
+        // draw-to-create masks (UX pack B §1): Escape cancels cleanly — no
+        // nodes created. CanvasView's in-progress drag listener watches this
+        // same field flip to null and tears itself down without committing.
+        useAppStore.getState().setMaskDrawMode(null);
       }
       if (ev.key === 'Escape' && useAppStore.getState().wbPicking) {
         useAppStore.getState().setWbPicking(false);
@@ -167,6 +183,7 @@ export function App() {
         <InspectorPanel />
       </div>
       <NodeEditorPanel />
+      <ExportDialog />
       {dropActive && (
         <div className="drop-overlay" data-testid="drop-overlay">
           <div className="drop-overlay-inner">Drop a RAW / JPEG file to open</div>

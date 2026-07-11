@@ -207,6 +207,78 @@ try {
     { baselineDims, dimsAfterUndo }
   );
 
+  console.log('verify-crop (LR-style rotate: drag OUTSIDE a corner changes angle, one undo entry, crop box stays axis-aligned):');
+  // Fresh, known geometry + a fresh crop-mode entry (the previous section
+  // left crop mode via "Done"), so this test doesn't depend on the dragged
+  // crop rect from the section above.
+  await setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 });
+  await waitForOutputDims(baselineDims.width, baselineDims.height);
+  await page.locator('[data-testid="crop-toggle"]').click();
+  await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
+  await waitForOutputDims(baselineDims.width, baselineDims.height);
+
+  const cropRect = page.locator('[data-testid="crop-rect"]');
+  const rectBoxBeforeRotate = await cropRect.boundingBox();
+  const geomBeforeRotate = await geometryState();
+  const pastBeforeRotate = await historyPast();
+
+  const rotateZone = page.locator('[data-testid="crop-rotate-se"]');
+  await rotateZone.scrollIntoViewIfNeeded();
+  const rzBox = await rotateZone.boundingBox();
+  await page.mouse.move(rzBox.x + rzBox.width / 2, rzBox.y + rzBox.height / 2);
+  await page.mouse.down();
+  // sweep the SE rotate zone further out and down — an angular drag around
+  // the crop rect's own center, not merely a radial one
+  await page.mouse.move(rzBox.x + rzBox.width / 2 + 10, rzBox.y + rzBox.height / 2 + 40, { steps: 8 });
+  await page.mouse.up();
+
+  const geomAfterRotate = await geometryState();
+  const rectBoxAfterRotate = await cropRect.boundingBox();
+  check('outside-corner drag changed the angle (crop rect x/y/w/h untouched)', geomAfterRotate.angle !== geomBeforeRotate.angle, {
+    before: geomBeforeRotate,
+    after: geomAfterRotate,
+  });
+  check(
+    "rotating left the crop rect's x/y/w/h exactly as committed (only angle moved)",
+    geomAfterRotate.crop.x === geomBeforeRotate.crop.x &&
+      geomAfterRotate.crop.y === geomBeforeRotate.crop.y &&
+      geomAfterRotate.crop.w === geomBeforeRotate.crop.w &&
+      geomAfterRotate.crop.h === geomBeforeRotate.crop.h,
+    { before: geomBeforeRotate.crop, after: geomAfterRotate.crop }
+  );
+  check('outside-corner rotate drag is exactly one undo entry', (await historyPast()) === pastBeforeRotate + 1, {
+    before: pastBeforeRotate,
+    after: await historyPast(),
+  });
+  check(
+    "the crop rect's on-screen box stays axis-aligned and in the SAME place while rotating (its bounding box is unchanged)",
+    Math.abs(rectBoxAfterRotate.x - rectBoxBeforeRotate.x) < 1 &&
+      Math.abs(rectBoxAfterRotate.y - rectBoxBeforeRotate.y) < 1 &&
+      Math.abs(rectBoxAfterRotate.width - rectBoxBeforeRotate.width) < 1 &&
+      Math.abs(rectBoxAfterRotate.height - rectBoxBeforeRotate.height) < 1,
+    { rectBoxBeforeRotate, rectBoxAfterRotate }
+  );
+  // the box being unrotated (not just unmoved) is the real "axis-aligned"
+  // claim — assert the actual computed transform has no skew/rotate component
+  const cropOverlayTransform = await page.locator('[data-testid="crop-overlay"]').evaluate((el) => getComputedStyle(el).transform);
+  check(
+    'the crop-overlay element itself carries only translate+uniform-scale (no rotation matrix component)',
+    /^matrix\(([-\d.e]+), 0, 0, \1,/.test(cropOverlayTransform),
+    cropOverlayTransform
+  );
+
+  // ±45° clamp still holds via this new gesture too (existing invariant, not loosened)
+  await page.mouse.move(rzBox.x + rzBox.width / 2, rzBox.y + rzBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(rzBox.x + rzBox.width / 2 - 400, rzBox.y + rzBox.height / 2 + 400, { steps: 10 });
+  await page.mouse.up();
+  const geomClamped = await geometryState();
+  check('the ±45° clamp still holds via the outside-corner gesture', Math.abs(geomClamped.angle) <= 45, geomClamped);
+
+  await page.locator('[data-testid="crop-reset"]').click();
+  await page.locator('[data-testid="crop-done"]').click();
+  await waitForOutputDims(baselineDims.width, baselineDims.height);
+
   console.log('verify-crop (sidecar round-trip):');
   await setGeometry({ crop: { x: 0.1, y: 0.2, w: 0.6, h: 0.5 }, angle: 7.5 });
   const sidecarW = Math.round(baselineDims.width * 0.6);

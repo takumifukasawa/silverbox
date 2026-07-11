@@ -20,6 +20,8 @@ export interface DecodeRequest {
   kind: 'raw' | 'jpg';
   bytes: ArrayBuffer;
   previewLongEdge: number;
+  /** Baseline exposure gain in EV, RAW only (settings.baselineExposureEV) — ignored for 'jpg'. */
+  baselineExposureEV: number;
 }
 
 export interface PreparedImage {
@@ -43,13 +45,18 @@ export type DecodeResponse =
 const lut16 = buildDecodeLut16();
 const lut8 = buildDecodeLut8();
 
-/** Interleaved RGB u16 (gamma) → linear RGBA f32. */
-function linearizeRgb16(src: Uint16Array, pixels: number): Float32Array {
+/**
+ * Interleaved RGB u16 (gamma) → linear RGBA f32, with `gain` (2^EV, see
+ * `applyBaselineExposure`'s caller) folded into the SAME loop that
+ * linearizes — one pass, no extra allocation. `gain` is 1 for JPEG (never
+ * called on that path) and the RAW-only baseline-exposure multiplier here.
+ */
+function linearizeRgb16(src: Uint16Array, pixels: number, gain: number): Float32Array {
   const out = new Float32Array(pixels * 4);
   for (let i = 0, o = 0; i < pixels; i++, o += 4) {
-    out[o] = lut16[src[i * 3]!]!;
-    out[o + 1] = lut16[src[i * 3 + 1]!]!;
-    out[o + 2] = lut16[src[i * 3 + 2]!]!;
+    out[o] = lut16[src[i * 3]!]! * gain;
+    out[o + 1] = lut16[src[i * 3 + 1]!]! * gain;
+    out[o + 2] = lut16[src[i * 3 + 2]!]! * gain;
     out[o + 3] = 1;
   }
   return out;
@@ -160,11 +167,25 @@ function applyFlip(
   return { data: out, width: ow, height: oh };
 }
 
-async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number): Promise<PreparedImage> {
+/**
+ * RAW-only deterministic "baseline exposure" (LR/Resolve-style): a fixed
+ * linear gain of 2^EV applied right where libraw's gamma-encoded output
+ * becomes the linear working-space float buffer, so both the GPU render and
+ * the CPU reference (which reads this SAME `image.data`) see identical,
+ * already-brightened values — no separate node/pass needed. This exists
+ * because noAutoBright:true (librawDecoder.ts) pins LibRaw's own
+ * colorspace-dependent auto-bright off for determinism, which otherwise
+ * leaves RAW opens looking dark next to a same-scene JPEG.
+ */
+function baselineExposureGain(ev: number): number {
+  return Math.pow(2, ev);
+}
+
+async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineExposureEV: number): Promise<PreparedImage> {
   const t0 = performance.now();
   const decoded = await new LibrawDecoder().decode(new Uint8Array(bytes));
   const pixels = decoded.width * decoded.height;
-  const linear = linearizeRgb16(decoded.data, pixels);
+  const linear = linearizeRgb16(decoded.data, pixels, baselineExposureGain(baselineExposureEV));
   const scaled = downsampleBox(linear, decoded.width, decoded.height, previewLongEdge);
   const oriented = applyFlip(scaled.data, scaled.width, scaled.height, decoded.flip);
   const rotated = decoded.flip === 5 || decoded.flip === 6;
@@ -208,10 +229,12 @@ async function prepareJpeg(bytes: ArrayBuffer, previewLongEdge: number): Promise
 }
 
 self.onmessage = async (ev: MessageEvent<DecodeRequest>) => {
-  const { id, kind, bytes, previewLongEdge } = ev.data;
+  const { id, kind, bytes, previewLongEdge, baselineExposureEV } = ev.data;
   try {
     const result =
-      kind === 'raw' ? await prepareRaw(bytes, previewLongEdge) : await prepareJpeg(bytes, previewLongEdge);
+      kind === 'raw'
+        ? await prepareRaw(bytes, previewLongEdge, baselineExposureEV)
+        : await prepareJpeg(bytes, previewLongEdge);
     const response: DecodeResponse = { id, ok: true, result };
     (self as unknown as Worker).postMessage(response, [result.data.buffer]);
   } catch (err) {

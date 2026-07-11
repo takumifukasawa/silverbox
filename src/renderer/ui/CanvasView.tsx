@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
@@ -23,7 +23,16 @@ import { useCanvasViewport, type ViewportState } from './useCanvasViewport';
 import { HistogramPanel } from './HistogramPanel';
 import { CropOverlay } from './CropOverlay';
 import { MaskOverlay } from './MaskOverlay';
-import { defaultMaskParams, MASK_KIND, type MaskParams, type MaskShape } from '../engine/graph/maskNode';
+import { MaskDrawOverlay } from './MaskDrawOverlay';
+import {
+  clampMaskShape,
+  defaultLinearMaskShape,
+  defaultMaskParams,
+  defaultRadialMaskShape,
+  MASK_KIND,
+  type MaskParams,
+  type MaskShape,
+} from '../engine/graph/maskNode';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
@@ -55,7 +64,15 @@ declare global {
         path: string,
         opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
       ): void;
+      /** Verify-only: exercises the export dialog's "output" selector (exportSelectedOutputs) without a native save dialog. */
+      exportOutputsTo(
+        target: 'active' | 'all' | string,
+        path: string,
+        opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
+      ): void;
       exportState(): { status: string; error: string | null };
+      /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
+      exportBatchState(): { count: number; paths: string[] } | null;
       /** Current `<userData>/settings.json` state (loaded at boot / after any settingsUpdate). */
       settingsState(): Settings;
       /** Merge `partial` into settings via IPC (mirrors the store action). */
@@ -177,6 +194,8 @@ export function CanvasView() {
   const setWbPicking = useAppStore((s) => s.setWbPicking);
   const colorKeyPicking = useAppStore((s) => s.colorKeyPicking);
   const setColorKeyPicking = useAppStore((s) => s.setColorKeyPicking);
+  const maskDrawMode = useAppStore((s) => s.maskDrawMode);
+  const setMaskDrawMode = useAppStore((s) => s.setMaskDrawMode);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const activeOutputId = useAppStore((s) => s.activeOutputId);
   const maskOverlay = useAppStore((s) => s.maskOverlay);
@@ -229,7 +248,11 @@ export function CanvasView() {
   // see NodeEditorPanel.tsx). planDoc keeps the SAME reference across such
   // edits; it — not graphForBuild directly — drives the render effect below.
   const planDoc = usePlanDoc(graphForBuild);
-  const { view, fit, oneToOne } = useCanvasViewport(containerRef, outputDims, wbPicking || colorKeyPicking);
+  const { view, fit, oneToOne } = useCanvasViewport(
+    containerRef,
+    outputDims,
+    wbPicking || colorKeyPicking || maskDrawMode !== null
+  );
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
@@ -466,9 +489,15 @@ export function CanvasView() {
       exportImageTo(path, opts) {
         void useAppStore.getState().exportImage(path, opts);
       },
+      exportOutputsTo(target, path, opts) {
+        void useAppStore.getState().exportSelectedOutputs(target, path, opts);
+      },
       exportState() {
         const s = useAppStore.getState();
         return { status: s.exportStatus, error: s.exportError };
+      },
+      exportBatchState() {
+        return useAppStore.getState().exportBatchInfo;
       },
       settingsState() {
         return useAppStore.getState().settings;
@@ -668,6 +697,98 @@ export function CanvasView() {
     useAppStore.getState().setMaskShape(maskNode.id, { ...shape, hue, sat, lum }, null);
   };
 
+  // --- Draw-to-create masks (UX pack B §1) -------------------------------
+  //
+  // Mousedown sets the shape's anchor (radial center / linear p0), dragging
+  // shows a live outline (MaskDrawOverlay), mouseup commits ONE
+  // addLocalAdjustmentWithShape call (one undo entry, same as the
+  // no-argument addLocalAdjustment). Coordinate mapping mirrors
+  // handleWbPick's container-rect + view.tx/scale math (the same absolute
+  // client→image-px conversion), normalized to 0..1 against outputDims to
+  // match maskNode.ts's shape convention. Clicking without dragging (< 2px
+  // moved) still creates something sane: a default-radius radial at the
+  // click point, or the default linear gradient, per the brief.
+  const [drawGesture, setDrawGesture] = useState<{
+    mode: 'radial' | 'linear';
+    start: { x: number; y: number };
+    current: { x: number; y: number };
+  } | null>(null);
+  const drawCleanupRef = useRef<(() => void) | null>(null);
+
+  // Escape (App.tsx) flips maskDrawMode to null directly — tear down any
+  // in-flight drag's window listeners and drop the preview WITHOUT
+  // committing, so cancel is always clean regardless of when it happens.
+  useEffect(() => {
+    if (maskDrawMode === null) {
+      drawCleanupRef.current?.();
+      drawCleanupRef.current = null;
+      setDrawGesture(null);
+    }
+  }, [maskDrawMode]);
+
+  const imagePointFromClient = (clientX: number, clientY: number): { x: number; y: number } | null => {
+    const container = containerRef.current;
+    if (!container || !outputDims) return null;
+    const rect = container.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - view.tx) / view.scale / outputDims.width,
+      y: (clientY - rect.top - view.ty) / view.scale / outputDims.height,
+    };
+  };
+
+  const handleMaskDrawPointerDown = (ev: React.PointerEvent<HTMLCanvasElement>) => {
+    if (maskDrawMode === null || !outputDims) return;
+    ev.preventDefault();
+    const start = imagePointFromClient(ev.clientX, ev.clientY);
+    if (!start) return;
+    const mode = maskDrawMode;
+    setDrawGesture({ mode, start, current: start });
+
+    const onMove = (e: PointerEvent) => {
+      const pt = imagePointFromClient(e.clientX, e.clientY);
+      if (pt) setDrawGesture({ mode, start, current: pt });
+    };
+    const onUp = (e: PointerEvent) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      drawCleanupRef.current = null;
+      setDrawGesture(null);
+
+      const end = imagePointFromClient(e.clientX, e.clientY) ?? start;
+      const dxPx = (end.x - start.x) * outputDims.width;
+      const dyPx = (end.y - start.y) * outputDims.height;
+      const draggedPx = Math.hypot(dxPx, dyPx);
+      const clickOnly = draggedPx < 2; // no meaningful drag — a plain click
+
+      let shape: MaskShape;
+      if (mode === 'radial') {
+        shape = clickOnly
+          ? { ...defaultRadialMaskShape(), cx: start.x, cy: start.y }
+          : {
+              type: 'radial',
+              mode: 'add',
+              cx: start.x,
+              cy: start.y,
+              radius: draggedPx / Math.max(outputDims.width, outputDims.height),
+              feather: 0.5,
+              invert: false,
+            };
+      } else {
+        shape = clickOnly
+          ? defaultLinearMaskShape()
+          : { type: 'linear', mode: 'add', x0: start.x, y0: start.y, x1: end.x, y1: end.y, feather: 0.3, invert: false };
+      }
+      useAppStore.getState().addLocalAdjustmentWithShape(clampMaskShape(shape));
+      setMaskDrawMode(null);
+    };
+    drawCleanupRef.current = () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
   return (
     <div className="canvas-view">
@@ -678,13 +799,21 @@ export function CanvasView() {
       >
         <canvas
           ref={canvasRef}
-          className={`canvas-view-canvas${wbPicking || colorKeyPicking ? ' canvas-view-canvas--picking' : ''}`}
+          className={`canvas-view-canvas${wbPicking || colorKeyPicking || maskDrawMode !== null ? ' canvas-view-canvas--picking' : ''}`}
           style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
           onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
+          onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : undefined}
           data-testid="canvas-view-canvas"
         />
-        {!overlayVisible && cropMode && outputDims && (
-          <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />
+        {!overlayVisible && drawGesture && outputDims && (
+          <MaskDrawOverlay
+            mode={drawGesture.mode}
+            start={drawGesture.start}
+            current={drawGesture.current}
+            view={view}
+            canvasWidth={outputDims.width}
+            canvasHeight={outputDims.height}
+          />
         )}
         {!overlayVisible && !cropMode && selectedMaskNode && outputDims && (
           <MaskOverlay
@@ -696,6 +825,19 @@ export function CanvasView() {
           />
         )}
       </div>
+      {/* CropOverlay renders OUTSIDE .canvas-viewport (which clips overflow
+          to the zoomed/panned canvas) rather than inside it: the LR-style
+          rotate zones (UX pack B §2) sit ~34px past each corner, and
+          whenever the fitted image touches the viewport edge along an axis
+          (routine in 'fit' mode — a landscape photo in a similarly-shaped
+          viewport has ~0 vertical margin) that would clip the rotate zone
+          right where it's needed. Position/transform math is unaffected:
+          .canvas-viewport is itself `position:absolute; inset:0` inside this
+          same `.canvas-view` (position:relative), so both siblings share the
+          identical (0,0) origin — only the clipping differs. */}
+      {!overlayVisible && cropMode && outputDims && (
+        <CropOverlay view={view} canvasWidth={outputDims.width} canvasHeight={outputDims.height} />
+      )}
       {!overlayVisible && <HistogramPanel />}
       {!overlayVisible && showBefore && (
         <div className="before-badge" data-testid="before-badge">

@@ -270,7 +270,35 @@ try {
   );
 
   // ---------------------------------------------------------------------
-  console.log('verify-exportsettings (5. export presets, via the UI):');
+  console.log('verify-exportsettings (export controls moved into a dialog, off the persistent toolbar):');
+  check(
+    'the toolbar itself carries none of the export option controls (only the Export… button)',
+    (await page.locator('.toolbar [data-testid="export-quality"]').count()) === 0 &&
+      (await page.locator('.toolbar [data-testid="export-maxdim"]').count()) === 0 &&
+      (await page.locator('.toolbar [data-testid="export-metadata"]').count()) === 0 &&
+      (await page.locator('.toolbar [data-testid="export-colorspace"]').count()) === 0,
+    {
+      quality: await page.locator('.toolbar [data-testid="export-quality"]').count(),
+      maxdim: await page.locator('.toolbar [data-testid="export-maxdim"]').count(),
+      metadata: await page.locator('.toolbar [data-testid="export-metadata"]').count(),
+      colorspace: await page.locator('.toolbar [data-testid="export-colorspace"]').count(),
+    }
+  );
+  check(
+    'the export controls do not exist anywhere before the dialog is opened',
+    (await page.locator('[data-testid="export-quality"]').count()) === 0,
+    await page.locator('[data-testid="export-quality"]').count()
+  );
+  await page.locator('[data-testid="export-button"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]', { timeout: 5_000 });
+  check(
+    'clicking Export… opens the dialog with the option controls inside it',
+    (await page.locator('[data-testid="export-dialog"] [data-testid="export-quality"]').count()) === 1,
+    await page.locator('[data-testid="export-dialog"] [data-testid="export-quality"]').count()
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (5. export presets, via the UI, inside the dialog):');
   await page.locator('[data-testid="export-quality"]').fill('72');
   await page.locator('[data-testid="export-maxdim"]').fill('1600');
   await page.locator('[data-testid="export-metadata"]').selectOption('minimal');
@@ -306,6 +334,84 @@ try {
     restoredQuality === '72' && restoredMaxDim === '1600' && restoredMetadata === 'minimal' && restoredColorSpace === 'p3',
     { restoredQuality, restoredMaxDim, restoredMetadata, restoredColorSpace }
   );
+
+  console.log('verify-exportsettings (autosaveSidecar checkbox is reachable from the dialog footer):');
+  const autosaveCheckbox = page.locator('[data-testid="export-autosave-checkbox"]');
+  check('autosave checkbox reflects the current (default true) setting', await autosaveCheckbox.isChecked(), true);
+  await autosaveCheckbox.click();
+  await page.waitForFunction(() => window.__debug.settingsState().autosaveSidecar === false, { timeout: 5_000 });
+  check('unchecking it turns settings.autosaveSidecar off', !(await page.evaluate(() => window.__debug.settingsState().autosaveSidecar)), true);
+  await autosaveCheckbox.click();
+  await page.waitForFunction(() => window.__debug.settingsState().autosaveSidecar === true, { timeout: 5_000 });
+
+  await page.locator('[data-testid="export-close-button"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="export-dialog"]') === null, { timeout: 5_000 });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (6. All outputs: two named outputs, both files written with the output-name suffix):');
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-output"]').click();
+  const gWithSecondOutput = await page.evaluate(() => window.__debug.graphState());
+  const secondOutputId = gWithSecondOutput.nodes.find((n) => n.kind === 'output' && n.id !== 'out').id;
+  await page.locator(`.react-flow__node[data-id="${secondOutputId}"]`).click();
+  await page.locator('[data-testid="output-name"]').fill('web');
+  // wire the second output straight off the input node (bypassing Develop) so it visibly differs from 'main'
+  const inSourceHandle = page.locator('.react-flow__node[data-id="in"] .react-flow__handle.source');
+  const secondTargetHandle = page.locator(`.react-flow__node[data-id="${secondOutputId}"] .react-flow__handle.target`);
+  const srcBox = await inSourceHandle.boundingBox();
+  const dstBox = await secondTargetHandle.boundingBox();
+  await page.mouse.move(srcBox.x + srcBox.width / 2, srcBox.y + srcBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(dstBox.x + dstBox.width / 2, dstBox.y + dstBox.height / 2, { steps: 8 });
+  await page.mouse.up();
+
+  await page.locator('[data-testid="export-button"]').click();
+  await page.waitForSelector('[data-testid="export-dialog"]', { timeout: 5_000 });
+  const outputTargetOptions = await page.locator('[data-testid="export-output-target"]').locator('option').allTextContents();
+  check(
+    'the output-target selector appears once a second output exists, offering both names + "All outputs"',
+    outputTargetOptions.includes('web') && outputTargetOptions.includes('All outputs'),
+    outputTargetOptions
+  );
+  await page.locator('[data-testid="export-output-target"]').selectOption('all');
+  await page.locator('[data-testid="export-quality"]').fill('81');
+  await page.locator('[data-testid="export-colorspace"]').selectOption('srgb');
+
+  const OUT_ALL_BASE = join(projectRoot, 'test-artifacts', 'exportsettings-alloutputs.jpg');
+  const OUT_ALL_MAIN = join(projectRoot, 'test-artifacts', 'exportsettings-alloutputs-main.jpg');
+  const OUT_ALL_WEB = join(projectRoot, 'test-artifacts', 'exportsettings-alloutputs-web.jpg');
+  for (const p of [OUT_ALL_BASE, OUT_ALL_MAIN, OUT_ALL_WEB]) if (existsSync(p)) unlinkSync(p);
+  // the dialog's real "Export" button goes through the native save dialog
+  // (untestable headless) — exportOutputsTo mirrors exportImageTo's existing
+  // convention of supplying the path directly to bypass it, while the UI
+  // interaction above still proves the selector/controls work.
+  await page.evaluate(
+    ([base, opts]) => window.__debug.exportOutputsTo('all', base, opts),
+    [OUT_ALL_BASE, { quality: 81, colorSpace: 'srgb' }]
+  );
+  await page.waitForFunction(() => window.__debug.exportState().status !== 'working', { timeout: 300_000 });
+  const allOutputsState = await page.evaluate(() => window.__debug.exportState());
+  check('All-outputs export completes without error', allOutputsState.status === 'idle', allOutputsState);
+  const batchInfo = await page.evaluate(() => window.__debug.exportBatchState());
+  check('exportBatchState reports 2 files written', batchInfo?.count === 2, batchInfo);
+  check('neither file is the unsuffixed base path (both outputs got a suffix)', !existsSync(OUT_ALL_BASE), existsSync(OUT_ALL_BASE));
+  check('main output file exists (…-main.jpg)', existsSync(OUT_ALL_MAIN), existsSync(OUT_ALL_MAIN));
+  check('second output file exists (…-web.jpg)', existsSync(OUT_ALL_WEB), existsSync(OUT_ALL_WEB));
+
+  const metaMain = await sharp(OUT_ALL_MAIN).metadata();
+  const metaWeb = await sharp(OUT_ALL_WEB).metadata();
+  check('both files honor the chosen quality/colorspace (JPEG, sRGB ICC present)', metaMain.format === 'jpeg' && metaWeb.format === 'jpeg' && !!metaMain.icc && !!metaWeb.icc, {
+    mainFormat: metaMain.format,
+    webFormat: metaWeb.format,
+    mainIcc: !!metaMain.icc,
+    webIcc: !!metaWeb.icc,
+  });
+  const mainMean = (await rawMeanAndSample(OUT_ALL_MAIN)).mean;
+  const webMean = (await rawMeanAndSample(OUT_ALL_WEB)).mean;
+  check("the two outputs' pixels differ (second output bypasses Develop)", Math.abs(mainMean - webMean) > 0.01, {
+    mainMean,
+    webMean,
+  });
 
   check('no page errors across the exportsettings checks', pageErrors.length === 0, pageErrors);
 } finally {

@@ -112,10 +112,14 @@ export function useCanvasViewport(
       // This is a raw addEventListener on the container, so it fires during
       // native bubbling BEFORE React's root-delegated synthetic dispatch —
       // a descendant's `ev.stopPropagation()` (e.g. the crop overlay's drag
-      // handles/controls) cannot preempt it. Check the target directly
-      // instead: crop-mode UI owns its own pointer handling.
+      // handles/controls, or the mask overlay's center/rim/endpoint handles)
+      // cannot preempt it. Check the target directly instead: crop-mode and
+      // mask-editing UI each own their own pointer handling — without this
+      // exclusion, dragging a mask handle ALSO pans the canvas underneath by
+      // the same delta (both listeners see the same pointermove stream),
+      // which silently drifts the view out of 'fit' on every mask edit.
       const target = ev.target as HTMLElement | null;
-      if (target?.closest('.crop-rect, .crop-handle, .crop-controls')) return;
+      if (target?.closest('.crop-rect, .crop-handle, .crop-controls, .mask-handle')) return;
       dragging = { x: ev.clientX, y: ev.clientY };
       container.setPointerCapture(ev.pointerId);
     };

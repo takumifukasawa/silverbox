@@ -31,10 +31,17 @@ function getWorker(): Worker {
  * Decode + prepare an image; transfers `bytes` to the worker (detached after
  * call). `longEdge` defaults to the preview size; pass Infinity-like values
  * (e.g. Number.MAX_SAFE_INTEGER) to keep full resolution for export.
+ * `baselineExposureEV` (settings.baselineExposureEV) is a RAW-only decode-time
+ * gain — see decodeWorker.ts's prepareRaw; ignored for `kind: 'jpg'`.
  */
-export function loadImage(bytes: ArrayBuffer, kind: 'raw' | 'jpg', longEdge = PREVIEW_LONG_EDGE): Promise<PreparedImage> {
+export function loadImage(
+  bytes: ArrayBuffer,
+  kind: 'raw' | 'jpg',
+  longEdge = PREVIEW_LONG_EDGE,
+  baselineExposureEV = 0
+): Promise<PreparedImage> {
   const id = nextId++;
-  const req: DecodeRequest = { id, kind, bytes, previewLongEdge: longEdge };
+  const req: DecodeRequest = { id, kind, bytes, previewLongEdge: longEdge, baselineExposureEV };
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });
     getWorker().postMessage(req, [bytes]);

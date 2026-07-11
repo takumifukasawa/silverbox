@@ -87,6 +87,17 @@ export interface Settings {
   autosaveSidecar: boolean;
   /** Long-edge cap (px) for the interactive decode preview; export always decodes full-res. */
   previewLongEdge: number;
+  /**
+   * Fixed linear gain (in EV, i.e. multiply by 2^EV) applied to RAW decodes
+   * ONLY, at decode time — see librawDecoder.ts's noAutoBright doc comment
+   * for why LibRaw's own auto-bright is unusable (colorspace-dependent), and
+   * decodeWorker.ts's prepareRaw for where this is applied. JPEG ingest is
+   * display-referred already and is never touched. 0.35 is a provisional
+   * Lightroom/Resolve-style "baseline exposure" pending a side-by-side
+   * calibration session against Lightroom (see the Lightroom-reference
+   * memory note) — a named, tunable "feel" constant, not derived from math.
+   */
+  baselineExposureEV: number;
   export: ExportSettingsShape;
   exportPresets: ExportPreset[];
 }
@@ -96,6 +107,7 @@ export const DEFAULT_SETTINGS: Settings = {
   settingsVersion: SETTINGS_VERSION,
   autosaveSidecar: true,
   previewLongEdge: 2560,
+  baselineExposureEV: 0.35,
   export: { quality: 90, maxDim: null, metadata: 'all', colorSpace: 'srgb' },
   exportPresets: [],
 };

@@ -108,12 +108,24 @@ try {
   const dims = await outputDims();
 
   // ---------------------------------------------------------------------
-  console.log('verify-masks (2. + Local Adjustment: one click, one undo entry, D/M/B wired):');
+  console.log('verify-masks (2. + Radial (draw-to-create), click-only: one undo entry, D/M/B wired):');
   const pastBeforeLA = await historyPast();
   const gBeforeLA = await graphState();
   const outputBeforeLA = gBeforeLA.nodes.find((n) => n.kind === 'output');
-  await page.locator('[data-testid="add-local-adjustment"]').click();
-  check('+ Local Adjustment is exactly one undo entry', (await historyPast()) === pastBeforeLA + 1, {
+  // "+ Radial" enters draw mode (crosshair cursor); a click with no drag
+  // still creates something sane — a default-radius radial at the click
+  // point (here, dead center, so downstream sections' cx=cy=0.5 assumptions
+  // hold unchanged).
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  const canvasForLA = page.locator('.canvas-view-canvas');
+  await canvasForLA.scrollIntoViewIfNeeded();
+  const isPickingCursorLA = await canvasForLA.evaluate((el) => el.classList.contains('canvas-view-canvas--picking'));
+  check('draw mode signals with the crosshair cursor class', isPickingCursorLA, isPickingCursorLA);
+  const laBox = await canvasForLA.boundingBox();
+  await page.mouse.move(laBox.x + laBox.width / 2, laBox.y + laBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up(); // no movement — click-only
+  check('+ Local Adjustment (draw-to-create) is exactly one undo entry', (await historyPast()) === pastBeforeLA + 1, {
     before: pastBeforeLA,
     after: await historyPast(),
   });
@@ -477,6 +489,74 @@ try {
     mainFileMean,
     secondFileMean,
   });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-masks (10. drag-to-create: mousedown/move/up commits a shape matching the drag; Escape cancels):');
+  const drawCanvas = page.locator('.canvas-view-canvas');
+  await drawCanvas.scrollIntoViewIfNeeded();
+  const drawBox = await drawCanvas.boundingBox();
+  const nodesBeforeDraw = (await graphState()).nodes.length;
+
+  // Escape cancels cleanly: entering draw mode alone creates nothing, and
+  // Escape after a partial drag (mousedown, no mouseup yet) still leaves
+  // zero new nodes.
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  await page.mouse.move(drawBox.x + drawBox.width * 0.3, drawBox.y + drawBox.height * 0.3);
+  await page.mouse.down();
+  await page.mouse.move(drawBox.x + drawBox.width * 0.4, drawBox.y + drawBox.height * 0.35, { steps: 4 });
+  await page.keyboard.press('Escape');
+  await page.mouse.up(); // release after Escape already canceled — must not resurrect a commit
+  const nodesAfterEscape = (await graphState()).nodes.length;
+  check('Escape cancels draw mode with zero new nodes', nodesAfterEscape === nodesBeforeDraw, {
+    nodesBeforeDraw,
+    nodesAfterEscape,
+  });
+  const pickingAfterEscape = await drawCanvas.evaluate((el) => el.classList.contains('canvas-view-canvas--picking'));
+  check('Escape exits draw mode (crosshair cursor reverts)', !pickingAfterEscape, pickingAfterEscape);
+
+  // A real drag: mousedown sets the radial center, dragging sets the
+  // radius, mouseup commits ONE history entry with shapes[0] matching the
+  // drag (within a few px, converting the normalized shape back to canvas px
+  // the same way MaskDrawOverlay does). Reset to 'fit' first: earlier mask-
+  // handle drags in this suite pan the view (useCanvasViewport's pan-
+  // suppression didn't know about .mask-handle — now fixed alongside this
+  // feature), so start from a known, centered view instead of depending on
+  // whatever pan state prior sections left behind.
+  await page.locator('[data-testid="view-fit"]').click();
+  await page.locator('[data-testid="add-local-adjustment-radial"]').click();
+  const pastBeforeDrawDrag = await historyPast();
+  const dragBox = await drawCanvas.boundingBox();
+  const startX = dragBox.x + dragBox.width * 0.3;
+  const startY = dragBox.y + dragBox.height * 0.35;
+  const endX = dragBox.x + dragBox.width * 0.45;
+  const endY = dragBox.y + dragBox.height * 0.35;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(endX, endY, { steps: 6 });
+  await page.mouse.up();
+  check('drag-to-create is exactly one undo entry', (await historyPast()) === pastBeforeDrawDrag + 1, {
+    before: pastBeforeDrawDrag,
+    after: await historyPast(),
+  });
+  const gAfterDrawDrag = await graphState();
+  const drawnMask = gAfterDrawDrag.nodes.filter((n) => n.kind === 'mask').at(-1);
+  const drawDims = await outputDims();
+  const expectedCx = (startX - dragBox.x) / dragBox.width;
+  const expectedCy = (startY - dragBox.y) / dragBox.height;
+  const expectedRadius =
+    Math.hypot((endX - startX) / dragBox.width * drawDims.width, (endY - startY) / dragBox.height * drawDims.height) /
+    Math.max(drawDims.width, drawDims.height);
+  const shape = drawnMask.mask.shapes[0];
+  check(
+    "drawn shape's center matches the mousedown point (within a few px)",
+    Math.abs(shape.cx - expectedCx) * drawDims.width < 4 && Math.abs(shape.cy - expectedCy) * drawDims.height < 4,
+    { expectedCx, expectedCy, actual: { cx: shape.cx, cy: shape.cy }, width: drawDims.width, height: drawDims.height }
+  );
+  check(
+    "drawn shape's radius matches the drag distance (within a few px)",
+    Math.abs(shape.radius - expectedRadius) * Math.max(drawDims.width, drawDims.height) < 4,
+    { expectedRadius, actualRadius: shape.radius }
+  );
 
   check('no page errors across the masks-milestone checks', pageErrors.length === 0, pageErrors);
 } finally {

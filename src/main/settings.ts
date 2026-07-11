@@ -81,6 +81,10 @@ export function sanitizeSettings(raw: unknown): Settings {
     typeof src.previewLongEdge === 'number' && Number.isFinite(src.previewLongEdge) && src.previewLongEdge > 0
       ? src.previewLongEdge
       : DEFAULT_SETTINGS.previewLongEdge;
+  result.baselineExposureEV =
+    typeof src.baselineExposureEV === 'number' && Number.isFinite(src.baselineExposureEV)
+      ? Math.min(5, Math.max(-5, src.baselineExposureEV))
+      : DEFAULT_SETTINGS.baselineExposureEV;
   result.export = sanitizeExportSettings(src.export);
   result.exportPresets = sanitizeExportPresets(src.exportPresets);
   return result as unknown as Settings;
