@@ -40,6 +40,10 @@ not — are written down in [DESIGN.md](DESIGN.md).
   saturation/vibrance.
 - **Tone Curve** — point curves with PCHIP interpolation, RGB/R/G/B channel
   tabs, endpoint black/white-point control.
+- **Camera-matched default look** — a fresh ARW opens with a baseline exposure
+  (linear, at decode) plus a per-model base curve fitted from the in-camera
+  JPEG, seeded as ordinary, visible, editable tone-curve points (Reset removes
+  them); JPEG opens and restored sidecars are never touched.
 - **HSL** — 8 bands × hue/saturation/luminance with smooth band weighting
   and a chroma mask that keeps grays untouched.
 - **Color Grading** — 3-way wheels (shadows/midtones/highlights + global)

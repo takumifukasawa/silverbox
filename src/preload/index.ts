@@ -24,6 +24,7 @@ const api: SilverboxApi = {
   testFlags: {
     isTest: process.env.SILVERBOX_TEST === '1',
     lensProfileAutoDefault: process.env.SILVERBOX_TEST_LENS_PROFILE_DEFAULT === '1',
+    baseCurveDefault: process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT === '1',
   },
 };
 

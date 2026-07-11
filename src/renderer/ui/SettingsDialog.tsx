@@ -34,7 +34,7 @@ export function SettingsDialog() {
             />
             Autosave sidecar
           </label>
-          <label className="export-dialog-row" title="Baseline exposure applied to RAW decodes (EV). Applies on the NEXT open; will be calibrated against Lightroom.">
+          <label className="export-dialog-row" title="Baseline exposure applied to RAW decodes (EV) — the linear first stage of the default look; the per-camera base curve is the second. Applies on the NEXT open; will be calibrated against Lightroom.">
             Baseline exposure (EV)
             <input
               type="number"

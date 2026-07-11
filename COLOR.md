@@ -87,6 +87,29 @@ AdobeRGB / Display P3 with ICC tags (print, when needed), HDR (PQ or
 gain-map JPEG/AVIF — same primaries as the working space). LUT bakes
 remain display-space→display-space transforms of the color chain.
 
+### Default rendering (baseline exposure + base curve)
+
+A neutral scene-referred RAW decode carries no display intent, so a fresh ARW
+renders darker than the camera's own JPEG — measuring DSC02993.ARW against its
+in-camera JPEG (percentile-matched encoded luma) put the camera about **+1.45
+EV brighter at p50**, but roughly flat (±0.1 EV) at the p10/p90 tails, so a flat
+exposure push would clip what the camera's curve rolls off. Silverbox matches
+Lightroom's **2-stage** default look:
+
+1. **Baseline exposure** — a fixed linear gain (`settings.baselineExposureEV`,
+   default 0.5 EV) applied at decode time to RAW only (see `shared/ipc.ts`).
+2. **Base curve** — a display TONE CURVE fitted from the camera JPEG
+   (`engine/color/baseCurve.ts`), seeded as VISIBLE, editable, deletable points
+   into the Develop node's `toneCurve.rgb` on a fresh ARW open (no sidecar).
+   It is NOT hidden decode magic: the points appear in the tone-curve editor,
+   Reset removes them, and JPEG opens / restored sidecars are never seeded.
+
+The shipped curve is fitted per camera model (`ILCE-7CM2` today; a Sony a7C II
+fallback for other bodies). Refit with `npm run fit:basecurve <arw> <jpg>`
+(RMS ≈ 1.3 / 255 against the measured transfer). Both constants are provisional
+"feel" values: the pending Lightroom calibration session (see the
+Lightroom-reference memory note) may replace them.
+
 ## Migration plan
 
 1. **Spike** — decode the reference ARW at `outputColor` sRGB vs Rec.2020

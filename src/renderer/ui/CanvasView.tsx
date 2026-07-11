@@ -56,6 +56,8 @@ declare global {
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
+      /** Capture make/model of the current image (fit-base-curve + base-curve verify); null for a JPEG or non-Sony RAW. */
+      captureInfo(): { cameraMake: string | null; cameraModel: string | null } | null;
       /** Working-space identity + the decode's libraw output color (verify:cst). */
       workingSpaceInfo(): { id: string; outputColor: number };
       /** Fraction of decoded pixels whose WORK_TO_SRGB has any channel < −0.001 (out-of-gamut probe). */
@@ -540,6 +542,11 @@ export function CanvasView() {
       imageForVerify() {
         const image = useAppStore.getState().image;
         return image ? { data: image.data, width: image.width, height: image.height } : null;
+      },
+      captureInfo() {
+        const image = useAppStore.getState().image;
+        if (!image) return null;
+        return { cameraMake: image.capture?.cameraMake ?? null, cameraModel: image.capture?.cameraModel ?? null };
       },
       workingSpaceInfo() {
         return { id: WORKING_SPACE_ID, outputColor: DECODE_OUTPUT_COLOR };

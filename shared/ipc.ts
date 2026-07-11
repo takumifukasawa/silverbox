@@ -77,8 +77,12 @@ export interface SilverboxApi {
    * the "embedded profile ON for fresh opens" default INSIDE the suite — off
    * for the 20 pre-F3b scripts (so their bit-exact CPU baselines are intact),
    * on only for verify-lensprofile which exercises that default.
+   * `baseCurveDefault` (SILVERBOX_TEST_BASE_CURVE_DEFAULT) re-enables the
+   * "default base curve seeded on fresh ARW opens" default INSIDE the suite —
+   * off for every other script (so seeding a tone curve never shifts their
+   * fresh-ARW baselines), on only for verify-basecurve which exercises it.
    */
-  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean };
+  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean; baseCurveDefault: boolean };
 }
 
 /**

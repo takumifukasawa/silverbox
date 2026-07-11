@@ -39,6 +39,7 @@ import {
 import { validateWgsl } from '../engine/shader/validateWgsl';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
+import { baseCurveForModel } from '../engine/color/baseCurve';
 import { buildLutExport } from '../engine/color/lutExport';
 import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
 import {
@@ -828,6 +829,27 @@ export const useAppStore = create<AppState>((set, get) => {
           nodes: graph.nodes.map((n) =>
             n.kind === 'input'
               ? { ...n, lens: { ...(n.lens ?? defaultLensParams()), profile: { enabled: true } } }
+              : n
+          ),
+        };
+      }
+      // Default BASE CURVE (COLOR.md "default rendering"): a fresh RAW open (no
+      // sidecar) seeds the Develop node's toneCurve.rgb with the camera-matched
+      // base curve — the visible, editable, deletable second stage of the
+      // default look (baseline exposure is the first, at decode). JPEG opens
+      // and restored sidecars are never touched (a restored doc keeps whatever
+      // it stored, so a user who deleted the curve reopens without it).
+      // Suppressed inside the verify suite (testFlags.isTest) except for
+      // verify-basecurve (baseCurveDefault), so the other scripts keep their
+      // untouched fresh-ARW baselines — same mechanism as the lens default.
+      const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault;
+      if (baseCurveAllowed && !usedSidecar && kind === 'raw') {
+        const curve = baseCurveForModel(image.capture?.cameraModel);
+        graph = {
+          ...graph,
+          nodes: graph.nodes.map((n) =>
+            n.kind === DEVELOP_KIND && n.develop
+              ? { ...n, develop: { ...n.develop, toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) } } }
               : n
           ),
         };
