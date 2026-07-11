@@ -39,6 +39,9 @@ const nodeTypes = { blend: BlendNode };
 
 /** Pure GraphDoc → React Flow Node[] projection, shared by the initial state and the resync effect below. */
 function buildNodes(graph: GraphDoc, fileName: string | null, selectedNodeId: string | null): Node[] {
+  // outputs are deletable only while another one remains (removeOpNode
+  // enforces the same rule — the doc must always keep at least one output)
+  const outputCount = graph.nodes.filter((n) => n.kind === 'output').length;
   return graph.nodes.map((n) => ({
     id: n.id,
     type:
@@ -68,7 +71,12 @@ function buildNodes(graph: GraphDoc, fileName: string | null, selectedNodeId: st
     sourcePosition: 'right',
     targetPosition: 'left',
     deletable:
-      isOpKind(n.kind) || n.kind === CUSTOM_KIND || n.kind === BLEND_KIND || n.kind === DEVELOP_KIND || n.kind === MASK_KIND,
+      isOpKind(n.kind) ||
+      n.kind === CUSTOM_KIND ||
+      n.kind === BLEND_KIND ||
+      n.kind === DEVELOP_KIND ||
+      n.kind === MASK_KIND ||
+      (n.kind === 'output' && outputCount > 1),
   })) as Node[];
 }
 

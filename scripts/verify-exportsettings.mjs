@@ -442,6 +442,29 @@ try {
   check('first colliding output file exists (…-main.jpg)', existsSync(OUT_DUP_1), existsSync(OUT_DUP_1));
   check('second colliding output file exists (…-main-2.jpg)', existsSync(OUT_DUP_2), existsSync(OUT_DUP_2));
 
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (8. output nodes are deletable while another remains, never the last):');
+  await page.locator(`.react-flow__node[data-id="${secondOutputId}"]`).click();
+  const deleteButton = page.locator('[data-testid="delete-node-button"]');
+  check('a second output is deletable (button enabled)', await deleteButton.isEnabled(), await deleteButton.isEnabled());
+  await deleteButton.click();
+  const gAfterOutputDelete = await page.evaluate(() => window.__debug.graphState());
+  check(
+    'deleting the second output removes it and its feeding edge',
+    !gAfterOutputDelete.nodes.some((n) => n.id === secondOutputId) &&
+      !gAfterOutputDelete.edges.some((e) => e.target === secondOutputId),
+    gAfterOutputDelete.nodes.filter((n) => n.kind === 'output').map((n) => n.id)
+  );
+  await page.locator('.react-flow__node[data-id="out"]').click();
+  check('the LAST output is not deletable (button disabled)', !(await deleteButton.isEnabled()), await deleteButton.isEnabled());
+  await page.keyboard.press('Backspace');
+  const gAfterLastDelete = await page.evaluate(() => window.__debug.graphState());
+  check(
+    'Backspace on the last output is a no-op too (removeOpNode guard)',
+    gAfterLastDelete.nodes.some((n) => n.id === 'out'),
+    gAfterLastDelete.nodes.filter((n) => n.kind === 'output').map((n) => n.id)
+  );
+
   check('no page errors across the exportsettings checks', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();

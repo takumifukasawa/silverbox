@@ -764,7 +764,27 @@ export const useAppStore = create<AppState>((set, get) => {
     set((s) => {
       const g = s.graph;
       const node = g.nodes.find((n) => n.id === nodeId);
-      if (!node || node.kind === 'input' || node.kind === 'output') return {};
+      if (!node || node.kind === 'input') return {};
+      if (node.kind === 'output') {
+        // Named outputs (spec §6): deleting an output is legal while at least
+        // one output REMAINS — a doc whose last output is gone couldn't
+        // render or export anything. Outputs have no outgoing edges, so
+        // there's nothing to bypass: drop the node and its feeding edge(s).
+        const outputs = g.nodes.filter((n) => n.kind === 'output');
+        if (outputs.length < 2) return {};
+        return {
+          ...pushHistory(s, null),
+          graph: {
+            ...g,
+            nodes: g.nodes.filter((n) => n.id !== nodeId),
+            edges: g.edges.filter((e) => e.target !== nodeId),
+          },
+          graphDirty: true,
+          selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
+          // null falls back to the doc's first output everywhere activeOutputId is consumed
+          activeOutputId: s.activeOutputId === nodeId ? null : s.activeOutputId,
+        };
+      }
       // bypass: route the node's input (blend: its 'a' input) to every target
       // it fed, preserving handles — EXCEPT a target's 'mask' port (masks
       // milestone): rewiring raw color into a blend's mask input would silently

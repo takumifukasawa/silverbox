@@ -104,7 +104,11 @@ export function Toolbar() {
 
   const cap = image?.capture;
   const selected = graph.nodes.find((n) => n.id === selectedNodeId);
-  const deletable = selected && selected.kind !== 'input' && selected.kind !== 'output';
+  const deletable =
+    selected &&
+    selected.kind !== 'input' &&
+    // an output is deletable only while another remains (removeOpNode enforces the same)
+    (selected.kind !== 'output' || graph.nodes.filter((n) => n.kind === 'output').length > 1);
   const selectedIsMask = selected?.kind === MASK_KIND;
 
   return (
