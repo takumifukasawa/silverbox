@@ -1,14 +1,14 @@
 {
   "arw": "test-assets/test.ARW",
-  "jpg": "test-assets/test.JPG",
-  "fittedAt": "2026-07-11T06:57:43.597Z",
+  "jpg": "test-assets/lr-calib/DSC02993.jpg",
+  "fittedAt": "2026-07-12T06:34:38.379Z",
   "baselineExposureEV": 0.5,
   "cameraModel": "ILCE-7CM2",
   "p50": {
     "ours": 60.26,
-    "jpeg": 82.6
+    "jpeg": 91.43
   },
-  "rms": 1.265,
+  "rms": 1.118,
   "points": [
     [
       0,
@@ -16,31 +16,31 @@
     ],
     [
       21,
-      30
+      27
     ],
     [
       29,
-      44
+      43
     ],
     [
       38,
-      55
+      58
     ],
     [
       55,
-      74
+      82
     ],
     [
       72,
-      101
+      110
     ],
     [
       93,
-      134
+      145
     ],
     [
       116,
-      163
+      180
     ],
     [
       255,

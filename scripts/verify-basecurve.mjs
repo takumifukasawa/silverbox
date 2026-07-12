@@ -83,7 +83,7 @@ async function withApp(env, fn) {
       page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.kind === 'Develop')?.id ?? null);
     // p50 of the encoded-output LUMA histogram (reflects the full render,
     // including the seeded tone curve).
-    const histP50 = () =>
+    const histP50Once = () =>
       page.evaluate(() => {
         const h = window.__debug.histogramState();
         if (!h) return null;
@@ -95,6 +95,22 @@ async function withApp(env, fn) {
         }
         return h.luma.length - 1;
       });
+    // The histogram is a DEBOUNCED post-render stats readback, and
+    // histogramState() !== null right after an open is satisfiable by the
+    // PREVIOUS image's stale data — a single read can race the settle (the
+    // LR-refit curve surfaced this: savedP50 caught a mid-settle value that
+    // the old curve's numbers happened to mask). Sample until two
+    // consecutive reads 400ms apart agree.
+    const histP50 = async () => {
+      let prev = await histP50Once();
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 400));
+        const cur = await histP50Once();
+        if (cur !== null && cur === prev) return cur;
+        prev = cur;
+      }
+      return prev;
+    };
     // Mirror the tone-curve editor's Reset button (commit(identityCurvePoints)).
     const resetCurve = async () => {
       const id = await devId();

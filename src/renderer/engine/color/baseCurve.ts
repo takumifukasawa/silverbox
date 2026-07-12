@@ -19,20 +19,25 @@
 import type { CurvePoints } from '../graph/developNode';
 
 /**
- * Fitted from DSC02993.ARW vs its in-camera JPEG (Sony a7C II) at
- * baselineExposureEV 0.5, 2026-07-11, PCHIP RMS 1.27 / 255 over the dense
- * transfer (p50 lifts our 60.3 → the JPEG's 82.6). Refit command:
- *   npm run fit:basecurve /path/to.ARW /path/to.JPG
+ * Fitted from DSC02993.ARW vs LIGHTROOM CLASSIC's default rendering of it
+ * (Adobe Color, no edits, quality-100 sRGB export) at baselineExposureEV
+ * 0.5 — the 2026-07-12 LR calibration session's user decision: match LR,
+ * not the in-camera JPEG (the previous fit; LR lifts the upper-mids
+ * further, e.g. 116→180 vs the camera's →163). PCHIP RMS 1.12 / 255 over
+ * the dense transfer. Refit command:
+ *   npm run fit:basecurve /path/to.ARW /path/to/reference.jpg
+ * (the reference JPEG can be a camera JPEG or any exported rendering —
+ * whatever the default look should match.)
  */
 export const A7C2_BASE_CURVE: CurvePoints = [
   [0, 0],
-  [21, 30],
-  [29, 44],
-  [38, 55],
-  [55, 74],
-  [72, 101],
-  [93, 134],
-  [116, 163],
+  [21, 27],
+  [29, 43],
+  [38, 58],
+  [55, 82],
+  [72, 110],
+  [93, 145],
+  [116, 180],
   [255, 255],
 ];
 
