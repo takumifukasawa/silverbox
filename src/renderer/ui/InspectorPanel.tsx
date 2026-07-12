@@ -11,7 +11,16 @@ import {
   toneCurvePoint,
   type OpParamDef,
 } from '../engine/graph/ops';
-import { DEVELOP_KIND, outputName, defaultLensParams, type GraphNode, type LensParams } from '../engine/graph/graphDoc';
+import {
+  DEVELOP_KIND,
+  outputName,
+  defaultGeometryOrientation,
+  defaultGeometryParams,
+  defaultLensParams,
+  orientedDims,
+  type GraphNode,
+  type LensParams,
+} from '../engine/graph/graphDoc';
 import {
   defaultColorKeyMaskShape,
   defaultLinearMaskShape,
@@ -21,6 +30,7 @@ import {
   type MaskShape,
 } from '../engine/graph/maskNode';
 import { SPOTS_CAP, SPOTS_KIND } from '../engine/graph/spotsNode';
+import { anchorRadiusToOutput, outputRadiusToAnchor } from '../engine/graph/anchorSpace';
 import {
   defaultDevelopParams,
   GRADING_REGIONS,
@@ -646,14 +656,60 @@ function MaskInspector({ node }: { node: GraphNode }) {
 
 /**
  * Spots (spot removal, task #50) node inspector: spot count + a "clear all"
- * button (one undo entry). Per-spot editing (move dst/src, resize, delete
- * one) lives entirely in the on-canvas SpotOverlay while spot mode is
- * active — this section is just a summary + bulk-clear escape hatch, same
- * division of labor MaskInspector has with MaskOverlay for radial/linear.
+ * button (one undo entry), plus — round-7 hand-test fix ("spotの値調整って
+ * できないんだっけ？maskの滑らかさとかradiusとか？spotごとに必要な気も") — the
+ * SELECTED spot's own editable params (radius, feather) once one exists.
+ * Move/resize-by-drag/delete-one still live entirely in the on-canvas
+ * SpotOverlay while spot mode is active; this section adds the same two
+ * fields as a typed/slider alternative, mirroring MaskInspector's
+ * numRow+sessionRef coalescing pattern (one undo entry per drag/typing run).
+ *
+ * Radius is stored in ANCHOR space (anchorSpace.ts, same convention as
+ * masks) but displayed/edited in OUTPUT space, exactly like SpotOverlay's own
+ * canvas slider (spotAnchorToOutput / outputRadiusToAnchor) — same
+ * conversion path, so a value typed here and the same value dragged on the
+ * canvas slider always land on the identical anchor radius. Feather has no
+ * spatial meaning, so it round-trips untouched.
  */
 function SpotsInspector({ node }: { node: GraphNode }) {
   const setSpots = useAppStore((s) => s.setSpots);
-  const count = node.spots?.spots.length ?? 0;
+  const updateSpot = useAppStore((s) => s.updateSpot);
+  const selectedSpotIndex = useAppStore((s) => s.selectedSpotIndex);
+  const image = useAppStore((s) => s.image);
+  const graph = useAppStore((s) => s.graph);
+  const spots = node.spots?.spots ?? [];
+  const count = spots.length;
+  const sessionRef = useRef<Record<string, number | null>>({});
+
+  const inputGeometry = graph.nodes.find((n) => n.kind === 'input')?.geometry ?? defaultGeometryParams();
+  const anchorDims = image
+    ? orientedDims(image.width, image.height, inputGeometry.orientation ?? defaultGeometryOrientation())
+    : null;
+
+  // selectedSpotIndex can go stale (undo/redo past a point where this spot no
+  // longer exists) — same bounds guard SpotOverlay itself uses.
+  const selected = selectedSpotIndex !== null ? spots[selectedSpotIndex] : undefined;
+  const showFields = !!selected && !!anchorDims;
+
+  const commit = (key: string, patch: { radius: number } | { feather: number }) => {
+    sessionRef.current[key] ??= Date.now();
+    updateSpot(node.id, selectedSpotIndex!, patch, `spot-${key}:${node.id}:${selectedSpotIndex}:${sessionRef.current[key]}`);
+  };
+  const beginSession = (key: string) => () => {
+    sessionRef.current[key] = Date.now();
+  };
+  const endSession = (key: string) => () => {
+    sessionRef.current[key] = null;
+  };
+
+  const outputRadius =
+    selected && anchorDims ? anchorRadiusToOutput(selected.radius, inputGeometry, anchorDims.width, anchorDims.height) : 0;
+  const commitRadius = (outRadius: number) => {
+    if (!anchorDims) return;
+    commit('radius', { radius: outputRadiusToAnchor(outRadius, inputGeometry, anchorDims.width, anchorDims.height) });
+  };
+  const commitFeather = (v: number) => commit('feather', { feather: v });
+
   return (
     <>
       <div className="inspector-title">Spot Removal</div>
@@ -661,6 +717,66 @@ function SpotsInspector({ node }: { node: GraphNode }) {
         <div className="spots-count" data-testid="spots-count">
           {count} spot{count === 1 ? '' : 's'} ({SPOTS_CAP} max)
         </div>
+        {showFields && (
+          <>
+            <div className="spots-selected-index" data-testid="spots-selected-index">
+              Spot {selectedSpotIndex! + 1} of {count}
+            </div>
+            <div
+              className="param-row"
+              onPointerDown={beginSession('radius')}
+              onPointerUp={endSession('radius')}
+              title="Double-click the canvas rim handle for the same control"
+            >
+              <span className="param-label">Radius</span>
+              <input
+                type="range"
+                data-testid="spot-inspector-radius"
+                min={0.002}
+                max={0.15}
+                step={0.001}
+                value={outputRadius}
+                onChange={(ev) => commitRadius(Number(ev.target.value))}
+              />
+              <input
+                type="number"
+                className="param-number"
+                min={0.002}
+                max={0.15}
+                step={0.001}
+                value={outputRadius}
+                onChange={(ev) => {
+                  const v = Number(ev.target.value);
+                  if (Number.isFinite(v)) commitRadius(v);
+                }}
+              />
+            </div>
+            <div className="param-row" onPointerDown={beginSession('feather')} onPointerUp={endSession('feather')}>
+              <span className="param-label">Feather</span>
+              <input
+                type="range"
+                data-testid="spot-inspector-feather"
+                min={0}
+                max={1}
+                step={0.01}
+                value={selected!.feather}
+                onChange={(ev) => commitFeather(Number(ev.target.value))}
+              />
+              <input
+                type="number"
+                className="param-number"
+                min={0}
+                max={1}
+                step={0.01}
+                value={selected!.feather}
+                onChange={(ev) => {
+                  const v = Number(ev.target.value);
+                  if (Number.isFinite(v)) commitFeather(v);
+                }}
+              />
+            </div>
+          </>
+        )}
         <button data-testid="spots-clear-all" disabled={count === 0} onClick={() => setSpots(node.id, [], null)}>
           Clear all
         </button>

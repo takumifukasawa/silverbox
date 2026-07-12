@@ -193,14 +193,15 @@ try {
   const seCursor = await handle.evaluate((el) => getComputedStyle(el).cursor);
   check('SE corner handle cursor is nwse-resize (the cursor says what the drag will do)', seCursor === 'nwse-resize', seCursor);
   // getComputedStyle's width/height reflect the element's own AUTHORED CSS
-  // box (16px) — getBoundingClientRect() would instead report the SCREEN size
-  // after the ancestor .crop-overlay's pan/zoom `transform: scale(view.scale)`
-  // is applied, which is unrelated to the affordance size we're checking here.
+  // box (20px, round-7 bump from 16px) — getBoundingClientRect() would
+  // instead report the SCREEN size after the ancestor .crop-overlay's
+  // pan/zoom `transform: scale(view.scale)` is applied, which is unrelated
+  // to the affordance size we're checking here.
   const seVisibleSize = await handle.evaluate((el) => {
     const cs = getComputedStyle(el);
     return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
   });
-  check('SE corner handle visible dot is >=16px (bumped from 12px)', seVisibleSize.width >= 16 && seVisibleSize.height >= 16, seVisibleSize);
+  check('SE corner handle visible dot is >=20px (round-7 bump from 16px)', seVisibleSize.width >= 20 && seVisibleSize.height >= 20, seVisibleSize);
   const nCursor = await page.locator('[data-testid="crop-handle-n"]').evaluate((el) => getComputedStyle(el).cursor);
   check('N edge handle cursor is ns-resize', nCursor === 'ns-resize', nCursor);
   const eCursor = await page.locator('[data-testid="crop-handle-e"]').evaluate((el) => getComputedStyle(el).cursor);
@@ -542,6 +543,77 @@ try {
   check('4 rotate-zone glyphs render in crop mode', (await page.locator('[data-testid="crop-rotate-glyph"]').count()) === 4, {
     count: await page.locator('[data-testid="crop-rotate-glyph"]').count(),
   });
+  console.log('verify-crop (round-7: rotate glyph doubled — user hand-test "回転のアイコンが小さすぎる"):');
+  const rotateGlyphSize = await page
+    .locator('[data-testid="crop-rotate-glyph"]')
+    .first()
+    .evaluate((el) => ({ width: el.getAttribute('width'), height: el.getAttribute('height') }));
+  check(
+    'rotate glyph visual size is >=24px (round-7 bump from 14px)',
+    Number(rotateGlyphSize.width) >= 24 && Number(rotateGlyphSize.height) >= 24,
+    rotateGlyphSize
+  );
+  const rotateZoneSize = await page.locator('[data-testid="crop-rotate-se"]').evaluate((el) => {
+    const cs = getComputedStyle(el);
+    return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
+  });
+  check(
+    "rotate zone's own hitbox grew to at least fit the bigger glyph (hover area matches what's visible)",
+    rotateZoneSize.width >= Number(rotateGlyphSize.width) && rotateZoneSize.height >= Number(rotateGlyphSize.height),
+    { rotateZoneSize, rotateGlyphSize }
+  );
+
+  console.log(
+    'verify-crop (round-7: overlap investigation — SE corner handle vs SE rotate zone at the MIN-size crop rect):'
+  );
+  // GEOMETRY_MIN_CROP_SIZE (graphDoc.ts) is 0.05 — the smallest legal crop,
+  // and where the round-7 handle/rotate-zone size bumps are most likely to
+  // collide on screen. The DOM elements' own boxes (handle 20px, zone 32px,
+  // both anchored on the SAME corner point) DO overlap here by design — the
+  // rotate zone renders first (underneath) and the resize handle on top (see
+  // CropOverlay.tsx's paint-order comment), so overlap is resolved by
+  // z-order, not avoided. What actually matters for usability is that (a)
+  // the handle's own center is still reachable and still resizes, and (b)
+  // the zone's outer edge (away from the corner) is still reachable and
+  // still rotates — both checked directly below rather than just inspecting
+  // the boxes.
+  const MIN_CROP = 0.05;
+  await page.locator('[data-testid="crop-ratio"]').selectOption('free');
+  await setGeometry({ crop: { x: 0.475, y: 0.475, w: MIN_CROP, h: MIN_CROP }, angle: 0 });
+  const seHandleBoxMin = await page.locator('[data-testid="crop-handle-se"]').boundingBox();
+  const seZoneBoxMin = await page.locator('[data-testid="crop-rotate-se"]').boundingBox();
+  const overlaps = (a, b) => !(a.x + a.width < b.x || b.x + b.width < a.x || a.y + a.height < b.y || b.y + b.height < a.y);
+  console.log(`  (info) SE handle/zone element boxes overlap at the min-size crop rect: ${overlaps(seHandleBoxMin, seZoneBoxMin)}`);
+
+  const geomBeforeMinDrag = await geometryState();
+  await page.mouse.move(seHandleBoxMin.x + seHandleBoxMin.width / 2, seHandleBoxMin.y + seHandleBoxMin.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(seHandleBoxMin.x + seHandleBoxMin.width / 2 + 40, seHandleBoxMin.y + seHandleBoxMin.height / 2 + 30, {
+    steps: 6,
+  });
+  await page.mouse.up();
+  const geomAfterMinDrag = await geometryState();
+  check(
+    'at the min-size crop rect, dragging the SE handle CENTER still resizes (the overlapping rotate zone does not swallow it)',
+    geomAfterMinDrag.crop.w !== geomBeforeMinDrag.crop.w && geomAfterMinDrag.angle === geomBeforeMinDrag.angle,
+    { before: geomBeforeMinDrag, after: geomAfterMinDrag }
+  );
+
+  // re-seed the min rect (the resize drag above changed it) and confirm the
+  // rotate zone's OUTER edge (away from the corner, where it can't be
+  // confused with the handle) is still reachable.
+  await setGeometry({ crop: { x: 0.475, y: 0.475, w: MIN_CROP, h: MIN_CROP }, angle: 0 });
+  const seZoneBoxMin2 = await page.locator('[data-testid="crop-rotate-se"]').boundingBox();
+  await page.mouse.move(seZoneBoxMin2.x + seZoneBoxMin2.width - 3, seZoneBoxMin2.y + seZoneBoxMin2.height - 3);
+  await page.mouse.down();
+  await page.mouse.move(seZoneBoxMin2.x + seZoneBoxMin2.width + 20, seZoneBoxMin2.y + seZoneBoxMin2.height - 30, { steps: 6 });
+  await page.mouse.up();
+  const geomAfterMinRotate = await geometryState();
+  check(
+    "at the min-size crop rect, dragging the rotate zone's OUTER edge still rotates",
+    geomAfterMinRotate.angle !== 0,
+    geomAfterMinRotate
+  );
 
   // restore Free ratio + identity, exit crop mode — back to baseline for the sections below
   await page.locator('[data-testid="crop-ratio"]').selectOption('free');

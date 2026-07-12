@@ -519,9 +519,9 @@ button:disabled {
 
 .crop-handle {
   position: absolute;
-  width: 16px;
-  height: 16px;
-  margin: -8px;
+  width: 20px;
+  height: 20px;
+  margin: -10px;
   background: #fff;
   border: 1px solid #333;
   border-radius: 2px;
@@ -533,13 +533,15 @@ button:disabled {
     border-color 0.08s ease-out;
 }
 
-/* Enlarge the GRABBABLE area well past the visible 16px dot (≥28px hit target)
-   without changing how big the handle looks — an invisible ::after padding
-   hitbox, same trick used below for React Flow's own handles. */
+/* Enlarge the GRABBABLE area well past the visible 20px dot (round-7 bump:
+   ≥36px hit target, up from 28px — round-5's 28px still read as "too small"
+   in hand-testing) without changing how big the handle looks — an invisible
+   ::after padding hitbox, same trick used below for React Flow's own
+   handles. */
 .crop-handle::after {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -8px;
 }
 
 /* Hover/active affordance (UX pack D): the cursor already says what a drag
@@ -607,19 +609,22 @@ button:disabled {
   cursor: ew-resize;
 }
 
-/* LR-style rotate zones (UX pack B §2): a 20x20 hit area anchored on the
-   SAME corner point as the resize handle but pushed 24px further out along
-   the diagonal via `transform: translate(...)` (see the per-corner rules
-   below) — comfortably clear of the resize handle's own ~11px hit radius
-   (.crop-handle's ::after), so "near but outside the corner" is a real,
-   separate hit zone rather than a distance check inside the drag handler.
-   The custom cursor is a small circular-arrow SVG — CSS has no built-in
-   "rotate" cursor keyword. */
+/* LR-style rotate zones (UX pack B §2): a hit area anchored on the SAME
+   corner point as the resize handle but pushed further out along the
+   diagonal via `transform: translate(...)` (see the per-corner rules below)
+   — comfortably clear of the resize handle's own hit radius (.crop-handle's
+   ::after), so "near but outside the corner" is a real, separate hit zone
+   rather than a distance check inside the drag handler. The custom cursor is
+   a small circular-arrow SVG — CSS has no built-in "rotate" cursor keyword.
+   Round-7: grown from 20x20/24px-offset to 32x32/36px-offset alongside the
+   bigger glyph (below) and the bigger .crop-handle hitbox (now 36px, half
+   18px) — 36 - 16(zone half) - 18(handle half) = 2px clearance, same
+   just-clear-it design as before, recomputed for the new sizes. */
 .crop-rotate-zone {
   position: absolute;
-  width: 20px;
-  height: 20px;
-  margin: -10px;
+  width: 32px;
+  height: 32px;
+  margin: -16px;
   touch-action: none;
   cursor:
     url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='black' stroke-width='2.6'/><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='white' stroke-width='1.3'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='black' stroke-width='2.2'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='white' stroke-width='1.1'/></svg>")
@@ -630,32 +635,36 @@ button:disabled {
 .crop-rotate-zone-nw {
   left: 0;
   top: 0;
-  transform: translate(-24px, -24px);
+  transform: translate(-36px, -36px);
 }
 
 .crop-rotate-zone-ne {
   left: 100%;
   top: 0;
-  transform: translate(24px, -24px);
+  transform: translate(36px, -36px);
 }
 
 .crop-rotate-zone-se {
   left: 100%;
   top: 100%;
-  transform: translate(24px, 24px);
+  transform: translate(36px, 36px);
 }
 
 .crop-rotate-zone-sw {
   left: 0;
   top: 100%;
-  transform: translate(-24px, 24px);
+  transform: translate(-36px, 36px);
 }
 
 /* Round-6: the rotate zones above have no visible affordance at rest — this
    glyph (rendered as a CHILD of the zone, see CropOverlay.tsx) marks each one
    permanently while crop mode is active, dim at rest and brightening to full
    opacity on hover via the plain descendant selector below. pointer-events:
-   none keeps the zone div itself handling the drag. */
+   none keeps the zone div itself handling the drag. Round-7: the glyph itself
+   doubled (14px -> 26px, see CropOverlay.tsx's <svg> — user hand-test:
+   "回転のアイコンが小さすぎる"); the zone above grew to match so the
+   HOVERABLE area (the zone) covers the whole visible glyph, not just its
+   old, smaller footprint. */
 .crop-rotate-glyph {
   position: absolute;
   inset: 0;
@@ -764,20 +773,21 @@ button:disabled {
     border-color 0.08s ease-out;
 }
 
-/* Enlarge the GRABBABLE area well past the visible dot (≥28px hit target),
-   same ::after trick as .crop-handle — none of the three mask-handle
-   variants had this before (UX pack D round-5 finding: the radial mask's
-   control points read as too small AND unclear that they're grabbable). */
+/* Enlarge the GRABBABLE area well past the visible dot (round-7: ≥36px hit
+   target, up from 28px — same bump as .crop-handle), same ::after trick as
+   .crop-handle — none of the three mask-handle variants had this before
+   (UX pack D round-5 finding: the radial mask's control points read as too
+   small AND unclear that they're grabbable). */
 .mask-handle::after {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -8px;
 }
 
 .mask-handle-center {
-  width: 16px;
-  height: 16px;
-  margin: -8px;
+  width: 20px;
+  height: 20px;
+  margin: -10px;
   border-radius: 50%;
   background: #8ab4f8;
   border: 1px solid #1c2733;
@@ -787,9 +797,9 @@ button:disabled {
 }
 
 .mask-handle-rim {
-  width: 16px;
-  height: 16px;
-  margin: -8px;
+  width: 20px;
+  height: 20px;
+  margin: -10px;
   border-radius: 50%;
   background: #fff;
   border: 1px solid #333;
@@ -798,9 +808,9 @@ button:disabled {
 }
 
 .mask-handle-endpoint {
-  width: 16px;
-  height: 16px;
-  margin: -8px;
+  width: 20px;
+  height: 20px;
+  margin: -10px;
   border-radius: 50%;
   background: #f0c674;
   border: 1px solid #333;
@@ -966,20 +976,21 @@ button:disabled {
    healed area, not a decorative dot) — resizing them on hover like the fixed
    handles would misrepresent that area, so unlike .crop-handle/.mask-handle
    the hover/active affordance here is border-only, no transform: scale. A
-   tiny spot's circle can still be well under the ≥28px hit target, so a
+   tiny spot's circle can still be well under the minimum hit target, so a
    FIXED-size ::after (not a percentage inset, which would scale with the
    variable diameter) guarantees a minimum grabbable area regardless of the
    spot's radius; a large spot's own box already exceeds it and still
-   receives events across its full visible circle. */
+   receives events across its full visible circle. Round-7: floor raised to
+   36px (from 28px), matching the other handles' bump. */
 .spot-handle-dst::after,
 .spot-handle-src::after {
   content: '';
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 28px;
-  height: 28px;
-  margin: -14px 0 0 -14px;
+  width: 36px;
+  height: 36px;
+  margin: -18px 0 0 -18px;
 }
 
 .spot-handle-dst:hover,
@@ -1001,21 +1012,22 @@ button:disabled {
 }
 
 .spot-handle-rim {
-  width: 16px;
-  height: 16px;
-  margin: -8px;
+  width: 20px;
+  height: 20px;
+  margin: -10px;
   background: #fff;
   border: 1px solid #333;
   cursor: ew-resize;
   transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, background 0.08s ease-out, border-color 0.08s ease-out;
 }
 
-/* Enlarge the rim handle's GRABBABLE area well past its visible 16px dot
-   (≥28px hit target), same trick as .crop-handle/.mask-handle. */
+/* Enlarge the rim handle's GRABBABLE area well past its visible 20px dot
+   (round-7: ≥36px hit target, up from 28px), same trick as
+   .crop-handle/.mask-handle. */
 .spot-handle-rim::after {
   content: '';
   position: absolute;
-  inset: -6px;
+  inset: -8px;
 }
 
 .spot-handle-rim:hover {
@@ -1103,6 +1115,14 @@ button:disabled {
   font-size: 12px;
   color: #ccc;
   margin-bottom: 8px;
+}
+
+/* Selected-spot indicator (round-7: per-spot radius/feather editing) — sits
+   above the radius/feather rows it introduces. */
+.spots-selected-index {
+  font-size: 12px;
+  color: #8ab4f8;
+  margin-bottom: 6px;
 }
 
 .canvas-overlay {

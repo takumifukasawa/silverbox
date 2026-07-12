@@ -251,10 +251,13 @@ export function Toolbar() {
       <PresetsMenu />
       <button
         onClick={toggleMaskOverlay}
-        disabled={!selectedIsMask}
+        // Round-7 fix: mirrors 'O' (App.tsx) — always clickable to turn OFF
+        // an overlay that's on (even if selection has since moved away from
+        // the mask), only requires a mask selection to turn ON.
+        disabled={!selectedIsMask && !maskOverlay}
         data-testid="mask-overlay-toggle"
         className={maskOverlay ? 'active' : undefined}
-        title="Show the selected mask as a red overlay (O) — enabled while a mask node is selected"
+        title="Show the selected mask as a red overlay (O) — enabled while a mask node is selected, or to turn an active overlay off"
       >
         Mask overlay
       </button>

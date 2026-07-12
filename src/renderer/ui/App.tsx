@@ -146,11 +146,22 @@ export function App() {
         }
       }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
-        // masks milestone: 'O' toggles the LR-style red mask overlay, but
-        // only while the selection is actually a mask node — off = normal
-        // render, mask stays selected (spec §5).
+        // masks milestone: 'O' toggles the LR-style red mask overlay.
+        // Round-7 hand-test fix ("赤のまま" — the overlay got stuck ON):
+        // turning it OFF must always work regardless of what's selected now
+        // (the overlay itself auto-clears on selection change — see
+        // appStore.ts's lastMaskOverlaySelection subscribe — but a stray
+        // stuck-ON overlay from before that fix, or any other path, must
+        // still have an escape hatch); turning it ON still requires an
+        // actual mask-node selection — there's nothing sensible to show
+        // otherwise (spec §5).
         if (isTextEntry(ev.target)) return;
         const s = useAppStore.getState();
+        if (s.maskOverlay) {
+          ev.preventDefault();
+          s.toggleMaskOverlay();
+          return;
+        }
         const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
         if (node?.kind !== 'mask') return;
         ev.preventDefault();

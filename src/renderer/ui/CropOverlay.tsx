@@ -456,8 +456,8 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
               <svg
                 className="crop-rotate-glyph"
                 data-testid="crop-rotate-glyph"
-                width="14"
-                height="14"
+                width="26"
+                height="26"
                 viewBox="0 0 22 22"
                 aria-hidden="true"
                 focusable="false"

@@ -490,6 +490,68 @@ try {
   });
 
   // ---------------------------------------------------------------------
+  console.log('verify-spots (round-7 hand-test fix — "spotの値調整ってできないんだっけ？": per-spot radius/feather editing in the Inspector):');
+  await setSpots(spotsNodeId, [{ dx: 0.3, dy: 0.3, sx: 0.6, sy: 0.3, radius: 0.05, feather: 0.3 }]);
+  // click-select spot 0 (no drag — same pattern section 5 above uses to select without mutating)
+  const dstHandleForInspector = page.locator('[data-testid="spot-handle-dst-0"]');
+  await dstHandleForInspector.scrollIntoViewIfNeeded();
+  const dhiBox = await dstHandleForInspector.boundingBox();
+  await page.mouse.move(dhiBox.x + dhiBox.width / 2, dhiBox.y + dhiBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  check('spot 0 selected for the inspector checks', (await spotState()).selectedIndex === 0, (await spotState()).selectedIndex);
+
+  const indexLabel = await page.locator('[data-testid="spots-selected-index"]').innerText();
+  check('inspector shows "Spot 1 of 1"', indexLabel.includes('Spot 1 of 1'), indexLabel);
+
+  // Feather (never editable before this fix — schema default 0.3, no UI slider
+  // in v1): drive the inspector's slider through several ticks — one undo
+  // entry for the whole session (same ??=-session idiom as the canvas radius
+  // slider, see SpotOverlay.tsx/InspectorPanel.tsx), and the render changes.
+  const meanBeforeFeather = await gpuMean();
+  const pastBeforeFeather = await historyPast();
+  await setRangeValue('spot-inspector-feather', 0.1);
+  await setRangeValue('spot-inspector-feather', 0.5);
+  await setRangeValue('spot-inspector-feather', 0.9);
+  const featherAfter = (await spotsState(spotsNodeId)).spots[0].feather;
+  check('inspector feather slider moved spots[0].feather', Math.abs(featherAfter - 0.9) < 0.005, featherAfter);
+  check('three feather ticks in one session coalesce into ONE undo entry', (await historyPast()) === pastBeforeFeather + 1, {
+    before: pastBeforeFeather,
+    after: await historyPast(),
+  });
+  const meanAfterFeather = await gpuMean();
+  check('changing feather actually changes the render', !meansMatch(meanAfterFeather, meanBeforeFeather, TIGHT_TOLERANCE), {
+    meanBeforeFeather,
+    meanAfterFeather,
+  });
+
+  // Radius via the inspector must land on the exact same ANCHOR value the
+  // canvas slider would for the same OUTPUT value — both convert through the
+  // identical anchorSpace.ts helpers (anchorRadiusToOutput/
+  // outputRadiusToAnchor); identity geometry here, so anchor == output
+  // exactly either way, making the equality check exact.
+  const pastBeforeRadius = await historyPast();
+  await setRangeValue('spot-inspector-radius', 0.08);
+  const anchorViaInspector = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('inspector radius slider moved spots[0].radius (anchor space)', Math.abs(anchorViaInspector - 0.08) < 0.005, anchorViaInspector);
+  check('inspector radius edit is its own undo entry', (await historyPast()) === pastBeforeRadius + 1, {
+    before: pastBeforeRadius,
+    after: await historyPast(),
+  });
+  await setRangeValue('spot-inspector-radius', 0.1);
+  const anchorA = (await spotsState(spotsNodeId)).spots[0].radius;
+  await setRangeValue('spot-radius-slider', 0.1);
+  const anchorB = (await spotsState(spotsNodeId)).spots[0].radius;
+  check(
+    'the inspector radius slider and the canvas radius slider write the IDENTICAL anchor value for the identical output value (same conversion path)',
+    Math.abs(anchorA - anchorB) < 1e-9,
+    { anchorA, anchorB }
+  );
+
+  // clean up the probe spot before the anchor-rotate section below re-seeds its own
+  await setSpots(spotsNodeId, []);
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (§1 anchor: a spot stays pinned to image content across a rotation):');
   // Recreate a single healing spot over the SAME dark region the scan found
   // (identity geometry ⇒ anchor coords == the output-frame coords used above).

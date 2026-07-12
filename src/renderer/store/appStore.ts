@@ -2311,3 +2311,26 @@ useAppStore.subscribe((state) => {
     void useAppStore.getState().saveGraph();
   }, 1000);
 });
+
+// Mask overlay auto-clear (round-7 hand-test fix, "0キーでのオーバーレイは切り替わらないかも？
+// 赤のまま"): the LR-style red overlay only makes sense while a MASK node is
+// selected — the repro was enabling it, then clicking any other node (or the
+// canvas, which clears selection), which left the overlay stuck ON with no
+// way to reach it (the 'O' handler in App.tsx used to require a mask
+// selection even to turn it OFF). There are many selection writers
+// (selectNode, addOpNode, removeOpNode, commitSpot, undo/redo, sidecar
+// reload…) — rather than thread a "clear the overlay" side effect through
+// every one of them, this single subscribe watches `selectedNodeId` (keyed
+// off its own last-seen value, same pattern as lastAutosaveGraph above) and
+// clears the overlay the moment selection moves off a mask node while it's
+// on. 'O' itself (App.tsx) separately always turns an ON overlay OFF
+// regardless of selection — the two mechanisms together mean the overlay can
+// never survive past the mask node it was showing.
+let lastMaskOverlaySelection: string | null = null;
+useAppStore.subscribe((state) => {
+  if (state.selectedNodeId === lastMaskOverlaySelection) return;
+  lastMaskOverlaySelection = state.selectedNodeId;
+  if (!state.maskOverlay) return;
+  const node = state.graph.nodes.find((n) => n.id === state.selectedNodeId);
+  if (node?.kind !== MASK_KIND) useAppStore.setState({ maskOverlay: false });
+});

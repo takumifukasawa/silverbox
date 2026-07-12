@@ -295,14 +295,15 @@ try {
   const centerCursor = await centerHandle.evaluate((el) => getComputedStyle(el).cursor);
   check('mask center handle cursor is move', centerCursor === 'move', centerCursor);
   // getComputedStyle's width/height reflect the element's own AUTHORED CSS
-  // box (16px) — getBoundingClientRect() would instead report the SCREEN size
-  // after the ancestor .mask-overlay's pan/zoom `transform: scale(view.scale)`
-  // is applied, which is unrelated to the affordance size we're checking here.
+  // box (20px, round-7 bump from 16px) — getBoundingClientRect() would
+  // instead report the SCREEN size after the ancestor .mask-overlay's
+  // pan/zoom `transform: scale(view.scale)` is applied, which is unrelated
+  // to the affordance size we're checking here.
   const centerVisibleSize = await centerHandle.evaluate((el) => {
     const cs = getComputedStyle(el);
     return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
   });
-  check('mask center handle visible dot is >=16px (bumped from 12px)', centerVisibleSize.width >= 16 && centerVisibleSize.height >= 16, centerVisibleSize);
+  check('mask center handle visible dot is >=20px (round-7 bump from 16px)', centerVisibleSize.width >= 20 && centerVisibleSize.height >= 20, centerVisibleSize);
   const rimHandle = page.locator('[data-testid="mask-handle-rim"]');
   const rimCursor = await rimHandle.evaluate((el) => getComputedStyle(el).cursor);
   check('mask rim (resize) handle has a resize cursor', rimCursor === 'ew-resize', rimCursor);
@@ -310,7 +311,7 @@ try {
     const cs = getComputedStyle(el);
     return { width: parseFloat(cs.width), height: parseFloat(cs.height) };
   });
-  check('mask rim handle visible dot is >=16px (bumped from 10px)', rimVisibleSize.width >= 16 && rimVisibleSize.height >= 16, rimVisibleSize);
+  check('mask rim handle visible dot is >=20px (round-7 bump from 16px)', rimVisibleSize.width >= 20 && rimVisibleSize.height >= 20, rimVisibleSize);
 
   // restore the default centered mask before the linear-mask check
   await setMaskShape('mask-1', { type: 'radial', mode: 'add', cx: 0.5, cy: 0.5, radius: 0.25, feather: 0.5, invert: false });
@@ -393,6 +394,82 @@ try {
   );
   await overlayToggleBtn.click();
   check('clicking again turns it back off', (await toggleActive(overlayToggleBtn)) === false, await toggleActive(overlayToggleBtn));
+
+  // ---------------------------------------------------------------------
+  console.log(
+    'verify-masks (round-7 hand-test fix — "0キーでのオーバーレイは切り替わらないかも？赤のまま": overlay auto-clears off a mask selection; O never gets stuck):'
+  );
+  // Repro: enable the overlay while mask-1 is selected, then select a
+  // DIFFERENT (non-mask) node the way a real user would — selecting it in
+  // the node editor. Before this fix the overlay stayed red and 'O' went
+  // dead, because the keydown handler required the CURRENT selection to be a
+  // mask even just to turn it OFF (appStore.ts's lastMaskOverlaySelection
+  // subscribe + App.tsx's 'O' handler are the two-part fix under test).
+  // Selection goes through the __debug.selectNode hook rather than clicking
+  // the React Flow node's DOM element: NodeEditorPanel's `fitView` only runs
+  // once at mount, and by this point in the script the graph has grown
+  // enough (masks/spots/outputs from earlier sections) that mask-1/dev-1 can
+  // sit outside the panel's current pan/zoom — a real click there is flaky
+  // (this is store-level selection, same UI effect either way).
+  const selectNode = (id) => page.evaluate((n) => window.__debug.selectNode(n), id);
+  await selectNode('mask-1');
+  check(
+    'mask-1 re-selected (setup)',
+    await page.locator('.inspector-title', { hasText: 'Mask' }).isVisible().catch(() => false),
+    true
+  );
+  await page.keyboard.press('o');
+  check('overlay is ON with mask-1 selected (setup)', await toggleActive(overlayToggleBtn), await toggleActive(overlayToggleBtn));
+
+  await selectNode('dev-1');
+  check(
+    'dev-1 re-selected (setup)',
+    await page.locator('.inspector-title', { hasText: 'Develop' }).isVisible().catch(() => false),
+    true
+  );
+  check(
+    'selecting a non-mask node auto-clears the overlay (was stuck ON before this fix)',
+    (await toggleActive(overlayToggleBtn)) === false,
+    await toggleActive(overlayToggleBtn)
+  );
+  const screenshotAfterAutoClear = await clipMeans();
+  check(
+    'the red overlay is actually gone from the canvas too, not just the button state',
+    redness(screenshotAfterAutoClear) < redness(screenshotOff) + 0.05,
+    { screenshotOff, screenshotAfterAutoClear }
+  );
+
+  // With dev-1 (non-mask) still selected and the overlay already off, 'O'
+  // must be a harmless no-op — never re-enabling it (its "turn ON" branch
+  // still requires a mask selection) and never getting "stuck" either way.
+  await page.keyboard.press('o');
+  check(
+    "'O' with a non-mask node selected and the overlay already off stays off (no-op, not stuck)",
+    (await toggleActive(overlayToggleBtn)) === false,
+    await toggleActive(overlayToggleBtn)
+  );
+
+  // Same repro via "click the canvas" (the brief's other reported trigger,
+  // deselecting to selectedNodeId: null via NodeEditorPanel's onPaneClick) —
+  // the pane itself is a fixed background layer regardless of pan/zoom, so a
+  // real click is reliable here (unlike the individual node clicks above).
+  await selectNode('mask-1');
+  await page.keyboard.press('o');
+  check('overlay back ON with mask-1 selected (setup)', await toggleActive(overlayToggleBtn), await toggleActive(overlayToggleBtn));
+  await page.locator('.react-flow__pane').click({ position: { x: 5, y: 5 } });
+  check(
+    'clicking the empty canvas pane (deselecting) also auto-clears the overlay',
+    (await toggleActive(overlayToggleBtn)) === false,
+    await toggleActive(overlayToggleBtn)
+  );
+
+  // Confirm the fix didn't break the normal path: 'O' still turns the
+  // overlay back ON once a mask is (re)selected, and back OFF again.
+  await selectNode('mask-1');
+  await page.keyboard.press('o');
+  check("'O' still turns the overlay ON again once a mask is (re)selected", await toggleActive(overlayToggleBtn), await toggleActive(overlayToggleBtn));
+  await page.keyboard.press('o');
+  check('overlay left OFF for the sections below', (await toggleActive(overlayToggleBtn)) === false, await toggleActive(overlayToggleBtn));
 
   // ---------------------------------------------------------------------
   console.log('verify-masks (8. sidecar v3: save/reload, v2 fixture, unknown-key passthrough):');

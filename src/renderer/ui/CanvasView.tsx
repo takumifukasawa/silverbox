@@ -104,6 +104,15 @@ declare global {
       exportLutState(): { count: number; paths: string[]; skipped: string[] } | null;
       /** Verify-only: deterministic store-level wiring for test setup (the drag-to-wire UI itself is ms13's coverage). */
       connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
+      /**
+       * Verify-only: select a node by id (or null to deselect) without
+       * clicking its React Flow DOM element — NodeEditorPanel's `fitView`
+       * only runs once at mount, so a node added later in a long verify
+       * script can sit outside the panel's current pan/zoom, making a real
+       * click flaky/hanging (round-7's overlay-auto-clear repro needs to
+       * select an ARBITRARY node deterministically).
+       */
+      selectNode(id: string | null): void;
       /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
       exportBatchState(): { count: number; paths: string[] } | null;
       /** Current `<userData>/settings.json` state (loaded at boot / after any settingsUpdate). */
@@ -673,6 +682,9 @@ export function CanvasView() {
       },
       connectEdge(source, target, targetHandle) {
         useAppStore.getState().connectEdge(source, target, targetHandle);
+      },
+      selectNode(id) {
+        useAppStore.getState().selectNode(id);
       },
       exportState() {
         const s = useAppStore.getState();
