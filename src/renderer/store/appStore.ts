@@ -46,6 +46,8 @@ import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
 import {
   DEFAULT_SETTINGS,
   SIDECAR_SUFFIX,
+  type CliCheckJob,
+  type CliCheckResult,
   type CliRenderJob,
   type CliRenderResult,
   type ExportColorSpace,
@@ -351,6 +353,19 @@ interface AppState {
    * end, so main can print progress live.
    */
   runCliRender(job: CliRenderJob, onResult: (result: CliRenderResult) => void): Promise<void>;
+  /**
+   * Golden-render check/update (main/index.ts's `--check` mode, ROADMAP
+   * "Golden renders"): opens each image fresh with its OWN sidecar-or-
+   * default look (no preset support — a golden always represents that
+   * image's real look, per the CLI contract), renders the doc's first
+   * output at full resolution, and hands the pixels to
+   * `window.silverbox.checkGoldenImage` — main resizes to the golden's
+   * fixed long edge, then either writes the golden (`job.update`) or
+   * compares against the one on disk and reports. Same never-throws-per-
+   * image contract as runCliRender: a failure becomes `{input,error}` and
+   * the loop continues.
+   */
+  runCliCheck(job: CliCheckJob, onResult: (result: CliCheckResult) => void): Promise<void>;
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
@@ -1928,6 +1943,42 @@ export const useAppStore = create<AppState>((set, get) => {
             ms: Date.now() - startedAt,
           });
         }
+      } catch (err) {
+        onResult({ input, error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+  },
+
+  async runCliCheck(job, onResult) {
+    for (const input of job.images) {
+      try {
+        // No `skipSidecar`/preset here (unlike runCliRender) — a golden
+        // always represents the image's own sidecar-or-default look, the
+        // same defaults rule `--render` uses without `--preset`.
+        await get().openImageByPath(input);
+        if (get().imageStatus !== 'ready') {
+          throw new Error(get().imageError ?? `failed to open ${input}`);
+        }
+        const { imagePath, fileName, graph, renderer } = get();
+        if (!imagePath || !fileName || !renderer) throw new Error('no image open');
+        const bytes = await window.silverbox.readFile(imagePath);
+        const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
+        const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER, get().settings.baselineExposureEV);
+        const outputs = graph.nodes.filter((n) => n.kind === 'output');
+        if (outputs.length === 0) throw new Error('document has no output nodes');
+        // No --output support in check mode (see CliCheckJob's doc comment)
+        // — always the doc's first, same as --render's no-`--output` default.
+        const outputId = outputs[0]!.id;
+        const { data, width, height } = await renderer.renderToPixels(full, graph, 1, 'srgb', outputId);
+        const outcome = await window.silverbox.checkGoldenImage({
+          input,
+          data: data.buffer,
+          width,
+          height,
+          update: job.update,
+          threshold: job.threshold,
+        });
+        onResult(outcome);
       } catch (err) {
         onResult({ input, error: err instanceof Error ? err.message : String(err) });
       }

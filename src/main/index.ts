@@ -6,8 +6,9 @@ import { join, dirname, basename } from 'node:path';
 import {
   IPC,
   SIDECAR_SUFFIX,
-  type CliRenderJob,
-  type CliRenderResult,
+  type CliCheckImageRequest,
+  type CliCheckOutcome,
+  type CliProgressResult,
   type ExportEncodeRequest,
   type ExportEncodeResult,
   type ExportLutRequest,
@@ -17,7 +18,8 @@ import {
   type PresetSummary,
   type Settings,
 } from '../../shared/ipc';
-import { CLI_USAGE, buildCliRenderJob, formatCliProgress, parseCliArgs } from './cliArgs';
+import { CLI_USAGE, buildCliJob, formatCliProgress, parseCliArgs } from './cliArgs';
+import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
 import { deletePreset, listPresets, readPreset, writePreset } from './presets';
@@ -209,6 +211,10 @@ function registerIpc(): void {
   ipcMain.handle(IPC.presetDelete, async (_ev, slug: unknown): Promise<void> => {
     await deletePreset(slug);
   });
+
+  ipcMain.handle(IPC.goldenCheck, async (_ev, req: CliCheckImageRequest): Promise<CliCheckOutcome> => {
+    return checkGoldenImage(req);
+  });
 }
 
 /**
@@ -276,14 +282,14 @@ function createWindow(): BrowserWindow {
 }
 
 /**
- * `--render`'s whole lifecycle: parse argv (already read before app.whenReady
- * — see cliArgv above), print usage/errors and exit for bad usage, else
- * create the hidden window, hand it the job once the renderer signals ready
- * (cli:ready — closes the mount race, see App.tsx), and stream results back
- * as they render (cli:progress) until the batch finishes (cli:done). Exit
- * code: 2 for bad usage, 1 if any file errored, 0 otherwise — set via
- * app.exit() (never process.exit(), which wouldn't flush Electron's own
- * teardown).
+ * `--render`/`--check`'s whole lifecycle: parse argv (already read before
+ * app.whenReady — see cliArgv above), print usage/errors and exit for bad
+ * usage, else create the hidden window, hand it the job once the renderer
+ * signals ready (cli:ready — closes the mount race, see App.tsx), and stream
+ * results back as they complete (cli:progress) until the batch finishes
+ * (cli:done). Exit code: 2 for bad usage, 1 if any file errored/failed/had
+ * no golden (see hadFailure below), 0 otherwise — set via app.exit() (never
+ * process.exit(), which wouldn't flush Electron's own teardown).
  */
 async function runCliMode(): Promise<void> {
   const parsed = parseCliArgs(cliArgv);
@@ -305,12 +311,18 @@ async function runCliMode(): Promise<void> {
     return;
   }
 
-  const job = buildCliRenderJob(parsed, process.cwd());
+  const job = buildCliJob(parsed, process.cwd());
   const win = createWindow();
-  let hadError = false;
+  let hadFailure = false;
 
-  const onProgress = (_ev: unknown, result: CliRenderResult): void => {
-    if ('error' in result) hadError = true;
+  // A --check run's failure conditions (a golden ΔE fail, a missing golden
+  // without --update, a dims-changed) are just as much "this batch did not
+  // come out clean" as a --render error — same exit-code bucket, see
+  // CLI_USAGE's documented exit codes for both modes.
+  const onProgress = (_ev: unknown, result: CliProgressResult): void => {
+    if ('error' in result) hadFailure = true;
+    else if ('status' in result && result.status !== 'updated') hadFailure = true;
+    else if ('pass' in result && !result.pass) hadFailure = true;
     const { stderr, line } = formatCliProgress(result, parsed.json);
     (stderr ? process.stderr : process.stdout).write(line + '\n');
   };
@@ -335,7 +347,7 @@ async function runCliMode(): Promise<void> {
     });
   });
   ipcMain.removeListener(IPC.cliProgress, onProgress);
-  app.exit(timedOut || hadError ? 1 : 0);
+  app.exit(timedOut || hadFailure ? 1 : 0);
 }
 
 void app.whenReady().then(async () => {

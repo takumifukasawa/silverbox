@@ -157,6 +157,43 @@ preset" on a fresh open; there's no interactive crop to preserve in a batch.
 Exit codes: `0` every file rendered, `1` one or more files failed (the rest
 still render, and each failure is reported), `2` bad usage.
 
+### Golden renders
+
+A photo archive that owns its own regression suite: commit a small reference
+render (`<image>.silverbox.golden.png`, 512px long edge, sRGB) next to each
+image and its sidecar, and let the CLI tell you when a Silverbox upgrade
+changed the look.
+
+```sh
+# Once, per photo (or per shoot): protect the current look
+npm run render -- --check --update ~/photos/2026-07-11/*.ARW
+
+# After every Silverbox upgrade: did anything drift?
+npm run render -- --check ~/photos/2026-07-11/*.ARW
+```
+
+`--check` re-renders each image through the exact same pipeline as a normal
+render (its own sidecar, or the default look — no `--preset`/`--out`/etc.,
+since a golden always represents that image's real look), resizes to the
+golden's fixed 512px long edge (the same resize the export path uses), and
+compares against the committed PNG: CIE76 ΔE in Lab, per pixel. A run passes
+when mean ΔE stays at or under `--threshold` (default `1.0`) AND p95 ΔE
+stays within 3× that threshold — the mean catches broad drift, the 3×-p95
+headroom catches a real localized regression without failing over a
+handful of naturally noisy pixels. A missing golden is always a FAILURE
+(never silently skipped) unless `--update` is also given; a dimension
+mismatch (the image's aspect ratio changed since the golden was made — a
+crop edit) is also a FAILURE, reported as `dims-changed` rather than
+resampled to force a comparison, since that IS look drift by definition.
+`--update` (re)writes the golden for every input instead of comparing.
+Human output reports PASS/FAIL/UPDATED/NO GOLDEN/DIMS CHANGED per image;
+`--json` gives NDJSON like `--render` does. Exit codes: `0` every image
+passed or was updated, `1` one or more failed/had no golden, `2` bad usage.
+
+Commit the `.silverbox.golden.png` files alongside your sidecars — they're
+real, viewable PNGs, so `git diff`-by-eye and `git log -p` both work on them
+the same way they already do on the JSON sidecars.
+
 ## Verification
 
 The project is developed primarily against an end-to-end Playwright harness:

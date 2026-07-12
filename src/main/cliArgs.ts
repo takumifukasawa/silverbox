@@ -1,18 +1,28 @@
 /**
  * Headless CLI renderer (`electron . --render …` — the batch half of the
- * text-first workflow, ROADMAP "Headless CLI renderer"): argv parsing lives
- * here, isolated from main/index.ts's window/IPC wiring so the pure parsing
- * logic (and the usage text) has one home.
+ * text-first workflow, ROADMAP "Headless CLI renderer"; `--check`/`--update`
+ * extends it with golden renders, ROADMAP "Golden renders"): argv parsing
+ * lives here, isolated from main/index.ts's window/IPC wiring so the pure
+ * parsing logic (and the usage text) has one home.
  *
- * `parseCliArgs` only validates shape (numbers parse, enums match); it never
- * touches the filesystem. `buildCliRenderJob` resolves every path against the
- * CLI's own launch cwd — the renderer never needs to know what directory the
- * terminal was in.
+ * `parseCliArgs` only validates shape (numbers parse, enums match, mode-
+ * specific options aren't mixed with the wrong mode); it never touches the
+ * filesystem. `buildCliJob` resolves every path against the CLI's own launch
+ * cwd — the renderer never needs to know what directory the terminal was in.
  */
 import { resolve } from 'node:path';
-import type { CliRenderJob, CliRenderPresetRef, CliRenderResult, ExportColorSpace, ExportMetadataPolicy } from '../../shared/ipc';
+import type {
+  CliCheckJob,
+  CliJob,
+  CliProgressResult,
+  CliRenderJob,
+  CliRenderPresetRef,
+  ExportColorSpace,
+  ExportMetadataPolicy,
+} from '../../shared/ipc';
 
 export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg> [more images…]
+       silverbox-render --check [--update] [--threshold <deltaE>] [--json] <image…>
 
   --out <dir>          output directory (default: alongside each input)
   --preset <name|path> apply a preset instead of the image's own sidecar.
@@ -40,9 +50,34 @@ camera-matched base curve + the embedded Sony lens profile, when present).
 
 Exit codes: 0 every file succeeded, 1 one or more files failed (the rest
 still render and are reported), 2 bad usage.
+
+Golden renders (--check): commits a small reference render
+(<image>.silverbox.golden.png, 512px long edge sRGB) next to each
+image/sidecar, then re-renders and reports drift as it happens — a photo
+archive that owns its own regression suite.
+
+  --check               compare each image against its golden instead of
+                        rendering to an output file. Options above other
+                        than --json are not valid with --check (a golden is
+                        always the image's own sidecar-or-default look, at
+                        the fixed 512px long edge — nothing else to choose).
+  --update              (re)write the golden for every input instead of
+                        comparing (requires --check)
+  --threshold <deltaE>  max mean CIE76 ΔE to still call it a PASS (default
+                        1.0); p95 must also stay within 3x this threshold
+                        (requires --check)
+
+A missing golden is a FAILURE unless --update (a check run never silently
+skips an unprotected photo). A dimension mismatch (the image's aspect ratio
+changed since the golden was made — a crop edit) is also a FAILURE, reported
+as {input,status:"dims-changed"} rather than resampled to compare.
+
+Exit codes (--check): 0 every image passed or was updated, 1 one or more
+failed/had no golden (without --update), 2 bad usage.
 `;
 
 export interface CliParsedArgs {
+  mode: 'render' | 'check';
   images: string[];
   outDir: string | null;
   preset: string | null;
@@ -53,14 +88,22 @@ export interface CliParsedArgs {
   colorSpace: ExportColorSpace;
   json: boolean;
   help: boolean;
+  /** --update: only meaningful with mode 'check'. */
+  update: boolean;
+  /** --threshold: only meaningful with mode 'check'; max mean ΔE for a PASS. */
+  threshold: number;
 }
 
 const METADATA_VALUES: ExportMetadataPolicy[] = ['all', 'minimal', 'none'];
 const COLORSPACE_VALUES: ExportColorSpace[] = ['srgb', 'p3'];
 
+/** `--threshold`'s default when `--check` is given without one — see CLI_USAGE. */
+const DEFAULT_DELTAE_THRESHOLD = 1.0;
+
 /** Parse `--render`'s own argv tail (everything after the flag). Pure — no filesystem access. */
 export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } {
   const opts: CliParsedArgs = {
+    mode: 'render',
     images: [],
     outDir: null,
     preset: null,
@@ -71,6 +114,8 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     colorSpace: 'srgb',
     json: false,
     help: false,
+    update: false,
+    threshold: DEFAULT_DELTAE_THRESHOLD,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -82,6 +127,18 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
       case '--json':
         opts.json = true;
         break;
+      case '--check':
+        opts.mode = 'check';
+        break;
+      case '--update':
+        opts.update = true;
+        break;
+      case '--threshold': {
+        const v = Number(argv[++i]);
+        if (!Number.isFinite(v) || v <= 0) return { error: '--threshold expects a positive number' };
+        opts.threshold = v;
+        break;
+      }
       case '--out':
         opts.outDir = argv[++i] ?? null;
         if (opts.outDir === null) return { error: '--out expects a directory' };
@@ -123,6 +180,18 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         opts.images.push(arg);
     }
   }
+  if (opts.mode === 'check') {
+    if (opts.outDir !== null) return { error: '--out is not valid with --check' };
+    if (opts.preset !== null) return { error: '--preset is not valid with --check' };
+    if (opts.output !== null) return { error: '--output is not valid with --check' };
+    if (opts.quality !== 90) return { error: '--quality is not valid with --check' };
+    if (opts.maxDim !== null) return { error: '--max-dim is not valid with --check (goldens are fixed at 512px long edge)' };
+    if (opts.metadata !== 'all') return { error: '--metadata is not valid with --check' };
+    if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --check' };
+  } else {
+    if (opts.update) return { error: '--update requires --check' };
+    if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
+  }
   return opts;
 }
 
@@ -134,15 +203,21 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
  * see CLI_USAGE above — a trailing `.json` is the only signal, deliberately
  * simple and easy to document rather than sniffing the filesystem.
  */
-export function buildCliRenderJob(parsed: CliParsedArgs, cwd: string): CliRenderJob {
+export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
+  const images = parsed.images.map((p) => resolve(cwd, p));
+  if (parsed.mode === 'check') {
+    const job: CliCheckJob = { mode: 'check', images, update: parsed.update, threshold: parsed.threshold };
+    return job;
+  }
   const preset: CliRenderPresetRef | null =
     parsed.preset === null
       ? null
       : parsed.preset.endsWith('.json')
         ? { kind: 'path', value: resolve(cwd, parsed.preset) }
         : { kind: 'name', value: parsed.preset };
-  return {
-    images: parsed.images.map((p) => resolve(cwd, p)),
+  const job: CliRenderJob = {
+    mode: 'render',
+    images,
     outDir: parsed.outDir === null ? null : resolve(cwd, parsed.outDir),
     preset,
     output: parsed.output,
@@ -151,12 +226,31 @@ export function buildCliRenderJob(parsed: CliParsedArgs, cwd: string): CliRender
     metadata: parsed.metadata,
     colorSpace: parsed.colorSpace,
   };
+  return job;
 }
 
-/** One progress line: `{stderr,line}` — `--json` puts everything (success AND error) on stdout as NDJSON; human mode splits success (stdout) from error (stderr). */
-export function formatCliProgress(result: CliRenderResult, json: boolean): { stderr: boolean; line: string } {
+/**
+ * One progress line: `{stderr,line}` — `--json` puts everything (success AND
+ * failure) on stdout as NDJSON; human mode splits success (stdout) from
+ * failure (stderr). Handles both `--render`'s CliRenderResult and
+ * `--check`'s CliCheckResult shapes (see shared/ipc.ts's CliProgressResult).
+ */
+export function formatCliProgress(result: CliProgressResult, json: boolean): { stderr: boolean; line: string } {
   if (json) return { stderr: false, line: JSON.stringify(result) };
   if ('error' in result) return { stderr: true, line: `${result.input}: ERROR ${result.error}` };
+  if ('status' in result) {
+    const isFailure = result.status !== 'updated';
+    const label = result.status === 'updated' ? 'UPDATED' : result.status === 'no-golden' ? 'NO GOLDEN' : 'DIMS CHANGED';
+    return { stderr: isFailure, line: `${result.input}: ${label}` };
+  }
+  if ('deltaE' in result) {
+    const { mean, p95, max } = result.deltaE;
+    const label = result.pass ? 'PASS' : 'FAIL';
+    return {
+      stderr: !result.pass,
+      line: `${result.input}: ${label}  ΔE mean=${mean.toFixed(3)} p95=${p95.toFixed(3)} max=${max.toFixed(3)}`,
+    };
+  }
   return {
     stderr: false,
     line: `${result.input} -> ${result.output}  (${result.width}x${result.height}, ${result.bytes} bytes, ${result.ms}ms)`,

@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils, type IpcRendererEvent } from 'electron';
-import { IPC, type CliRenderJob, type SilverboxApi } from '../../shared/ipc';
+import { IPC, type CliJob, type SilverboxApi } from '../../shared/ipc';
 
 const api: SilverboxApi = {
   ping: () => ipcRenderer.invoke(IPC.ping),
@@ -34,13 +34,14 @@ const api: SilverboxApi = {
     forceDefaults: process.env.SILVERBOX_CLI_RENDER === '1',
   },
   onCliRun: (callback) => {
-    const listener = (_ev: IpcRendererEvent, job: CliRenderJob) => callback(job);
+    const listener = (_ev: IpcRendererEvent, job: CliJob) => callback(job);
     ipcRenderer.on(IPC.cliRun, listener);
     return () => ipcRenderer.removeListener(IPC.cliRun, listener);
   },
   cliReady: () => ipcRenderer.send(IPC.cliReady),
   cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
   cliDone: () => ipcRenderer.send(IPC.cliDone),
+  checkGoldenImage: (req) => ipcRenderer.invoke(IPC.goldenCheck, req),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

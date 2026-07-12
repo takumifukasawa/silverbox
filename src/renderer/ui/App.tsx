@@ -170,7 +170,14 @@ export function App() {
   useEffect(() => {
     const unsubscribe = window.silverbox.onCliRun((job) => {
       void (async () => {
-        await useAppStore.getState().runCliRender(job, (result) => window.silverbox.cliProgress(result));
+        // `job.mode` picks which batch runner handles it (golden renders,
+        // ROADMAP "Golden renders", extends the same one-job/stream-results
+        // wiring `--render` already used) — see appStore.ts's runCliCheck.
+        if (job.mode === 'check') {
+          await useAppStore.getState().runCliCheck(job, (result) => window.silverbox.cliProgress(result));
+        } else {
+          await useAppStore.getState().runCliRender(job, (result) => window.silverbox.cliProgress(result));
+        }
         window.silverbox.cliDone();
       })();
     });

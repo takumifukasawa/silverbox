@@ -5,6 +5,7 @@
  * main registers a handler per channel. Keep channel names and signatures in
  * this one file so both sides stay in sync.
  */
+import type { DeltaEStats } from './color/deltaE';
 
 export const IPC = {
   ping: 'app:ping',
@@ -31,10 +32,28 @@ export const IPC = {
   cliRun: 'cli:run',
   cliProgress: 'cli:progress',
   cliDone: 'cli:done',
+  // Golden renders (`--check`/`--update` — see main/goldenRender.ts): the
+  // renderer's job is producing pixels (same as any CLI render); main's job
+  // is encoding, comparing against the golden PNG on disk, and reporting —
+  // this one round-trip per image does all three, main-side.
+  goldenCheck: 'golden:check',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
 export const SIDECAR_SUFFIX = '.silverbox.json';
+
+/**
+ * Suffix of the golden reference render written next to the image file
+ * (ROADMAP "Golden renders" — `<image>.silverbox.golden.png`, e.g.
+ * `photo.ARW.silverbox.golden.png`). Ends in `.png`, a different basename
+ * than SIDECAR_SUFFIX, so the sidecar hot-reload watcher's exact-basename
+ * filter (main/index.ts's armSidecarWatch) never mistakes a golden write for
+ * a sidecar change.
+ */
+export const GOLDEN_SUFFIX = '.silverbox.golden.png';
+
+/** Long edge (px) every golden PNG is rendered/resized to — fixed, not user-configurable (see CliCheckJob's doc comment). */
+export const GOLDEN_LONG_EDGE = 512;
 
 export interface PingResult {
   pid: number;
@@ -113,18 +132,29 @@ export interface SilverboxApi {
    */
   testFlags: { isTest: boolean; lensProfileAutoDefault: boolean; baseCurveDefault: boolean; forceDefaults: boolean };
   /**
-   * Subscribe to main's ONE-TIME `--render` job push (headless CLI mode
-   * only — see main/index.ts). Returns an unsubscribe function; the
-   * renderer calls `cliReady()` right after registering so main knows it's
-   * safe to send (avoids a race against React mount).
+   * Subscribe to main's ONE-TIME `--render`/`--check` job push (headless CLI
+   * mode only — see main/index.ts). `job.mode` selects which of
+   * runCliRender/runCliCheck (appStore.ts) handles it. Returns an
+   * unsubscribe function; the renderer calls `cliReady()` right after
+   * registering so main knows it's safe to send (avoids a race against
+   * React mount).
    */
-  onCliRun(callback: (job: CliRenderJob) => void): () => void;
+  onCliRun(callback: (job: CliJob) => void): () => void;
   /** Tell main the renderer's CLI listener is registered and ready for the job. */
   cliReady(): void;
-  /** Stream one rendered file's result (or error) back to main as it completes. */
-  cliProgress(result: CliRenderResult): void;
+  /** Stream one rendered/checked file's result (or error) back to main as it completes. */
+  cliProgress(result: CliProgressResult): void;
   /** Tell main every image in the job has been attempted; main prints the summary and exits. */
   cliDone(): void;
+  /**
+   * Golden-render check/update for one image (`--check`/`--update` — see
+   * main/goldenRender.ts): hands main the full-resolution rendered pixels
+   * (same shape as ExportEncodeRequest's `data`); main resizes to the
+   * golden's fixed 512px long edge, then either writes the golden PNG
+   * (`update: true`) or decodes the existing one and compares. All the
+   * encode/compare/report work is main-side — see runCliCheck's doc comment.
+   */
+  checkGoldenImage(req: CliCheckImageRequest): Promise<CliCheckOutcome>;
 }
 
 /**
@@ -138,11 +168,12 @@ export type CliRenderPresetRef = { kind: 'path'; value: string } | { kind: 'name
 
 /**
  * The whole batch job for one `--render` invocation, built by main
- * (src/main/cliArgs.ts's buildCliRenderJob) from parsed argv + the launch
+ * (src/main/cliArgs.ts's buildCliJob) from parsed argv + the launch
  * cwd — every path here is already absolute, so the renderer never needs to
  * know what directory the CLI was invoked from.
  */
 export interface CliRenderJob {
+  mode: 'render';
   /** Absolute paths, in argv order. */
   images: string[];
   /** Absolute output directory; null = alongside each input. */
@@ -161,6 +192,69 @@ export interface CliRenderJob {
 export type CliRenderResult =
   | { input: string; output: string; width: number; height: number; bytes: number; ms: number }
   | { input: string; error: string };
+
+/**
+ * The whole batch job for one `--check` invocation (golden renders, ROADMAP
+ * "Golden renders" — see main/goldenRender.ts), built by main
+ * (src/main/cliArgs.ts's buildCliJob). Unlike CliRenderJob there is no
+ * outDir/preset/output/quality/maxDim/metadata/colorSpace: the golden always
+ * lives at `<image>.silverbox.golden.png` (next to the image/sidecar),
+ * always at the fixed 512px long edge, always the image's own sidecar-or-
+ * default look, always the doc's first output — the whole point is that a
+ * check run reproduces exactly what an ordinary `--render` of that image
+ * would look like, so there is nothing else to configure.
+ */
+export interface CliCheckJob {
+  mode: 'check';
+  /** Absolute paths, in argv order. */
+  images: string[];
+  /** `--update`: (re)write the golden instead of comparing against it. */
+  update: boolean;
+  /** `--threshold`: max mean ΔE (CIE76) to still call it a pass; see CliCheckOutcome. */
+  threshold: number;
+}
+
+/** Either job shape `cli:run` can carry; the renderer branches on `mode`. */
+export type CliJob = CliRenderJob | CliCheckJob;
+
+/** Golden-render outcome for one status that isn't a pass/fail ΔE comparison. */
+export type CliCheckStatus =
+  /** No golden exists next to this image and `--update` was not given — always a FAILURE (see CliCheckOutcome). */
+  | 'no-golden'
+  /** `--update`: the golden was (re)written. */
+  | 'updated'
+  /** The current render's dimensions differ from the stored golden's (the image's aspect ratio changed — a crop
+   *  edit since the golden was made) — reported as a FAILURE rather than resampled to compare, because a changed
+   *  aspect ratio IS look drift by definition. */
+  | 'dims-changed';
+
+/** One `--check` image's outcome: a real ΔE comparison, or a status that short-circuits it. */
+export type CliCheckOutcome =
+  | { input: string; deltaE: DeltaEStats; pass: boolean }
+  | { input: string; status: CliCheckStatus };
+
+/** CliCheckOutcome plus the same {input,error} failure shape CliRenderResult uses — streamed via cliProgress. */
+export type CliCheckResult = CliCheckOutcome | { input: string; error: string };
+
+/** Whatever cliProgress carries — main's formatter (cliArgs.ts's formatCliProgress) branches on shape. */
+export type CliProgressResult = CliRenderResult | CliCheckResult;
+
+/**
+ * Request for one image's golden check/update (`window.silverbox.checkGoldenImage`
+ * — see main/goldenRender.ts). `data`/`width`/`height` are the SAME
+ * full-resolution display-encoded RGBA8 sRGB pixels a normal export would
+ * produce (renderScale 1, colorSpace 'srgb') — main resizes to the golden's
+ * fixed long edge itself, reusing the export pipeline's own resize, so a
+ * check run's render is byte-for-byte the same pipeline as `--render`.
+ */
+export interface CliCheckImageRequest {
+  input: string;
+  data: ArrayBuffer;
+  width: number;
+  height: number;
+  update: boolean;
+  threshold: number;
+}
 
 /**
  * `<userData>/presets/<slug>.json` listing entry (task #37): individual

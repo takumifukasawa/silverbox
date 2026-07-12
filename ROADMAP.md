@@ -75,6 +75,18 @@ curve + embedded lens profile), or a named/path preset applied like the UI's
 color-space controls; reports progress as it goes (NDJSON under `--json`).
 Continues past a single file's failure (exit 1, each error reported)
 rather than aborting the whole batch.
+Golden renders (`silverbox-render --check`, extends the CLI renderer above):
+a photo archive that owns its own regression suite. `--check --update`
+commits a small reference render (`<image>.silverbox.golden.png`, 512px
+long edge, sRGB — a real, `git diff`-by-eye PNG) next to each image/sidecar
+through the exact same pipeline `--render` uses; a later `--check` re-renders
+and reports drift as CIE76 ΔE in Lab (mean + p95 + max), pass = mean ≤
+`--threshold` (default 1.0) AND p95 ≤ 3×that. A missing golden is always a
+FAILURE unless `--update` (never silently skips an unprotected photo); a
+dimension mismatch (the image's aspect ratio changed — a crop edit since the
+golden was made) is also a FAILURE (`dims-changed`), never resampled to
+force a comparison. Engine updates become detectable choices instead of
+silent drift in a photo's rendered look.
 
 ## In flight / agreed order
 
@@ -137,10 +149,6 @@ offset (value decided in the Lightroom calibration session).
   that proves insufficient
 - Image node: composite with / mask by another file (path reference) — a
   second image feeding a node graph the way a mask node feeds a shape today
-- **Golden renders** (`silverbox check`): commit a thumbnail/hash next to
-  each sidecar and let the CLI re-render and report ΔE — a photo archive
-  that owns a regression test suite; engine updates become detectable
-  choices instead of silent drift
 - Unit-test tier (vitest) for pure engine math (matrices, splines,
   solvers, sanitizers) under the E2E suite — F3b's Sony-spline decoding
   should be written test-first against in-camera-JPEG-derived values
