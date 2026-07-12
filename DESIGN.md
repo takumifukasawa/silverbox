@@ -188,3 +188,37 @@ briefs, reviews, verification runs and commits; implementation agents work
 from written briefs and never commit. One feature = one verify script = one
 commit, and the whole suite runs green before anything lands. The repo's
 history is meant to read as a sequence of complete, verified features.
+
+## The color model — DaVinci's structure, Lightroom's controls (decided 2026-07-13)
+
+Color correction has exactly three layers, each with ONE job; new color
+features must name their layer or be rejected:
+
+1. **Profile** (upstream of everything): the camera's character — the
+   fitted base curve today, the fitted color transform (profile fit)
+   next. Applied as visible default-look state, never hidden.
+2. **Primary** = the Develop node's interior, deliberately shaped like
+   Lightroom's right panel (tone, curves, HSL mixer, grading wheels,
+   saturation/vibrance). This surface is FROZEN — LR-refugees' muscle
+   memory is the spec; no new global color tools.
+3. **Secondary** = mask+blend rigs (radial/linear/ColorKey — ColorKey IS
+   the HSL qualifier). Targeted color work belongs here, and is MORE
+   capable than panel-side alternatives (a rig applies any Develop
+   adjustment, not just hue/sat/lum). Consequence: LR's Point Color is
+   deliberately NOT adopted — the investment goes into making ColorKey
+   rig creation as fluid as Point Color's gesture instead.
+
+Adjacent guards from the same review: scopes beyond the histogram
+(waveform/parade/vectorscope) are maintenance-only (no further
+investment; collapse under "advanced" at the next UI pass); the custom
+WGSL node is load-bearing for the looks-as-code thesis but
+expansion-frozen (expert feature); when the wipe compare lands, one
+compare mechanism becomes primary rather than accreting two.
+
+## The catalog line (explicit slope guard)
+
+Views may FILTER, nothing may PERSIST view state as photo metadata
+beyond the sidecar, and search/collections/keywords do not exist. The
+filmstrip rating filter sits exactly ON the line — anything past it
+(saved filters, smart groups, cross-folder queries) is the catalog
+slope and gets rejected by default.
