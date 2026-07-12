@@ -362,10 +362,13 @@ try {
 
   console.log('verify-crop (angle slider keeps the no-void invariant too):');
   await page.locator('[data-testid="crop-reset"]').click();
-  // drive the actual slider (onAngleChange path), not the debug hook
+  // drive the actual slider (onAngleChange path), not the debug hook. UI
+  // sign matches LIGHTROOM (slider +30 = clockwise), which negates into the
+  // internal "+angle = CCW" doc convention: expect geometry.angle === -30.
   await page.locator('[data-testid="crop-angle-slider"]').fill('30');
   const geomSlider = await geometryState();
-  check('slider reached a large angle on a full crop', Math.abs(geomSlider.angle - 30) < 0.5, geomSlider);
+  check('slider +30 (LR sign) writes internal angle -30', Math.abs(geomSlider.angle + 30) < 0.5, geomSlider);
+  check('the readout shows the LR-signed +30.0°', (await page.locator('[data-testid="crop-angle"]').textContent()) === '30.0°', await page.locator('[data-testid="crop-angle"]').textContent());
   const sliderVoid = worstVoid(geomSlider.crop, geomSlider.angle, baselineDims.width, baselineDims.height);
   check('no-void holds via the slider path too', sliderVoid <= 1, {
     sliderVoid,

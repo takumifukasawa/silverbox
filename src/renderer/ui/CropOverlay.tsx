@@ -638,12 +638,20 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
       <div className="crop-controls" data-testid="crop-controls" onPointerDown={(ev) => ev.stopPropagation()}>
         <label>
           Angle
+          {/* UI sign matches Lightroom (2026-07-12 calibration: LR shows +
+              for a CLOCKWISE straighten), which is the OPPOSITE of the
+              internal "+angle rotates the image CCW on screen" shader
+              convention (RESAMPLE_SHADER — deliberately untouched, verify
+              pins it). Negate exactly at this boundary: displayed = −doc,
+              slider writes −value. The corner-rotate gesture already
+              produces "clockwise drag ⇒ internal angle decreases", so its
+              readout here goes POSITIVE, matching LR muscle memory. */}
           <input
             type="range"
             min={-45}
             max={45}
             step={0.1}
-            value={angle}
+            value={-angle}
             data-testid="crop-angle-slider"
             onPointerDown={() => {
               angleSessionRef.current = Date.now();
@@ -651,10 +659,10 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
             onPointerUp={() => {
               angleSessionRef.current = null;
             }}
-            onChange={(ev) => onAngleChange(Number(ev.target.value))}
+            onChange={(ev) => onAngleChange(-Number(ev.target.value))}
           />
           <span className="crop-angle-value" data-testid="crop-angle">
-            {angle.toFixed(1)}°
+            {(-angle).toFixed(1)}°
           </span>
         </label>
         <button data-testid="crop-rotate-left" onClick={() => rotateBy(1)} title="Rotate left 90°">
