@@ -27,6 +27,7 @@ per-node preview). Suite: 49 e2e + unit tier.
 | Auto tone | LRC/LR "Auto" | Medium-small: histogram-based heuristic starting point; honest v1 = percentile targets. |
 | Perspective correction (Upright/keystone) | LRC Transform | Medium-large: new geometry math in RESAMPLE + UI; manual sliders v1, auto lines later. |
 | Tone curve point/parametric REGIONS drag (drag-on-image) | LRC targeted adjustment tool (TAT) | Medium: we have curves + HSL; the TAT gesture (drag on the photo to edit the band under the cursor) is a beloved LR interaction. |
+| Point Color (pick a color from the photo, adjust it precisely) | LRC 13+ | Medium: nearest existing = the ColorKey mask; Point Color is a different, lighter gesture (eyedropper -> hue/sat/lum + range sliders on the DEVELOP node, no mask rig). Could share the ColorKey WGSL gates. |
 | History panel (persistent step list) | LRC | Medium: we have undo/redo in-session; LRC persists history in the catalog. OURS should stay session-only or sidecar-git ("look-history replay" is already a roadmap idea — git IS our history). Recommend: expose undo stack as a panel v1; git-log-based replay later. |
 | Soft proofing | LRC | Medium: we have P3 export; soft proof = preview through target profile + gamut warning overlay (roadmap already lists gamut warning). |
 | Batch/sync settings across photos | LRC sync | Small-medium: presets + filmstrip multi-select "apply preset/paste to selected". Multi-select is the missing primitive. |
