@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { OpenSession, StaleOpenError } from './openSession';
 import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { extractSonyEmbeddedPreview } from '../engine/lens/sonyLensProfile';
@@ -585,13 +586,6 @@ function cancelAutosaveTimer(): void {
   }
 }
 
-/**
- * Monotonic id of the most recent openImageByPath call — the newest-open-wins
- * epoch guard (see that method's doc comment). Module scope for the same
- * definition-order reason as autosaveTimer above.
- */
-let openImageEpoch = 0;
-
 // --- Embedded-preview-first opening (AppState.openingPreview) --------------
 //
 // Revoke the overlay's blob: URL and drop it — call sites: a new open
@@ -630,6 +624,118 @@ function pushHistory(s: AppState, key: string | null): { history: GraphHistory }
 
 export function isJpegFileName(name: string): boolean {
   return /\.(jpg|jpeg)$/i.test(name);
+}
+
+/**
+ * Fresh-open default-look seeding (OpenSession extraction — architecture
+ * audit risk #1): a pure graph transform, no I/O, no `set()` — openImageByPath
+ * calls this once per open, right after the sidecar (or the lack of one) is
+ * known, and folds the result straight into its commit. Split out so "what
+ * does a fresh open look like" reads independently of the epoch/preview/
+ * sidecar bookkeeping around it; unchanged formulas/gating from their
+ * previous inline home.
+ *
+ * - `wbModel` is always computed from the image's camera color info, and any
+ *   DEVELOP/whitebalance node still holding the as-shot placeholder (temp 0
+ *   — a fresh doc, or a defensively-unresolved sidecar node) gets its real
+ *   Kelvin/tint value resolved in, so WB sliders never show 0.
+ * - Embedded lens profile default-on and the base curve + default
+ *   sharpen/color-NR seeding are FRESH-OPEN only (`!opts.usedSidecar`),
+ *   suppressed under the verify suite except for the scripts that opt in —
+ *   see the two `Allowed` flags below.
+ */
+export function seedDefaultLook(
+  graph: GraphDoc,
+  image: PreparedImage,
+  opts: { usedSidecar: boolean; kind: 'raw' | 'jpg'; testFlags: Window['silverbox']['testFlags'] }
+): { graph: GraphDoc; wbModel: WbModel } {
+  const { usedSidecar, kind, testFlags: flags } = opts;
+  // per-image WB model; resolve the as-shot placeholder (temp 0) in the
+  // loaded/default doc so WB sliders always show real Kelvin values
+  const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz });
+  let out: GraphDoc = {
+    ...graph,
+    nodes: graph.nodes.map((n) => {
+      if (n.kind === DEVELOP_KIND && n.develop && n.develop.basic.temp === 0) {
+        return {
+          ...n,
+          develop: {
+            ...n.develop,
+            basic: { ...n.develop.basic, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint },
+          },
+        };
+      }
+      if (n.kind === 'whitebalance' && (n.params?.temp ?? 0) === 0) {
+        return { ...n, params: { ...n.params, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint } };
+      }
+      return n;
+    }),
+  };
+  // Embedded lens profile (task #34): default it ON for a FRESH open (no
+  // sidecar on disk) when the image actually carries correction splines —
+  // matching the camera/LR out-of-box behavior. A restored sidecar keeps
+  // whatever it stored (older sidecars with no `profile` key sanitize to
+  // enabled:false, so their renders never change).
+  // Suppressed inside the verify suite (testFlags.isTest) except for
+  // verify-lensprofile (lensProfileAutoDefault) and the headless CLI
+  // renderer (forceDefaults — see SilverboxApi.testFlags's doc comment; the
+  // CLI must match a fresh open's real look even under verify-cli.mjs's own
+  // SILVERBOX_TEST=1 isolation), so the other scripts keep their
+  // resample-free, CPU-referenceable baselines.
+  const autoDefaultAllowed = !flags.isTest || flags.lensProfileAutoDefault || flags.forceDefaults;
+  if (autoDefaultAllowed && !usedSidecar && image.profile) {
+    out = {
+      ...out,
+      nodes: out.nodes.map((n) =>
+        n.kind === 'input' ? { ...n, lens: { ...(n.lens ?? defaultLensParams()), profile: { enabled: true } } } : n
+      ),
+    };
+  }
+  // Default BASE CURVE (COLOR.md "default rendering"): a fresh RAW open (no
+  // sidecar) seeds the Develop node's toneCurve.rgb with the camera-matched
+  // base curve — the visible, editable, deletable second stage of the
+  // default look (baseline exposure is the first, at decode). JPEG opens and
+  // restored sidecars are never touched (a restored doc keeps whatever it
+  // stored, so a user who deleted the curve reopens without it).
+  // Suppressed inside the verify suite (testFlags.isTest) except for
+  // verify-basecurve (baseCurveDefault) and the headless CLI renderer
+  // (forceDefaults), so the other scripts keep their untouched fresh-ARW
+  // baselines — same mechanism as the lens default.
+  const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault || flags.forceDefaults;
+  if (baseCurveAllowed && !usedSidecar && kind === 'raw') {
+    const curve = baseCurveForModel(image.capture?.cameraModel);
+    out = {
+      ...out,
+      nodes: out.nodes.map((n) =>
+        n.kind === DEVELOP_KIND && n.develop
+          ? {
+              ...n,
+              develop: {
+                ...n.develop,
+                toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) },
+                // Default RAW sharpening (LR-calibration 2026-07-12): LR
+                // Classic seeds RAW imports with amount 40 / radius 1.0 /
+                // masking 0 (JPEGs get 0 — they were sharpened in-camera),
+                // and with DETAIL_SHARPEN_GAIN aligning the slider scale, our
+                // 40 ≈ LR's 40. Visible/editable in the Detail section like
+                // every other piece of the default look.
+                // Default color NR (manual-noise-reduction pack): LR
+                // Classic also seeds RAW imports with Color 25 (Detail 50 /
+                // Smoothness 50 — the sub-slider defaults already reproduce
+                // today's fixed formula, so only `amount` needs to move);
+                // Luminance NR stays 0, same as LR.
+                detail: {
+                  ...n.develop.detail,
+                  sharpen: { ...n.develop.detail.sharpen, amount: 40, radius: 1.0, masking: 0 },
+                  noiseColor: { ...n.develop.detail.noiseColor, amount: 25 },
+                },
+              },
+            }
+          : n
+      ),
+    };
+  }
+  return { graph: out, wbModel };
 }
 
 /**
@@ -1319,24 +1425,23 @@ export const useAppStore = create<AppState>((set, get) => {
   gpuError: null,
 
   async openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) {
-    // Newest-open-wins epoch guard: this method awaits three times (readFile,
-    // loadImage, readSidecar), and nothing else stopped an OLDER in-flight
-    // open from resolving AFTER a newer one and clobbering its state — with
-    // the filmstrip's arrow-key switching (rapid consecutive opens of
-    // multi-second RAW decodes) that stale-open-wins race became a real,
-    // reachable bug rather than a double-click curiosity. Every await
-    // checkpoint below bails silently when a newer open has started; the
-    // newer call owns ALL UI state from the moment it increments the epoch.
-    const epoch = ++openImageEpoch;
-    const stale = () => epoch !== openImageEpoch;
-    // a pending autosave from whatever image was open belongs to THAT
-    // image/path; never let it fire against the one we're about to open
+    // Newest-open-wins epoch guard + cleanup ledger (OpenSession extraction —
+    // architecture-audit risk #1) — see openSession.ts's doc comment for the
+    // race this guards (the filmstrip's arrow-key switching resolving
+    // multi-second RAW decodes out of call order). Constructing `session`
+    // claims the epoch AND runs the PREVIOUS session's disposers (its own
+    // opening-preview blob URL, if it set one — see the `session.own(...)`
+    // call below) — the scattered top-of-function `clearOpeningPreview`
+    // call this used to be is now that ledger sweep instead.
+    const session = new OpenSession(path, opts);
+    // A pending autosave from whatever image was open belongs to THAT
+    // image/path; never let it fire against the one we're about to open.
+    // NOT part of the ledger above: the timer is scheduled by the
+    // graph-mutation subscriber outside any particular session's lifetime
+    // (openImageByPath never creates it), so there's no single owning
+    // session to register it against — called unconditionally here instead,
+    // exactly where the old epoch guard used to call it.
     cancelAutosaveTimer();
-    // Whatever preview overlay belonged to the PREVIOUS open (still 'loading',
-    // or just never got cleaned up) is now stale — drop it before this open
-    // does anything else, so two rapid opens never leave a leaked blob: URL
-    // or a stale overlay showing the wrong photo.
-    set(clearOpeningPreview(get()));
     // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
     // default — see this method's `keepFolderContext` doc comment.
     if (!opts?.keepFolderContext) set({ folderDir: null, folderEntries: [] });
@@ -1355,8 +1460,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // preview active.
     set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null, previewLook: null });
     try {
-      const bytes = await window.silverbox.readFile(path);
-      if (stale()) return;
+      const bytes = await session.guard(window.silverbox.readFile(path));
       // Embedded-preview-first opening: slice the camera JPEG OUT of `bytes`
       // (extractSonyEmbeddedPreview copies via ArrayBuffer.slice — never a
       // view into `bytes`) before loadImage transfers it to the decode
@@ -1377,10 +1481,15 @@ export const useAppStore = create<AppState>((set, get) => {
           set(clearOpeningPreview(get()));
           const url = URL.createObjectURL(new Blob([preview.bytes], { type: 'image/jpeg' }));
           set({ openingPreview: { url, width: preview.width, height: preview.height } });
+          // Ledger registration: if THIS session gets superseded before
+          // reaching ready/error, the NEXT session's constructor revokes
+          // this URL for us — see the class doc comment.
+          session.own(() => set(clearOpeningPreview(get())));
         }
       }
-      const image = await loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV);
-      if (stale()) return;
+      const image = await session.guard(
+        loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV)
+      );
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
       // untouched until the user saves over it) with a toolbar notice.
@@ -1401,8 +1510,9 @@ export const useAppStore = create<AppState>((set, get) => {
         // skipSidecar (headless CLI's --preset path): behave as if nothing
         // were on disk at all, even when a sidecar genuinely exists — see
         // AppState.openImageByPath's doc comment.
-        const sidecar = opts?.skipSidecar ? null : await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
-        if (stale()) return;
+        const sidecar = opts?.skipSidecar
+          ? null
+          : await session.guard(window.silverbox.readSidecar(path + SIDECAR_SUFFIX));
         sidecarRawText = sidecar;
         if (sidecar !== null) {
           // the sidecar file EXISTS — a parse failure here (unlike readSidecar
@@ -1425,97 +1535,20 @@ export const useAppStore = create<AppState>((set, get) => {
           }
         }
       } catch (err) {
+        // A newest-open-wins bail-out from session.guard() above must reach
+        // the OUTER catch (which checks session.stale() and returns
+        // silently), not get swallowed here as an ordinary "sidecar ignored"
+        // notice — see OpenSession.guard's doc comment on this exact hazard.
+        if (err instanceof StaleOpenError) throw err;
         sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
-      // per-image WB model; resolve the as-shot placeholder (temp 0) in the
-      // loaded/default doc so WB sliders always show real Kelvin values
-      const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz });
-      graph = {
-        ...graph,
-        nodes: graph.nodes.map((n) => {
-          if (n.kind === DEVELOP_KIND && n.develop && n.develop.basic.temp === 0) {
-            return {
-              ...n,
-              develop: {
-                ...n.develop,
-                basic: { ...n.develop.basic, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint },
-              },
-            };
-          }
-          if (n.kind === 'whitebalance' && (n.params?.temp ?? 0) === 0) {
-            return { ...n, params: { ...n.params, temp: wbModel.asShot.temp, tint: wbModel.asShot.tint } };
-          }
-          return n;
-        }),
-      };
-      // Embedded lens profile (task #34): default it ON for a FRESH open (no
-      // sidecar on disk) when the image actually carries correction splines —
-      // matching the camera/LR out-of-box behavior. A restored sidecar keeps
-      // whatever it stored (older sidecars with no `profile` key sanitize to
-      // enabled:false, so their renders never change).
-      // Suppressed inside the verify suite (testFlags.isTest) except for
-      // verify-lensprofile (lensProfileAutoDefault) and the headless CLI
-      // renderer (forceDefaults — see SilverboxApi.testFlags's doc comment;
-      // the CLI must match a fresh open's real look even under
-      // verify-cli.mjs's own SILVERBOX_TEST=1 isolation), so the other
-      // scripts keep their resample-free, CPU-referenceable baselines.
-      const flags = window.silverbox.testFlags;
-      const autoDefaultAllowed = !flags.isTest || flags.lensProfileAutoDefault || flags.forceDefaults;
-      if (autoDefaultAllowed && !usedSidecar && image.profile) {
-        graph = {
-          ...graph,
-          nodes: graph.nodes.map((n) =>
-            n.kind === 'input'
-              ? { ...n, lens: { ...(n.lens ?? defaultLensParams()), profile: { enabled: true } } }
-              : n
-          ),
-        };
-      }
-      // Default BASE CURVE (COLOR.md "default rendering"): a fresh RAW open (no
-      // sidecar) seeds the Develop node's toneCurve.rgb with the camera-matched
-      // base curve — the visible, editable, deletable second stage of the
-      // default look (baseline exposure is the first, at decode). JPEG opens
-      // and restored sidecars are never touched (a restored doc keeps whatever
-      // it stored, so a user who deleted the curve reopens without it).
-      // Suppressed inside the verify suite (testFlags.isTest) except for
-      // verify-basecurve (baseCurveDefault) and the headless CLI renderer
-      // (forceDefaults), so the other scripts keep their untouched fresh-ARW
-      // baselines — same mechanism as the lens default.
-      const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault || flags.forceDefaults;
-      if (baseCurveAllowed && !usedSidecar && kind === 'raw') {
-        const curve = baseCurveForModel(image.capture?.cameraModel);
-        graph = {
-          ...graph,
-          nodes: graph.nodes.map((n) =>
-            n.kind === DEVELOP_KIND && n.develop
-              ? {
-                  ...n,
-                  develop: {
-                    ...n.develop,
-                    toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) },
-                    // Default RAW sharpening (LR-calibration 2026-07-12): LR
-                    // Classic seeds RAW imports with amount 40 / radius 1.0 /
-                    // masking 0 (JPEGs get 0 — they were sharpened in-camera),
-                    // and with DETAIL_SHARPEN_GAIN aligning the slider scale,
-                    // our 40 ≈ LR's 40. Visible/editable in the Detail
-                    // section like every other piece of the default look.
-                    // Default color NR (manual-noise-reduction pack): LR
-                    // Classic also seeds RAW imports with Color 25 (Detail
-                    // 50 / Smoothness 50 — the sub-slider defaults already
-                    // reproduce today's fixed formula, so only `amount`
-                    // needs to move); Luminance NR stays 0, same as LR.
-                    detail: {
-                      ...n.develop.detail,
-                      sharpen: { ...n.develop.detail.sharpen, amount: 40, radius: 1.0, masking: 0 },
-                      noiseColor: { ...n.develop.detail.noiseColor, amount: 25 },
-                    },
-                  },
-                }
-              : n
-          ),
-        };
-      }
+      // Fresh-open default-look seeding (WB Kelvin resolution, embedded lens
+      // profile auto-on, base curve + default sharpen/color-NR) — pure
+      // helper, see its doc comment for the per-piece gating.
+      const seeded = seedDefaultLook(graph, image, { usedSidecar, kind, testFlags: window.silverbox.testFlags });
+      graph = seeded.graph;
+      const wbModel = seeded.wbModel;
       // node ids of the previous doc must never alias into stale shaders
       clearCustomShaderArtifacts();
       mirrorShaderArtifactClear();
@@ -1572,9 +1605,11 @@ export const useAppStore = create<AppState>((set, get) => {
       // here just means no hot-reload push for this image, not a broken open.
       void window.silverbox.watchSidecar(path + SIDECAR_SUFFIX);
     } catch (err) {
-      // a STALE open's failure must not clobber the newer open's state — the
-      // newer call owns the UI from its epoch increment onward
-      if (stale()) return;
+      // A stale open's failure — including StaleOpenError from
+      // session.guard(), which by construction only throws once
+      // session.stale() is true — must not clobber the newer open's state:
+      // the newer call owns the UI from the moment it claimed the epoch.
+      if (session.stale()) return;
       set({
         ...clearOpeningPreview(get()),
         imageStatus: 'error',
