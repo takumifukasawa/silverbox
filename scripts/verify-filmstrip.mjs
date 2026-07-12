@@ -105,7 +105,13 @@ try {
   await openImageFireAndForget(bDsc2);
   await waitReadyOrError();
   await page.click('[data-testid="save-button"]');
-  await page.waitForFunction(() => window.__debug.graphDirty() === false, { timeout: 10_000 });
+  // A fresh open is ALREADY graphDirty === false, so waiting on that (as this
+  // fixture originally did) resolves instantly and races the async sidecar
+  // write — under parallel-suite contention the existsSync below lost that
+  // race. Wait for the FILE, the thing the fixture actually needs.
+  for (let i = 0; i < 100 && !existsSync(bDsc2 + '.silverbox.json'); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
   check('sidecar written for b_DSC2.ARW', existsSync(bDsc2 + '.silverbox.json'), null);
 
   // === 1. Open the folder — 4 cells, sorted, first image open ===
