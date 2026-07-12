@@ -210,6 +210,13 @@ function DevelopInspector({ node }: { node: GraphNode }) {
   return (
     <>
       <div className="inspector-title">Develop</div>
+      <Section title="Profile">
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'profile.amount', label: 'Amount', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.profile.amount}
+        />
+      </Section>
       <Section title="Basic">
         <div className="wb-eyedropper-row">
           <button

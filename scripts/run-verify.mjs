@@ -86,6 +86,7 @@ const ALL_SCRIPTS = [
   { name: 'presets', file: 'verify-presets.mjs' },
   { name: 'lensprofile', file: 'verify-lensprofile.mjs' },
   { name: 'basecurve', file: 'verify-basecurve.mjs' },
+  { name: 'profilefit', file: 'verify-profilefit.mjs' },
   { name: 'hotreload', file: 'verify-hotreload.mjs' },
   { name: 'cli', file: 'verify-cli.mjs' },
   { name: 'diff', file: 'verify-diff.mjs' },

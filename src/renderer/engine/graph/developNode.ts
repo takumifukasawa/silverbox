@@ -17,6 +17,7 @@
  */
 import { srgbDecode, srgbEncode } from '../color/srgb';
 import { WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
+import { applyProfileCpu, DEFAULT_PROFILE, PROFILE_LATTICE_N, packProfileLattice } from '../color/profileFit';
 import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
 import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
@@ -136,7 +137,20 @@ export interface EffectsParams {
   vignetteMidpoint: number;
 }
 
+/**
+ * Fitted camera-profile transform (the Adobe-Color character match — see
+ * engine/color/profileFit.ts and docs/brief-bank/profile-fit.md). `amount`
+ * 0..100 blends identity → the per-camera residual lattice; applied FIRST in
+ * the Develop chain (before the base curve / any user slider). Only `amount`
+ * is stored in the doc — the lattice itself is resolved from the camera model
+ * at compile time (buildPlan → profileForModel), never serialized.
+ */
+export interface ProfileParams {
+  amount: number;
+}
+
 export interface DevelopParams {
+  profile: ProfileParams;
   basic: DevelopBasicParams;
   toneCurve: ToneCurveParams;
   hsl: Record<HslBand, HslBandParams>;
@@ -156,6 +170,9 @@ export function identityCurvePoints(): CurvePoints {
 
 export function defaultDevelopParams(): DevelopParams {
   return {
+    // identity (no pass); fresh RAW opens seed amount 100 under the
+    // default-look gate (appStore.seedDefaultLook), JPEG/restored keep 0.
+    profile: { amount: 0 },
     basic: {
       temp: 0,
       tint: 0,
@@ -201,6 +218,11 @@ export function isIdentityCurve(points: CurvePoints): boolean {
   return points.every((p) => p[1] === p[0]);
 }
 
+/** Profile is a no-op at amount 0 (bit-exact pass-through, like every section). */
+export function isIdentityProfile(p: ProfileParams): boolean {
+  return p.amount <= 0;
+}
+
 export function isIdentityToneCurve(tc: ToneCurveParams): boolean {
   return isIdentityCurve(tc.rgb) && isIdentityCurve(tc.r) && isIdentityCurve(tc.g) && isIdentityCurve(tc.b);
 }
@@ -229,6 +251,45 @@ export function isIdentityEffectsSpatial(e: EffectsParams): boolean {
 }
 
 // --- GPU passes --------------------------------------------------------------
+
+// Profile: the fitted camera-color residual, applied FIRST on the decoded
+// working-linear signal (before the base curve / any user slider). Trilinear
+// fetch of a 17³ RESIDUAL lattice (amount pre-baked into the packed values, so
+// binding is a single read-only STORAGE buffer — the lattice is 78 KB, over
+// the uniform-block cap). The look-up coord is clamped to [0,1]; the
+// regularized hull is ~0, so out-of-gamut inputs read ~identity (never an
+// edge-clamped shift). The trilinear math is the EXACT mirror of
+// profileFit.ts's profileResidual — keep them in lockstep. The pass only
+// exists at amount > 0, so identity stays bit-exact.
+const PROFILE_N = PROFILE_LATTICE_N;
+const PROFILE_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct ProfileLat {
+  data: array<vec4f, ${PROFILE_N * PROFILE_N * PROFILE_N}>,
+}
+@group(0) @binding(1) var<storage, read> u: ProfileLat;
+`,
+  body: /* wgsl */ `
+  {
+    let pc = clamp(c, vec3f(0.0), vec3f(1.0)) * ${PROFILE_N - 1}.0;
+    let i0 = min(vec3i(pc), vec3i(${PROFILE_N - 2}));
+    let f = pc - vec3f(i0);
+    var res = vec3f(0.0);
+    for (var dx = 0; dx < 2; dx = dx + 1) {
+      let wx = select(1.0 - f.x, f.x, dx == 1);
+      for (var dy = 0; dy < 2; dy = dy + 1) {
+        let wy = select(1.0 - f.y, f.y, dy == 1);
+        for (var dz = 0; dz < 2; dz = dz + 1) {
+          let wz = select(1.0 - f.z, f.z, dz == 1);
+          let idx = ((i0.x + dx) * ${PROFILE_N} + (i0.y + dy)) * ${PROFILE_N} + (i0.z + dz);
+          res = res + wx * wy * wz * u.data[idx].xyz;
+        }
+      }
+    }
+    c = c + res;
+  }
+`,
+});
 
 const TONE_WGSL = nodePassWgsl({
   uniformDecl: /* wgsl */ `
@@ -330,8 +391,15 @@ export interface PassSpec {
   /** Pipeline cache key (one compile per distinct id). */
   shaderId: string;
   wgsl: string;
-  /** Uniform contents; byteLength 0 = the pass binds no uniform. */
+  /** Uniform (or storage, see `storage`) contents; byteLength 0 = the pass binds no buffer. */
   uniforms: ArrayBuffer;
+  /**
+   * When true, binding(1) is a read-only STORAGE buffer, not a uniform — the
+   * renderer sets GPUBufferUsage.STORAGE accordingly (layout:'auto' infers the
+   * binding type from the WGSL). Used by the profile pass, whose 17³ lattice
+   * (78 KB) exceeds the 64 KB uniform-block limit.
+   */
+  storage?: boolean;
 }
 
 function packTone(b: DevelopBasicParams, wbGains: [number, number, number]): ArrayBuffer {
@@ -1001,9 +1069,12 @@ export interface CompiledDevelop {
 export function compileDevelop(
   params: DevelopParams,
   wbGains: [number, number, number],
-  renderScale: number
+  renderScale: number,
+  /** Per-camera profile residual (buildPlan resolves it via profileForModel); defaults to the fallback so callers without a model still render correctly. */
+  profileLattice: readonly number[] = DEFAULT_PROFILE
 ): CompiledDevelop {
   const b = params.basic;
+  const profileActive = !isIdentityProfile(params.profile);
   const wbActive = wbGains[0] !== 1 || wbGains[1] !== 1 || wbGains[2] !== 1;
   const toneActive =
     wbActive ||
@@ -1032,7 +1103,13 @@ export function compileDevelop(
   const hslBands = hslActive ? packHsl(params.hsl) : null;
   const grading = gradingActive ? packGrading(params.grading) : null;
   const fxPixel = fxPixelActive ? packFxPixel(e) : null;
+  const profile = profileActive ? packProfileLattice(profileLattice, params.profile.amount) : null;
   const passes: PassSpec[] = [];
+  if (profile) {
+    // FIRST in the chain (before the base curve / any user slider) — the
+    // fitted camera-color transform, a read-only storage-buffer trilinear.
+    passes.push({ shaderId: 'develop/profile', wgsl: PROFILE_WGSL, uniforms: profile.buffer as ArrayBuffer, storage: true });
+  }
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
   if (lut) {
     passes.push({ shaderId: 'develop/toneCurve', wgsl: TONECURVE_WGSL, uniforms: lut.buffer as ArrayBuffer });
@@ -1076,6 +1153,8 @@ export function compileDevelop(
       ? null // spatial kernels have no per-pixel CPU mirror
       : (px: Rgb, x: number, y: number, width: number, height: number): Rgb => {
           let out = px;
+          // FIRST — exact mirror of PROFILE_WGSL (trilinear + amount blend).
+          if (profileActive) out = applyProfileCpu(profileLattice, out, params.profile.amount);
           if (toneActive) out = cpuDevelopTone(out, b, wbGains);
           if (lut) out = cpuToneCurve(out, lut);
           if (hslBands) out = cpuHsl(out, hslBands);

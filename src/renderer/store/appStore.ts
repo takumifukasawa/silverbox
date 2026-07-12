@@ -776,6 +776,12 @@ export function seedDefaultLook(
               ...n,
               develop: {
                 ...n.develop,
+                // Fitted camera PROFILE (Adobe-Color character — profileFit.ts):
+                // amount 100 on a fresh RAW open, applied FIRST in the Develop
+                // chain (before the base curve). The lattice is resolved from
+                // the camera model at render time; only `amount` is stored.
+                // Dial-able in the Basic panel; 0 removes it entirely.
+                profile: { ...n.develop.profile, amount: 100 },
                 toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) },
                 // Default RAW sharpening (LR-calibration 2026-07-12): LR
                 // Classic seeds RAW imports with amount 40 / radius 1.0 /

@@ -57,6 +57,8 @@ let offscreenCanvas: OffscreenCanvas | null = null;
 let wbModel: WbModel = createWbModel({});
 /** Decoded dims of the current preview image — fed to buildPlan for anchor-space mask/spot conversion. */
 let currentImageDims: { width: number; height: number } | null = null;
+/** Camera model of the current preview image — selects the per-camera profile lattice (profileFit.ts). */
+let currentCameraModel: string | null = null;
 /** Gen of the most recently applied 'image'/'render' command (main surface — see renderProtocol.ts). */
 let currentGen = 0;
 
@@ -208,6 +210,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           outputId: req.outputId,
           srcWidth: req.image.width,
           srcHeight: req.image.height,
+          cameraModel: req.image.capture?.cameraModel ?? null,
           allowExternal: req.allowExternal,
         });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
@@ -227,6 +230,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           outputId: req.outputId,
           srcWidth: req.image.width,
           srcHeight: req.image.height,
+          cameraModel: req.image.capture?.cameraModel ?? null,
           inspectNodeId: req.inspectNodeId,
         });
         const result = await renderer.captureCutPointPixels(req.image, plan, req.encoded);
@@ -269,6 +273,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       currentCompareGen = msg.gen;
       wbModel = createWbModel(msg.image.color ?? {});
       currentImageDims = { width: msg.image.width, height: msg.image.height };
+      currentCameraModel = msg.image.capture?.cameraModel ?? null;
       lastImage = msg.image;
       // Image-node cache invalidation on main-image switch (see
       // `imageNodeCache`'s own doc comment) — each GraphRenderer instance
@@ -337,6 +342,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               outputId: msg.outputId,
               srcWidth: currentImageDims?.width,
               srcHeight: currentImageDims?.height,
+              cameraModel: currentCameraModel,
               inspectNodeId: msg.inspectNodeId ?? undefined,
             },
             msg.showBefore
@@ -443,6 +449,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               outputId: msg.outputId,
               srcWidth: currentImageDims?.width,
               srcHeight: currentImageDims?.height,
+              cameraModel: currentCameraModel,
             },
             msg.showBefore
           );

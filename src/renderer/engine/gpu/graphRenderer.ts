@@ -1474,9 +1474,12 @@ export class GraphRenderer {
         const phases = op.passes.map((pass): ExecPhase => {
           let uniformBuffer: GPUBuffer | null = null;
           if (pass.uniforms.byteLength > 0) {
+            // profile lattice is a read-only STORAGE buffer (78 KB > uniform
+            // cap); everything else binds a uniform. layout:'auto' infers the
+            // binding type from the WGSL, so the bind-group entry is identical.
             uniformBuffer = this.createBuffer({
               size: pass.uniforms.byteLength,
-              usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+              usage: (pass.storage ? GPUBufferUsage.STORAGE : GPUBufferUsage.UNIFORM) | GPUBufferUsage.COPY_DST,
             });
             this.device.queue.writeBuffer(uniformBuffer, 0, pass.uniforms);
           }

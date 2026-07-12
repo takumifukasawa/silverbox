@@ -2,10 +2,11 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
 import { thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
-import { srgbEncode } from '../engine/color/srgb';
-import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
+import { srgbDecode, srgbEncode } from '../engine/color/srgb';
+import { SRGB_TO_WORK, WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
+import { loadImage } from '../engine/decoder/imageLoader';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
-import { DECODE_OUTPUT_COLOR } from '../engine/decoder/librawDecoder';
+import { DECODE_OUTPUT_COLOR, isRawFileName } from '../engine/decoder/librawDecoder';
 import { RenderWorkerClient } from '../engine/gpu/renderClient';
 import {
   buildPlan,
@@ -103,6 +104,17 @@ declare global {
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
+      /**
+       * Fit-profile tooling (scripts/fit-profile.mjs): the CURRENT graph's
+       * DEVELOPED output in working-space linear Rec.2020, at a long edge of
+       * ≤ maxDim. Renders through the real GPU export path (renderToPixels →
+       * display-encoded sRGB) — so orientation/geometry are applied and the
+       * frame comes out upright, matching an LR export — then INVERTS the exit
+       * transform (sRGB decode → SRGB_TO_WORK) back to working-linear, exactly
+       * the design's "invert our exit transform on our render". Null when no
+       * image/renderer. Async (a one-shot render).
+       */
+      developedForFit(maxDim: number): Promise<{ rgb: number[]; width: number; height: number } | null>;
       /** Capture make/model of the current image (fit-base-curve + base-curve verify); null for a JPEG or non-Sony RAW. */
       captureInfo(): { cameraMake: string | null; cameraModel: string | null } | null;
       /** Working-space identity + the decode's libraw output color (verify:cst). */
@@ -903,6 +915,7 @@ export function CanvasView() {
           renderScale: Math.max(width, height) / Math.max(s.image.fullWidth, s.image.fullHeight),
           srcWidth: width,
           srcHeight: height,
+          cameraModel: s.image.capture?.cameraModel ?? null,
         });
         // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
         if (!planHasCpuReference(plan)) return null;
@@ -946,6 +959,28 @@ export function CanvasView() {
       imageForVerify() {
         const image = useAppStore.getState().image;
         return image ? { data: image.data, width: image.width, height: image.height } : null;
+      },
+      async developedForFit(maxDim) {
+        const s = useAppStore.getState();
+        if (!s.imagePath || !s.fileName || !s.renderer) return null;
+        const bytes = await window.silverbox.readFile(s.imagePath);
+        const kind = isRawFileName(s.fileName) ? 'raw' : 'jpg';
+        const full = await loadImage(bytes, kind, Math.max(1, maxDim), s.settings.baselineExposureEV);
+        const { data, width, height } = await s.renderer.renderToPixels(full, s.graph, 1, 'srgb', undefined, false);
+        // invert the exit transform: sRGB decode → SRGB_TO_WORK → working-linear
+        const M = SRGB_TO_WORK;
+        const n = width * height;
+        const out = new Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          const sr = srgbDecode(data[i * 4]! / 255);
+          const sg = srgbDecode(data[i * 4 + 1]! / 255);
+          const sb = srgbDecode(data[i * 4 + 2]! / 255);
+          const o = i * 3;
+          out[o] = M[0][0] * sr + M[0][1] * sg + M[0][2] * sb;
+          out[o + 1] = M[1][0] * sr + M[1][1] * sg + M[1][2] * sb;
+          out[o + 2] = M[2][0] * sr + M[2][1] * sg + M[2][2] * sb;
+        }
+        return { rgb: out, width, height };
       },
       captureInfo() {
         const image = useAppStore.getState().image;

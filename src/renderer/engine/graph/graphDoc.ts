@@ -6,6 +6,7 @@
  */
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
 import { compileDevelop, defaultDevelopParams, type DevelopParams, type PassSpec } from './developNode';
+import { profileForModel } from '../color/profileFit';
 import {
   createDefaultCustomShaderParams,
   getCustomShaderArtifact,
@@ -1061,6 +1062,13 @@ export interface CompileContext {
   /** renderLongEdge / fullLongEdge (≤1 preview, 1 export); scales Detail kernels. */
   renderScale?: number;
   /**
+   * Camera model (PreparedImage.capture.cameraModel) — selects the per-camera
+   * fitted PROFILE lattice (profileFit.ts). A short string, cheap to thread
+   * per frame; omitted callers get the fallback profile. Only matters when the
+   * Develop node's profile.amount > 0 (fresh RAW default look).
+   */
+  cameraModel?: string | null;
+  /**
    * Selects which output node to resolve when the doc has more than one
    * (named-outputs, spec §6) — matched against a node's `id`. Default (or no
    * match) = the doc's first output node, in `doc.nodes` array order.
@@ -1231,7 +1239,7 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const wbGains = wb.gains(params.basic.temp, params.basic.tint);
-        const compiled = compileDevelop(params, wbGains, renderScale);
+        const compiled = compileDevelop(params, wbGains, renderScale, profileForModel(ctx?.cameraModel));
         if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {
