@@ -41,6 +41,9 @@ export function PresetsMenu() {
   const applyPreset = useAppStore((s) => s.applyPreset);
   const deletePreset = useAppStore((s) => s.deletePreset);
   const setPreviewLook = useAppStore((s) => s.setPreviewLook);
+  const copyDevelopSettings = useAppStore((s) => s.copyDevelopSettings);
+  const pasteDevelopSettings = useAppStore((s) => s.pasteDevelopSettings);
+  const hasClipboard = useAppStore((s) => s.developClipboard !== null);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState('');
   const [saveName, setSaveName] = useState('');
@@ -213,6 +216,31 @@ export function PresetsMenu() {
                 title="Save the current whole-look develop graph as a named preset (same name overwrites it)"
               >
                 Save
+              </button>
+            </div>
+            {/* Visible-path principle (DESIGN.md): copy/paste develop
+                settings existed only as ⌘⇧C/V — the adoption audit's one
+                violation. The clickable path lives here because a preset is
+                the persistent cousin of the same concept (captureLook/
+                applyLook are literally shared). */}
+            <div className="presets-menu-row">
+              <button
+                type="button"
+                data-testid="preset-copy-settings"
+                disabled={!ready}
+                onClick={copyDevelopSettings}
+                title="Copy the current develop settings for pasting onto another photo (⌘⇧C)"
+              >
+                Copy settings
+              </button>
+              <button
+                type="button"
+                data-testid="preset-paste-settings"
+                disabled={!ready || !hasClipboard}
+                onClick={pasteDevelopSettings}
+                title="Paste the copied develop settings onto this photo — one undo entry (⌘⇧V)"
+              >
+                Paste
               </button>
             </div>
           </div>
