@@ -138,50 +138,16 @@ function downsampleBox(
   return { data: out, width: ow, height: oh };
 }
 
-/**
- * Apply libraw `flip` (EXIF orientation): 0 none, 3 = 180°, 5 = 90° CCW,
- * 6 = 90° CW. Returns possibly swapped dimensions.
- */
-function applyFlip(
-  src: Float32Array,
-  w: number,
-  h: number,
-  flip: number
-): { data: Float32Array; width: number; height: number } {
-  if (flip === 0) return { data: src, width: w, height: h };
-  const rotates = flip === 5 || flip === 6;
-  const ow = rotates ? h : w;
-  const oh = rotates ? w : h;
-  const out = new Float32Array(src.length);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let ox: number;
-      let oy: number;
-      if (flip === 3) {
-        ox = w - 1 - x;
-        oy = h - 1 - y;
-      } else if (flip === 6) {
-        // 90° clockwise
-        ox = h - 1 - y;
-        oy = x;
-      } else if (flip === 5) {
-        // 90° counter-clockwise
-        ox = y;
-        oy = w - 1 - x;
-      } else {
-        ox = x;
-        oy = y;
-      }
-      const s = (y * w + x) * 4;
-      const d = (oy * ow + ox) * 4;
-      out[d] = src[s]!;
-      out[d + 1] = src[s + 1]!;
-      out[d + 2] = src[s + 2]!;
-      out[d + 3] = 1;
-    }
-  }
-  return { data: out, width: ow, height: oh };
-}
+// NOTE (round-7 orientation bug, DSC06787.ARW): there used to be an
+// applyFlip() here re-applying `decoded.flip` to the decoded pixels — but
+// LibRaw's mem-image output has ALREADY applied the EXIF orientation
+// (dcraw_make_mem_image honors sizes.flip), so a portrait ARW arrives as an
+// already-portrait buffer (measured: 4688×7028 for a flip=5 shot whose
+// sensor raster is 7028×4688). Rotating it AGAIN put every portrait photo
+// back on its side; landscape shots (flip=0) double-rotated harmlessly,
+// which is why the whole test corpus never caught it. The decoded buffer is
+// used exactly as LibRaw hands it over; `flip` is kept on PreparedImage as
+// metadata only.
 
 /**
  * RAW-only deterministic "baseline exposure" (LR/Resolve-style): a fixed
@@ -207,14 +173,12 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
   const pixels = decoded.width * decoded.height;
   const linear = linearizeRgb16(decoded.data, pixels, baselineExposureGain(baselineExposureEV));
   const scaled = downsampleBox(linear, decoded.width, decoded.height, previewLongEdge);
-  const oriented = applyFlip(scaled.data, scaled.width, scaled.height, decoded.flip);
-  const rotated = decoded.flip === 5 || decoded.flip === 6;
   return {
-    data: oriented.data,
-    width: oriented.width,
-    height: oriented.height,
-    fullWidth: rotated ? decoded.height : decoded.width,
-    fullHeight: rotated ? decoded.width : decoded.height,
+    data: scaled.data,
+    width: scaled.width,
+    height: scaled.height,
+    fullWidth: decoded.width,
+    fullHeight: decoded.height,
     flip: decoded.flip,
     color: decoded.color,
     capture: decoded.capture,

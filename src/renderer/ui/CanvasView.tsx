@@ -50,7 +50,7 @@ import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../
 declare global {
   interface Window {
     __debug?: {
-      imageState(): { status: string; width?: number; height?: number; fullWidth?: number; fullHeight?: number };
+      imageState(): { status: string; width?: number; height?: number; fullWidth?: number; fullHeight?: number; flip?: number };
       /** Embedded-preview-first opening (Lightroom trick): the overlay's current state, or null once cleared. */
       openingPreviewState(): { url: string; width: number; height: number } | null;
       /** Verify-only: every blob: URL clearOpeningPreview has revoked so far, in order (proves a rapid second open doesn't leak the first's URL). */
@@ -550,6 +550,7 @@ export function CanvasView() {
           height: s.image?.height,
           fullWidth: s.image?.fullWidth,
           fullHeight: s.image?.fullHeight,
+          flip: s.image?.flip,
         };
       },
       openingPreviewState() {

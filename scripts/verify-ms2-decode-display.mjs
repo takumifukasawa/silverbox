@@ -117,6 +117,34 @@ try {
 
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms2-jpg.png') });
   console.log('screenshots: test-artifacts/ms2-raw.png, ms2-jpg.png');
+
+  // -----------------------------------------------------------------------
+  // Portrait orientation (round-7 bug): LibRaw's mem-image output arrives
+  // ALREADY rotated per EXIF — a defunct second rotation in decodeWorker put
+  // every portrait ARW on its side (landscape flip=0 shots double-rotated
+  // harmlessly, so the landscape-only corpus never caught it). Gated on a
+  // portrait fixture being present: the default is a personal reference
+  // photo that exists on the primary dev machine only — skip cleanly (with
+  // a loud line) elsewhere rather than fail.
+  const PORTRAIT_ARW =
+    process.env.SILVERBOX_TEST_PORTRAIT_ARW ??
+    'test-assets/italy/DSC06787.ARW';
+  const { existsSync } = await import('node:fs');
+  if (!existsSync(PORTRAIT_ARW)) {
+    console.log(`  SKIP  portrait-orientation checks (fixture missing: ${PORTRAIT_ARW})`);
+  } else {
+    console.log('verify-ms2 (portrait ARW decodes portrait — no double rotation):');
+    rmSidecarSync(PORTRAIT_ARW + '.silverbox.json', { force: true });
+    await page.evaluate((p) => {
+      void window.__openImageByPath(p);
+    }, PORTRAIT_ARW);
+    await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+    const portrait = await page.evaluate(() => window.__debug.imageState());
+    check('portrait ARW reports a rotating EXIF flip (5 or 6)', portrait.flip === 5 || portrait.flip === 6, portrait);
+    check('preview dims are PORTRAIT (height > width)', portrait.height > portrait.width, portrait);
+    check('full dims are PORTRAIT too', portrait.fullHeight > portrait.fullWidth, portrait);
+    rmSidecarSync(PORTRAIT_ARW + '.silverbox.json', { force: true });
+  }
 } finally {
   await app.close();
 }
