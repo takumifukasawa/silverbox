@@ -618,6 +618,15 @@ function packNr(d: DetailParams, scale: number): ArrayBuffer {
   return buf;
 }
 
+/**
+ * Sharpen slider scale — LR-CALIBRATION 2026-07-12: per slider unit our
+ * unsharp mask measured ~2.4× weaker than LR Classic's (matching LR's
+ * default RAW sharpening of amount 40 needed our ~96): fine-scale
+ * local-contrast energy Δ at amount 40 was 1.12 vs LR's 2.72. This gain
+ * aligns the slider scale so our 40 ≈ LR's 40.
+ */
+const DETAIL_SHARPEN_GAIN = 2.4;
+
 function packSharpen(d: DetailParams, scale: number): ArrayBuffer {
   const s = d.sharpen;
   const sigma = Math.max(DETAIL_SIGMA_MIN, s.radius * scale);
@@ -626,7 +635,7 @@ function packSharpen(d: DetailParams, scale: number): ArrayBuffer {
   const f = new Float32Array(buf);
   f[0] = inv2s2(sigma);
   f[1] = radius;
-  f[2] = s.amount / 100; // slider 100 → +1× the highpass
+  f[2] = DETAIL_SHARPEN_GAIN * (s.amount / 100); // slider 100 → GAIN× the highpass
   f[3] = Math.min(1, Math.max(0, s.masking / 100));
   f[4] = 1 / sigma;
   return buf;

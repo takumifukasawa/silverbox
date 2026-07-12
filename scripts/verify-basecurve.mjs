@@ -147,6 +147,17 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
   const seeded = await devCurve();
   check('fresh ARW seeds toneCurve.rgb with the exact shipped points', pointsEqual(seeded, EXPECTED_POINTS), seeded);
   check('graphDirty stays false (the base curve IS the default look)', (await graphDirty()) === false, await graphDirty());
+  // Default RAW sharpening rides the same default-look seeding (LR seeds RAW
+  // imports with 40/1.0/0; JPEGs stay 0 — asserted in the JPEG section below).
+  const seededSharpen = await page.evaluate(() => {
+    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
+    return dev?.develop?.detail?.sharpen ?? null;
+  });
+  check(
+    'fresh ARW seeds default sharpening 40/1.0/0 (LR RAW default)',
+    seededSharpen && seededSharpen.amount === 40 && seededSharpen.radius === 1.0 && seededSharpen.masking === 0,
+    seededSharpen
+  );
   const seededP50 = await histP50();
 
   // --- 4a. Reset restores identity (a darker render) ---
@@ -164,6 +175,11 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
   console.log('verify-basecurve (JPEG open is untouched):');
   await openImage(JPG_PATH);
   check('JPEG open keeps the identity curve (no base curve)', pointsEqual(await devCurve(), IDENTITY), await devCurve());
+  const jpegSharpen = await page.evaluate(() => {
+    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
+    return dev?.develop?.detail?.sharpen ?? null;
+  });
+  check('JPEG open keeps sharpening at 0 (LR behavior: in-camera JPEGs are pre-sharpened)', jpegSharpen?.amount === 0, jpegSharpen);
   const jpegP50 = await histP50();
 
   // --- 2. seeded render lands far closer to the JPEG at p50 ---

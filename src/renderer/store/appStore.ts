@@ -1225,7 +1225,23 @@ export const useAppStore = create<AppState>((set, get) => {
           ...graph,
           nodes: graph.nodes.map((n) =>
             n.kind === DEVELOP_KIND && n.develop
-              ? { ...n, develop: { ...n.develop, toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) } } }
+              ? {
+                  ...n,
+                  develop: {
+                    ...n.develop,
+                    toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) },
+                    // Default RAW sharpening (LR-calibration 2026-07-12): LR
+                    // Classic seeds RAW imports with amount 40 / radius 1.0 /
+                    // masking 0 (JPEGs get 0 — they were sharpened in-camera),
+                    // and with DETAIL_SHARPEN_GAIN aligning the slider scale,
+                    // our 40 ≈ LR's 40. Visible/editable in the Detail
+                    // section like every other piece of the default look.
+                    detail: {
+                      ...n.develop.detail,
+                      sharpen: { ...n.develop.detail.sharpen, amount: 40, radius: 1.0, masking: 0 },
+                    },
+                  },
+                }
               : n
           ),
         };
