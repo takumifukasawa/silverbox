@@ -9,10 +9,12 @@ recommended order. "LRC" = Lightroom Classic, "LR" = cloud Lightroom,
 
 Ingest (ARW/JPEG, embedded-preview-first, folder filmstrip, ratings),
 develop (WB/tone/curves/HSL/grading wheels/detail incl. six-knob NR/
-effects, all LR-calibrated), geometry (crop/LR-style straighten/rotate/
+effects — brightness/dehaze/clarity/texture/vignette/sharpen are
+LR-calibrated; HSL + grading strengths are LR-SHAPED but uncalibrated,
+banked as calibration round 3), geometry (crop/LR-style straighten/rotate/
 flip, manual + embedded Sony lens corrections), local adjustments
 (radial/linear/colorKey masks on a node graph, spot removal), the node
-graph itself (blend modes with masks, custom WGSL, Image node, external
+graph itself (blend node — plain mix + mask port, custom WGSL, Image node, external
 tool hook, named multi-outputs with per-output export settings),
 output (JPEG/PNG exports with ICC/EXIF policy, LUT export, golden
 renders, headless CLI, presets, sidecar hot-reload, compare view,
@@ -36,6 +38,7 @@ per-node preview). Suite: 49 e2e + unit tier.
 ### Category B — the node-graph identity (DR-inspired, differentiators)
 | Feature | Reference | Notes |
 |---|---|---|
+| Blend MODES (multiply/screen/overlay/…) | PS/DR/LR features | Small-medium: the blend node carries only a mix `amount` today (double-check finding — this table previously overclaimed "blend modes"). A `mode` param on the blend node + WGSL/CPU pairs per formula; classic set of ~8 modes. |
 | Node bypass toggle (solo/mute) | DR (Ctrl+D) | SMALL and high-value: temporarily disable any node without unwiring. We already bypass on delete; a `disabled` flag + keyboard toggle. Arguably Category A urgency for graph usability. |
 | Group/compound nodes | DR compound nodes | Large: fold a subgraph into one node with exposed params. The preset system is a flat cousin; defer. |
 | Shared/linked nodes (one correction reused across outputs) | DR shared nodes | Our DAG already allows fan-out — a node feeding two outputs IS shared. Gap is only UI affordance/education. Document, don't build. |

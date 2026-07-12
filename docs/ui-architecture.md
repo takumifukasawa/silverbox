@@ -53,10 +53,11 @@ single-window, non-catalog tool.
   (today) or a thumbnail GRID replacing the canvas (LRC's Library grid
   feel, ratings + edited dots on cells, Enter/double-click returns to
   develop view on the clicked photo). Explicitly still not a catalog:
-  it renders the SAME listImages data, nothing persisted. Keyboard: `G`
-  grid / `D` (or Escape) develop — LRC muscle memory (`G` currently
-  unused; `D`... check the shortcut chain first; if taken, Escape+G
-  round-trip suffices).
+  it renders the SAME listImages data, nothing persisted. Keyboard: LRC muscle
+  memory wants `G` for grid, but **`g` is TAKEN (grayscale toggle,
+  App.tsx)** — double-check finding. Options when this ships: move
+  grayscale to `V` (closer to LR's B&W key) and give grid `G`, or use
+  `⇧G` for grid. Decide then; verify the whole chain first.
 - **Keyboard map doc**: docs/shortcuts.md generated manually once —
   every shortcut currently lives in App.tsx's chain; the map is now big
   enough that users need a reference (and a `?` overlay later).
