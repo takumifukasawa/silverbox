@@ -653,8 +653,21 @@ function packSharpen(d: DetailParams, scale: number): ArrayBuffer {
 // sigmas are meant to be recalibrated against LR side-by-side in a follow-up
 // session. Recalibrate HERE only — the passes and CPU mirrors consume these
 // named constants, so the formulas never need to change.
-/** Dehaze ±100 → black-point shift k = ±this (encoded units; must stay < 1). */
-const FX_DEHAZE_STRENGTH = 0.3;
+/**
+ * Dehaze ±100 → black-point shift k = ±this (encoded units; must stay < 1).
+ * LR-calibrated 2026-07-12 (0.3 → 0.14): measured on three scenes, our +50
+ * darkened mids 2-3× more than LR Classic's (+50 mid-L delta ours −5..−15 vs
+ * LR −2..−8); 0.14 puts the luminance response in LR's band.
+ */
+const FX_DEHAZE_STRENGTH = 0.14;
+/**
+ * Dehaze ±100 → ±this saturation lift around encoded luma. LR's dehaze
+ * REVIVES color as it cuts haze (measured +50 chroma delta up to +12 on a
+ * genuinely hazy sunset while ours added ≤ +3) — a black-point stretch
+ * alone can't reproduce that, hence the explicit coupling. Same 2026-07-12
+ * calibration session.
+ */
+const FX_DEHAZE_SAT = 0.22;
 /** Vignette ±100 → ±this many stops of exp2 gain at the far corners. */
 const FX_VIGNETTE_STOPS = 1.5;
 /** Clarity ±100 → this × the (midtone-weighted) luma highpass. */
@@ -773,22 +786,30 @@ fn pcgHash(v: u32) -> u32 {
 const FX_PIXEL_WGSL = nodePassWgsl({
   uniformDecl: /* wgsl */ `
 struct FxPixelParams {
-  // x = dehaze k (±0.3), y = vignette exponent scale, z = vignette midpoint,
-  // w = grain amplitude
+  // x = dehaze k (±FX_DEHAZE_STRENGTH), y = vignette exponent scale,
+  // z = vignette midpoint, w = grain amplitude
   p0: vec4f,
-  // x = grain cell size (render px), yzw unused
+  // x = grain cell size (render px), y = dehaze saturation lift
+  // (±FX_DEHAZE_SAT), zw unused
   p1: vec4f,
 }
 @group(0) @binding(1) var<uniform> u: FxPixelParams;
 `,
-  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_PCG_HASH,
+  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_PCG_HASH + WGSL_LUMA,
   body: /* wgsl */ `
   {
     var e = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
 
-    // 1. Dehaze: k in [-0.3, 0.3] — never divides by zero
+    // 1. Dehaze: k — black-point stretch (never divides by zero) + the
+    // LR-character saturation coupling (haze removal revives color; see
+    // FX_DEHAZE_SAT). Branched so dehaze=0 stays numerically untouched.
     let k = u.p0.x;
     e = clamp((e - vec3f(k)) / (1.0 - k), vec3f(0.0), vec3f(1.0));
+    let dsat = u.p1.y;
+    if (dsat != 0.0) {
+      let yD = luma(e);
+      e = clamp(vec3f(yD) + (e - vec3f(yD)) * (1.0 + dsat), vec3f(0.0), vec3f(1.0));
+    }
 
     // 2. Vignette: radial falloff from image center; corner r = 1
     let dims = vec2f(textureDimensions(src));
@@ -821,6 +842,7 @@ function packFxPixel(e: EffectsParams): Float32Array {
   f[2] = e.vignetteMidpoint;
   f[3] = (e.grain / 100) * FX_GRAIN_AMPLITUDE;
   f[4] = e.grainSize;
+  f[5] = FX_DEHAZE_SAT * (e.dehaze / 100);
   return f;
 }
 
@@ -845,10 +867,17 @@ function cpuFxPixel(px: Rgb, u: Float32Array, x: number, y: number, width: numbe
     srgbEncode(Math.min(Math.max(px[1], 0), 1)),
     srgbEncode(Math.min(Math.max(px[2], 0), 1)),
   ];
-  // 1. Dehaze
+  // 1. Dehaze: black-point stretch + the LR-character saturation coupling
+  // (branched exactly like the WGSL so dehaze=0 stays numerically untouched)
   const k = u[0]!;
   const dehaze = (v: number) => Math.min(Math.max((v - k) / (1 - k), 0), 1);
   e = [dehaze(e[0]), dehaze(e[1]), dehaze(e[2])];
+  const dsat = u[5]!;
+  if (dsat !== 0) {
+    const yD = lumaCpu(e[0], e[1], e[2]);
+    const satF = (v: number) => Math.min(Math.max(yD + (v - yD) * (1 + dsat), 0), 1);
+    e = [satF(e[0]), satF(e[1]), satF(e[2])];
+  }
   // 2. Vignette
   const uvx = (x + 0.5) / width;
   const uvy = (y + 0.5) / height;
