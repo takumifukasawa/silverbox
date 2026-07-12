@@ -1540,6 +1540,11 @@ export const useAppStore = create<AppState>((set, get) => {
         // silently), not get swallowed here as an ordinary "sidecar ignored"
         // notice — see OpenSession.guard's doc comment on this exact hazard.
         if (err instanceof StaleOpenError) throw err;
+        // Pre-existing gap (flagged by the OpenSession extraction, closed
+        // here): a GENUINE readSidecar rejection used to continue to the
+        // final commit with staleness unchecked — the one path where a stale
+        // open could still clobber a newer one's state. Re-check explicitly.
+        if (session.stale()) throw new StaleOpenError();
         sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
         console.warn(`ignoring invalid sidecar for ${fileName}:`, err);
       }
