@@ -106,6 +106,48 @@ const ENCODE_SHADER = buildEncodeShader(WGSL_WORK_TO_SRGB);
 /** Export-only color-space variant (registered under shader id 'encode/p3'); the preview never uses this. */
 const ENCODE_SHADER_P3 = buildEncodeShader(WGSL_WORK_TO_P3);
 
+/** Box-filter taps per axis for THUMBNAIL_SHADER — 4×4 = 16 samples per output texel, plenty of anti-aliasing at a ~64px thumbnail and still trivial GPU cost. */
+const THUMBNAIL_TAPS = 4;
+
+// Node thumbnails (per-node-preview pack, tier 1): downsamples a step's own
+// rgba16float output to a tiny display-ready rgba8unorm target — same exit
+// transform as ENCODE_SHADER (WORK_TO_SRGB + the exact sRGB curve) so a
+// thumbnail's colors always match what the main canvas would show for that
+// same texture, just averaged in LINEAR space first (one encode, after the
+// box filter, not one per tap) to stay inside the "linear between passes"
+// invariant. A single bilinear sample per output texel would alias badly at
+// the ~30:1 ratios a 2000px-wide preview downsamples to 64px at — this pass
+// instead averages a THUMBNAIL_TAPS×THUMBNAIL_TAPS grid of textureLoad reads
+// per output texel (a real box filter, no sampler/mip machinery needed).
+const THUMBNAIL_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+struct ThumbParams {
+  srcDims: vec2f,
+  dstDims: vec2f,
+}
+@group(0) @binding(1) var<uniform> p: ThumbParams;
+${FULLSCREEN_VS}
+${WGSL_SRGB_ENCODE}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let cell = p.srcDims / p.dstDims;
+  let origin = pos.xy * cell;
+  var sum = vec3f(0.0);
+  for (var j = 0; j < ${THUMBNAIL_TAPS}; j++) {
+    for (var i = 0; i < ${THUMBNAIL_TAPS}; i++) {
+      let fx = (f32(i) + 0.5) / ${THUMBNAIL_TAPS}.0;
+      let fy = (f32(j) + 0.5) / ${THUMBNAIL_TAPS}.0;
+      let s = origin + vec2f(fx, fy) * cell;
+      let coord = vec2i(clamp(s, vec2f(0.0), p.srcDims - vec2f(1.0)));
+      sum += textureLoad(src, coord, 0).rgb;
+    }
+  }
+  let avg = sum / f32(${THUMBNAIL_TAPS} * ${THUMBNAIL_TAPS});
+  let enc = clamp(${WGSL_WORK_TO_SRGB} * avg, vec3f(0.0), vec3f(1.0));
+  return vec4f(srgbEncode(enc), 1.0);
+}
+`;
+
 // Viewer-only grayscale: convert to sRGB + encode (same exit), then show the
 // WORKING_LUMA luma of the encoded image on all channels — a tone/contrast
 // check that never touches readbacks or export.
@@ -589,6 +631,8 @@ export class GraphRenderer {
   private maskOverlayPipelineCache: GPURenderPipeline | null = null;
   /** Compiled once, on first use — the masked variant of the blend pass (see BLEND_MASK_SHADER). */
   private blendMaskPipelineCache: GPURenderPipeline | null = null;
+  /** Compiled once, on first use — the node-thumbnail box-downsample pass (see THUMBNAIL_SHADER). */
+  private thumbnailPipelineCache: GPURenderPipeline | null = null;
 
   /** Viewer-only display mode; readbacks/export always use the color encode. */
   viewMode: 'color' | 'grayscale' = 'color';
@@ -882,6 +926,19 @@ export class GraphRenderer {
       });
     }
     return this.maskOverlayPipelineCache;
+  }
+
+  /** Node-thumbnail box-downsample pipeline (see THUMBNAIL_SHADER) — compiled once, on first use. */
+  private thumbnailPipeline(): GPURenderPipeline {
+    if (!this.thumbnailPipelineCache) {
+      const module = this.device.createShaderModule({ code: THUMBNAIL_SHADER });
+      this.thumbnailPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba8unorm' }] },
+      });
+    }
+    return this.thumbnailPipelineCache;
   }
 
   /** Compute pipeline for HISTOGRAM_SHADER — compiled once, shared by stats() and statsCrop(). */
@@ -1552,6 +1609,108 @@ export class GraphRenderer {
       }
       return out;
     });
+  }
+
+  /**
+   * Node thumbnails (per-node-preview pack, tier 1): downsamples every
+   * DISTINCT step index named in `nodeSteps` (a nodeId → step-index map —
+   * see RenderPlan.nodeSteps) to a `longEdge`-scaled RGBA buffer, keyed back
+   * out to every nodeId that shares it. `-1` reads the same effective source
+   * view `render()` itself uses (the geometry/lens-resampled base, or the
+   * raw decode when both are identity) — so the input node and any
+   * identity/bypassed op both get a real thumbnail with zero special-casing.
+   *
+   * Retained-texture lifetime vs the step-texture pool (this pack's
+   * flagged fragile spot): this method reads `this.stepTextures` as they
+   * stand RIGHT NOW, with no re-record of the main chain. That is only safe
+   * because the CALLER (renderWorker.ts's 'thumbnails' request handler)
+   * never fires until the render-worker message queue has fully drained the
+   * most recent 'render' command first — worker message handling has no
+   * macrotask hops between "start applying a render" and "submit() the
+   * chain" (setGraph/applyGraph do no actual GPU await), so by the time a
+   * LATER posted message is even looked at, the prior render's submit() has
+   * already happened and `this.stepTextures` holds its final content. The
+   * debounce living upstream of that (CanvasView's 300ms post-render timer)
+   * is what guarantees no NEWER 'render' is queued behind THIS request
+   * either — see CanvasView.tsx's doc comment on the thumbnail timer. The
+   * bounds check below is defense-in-depth on top of that ordering argument,
+   * not a substitute for it: a `nodeSteps` index from a stale/mismatched
+   * plan (more steps than the renderer currently holds) is simply skipped
+   * rather than reading past the array.
+   */
+  async thumbnails(
+    nodeSteps: Record<string, number>,
+    longEdge: number
+  ): Promise<Record<string, { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> }> | null> {
+    await this.graphReady;
+    if (!this.source) return null;
+    const { width, height } = this;
+    const long = Math.max(width, height);
+    const scale = longEdge / long;
+    const thumbW = Math.max(1, Math.round(width * scale));
+    const thumbH = Math.max(1, Math.round(height * scale));
+
+    const encoder = this.device.createCommandEncoder();
+    const sourceView = this.effectiveSourceView(encoder);
+    const pipeline = this.thumbnailPipeline();
+    const uniform = this.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(uniform, 0, new Float32Array([width, height, thumbW, thumbH]));
+
+    const distinctIndices = new Set(Object.values(nodeSteps));
+    const targets = new Map<number, GPUTexture>();
+    for (const idx of distinctIndices) {
+      // Belt-and-braces guard (see this method's doc comment): a step index
+      // this map was computed against but which no longer exists here is
+      // simply skipped, never read.
+      if (idx >= 0 && idx >= this.stepTextures.length) continue;
+      const view = idx < 0 ? sourceView : this.stepTextures[idx]!.createView();
+      const target = this.createTexture({
+        size: [thumbW, thumbH],
+        format: 'rgba8unorm',
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      });
+      targets.set(idx, target);
+      this.addPass(encoder, target.createView(), pipeline, [
+        { binding: 0, resource: view },
+        { binding: 1, resource: { buffer: uniform } },
+      ]);
+    }
+
+    const bytesPerRow = Math.ceil((thumbW * 4) / 256) * 256;
+    const buffers = new Map<number, GPUBuffer>();
+    for (const [idx, target] of targets) {
+      const buf = this.createBuffer({ size: bytesPerRow * thumbH, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      buffers.set(idx, buf);
+      encoder.copyTextureToBuffer({ texture: target }, { buffer: buf, bytesPerRow, rowsPerImage: thumbH }, [thumbW, thumbH]);
+    }
+    this.device.queue.submit([encoder.finish()]);
+
+    const perIndex = new Map<number, Uint8ClampedArray<ArrayBuffer>>();
+    try {
+      await Promise.all(
+        [...buffers].map(async ([idx, buf]) => {
+          await buf.mapAsync(GPUMapMode.READ);
+          const padded = new Uint8Array(buf.getMappedRange());
+          const out = new Uint8ClampedArray(thumbW * thumbH * 4);
+          for (let y = 0; y < thumbH; y++) {
+            out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + thumbW * 4), y * thumbW * 4);
+          }
+          buf.unmap();
+          perIndex.set(idx, out);
+        })
+      );
+    } finally {
+      for (const target of targets.values()) this.destroyTexture(target);
+      for (const buf of buffers.values()) this.destroyBuffer(buf);
+      this.destroyBuffer(uniform);
+    }
+
+    const result: Record<string, { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> }> = {};
+    for (const [nodeId, idx] of Object.entries(nodeSteps)) {
+      const data = perIndex.get(idx);
+      if (data) result[nodeId] = { width: thumbW, height: thumbH, data };
+    }
+    return result;
   }
 }
 

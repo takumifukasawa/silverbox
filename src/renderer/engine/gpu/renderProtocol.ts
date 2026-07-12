@@ -41,6 +41,8 @@ export type RenderWorkerCommand =
       outputId?: string;
       /** Selected mask node id whose value should composite as a canvas-only red overlay (masks milestone); null/undefined = no overlay. */
       overlayMaskNodeId?: string | null;
+      /** Inspect mode (per-node-preview pack, tier 2): render THIS node's own output instead of `outputId`'s; null/undefined = normal output resolution. See graphDoc.ts's CompileContext.inspectNodeId. */
+      inspectNodeId?: string | null;
     }
   | { type: 'resize'; width: number; height: number }
   /**
@@ -77,6 +79,16 @@ export type RenderWorkerRequestMethod =
   | { method: 'rendererStats' }
   | { method: 'statsCrop'; x0: number; y0: number; w: number; h: number }
   | { method: 'encodedCropForVerify'; x0: number; y0: number; w: number; h: number }
+  /**
+   * Node thumbnails (per-node-preview pack, tier 1): `nodeSteps` is the
+   * CALLER's own (main-thread) buildPlan().nodeSteps over the FULL,
+   * non-truncated doc (never the inspect-mode-truncated one — see
+   * CanvasView.tsx) — recomputing it worker-side would need the whole doc to
+   * cross again just for this, and the two buildPlan() calls are guaranteed
+   * to agree since it's a pure function of the same doc/ctx the 'render'
+   * command was just posted with.
+   */
+  | { method: 'thumbnails'; nodeSteps: Record<string, number>; longEdge: number }
   /** Compare view: readback of the SECOND (compare-pane) GraphRenderer's current canvas content — see renderWorker.ts's compare* commands. */
   | { method: 'compareReadbackMean' }
   | {

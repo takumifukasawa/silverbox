@@ -15,59 +15,106 @@ import {
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
-import { BLEND_KIND, CUSTOM_KIND, OPS, isOpKind } from '../engine/graph/ops';
-import { DEVELOP_KIND, outputName, type GraphDoc } from '../engine/graph/graphDoc';
+import { BLEND_KIND, CUSTOM_KIND, isOpKind } from '../engine/graph/ops';
+import { DEVELOP_KIND, nodeLabel, type GraphDoc } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
 
-/** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output. */
-function BlendNode({ data, selected }: NodeProps) {
+/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions. */
+interface OpNodeData {
+  label: string;
+  thumbUrl?: string;
+  inspecting: boolean;
+  [key: string]: unknown;
+}
+
+/**
+ * Live thumbnail body (per-node-preview pack, tier 1) + the "eye" inspect
+ * toggle (tier 2) shared by every non-input/non-output node type below.
+ * `thumbUrl` is undefined for a node buildPlan never reached from the
+ * resolved output (a disconnected branch) — shown as a plain "=" placeholder
+ * rather than nothing, so an editor full of freshly-added, not-yet-wired
+ * nodes doesn't read as "thumbnails are broken".
+ */
+function NodeThumb({ id, thumbUrl, inspecting }: { id: string; thumbUrl?: string; inspecting: boolean }) {
+  const setInspectNode = useAppStore((s) => s.setInspectNode);
   return (
-    <div className={`blend-node${selected ? ' selected' : ''}`}>
+    <div className="op-node-body">
+      <div
+        className={`op-node-thumb${thumbUrl ? '' : ' op-node-thumb--empty'}`}
+        style={thumbUrl ? { backgroundImage: `url(${thumbUrl})` } : undefined}
+        data-testid={`node-thumb-${id}`}
+      >
+        {!thumbUrl && <span aria-hidden>=</span>}
+      </div>
+      <button
+        type="button"
+        className={`op-node-eye${inspecting ? ' op-node-eye--active' : ''}`}
+        title={inspecting ? 'Stop inspecting this node’s output' : 'Inspect this node’s output (⌥-click also works)'}
+        data-testid={`node-inspect-${id}`}
+        onClick={(ev) => {
+          ev.stopPropagation();
+          setInspectNode(inspecting ? null : id);
+        }}
+      >
+        {inspecting ? '◉' : '○'}
+      </button>
+    </div>
+  );
+}
+
+/** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack). */
+function OpNode({ id, data, selected }: NodeProps) {
+  const { label, thumbUrl, inspecting } = data as unknown as OpNodeData;
+  return (
+    <div className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
+      <Handle type="target" position={Position.Left} />
+      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
+      <span>{label}</span>
+      <Handle type="source" position={Position.Right} />
+    </div>
+  );
+}
+
+/** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output, same thumbnail/eye body as OpNode. */
+function BlendNode({ id, data, selected }: NodeProps) {
+  const { label, thumbUrl, inspecting } = data as unknown as OpNodeData;
+  return (
+    <div className={`blend-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
       <Handle type="target" id="a" position={Position.Left} style={{ top: '30%' }} />
       <Handle type="target" id="b" position={Position.Left} style={{ top: '70%' }} />
       <Handle type="target" id="mask" position={Position.Bottom} style={{ left: '50%' }} />
       <span className="blend-node-ports">
         a<br />b
       </span>
-      <span>{String((data as { label?: string }).label ?? 'blend')}</span>
+      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
+      <span>{label}</span>
       <Handle type="source" position={Position.Right} />
     </div>
   );
 }
 
-const nodeTypes = { blend: BlendNode };
+const nodeTypes = { blend: BlendNode, op: OpNode };
 
 /** Pure GraphDoc → React Flow Node[] projection, shared by the initial state and the resync effect below. */
-function buildNodes(graph: GraphDoc, fileName: string | null, selectedNodeId: string | null): Node[] {
+function buildNodes(
+  graph: GraphDoc,
+  fileName: string | null,
+  selectedNodeId: string | null,
+  nodeThumbs: Record<string, string>,
+  inspectNodeId: string | null
+): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
   const outputCount = graph.nodes.filter((n) => n.kind === 'output').length;
   return graph.nodes.map((n) => ({
     id: n.id,
     type:
-      n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : 'default',
+      n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : 'op',
     data: {
-      label:
-        n.kind === 'input'
-          ? fileName
-            ? `input — ${fileName}`
-            : 'input'
-          : n.kind === 'output'
-            ? `output (sRGB) — ${outputName(n)}`
-            : n.kind === DEVELOP_KIND
-              ? 'Develop'
-              : n.kind === CUSTOM_KIND
-                ? 'custom (wgsl)'
-                : n.kind === BLEND_KIND
-                  ? 'blend'
-                  : n.kind === MASK_KIND
-                    ? 'mask'
-                    : n.kind === SPOTS_KIND
-                      ? 'spots'
-                      : isOpKind(n.kind)
-                        ? OPS[n.kind].label.toLowerCase()
-                        : n.kind,
+      label: nodeLabel(n, fileName),
+      thumbUrl: nodeThumbs[n.id],
+      inspecting: n.id === inspectNodeId,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
@@ -102,6 +149,14 @@ export function NodeEditorPanel() {
   const removeEdge = useAppStore((s) => s.removeEdge);
   const connectNotice = useAppStore((s) => s.connectNotice);
   const graphBroken = useAppStore((s) => s.graphBroken);
+  // Per-node-preview pack: RENDER OUTPUT, not doc input (kept out of
+  // GraphDoc/history entirely — see appStore.ts's nodeThumbs/inspectNodeId
+  // doc comments) but still flows through buildNodes/rfNodes below like any
+  // other per-node display data, rather than a second, competing per-frame
+  // write path into React Flow.
+  const nodeThumbs = useAppStore((s) => s.nodeThumbs);
+  const inspectNodeId = useAppStore((s) => s.inspectNodeId);
+  const setInspectNode = useAppStore((s) => s.setInspectNode);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -113,15 +168,20 @@ export function NodeEditorPanel() {
   // to the worker on every move. Instead, onNodesChange applies EVERY change
   // (including in-flight 'position' drag changes) to this local state only;
   // the GraphDoc is written exactly once, at drag end (onNodeDragStop below).
-  const [rfNodes, setRfNodes] = useState<Node[]>(() => buildNodes(graph, fileName, selectedNodeId));
+  // nodeThumbs/inspectNodeId resync the SAME way as graph/fileName/selection
+  // below (they change at most every ~300ms, via CanvasView's debounce — far
+  // below drag-lag territory, so no extra guard is needed for them).
+  const [rfNodes, setRfNodes] = useState<Node[]>(() =>
+    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId)
+  );
   // Suppressed while a drag is in flight: the store's node position is still
   // the PRE-drag value until drop, so resyncing from it mid-drag would fight
   // the local per-move state right back into the lag this exists to avoid.
   const draggingRef = useRef(false);
   useEffect(() => {
     if (draggingRef.current) return;
-    setRfNodes(buildNodes(graph, fileName, selectedNodeId));
-  }, [graph, fileName, selectedNodeId]);
+    setRfNodes(buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId));
+  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId]);
 
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,
@@ -131,7 +191,19 @@ export function NodeEditorPanel() {
     selected: e.id === selectedEdgeId,
   }));
 
-  const onNodeClick: NodeMouseHandler = useCallback((_ev, node) => selectNode(node.id), [selectNode]);
+  // ⌥-click toggles inspect mode instead of selecting (per-node-preview pack,
+  // tier 2) — the same node also has its own always-visible "eye" button
+  // (NodeThumb above) for discoverability, per the brief.
+  const onNodeClick: NodeMouseHandler = useCallback(
+    (ev, node) => {
+      if (ev.altKey) {
+        setInspectNode(inspectNodeId === node.id ? null : node.id);
+        return;
+      }
+      selectNode(node.id);
+    },
+    [selectNode, setInspectNode, inspectNodeId]
+  );
   // Every intermediate position lands in local state only (see rfNodes above)
   // — applyNodeChanges is the same helper React Flow's own useNodesState uses.
   const onNodesChange = useCallback((changes: NodeChange[]) => {

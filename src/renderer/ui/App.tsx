@@ -139,6 +139,12 @@ export function App() {
         // down (compare has none), just flip the flag off.
         useAppStore.getState().setCompareMode(false);
       }
+      if (ev.key === 'Escape' && useAppStore.getState().inspectNodeId !== null) {
+        // Inspect mode (per-node-preview pack, tier 2): same "just flip the
+        // flag off" shape as compareMode above — inspect isn't a canvas
+        // pointer tool (no gesture of its own to tear down).
+        useAppStore.getState().setInspectNode(null);
+      }
       if ((ev.key === 'Backspace' || ev.key === 'Delete') && useAppStore.getState().spotMode) {
         // Delete-key precedence (task #50): React Flow's own node editor
         // ALSO binds Backspace/Delete (deleteKeyCode, NodeEditorPanel.tsx) to

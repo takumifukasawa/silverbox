@@ -518,6 +518,37 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Inspect mode (per-node-preview pack, tier 2): distinct color from both
+   .before-badge (amber, A/B) and .compare-pane-badge (cyan) — this is a
+   THIRD, mutually-exclusive-with-compare "what is the canvas showing" state.
+   Unlike the pointer-events:none badges above, this one hosts a real ✕
+   button, so it opts back into pointer events. */
+.canvas-inspect-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 8px 3px 10px;
+  background: rgba(20, 20, 20, 0.72);
+  border: 1px solid #c299f0;
+  border-radius: 4px;
+  color: #c299f0;
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+.canvas-inspect-exit {
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
 /* Embedded-preview-first opening: the ARW's own camera JPEG, filling the
    viewport while the real decode + GPU render runs behind it (see
    CanvasView's opening-preview-overlay). object-fit: contain, not cover — a
@@ -1803,6 +1834,79 @@ button:disabled {
   font-size: 9px;
   line-height: 1.7;
   color: #889;
+}
+
+/* Generic op-kind node (per-node-preview pack): same footprint/selected
+   treatment as .blend-node so the two read as one family in the graph. */
+.op-node {
+  position: relative;
+  background: #2d2d3d;
+  border: 1px solid #556;
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 12px;
+  min-width: 90px;
+  text-align: center;
+}
+
+.op-node.selected {
+  border-color: #8ab4f8;
+}
+
+/* Currently-inspected node (tier 2) — distinct border color from selection
+   (#8ab4f8) so "selected" and "inspecting" stay visually separable when a
+   node is both at once. Matches .canvas-inspect-badge's purple. */
+.op-node--inspecting,
+.blend-node.op-node--inspecting {
+  border-color: #c299f0;
+}
+
+/* Thumbnail + eye button row (tier 1/2), shared by .op-node and .blend-node. */
+.op-node-body {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.op-node-thumb {
+  width: 64px;
+  height: 48px;
+  max-width: 100%;
+  border-radius: 3px;
+  background-color: #1a1a1a;
+  background-size: cover;
+  background-position: center;
+  border: 1px solid #444;
+}
+
+.op-node-thumb--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #667;
+  font-size: 14px;
+}
+
+.op-node-eye {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(20, 20, 20, 0.75);
+  color: #aab;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.op-node-eye--active {
+  color: #c299f0;
 }
 
 /* ---- export dialog (UX pack B §4) ---- */

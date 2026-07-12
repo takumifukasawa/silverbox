@@ -42,6 +42,7 @@ import {
   type CustomShaderParams,
 } from '../engine/graph/customShaderNode';
 import { validateWgsl } from '../engine/shader/validateWgsl';
+import { clearNodeThumbs, pruneNodeThumb } from '../engine/thumbnail/nodeThumbCache';
 import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/whiteBalance';
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
 import { baseCurveForModel } from '../engine/color/baseCurve';
@@ -123,6 +124,28 @@ interface AppState {
   /** Graph differs from what the sidecar holds (or would hold). */
   graphDirty: boolean;
   selectedNodeId: string | null;
+  /**
+   * Live ~64px thumbnail blob: URLs by nodeId (per-node-preview pack, tier
+   * 1) — RENDER OUTPUT, not doc input, so this deliberately lives OUTSIDE
+   * GraphDoc/history (undo/redo never touches it; CanvasView.tsx's debounced
+   * post-render effect is the only writer). See engine/thumbnail/nodeThumbCache.ts
+   * for the revocation-audit discipline every writer of this map follows.
+   */
+  nodeThumbs: Record<string, string>;
+  setNodeThumbs(thumbs: Record<string, string>): void;
+  /**
+   * Inspect mode (per-node-preview pack, tier 2): previews THIS node's own
+   * output on the main canvas instead of the active output — null = normal.
+   * Mutually exclusive with compareMode in BOTH directions (see
+   * setCompareMode/setInspectNode below): both answer "what should the
+   * canvas show", so only one gets to at a time; unlike compare, inspect
+   * isn't a canvas POINTER tool (no gesture of its own), so it does NOT go
+   * through deactivateOtherTools. Cleared on image switch (openImageByPath)
+   * and whenever the inspected node itself disappears (see this file's
+   * inspectNodeId-prune subscribe, near the bottom).
+   */
+  inspectNodeId: string | null;
+  setInspectNode(id: string | null): void;
   /** WGSL compile errors by node id (custom nodes render identity meanwhile). */
   shaderErrors: Record<string, string>;
   /** The live render-worker client (registered by CanvasView; used for export). */
@@ -1052,6 +1075,8 @@ export const useAppStore = create<AppState>((set, get) => {
   graph: defaultGraphDoc(),
   graphDirty: false,
   selectedNodeId: null,
+  nodeThumbs: {},
+  inspectNodeId: null,
   shaderErrors: {},
   renderer: null,
   viewportFitAnimated: null,
@@ -1285,6 +1310,13 @@ export const useAppStore = create<AppState>((set, get) => {
       clearCustomShaderArtifacts();
       mirrorShaderArtifactClear();
       shaderEpoch++;
+      // Per-node thumbnails/inspect mode (per-node-preview pack) never
+      // survive an image switch: defaultGraphDoc()/a loaded sidecar reuse the
+      // SAME node ids across different images ('in'/'dev'/'out'…), so a
+      // node-existence check alone couldn't tell "still the same node" apart
+      // from "coincidentally the same id, totally different image" — clear
+      // both explicitly, revoking every blob: URL before dropping the map.
+      clearNodeThumbs(get().nodeThumbs);
       set({
         ...clearOpeningPreview(get()),
         imageStatus: 'ready',
@@ -1292,6 +1324,8 @@ export const useAppStore = create<AppState>((set, get) => {
         graph,
         graphDirty: false,
         selectedNodeId: null,
+        nodeThumbs: {},
+        inspectNodeId: null,
         history: emptyHistory(),
         shaderErrors: {},
         sidecarNotice,
@@ -1368,6 +1402,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
   selectNode(id) {
     set({ selectedNodeId: id });
+  },
+
+  setNodeThumbs(thumbs) {
+    set({ nodeThumbs: thumbs });
+  },
+
+  setInspectNode(id) {
+    set((s) => (s.inspectNodeId === id ? {} : { inspectNodeId: id, ...(id !== null ? { compareMode: false } : {}) }));
   },
 
   // `key` is a flat param key for op nodes, or a dot path into the Develop
@@ -1494,6 +1536,12 @@ export const useAppStore = create<AppState>((set, get) => {
           // null falls back to Mode A (before) — the compare strip's dropdown
           // just loses this option, same "graceful fallback" as activeOutputId
           compareOutputId: s.compareOutputId === nodeId ? null : s.compareOutputId,
+          // Per-node-preview pack: prune this node's own thumbnail (revoking
+          // its blob: URL) immediately rather than waiting for the next
+          // debounced refresh, and exit inspect mode if it was targeting
+          // exactly this node.
+          nodeThumbs: pruneNodeThumb(s.nodeThumbs, nodeId),
+          inspectNodeId: s.inspectNodeId === nodeId ? null : s.inspectNodeId,
         };
       }
       // bypass: route the node's input (blend: its 'a' input) to every target
@@ -1529,6 +1577,8 @@ export const useAppStore = create<AppState>((set, get) => {
         graph: scratch,
         graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
+        nodeThumbs: pruneNodeThumb(s.nodeThumbs, nodeId),
+        inspectNodeId: s.inspectNodeId === nodeId ? null : s.inspectNodeId,
       };
     });
   },
@@ -1954,7 +2004,11 @@ export const useAppStore = create<AppState>((set, get) => {
       s.compareMode === active
         ? {}
         : active
-          ? { compareMode: true, ...deactivateOtherTools('compare') }
+          // Entering compare exits inspect mode (per-node-preview pack) — both
+          // answer "what should the canvas show", and letting them stack would
+          // mean two different "which node's result am I looking at" pickers
+          // fighting over the one canvas.
+          ? { compareMode: true, inspectNodeId: null, ...deactivateOtherTools('compare') }
           : { compareMode: false }
     );
   },
@@ -2479,4 +2533,30 @@ useAppStore.subscribe((state) => {
   if (!state.maskOverlay) return;
   const node = state.graph.nodes.find((n) => n.id === state.selectedNodeId);
   if (node?.kind !== MASK_KIND) useAppStore.setState({ maskOverlay: false });
+});
+
+// Per-node-preview pack: belt-and-braces prune, alongside removeOpNode's own
+// immediate one — undo/redo and sidecar reload replace `graph` wholesale
+// without going through removeOpNode at all, so a node this map/inspection
+// still names could otherwise survive a graph replacement that dropped it.
+// Keyed off `graph` itself (lastAutosaveGraph's own pattern above): image
+// switches ALSO replace `graph`, but openImageByPath already clears both
+// fields explicitly and synchronously in the SAME `set` — by the time this
+// subscribe observes the new graph, inspectNodeId/nodeThumbs are already
+// whatever that call left them, so this only ever has real work to do for
+// an in-session graph edit (undo/redo, sidecar reload) that dropped a node.
+let lastNodePreviewGraph: GraphDoc | null = null;
+useAppStore.subscribe((state) => {
+  if (state.graph === lastNodePreviewGraph) return;
+  lastNodePreviewGraph = state.graph;
+  const ids = new Set(state.graph.nodes.map((n) => n.id));
+  const patch: Partial<AppState> = {};
+  if (state.inspectNodeId !== null && !ids.has(state.inspectNodeId)) patch.inspectNodeId = null;
+  const staleThumbIds = Object.keys(state.nodeThumbs).filter((id) => !ids.has(id));
+  if (staleThumbIds.length > 0) {
+    let thumbs = state.nodeThumbs;
+    for (const id of staleThumbIds) thumbs = pruneNodeThumb(thumbs, id);
+    patch.nodeThumbs = thumbs;
+  }
+  if (Object.keys(patch).length > 0) useAppStore.setState(patch);
 });

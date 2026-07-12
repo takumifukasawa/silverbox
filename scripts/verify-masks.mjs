@@ -21,7 +21,7 @@
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
-import { mkdirSync, existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, existsSync, readFileSync, statSync, writeFileSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
 import sharp from 'sharp';
 
@@ -600,15 +600,22 @@ try {
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
   await openAndWait(ARW_PATH);
   await page.keyboard.press('Meta+s');
-  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+  // A fresh open is already graphDirty === false, so waiting on that races
+  // the async write (the filmstrip fixture's exact bug) — poll for the FILE.
+  for (let i = 0; i < 100 && !existsSync(SIDECAR); i++) await new Promise((r) => setTimeout(r, 100));
   const cleanJson = JSON.parse(readFileSync(SIDECAR, 'utf8'));
   cleanJson.someFutureWrapperField = 'wrapper-extra';
   const devNodeIdx = cleanJson.graph.nodes.findIndex((n) => n.id === 'dev');
   cleanJson.graph.nodes[devNodeIdx].someFutureNodeField = 'node-extra';
   writeFileSync(SIDECAR, JSON.stringify(cleanJson, null, 2));
   await openAndWait(ARW_PATH);
+  const mtimeBeforeResave = statSync(SIDECAR).mtimeMs;
   await page.keyboard.press('Meta+s');
-  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+  // same fresh-open race as above — the resave rewrites an EXISTING file, so
+  // poll for its mtime to move instead of mere existence
+  for (let i = 0; i < 100 && statSync(SIDECAR).mtimeMs === mtimeBeforeResave; i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
   const resavedJson = JSON.parse(readFileSync(SIDECAR, 'utf8'));
   check('unknown wrapper-level key survives load+save', resavedJson.someFutureWrapperField === 'wrapper-extra', resavedJson.someFutureWrapperField);
   check(

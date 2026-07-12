@@ -132,6 +132,7 @@ export class RenderWorkerClient {
     showBefore: boolean;
     outputId?: string;
     overlayMaskNodeId?: string | null;
+    inspectNodeId?: string | null;
   }): void {
     this.gen++;
     this.renderPostCount++;
@@ -144,6 +145,7 @@ export class RenderWorkerClient {
       showBefore: args.showBefore,
       outputId: args.outputId,
       overlayMaskNodeId: args.overlayMaskNodeId ?? null,
+      inspectNodeId: args.inspectNodeId ?? null,
     };
     getWorker().postMessage(msg);
   }
@@ -222,6 +224,21 @@ export class RenderWorkerClient {
 
   encodedCropForVerify(x0: number, y0: number, w: number, h: number): Promise<Uint8Array | null> {
     return request(this.gen, { method: 'encodedCropForVerify', x0, y0, w, h });
+  }
+
+  /**
+   * Node thumbnails (per-node-preview pack, tier 1): `nodeSteps` is a
+   * nodeId → step-index map from the CALLER's own buildPlan().nodeSteps
+   * (CanvasView.tsx builds one locally every render pass already, for the
+   * graphBroken check) — see renderProtocol.ts's 'thumbnails' doc comment
+   * for why the worker doesn't recompute it. Resolves to null only when no
+   * image is loaded yet (mirrors readbackMean's own null case).
+   */
+  thumbnails(
+    nodeSteps: Record<string, number>,
+    longEdge: number
+  ): Promise<Record<string, { width: number; height: number; data: Uint8ClampedArray<ArrayBuffer> }> | null> {
+    return request(this.gen, { method: 'thumbnails', nodeSteps, longEdge });
   }
 
   /** Export: `image` is a disposable full-resolution decode (see appStore.ts's exportImage) — its buffer is transferred, not copied. */

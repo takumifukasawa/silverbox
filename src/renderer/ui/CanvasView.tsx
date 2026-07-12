@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
 import { thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
+import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
@@ -15,6 +16,7 @@ import {
   defaultLensParams,
   DEVELOP_KIND,
   isIdentityGeometry,
+  nodeLabel,
   orientedDims,
   outputName,
   planHasCpuReference,
@@ -65,6 +67,12 @@ declare global {
       };
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
       thumbnailRevocations(): string[];
+      /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
+      nodeThumbsState(): Record<string, string>;
+      /** Verify-only: every node-thumbnail blob: URL updateNodeThumbs has revoked so far, in order. */
+      nodeThumbRevocations(): string[];
+      /** Per-node-preview pack, tier 2: the currently-inspected node id, or null. */
+      inspectState(): string | null;
       rendererKind(): 'webgpu';
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
@@ -244,6 +252,11 @@ function usePlanDoc(doc: GraphDoc): GraphDoc {
  */
 const COMPARE_PANE_SCALE = 1;
 
+/** Long-edge target (px) for every node-graph thumbnail (per-node-preview pack, tier 1) — a UE-material-editor-style ~64px preview, cheap at this size (see graphRenderer.ts's THUMBNAIL_SHADER). */
+const NODE_THUMBNAIL_LONG_EDGE = 64;
+/** Debounce (ms) after the LAST render before thumbnails refresh — never per-slider-tick (see this file's thumbnail-timer effect below). */
+const NODE_THUMBNAIL_DEBOUNCE_MS = 300;
+
 function workToSrgb(rgb: readonly [number, number, number]): [number, number, number] {
   const [r, g, b] = rgb;
   return [
@@ -282,6 +295,11 @@ export function CanvasView() {
   const openingPreview = useAppStore((s) => s.openingPreview);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
+  const fileName = useAppStore((s) => s.fileName);
+  // Inspect mode (per-node-preview pack, tier 2) — see appStore.ts's
+  // inspectNodeId doc comment for the compareMode exclusivity rule.
+  const inspectNodeId = useAppStore((s) => s.inspectNodeId);
+  const setInspectNode = useAppStore((s) => s.setInspectNode);
   // LR-style preset hover preview (round-7 UX pack G §4): a transient look
   // that overrides the RENDER only — everything else in this component
   // (selection, mask/spot overlays, the node editor's own reads of `graph`)
@@ -313,6 +331,10 @@ export function CanvasView() {
   const maskOverlay = useAppStore((s) => s.maskOverlay);
   const selectedNode = graph.nodes.find((n) => n.id === selectedNodeId);
   const selectedMaskNode = selectedNode?.kind === MASK_KIND ? selectedNode : undefined;
+  // Inspect mode (per-node-preview pack, tier 2) badge label — nodeLabel is
+  // the SAME helper NodeEditorPanel's node bodies use, so the two never say
+  // different things about the same node.
+  const inspectedNode = inspectNodeId ? graph.nodes.find((n) => n.id === inspectNodeId) : undefined;
   // The active chain's spots node (appStore.ts's findActiveSpotsNodeId) —
   // NOT simply selectedNode: spot mode edits/shows that chain's spots
   // regardless of whatever else happens to be selected in the node editor.
@@ -391,6 +413,8 @@ export function CanvasView() {
   const viewRef = useRef(view);
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
+  /** Per-node-preview pack (tier 1): the 300ms post-render debounce timer — see the thumbnail-refresh block in the render effect below. */
+  const thumbTimerRef = useRef<number | undefined>(undefined);
   const scopeMode = useAppStore((s) => s.scopeMode);
 
   // Space's animated fit (UX pack G §2): register this mount's fitAnimated
@@ -540,15 +564,21 @@ export function CanvasView() {
       // the node editor instead of killing the preview. buildPlan is pure and
       // side-effect-free (graphDoc.ts), so re-running it here — main-side,
       // redundant to the worker's own copy over the SAME doc — costs nothing
-      // and needs no round trip just to learn whether it throws.
+      // and needs no round trip just to learn whether it throws. This is
+      // ALSO the FULL, never-inspect-truncated plan the thumbnail refresh
+      // below reuses (its nodeSteps) — inspect mode must never change what
+      // thumbnails show, only what the main canvas shows (see client.render's
+      // own inspectNodeId, further down).
+      let nodeSteps: Record<string, number> = {};
       try {
-        buildPlan(planDoc, {
+        const localPlan = buildPlan(planDoc, {
           wb: wbModel,
           renderScale,
           outputId: activeOutputId ?? undefined,
           srcWidth: image.width,
           srcHeight: image.height,
         });
+        nodeSteps = localPlan.nodeSteps;
         useAppStore.getState().setGraphBroken(false);
       } catch {
         useAppStore.getState().setGraphBroken(true);
@@ -574,6 +604,7 @@ export function CanvasView() {
         showBefore,
         outputId: activeOutputId ?? undefined,
         overlayMaskNodeId: maskOverlay && selectedMaskNode ? selectedMaskNode.id : null,
+        inspectNodeId,
       });
       setGpuError(null);
       // Compare view (compare pack): mirrors the render() call above onto the
@@ -632,6 +663,32 @@ export function CanvasView() {
           });
         }
       }, 120);
+
+      // Node thumbnails (per-node-preview pack, tier 1): refreshed on a
+      // SEPARATE, longer (300ms) post-render debounce — never per-slider-tick
+      // — and skipped ENTIRELY while a modal canvas gesture (crop/spot/
+      // mask-draw) is active, so a thumbnail readback never contends with a
+      // drag's own frame budget (this file's fragile-spot guard). Clearing
+      // the pending timer without rescheduling one is enough: the NEXT time
+      // this effect runs with the gesture flag back off (the tool's own
+      // deactivation flips cropMode/spotMode/maskDrawMode, which is itself a
+      // dependency below) a fresh 300ms timer starts, so thumbnails still
+      // settle shortly after the session ends.
+      clearTimeout(thumbTimerRef.current);
+      const gestureActive = cropMode || spotMode || maskDrawMode !== null;
+      if (!gestureActive && Object.keys(nodeSteps).length > 0) {
+        const thumbGen = client.currentGen();
+        thumbTimerRef.current = window.setTimeout(() => {
+          void client.thumbnails(nodeSteps, NODE_THUMBNAIL_LONG_EDGE).then(async (batch) => {
+            // Stale-response guard, same reasoning as the stats/scope debounce
+            // above: a newer edit (or image switch) may have moved on while
+            // the GPU readback + PNG encode were in flight.
+            if (!batch || client.currentGen() !== thumbGen) return;
+            const merged = await updateNodeThumbs(useAppStore.getState().nodeThumbs, batch);
+            useAppStore.getState().setNodeThumbs(merged);
+          });
+        }, NODE_THUMBNAIL_DEBOUNCE_MS);
+      }
     } catch (err) {
       setGpuError(err instanceof Error ? err.message : String(err));
     }
@@ -643,11 +700,14 @@ export function CanvasView() {
     showBefore,
     grayscaleView,
     cropMode,
+    spotMode,
+    maskDrawMode,
     activeOutputId,
     maskOverlay,
     selectedMaskNode?.id,
     compareMode,
     compareOutputId,
+    inspectNodeId,
   ]);
 
   useEffect(() => {
@@ -679,6 +739,18 @@ export function CanvasView() {
       },
       thumbnailRevocations() {
         return [...thumbnailRevocationLog()];
+      },
+      /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
+      nodeThumbsState() {
+        return useAppStore.getState().nodeThumbs;
+      },
+      /** Verify-only: every node-thumbnail blob: URL updateNodeThumbs has revoked so far, in order (revocation audit, mirrors thumbnailRevocations()). */
+      nodeThumbRevocations() {
+        return [...nodeThumbRevocationLog()];
+      },
+      /** Per-node-preview pack, tier 2: the currently-inspected node id, or null — see appStore.ts's inspectNodeId. */
+      inspectState() {
+        return useAppStore.getState().inspectNodeId;
       },
       rendererKind() {
         return 'webgpu';
@@ -1389,6 +1461,24 @@ export function CanvasView() {
       {!overlayVisible && showBefore && (
         <div className="before-badge" data-testid="before-badge">
           Before
+        </div>
+      )}
+      {/* Inspect mode (per-node-preview pack, tier 2): App.tsx's Escape chain
+          and an image switch (appStore.ts's openImageByPath) both clear
+          inspectNodeId the same way this ✕ button does — one single source
+          of truth (setInspectNode(null)), three ways to reach it. */}
+      {!overlayVisible && inspectedNode && (
+        <div className="canvas-inspect-badge" data-testid="inspect-badge">
+          <span>Inspecting: {nodeLabel(inspectedNode, fileName)}</span>
+          <button
+            type="button"
+            className="canvas-inspect-exit"
+            data-testid="inspect-exit"
+            onClick={() => setInspectNode(null)}
+            title="Stop inspecting (Esc)"
+          >
+            ×
+          </button>
         </div>
       )}
       {!overlayVisible && (

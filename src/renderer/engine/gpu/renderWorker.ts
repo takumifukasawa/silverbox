@@ -79,9 +79,9 @@ function buildPreviewPlan(doc: GraphDoc, ctx: CompileContext, showBefore: boolea
   try {
     plan = buildPlan(doc, ctx);
   } catch {
-    plan = { steps: [], output: -1 };
+    plan = { steps: [], output: -1, nodeSteps: {} };
   }
-  if (showBefore) plan = { steps: [], output: -1 };
+  if (showBefore) plan = { steps: [], output: -1, nodeSteps: {} };
   return plan;
 }
 
@@ -151,6 +151,19 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           { type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result },
           result ? [result.buffer] : []
         );
+        return;
+      }
+      case 'thumbnails': {
+        const result = await renderer.thumbnails(req.nodeSteps, req.longEdge);
+        // Batch, never per-node messages (this pack's other flagged fragile
+        // spot) — ONE response carries every node's bytes; transfer every
+        // DISTINCT buffer so the structured clone doesn't copy them. Several
+        // nodeIds legitimately share the SAME underlying buffer (identity/
+        // bypassed nodes — see GraphRenderer.thumbnails()'s doc comment), so
+        // this dedupes by reference first: postMessage throws if the same
+        // ArrayBuffer appears twice in one transfer list.
+        const transfer = result ? [...new Set(Object.values(result).map((t) => t.data.buffer))] : [];
+        post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result }, transfer);
         return;
       }
       case 'renderToPixels': {
@@ -240,6 +253,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               outputId: msg.outputId,
               srcWidth: currentImageDims?.width,
               srcHeight: currentImageDims?.height,
+              inspectNodeId: msg.inspectNodeId ?? undefined,
             },
             msg.showBefore
           );

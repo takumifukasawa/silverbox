@@ -93,6 +93,24 @@ export function outputName(node: GraphNode): string {
   return node.name?.trim() || 'main';
 }
 
+/**
+ * Human-readable label for a graph node — the single source of truth for
+ * NodeEditorPanel's node bodies AND CanvasView's inspect-mode badge (per-
+ * node-preview pack), so the two never drift apart. `fileName` is only used
+ * by the input node's own label.
+ */
+export function nodeLabel(node: GraphNode, fileName: string | null): string {
+  if (node.kind === 'input') return fileName ? `input — ${fileName}` : 'input';
+  if (node.kind === 'output') return `output (sRGB) — ${outputName(node)}`;
+  if (node.kind === DEVELOP_KIND) return 'Develop';
+  if (node.kind === CUSTOM_KIND) return 'custom (wgsl)';
+  if (node.kind === BLEND_KIND) return 'blend';
+  if (node.kind === MASK_KIND) return 'mask';
+  if (node.kind === SPOTS_KIND) return 'spots';
+  if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
+  return node.kind;
+}
+
 // --- Export overrides: per-output export settings ---------------------------
 //
 // A "main" full-res output and a "web" 2048px/q80 output are often the SAME
@@ -868,6 +886,19 @@ export interface RenderPlan {
   /** Step index whose output feeds the output node (-1 = the input itself). */
   output: number;
   /**
+   * Every node id's OWN resolved step index (-1 = the raw/geometry-resampled
+   * source), for every node reachable from whichever id `output` above was
+   * resolved from (per-node-preview pack, tier 1: node thumbnails). An
+   * identity/bypassed node (default-valued op, unconnected mask, a blend at
+   * amount 0…) maps to the SAME index as its upstream ancestor — buildPlan's
+   * `resolve()` returns that ancestor's index for it rather than pushing a
+   * new step — so GraphRenderer.thumbnails() naturally renders the identical
+   * texture for both, which IS "show the upstream thumb" with no special
+   * casing. A node NOT reachable from the resolved output (a disconnected
+   * branch) has no entry at all — the UI shows a placeholder for those.
+   */
+  nodeSteps: Record<string, number>;
+  /**
    * Present only when the input node's geometry is non-identity (crop and/or
    * straighten). When present, the renderer resamples the source into a BASE
    * texture of dims (round(crop.w*srcW), round(crop.h*srcH)) before running
@@ -903,6 +934,17 @@ export interface CompileContext {
    */
   srcWidth?: number;
   srcHeight?: number;
+  /**
+   * Inspect mode (per-node-preview pack, tier 2): render THIS node's own
+   * output instead of the selected output node's — "up to node X" is exactly
+   * the step index `resolve(id)` returns, so the rest of buildPlan is
+   * unchanged; anything downstream of the inspected node is simply never
+   * visited. Falls back to the normal output resolution when the id doesn't
+   * name a node in `doc` (e.g. the inspected node was deleted mid-flight —
+   * the caller is expected to clear inspection itself, but a stale id must
+   * never throw).
+   */
+  inspectNodeId?: string;
 }
 
 /**
@@ -1099,7 +1141,12 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
     return index;
   };
 
-  const plan: RenderPlan = { steps, output: resolve(output.id) };
+  // Inspect mode (per-node-preview pack, tier 2): resolve the inspected
+  // node's OWN id instead of the selected output's — see CompileContext's
+  // inspectNodeId doc comment. Anything downstream of it is simply never
+  // reached by resolve(), which is exactly "render up to node X".
+  const targetId = ctx?.inspectNodeId !== undefined && byId.has(ctx.inspectNodeId) ? ctx.inspectNodeId : output.id;
+  const plan: RenderPlan = { steps, output: resolve(targetId), nodeSteps: Object.fromEntries(memo) };
   if (!isIdentityGeometry(geometry)) {
     plan.geometry = {
       angleRad: (geometry.angle * Math.PI) / 180,
