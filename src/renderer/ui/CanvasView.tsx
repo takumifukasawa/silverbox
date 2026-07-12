@@ -16,6 +16,7 @@ import {
   DEVELOP_KIND,
   isIdentityGeometry,
   orientedDims,
+  outputName,
   planHasCpuReference,
   type ExportOverrides,
   type GeometryParams,
@@ -68,6 +69,14 @@ declare global {
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
       readbackSharpness(): Promise<{ luma: number; chroma: number } | null>;
+      /** Compare pane (compare pack) readback — null before an image/compare pane exists (mirrors readbackMean's own guard). */
+      compareReadbackMean(): Promise<{ r: number; g: number; b: number } | null>;
+      /** Compare view toggle + Mode B's picked second output id (compare pack). */
+      compareState(): { mode: boolean; outputId: string | null };
+      /** Verify-only convenience: flips compareMode without driving the toolbar button/'C' shortcut. */
+      setCompareMode(active: boolean): void;
+      /** Verify-only convenience: sets Mode B's picked second output id without driving the compare strip's dropdown. */
+      setCompareOutputId(id: string | null): void;
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
@@ -224,6 +233,17 @@ function usePlanDoc(doc: GraphDoc): GraphDoc {
   return stableRef.current;
 }
 
+/**
+ * Compare view (compare pack): backing-store resolution of the compare pane
+ * relative to outputDims. 1 = full-res double render (same cost as the main
+ * pane); 0.5 halves the compare pane's pixel count when a full-res double
+ * render measurably lags slider drags (see this file's compare-render effect
+ * and the report's perf finding — CSS size still matches outputDims exactly,
+ * so the browser just upsamples a softer image; the fit/pan/zoom MATH is
+ * untouched either way).
+ */
+const COMPARE_PANE_SCALE = 1;
+
 function workToSrgb(rgb: readonly [number, number, number]): [number, number, number] {
   const [r, g, b] = rgb;
   return [
@@ -244,6 +264,12 @@ export function CanvasView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const clientRef = useRef<RenderWorkerClient | null>(null);
+  // Compare view (compare pack): the SECOND pane's canvas — see renderWorker.ts
+  // for why it's a second GraphRenderer in the SAME worker, not a second
+  // Worker. Its container is deliberately NOT wired to useCanvasViewport: the
+  // brief's "events bind once" — pan/zoom listeners stay on `containerRef`
+  // only, and `view` (below) is applied to BOTH canvases' transforms.
+  const compareCanvasRef = useRef<HTMLCanvasElement>(null);
   const lastImageRef = useRef<unknown>(null);
   // Async GPU failures (device loss etc.) live in the store (see task
   // #45/worker-error-surfacing) so the render worker's out-of-band 'error'
@@ -269,6 +295,8 @@ export function CanvasView() {
   const grayscaleView = useAppStore((s) => s.grayscaleView);
   const toggleBefore = useAppStore((s) => s.toggleBefore);
   const toggleGrayscaleView = useAppStore((s) => s.toggleGrayscaleView);
+  const compareMode = useAppStore((s) => s.compareMode);
+  const compareOutputId = useAppStore((s) => s.compareOutputId);
   const cropMode = useAppStore((s) => s.cropMode);
   const wbPicking = useAppStore((s) => s.wbPicking);
   const setWbPicking = useAppStore((s) => s.setWbPicking);
@@ -461,6 +489,19 @@ export function CanvasView() {
     canvas.style.height = `${outputDims.height}px`;
   }, [outputDims]);
 
+  // Compare pane's CSS size ALWAYS matches the main canvas's exactly (same
+  // outputDims) regardless of COMPARE_PANE_SCALE — the backing-store
+  // resolution (set via client.compareResize below) is the only thing that
+  // may differ, so the shared `view` transform's fit/pan/zoom math applies
+  // identically to both canvases (the browser just up/downsamples the
+  // compare pane's pixel content to fill the same CSS box).
+  useLayoutEffect(() => {
+    const canvas = compareCanvasRef.current;
+    if (!canvas || !outputDims) return;
+    canvas.style.width = `${outputDims.width}px`;
+    canvas.style.height = `${outputDims.height}px`;
+  }, [outputDims]);
+
   // switching into a non-histogram mode fetches fresh samples immediately:
   // edits made while the histogram was showing don't update scopeSamples, so
   // an existing value may be stale — always refetch, never just reuse it
@@ -535,6 +576,45 @@ export function CanvasView() {
         overlayMaskNodeId: maskOverlay && selectedMaskNode ? selectedMaskNode.id : null,
       });
       setGpuError(null);
+      // Compare view (compare pack): mirrors the render() call above onto the
+      // SECOND canvas/GraphRenderer (renderWorker.ts's initCompare/compareRender)
+      // — Mode A (no valid compareOutputId) shows the before state, exactly
+      // like the A/B toggle's showBefore above; Mode B shows a second output
+      // picked from the compare strip's dropdown (Toolbar.tsx's CompareStrip).
+      // initCompare/compareResize run every effect pass regardless of
+      // compareMode — both are cheap/idempotent — so the pane is already
+      // sized and has a renderer waiting the INSTANT compare mode toggles on,
+      // with no first-toggle GPU-setup lag; only the render() call itself is
+      // gated on compareMode, so no GPU work happens while the pane is
+      // hidden.
+      const compareCanvas = compareCanvasRef.current;
+      if (compareCanvas) {
+        client.initCompare(compareCanvas);
+        if (outputDims) {
+          client.compareResize(
+            Math.max(1, Math.round(outputDims.width * COMPARE_PANE_SCALE)),
+            Math.max(1, Math.round(outputDims.height * COMPARE_PANE_SCALE))
+          );
+        }
+        if (compareMode) {
+          const outputs = planDoc.nodes.filter((n) => n.kind === 'output');
+          const resolvedActiveId =
+            (activeOutputId && outputs.some((n) => n.id === activeOutputId) && activeOutputId) || outputs[0]?.id;
+          // Mode B only while the picked id still names a DIFFERENT, existing
+          // output — an output deleted out from under the selection (or a
+          // stale pick equal to the now-active output) falls back to Mode A.
+          const modeBOutputId =
+            compareOutputId && compareOutputId !== resolvedActiveId && outputs.some((n) => n.id === compareOutputId)
+              ? compareOutputId
+              : null;
+          client.compareRender({
+            doc: planDoc,
+            renderScale,
+            showBefore: modeBOutputId === null,
+            outputId: modeBOutputId ?? undefined,
+          });
+        }
+      }
       // refresh the histogram once edits settle (slider drags fire rapidly);
       // `gen` pins this debounce cycle so a slow response that resolves after
       // a NEWER edit's response never clobbers the store with stale data.
@@ -566,6 +646,8 @@ export function CanvasView() {
     activeOutputId,
     maskOverlay,
     selectedMaskNode?.id,
+    compareMode,
+    compareOutputId,
   ]);
 
   useEffect(() => {
@@ -614,6 +696,23 @@ export function CanvasView() {
         const client = clientRef.current;
         if (!client || !client.hasImage) return null;
         return client.readbackMean();
+      },
+      /** Compare pane (compare pack) readback — see compareReadbackMean's client-side doc comment. */
+      async compareReadbackMean() {
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        return client.compareReadbackMean();
+      },
+      /** Compare view toggle + Mode B's picked second output id — see appStore.ts's compareMode/compareOutputId. */
+      compareState() {
+        const s = useAppStore.getState();
+        return { mode: s.compareMode, outputId: s.compareOutputId };
+      },
+      setCompareMode(active) {
+        useAppStore.getState().setCompareMode(active);
+      },
+      setCompareOutputId(id) {
+        useAppStore.getState().setCompareOutputId(id);
       },
       async readbackSharpness() {
         const client = clientRef.current;
@@ -1157,76 +1256,127 @@ export function CanvasView() {
   };
 
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
+  // Compare view (compare pack): resolve which mode the compare pane is
+  // showing, for the badge label only (the render effect above computes the
+  // SAME thing to drive the actual compareRender call — kept as two small
+  // derivations rather than lifting one to a ref, since this one is cheap and
+  // only feeds text).
+  const compareOutputs = graph.nodes.filter((n) => n.kind === 'output');
+  const compareResolvedActiveId =
+    (activeOutputId && compareOutputs.some((n) => n.id === activeOutputId) && activeOutputId) ||
+    compareOutputs[0]?.id;
+  const compareModeBNode =
+    compareOutputId && compareOutputId !== compareResolvedActiveId
+      ? compareOutputs.find((n) => n.id === compareOutputId)
+      : undefined;
   return (
     <div className="canvas-view">
-      <div
-        ref={containerRef}
-        className="canvas-viewport"
-        style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
-      >
-        <canvas
-          ref={canvasRef}
-          className={`canvas-view-canvas${wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode ? ' canvas-view-canvas--picking' : ''}`}
-          style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
-          onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
-          onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : spotMode ? handleSpotPointerDown : undefined}
-          data-testid="canvas-view-canvas"
-        />
-        {!overlayVisible && drawGesture && outputDims && (
-          <MaskDrawOverlay
-            mode={drawGesture.mode}
-            start={drawGesture.start}
-            current={drawGesture.current}
-            view={view}
-            canvasWidth={outputDims.width}
-            canvasHeight={outputDims.height}
+      <div className="canvas-panes">
+        <div
+          ref={containerRef}
+          className="canvas-viewport"
+          style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
+        >
+          <canvas
+            ref={canvasRef}
+            className={`canvas-view-canvas${wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode ? ' canvas-view-canvas--picking' : ''}`}
+            style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
+            onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
+            onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : spotMode ? handleSpotPointerDown : undefined}
+            data-testid="canvas-view-canvas"
           />
-        )}
-        {!overlayVisible && !cropMode && selectedMaskNode && outputDims && anchorDims && (
-          <MaskOverlay
-            key={selectedMaskNode.id}
-            node={selectedMaskNode}
-            view={view}
-            canvasWidth={outputDims.width}
-            canvasHeight={outputDims.height}
-            geometry={inputGeometry}
-            orientedWidth={anchorDims.width}
-            orientedHeight={anchorDims.height}
-          />
-        )}
-        {!overlayVisible && !cropMode && spotMode && outputDims && anchorDims && (
-          <SpotOverlay
-            key={activeSpotsNode?.id ?? 'none'}
-            node={activeSpotsNode}
-            view={view}
-            canvasWidth={outputDims.width}
-            canvasHeight={outputDims.height}
-            geometry={inputGeometry}
-            orientedWidth={anchorDims.width}
-            orientedHeight={anchorDims.height}
-          />
-        )}
-        {!overlayVisible && spotDraft && outputDims && (
-          <SpotDrawOverlay
-            dst={spotDraft.dst}
-            src={spotDraft.src}
-            radius={spotBrushRadius}
-            view={view}
-            canvasWidth={outputDims.width}
-            canvasHeight={outputDims.height}
-          />
+          {!overlayVisible && drawGesture && outputDims && (
+            <MaskDrawOverlay
+              mode={drawGesture.mode}
+              start={drawGesture.start}
+              current={drawGesture.current}
+              view={view}
+              canvasWidth={outputDims.width}
+              canvasHeight={outputDims.height}
+            />
+          )}
+          {!overlayVisible && !cropMode && selectedMaskNode && outputDims && anchorDims && (
+            <MaskOverlay
+              key={selectedMaskNode.id}
+              node={selectedMaskNode}
+              view={view}
+              canvasWidth={outputDims.width}
+              canvasHeight={outputDims.height}
+              geometry={inputGeometry}
+              orientedWidth={anchorDims.width}
+              orientedHeight={anchorDims.height}
+            />
+          )}
+          {!overlayVisible && !cropMode && spotMode && outputDims && anchorDims && (
+            <SpotOverlay
+              key={activeSpotsNode?.id ?? 'none'}
+              node={activeSpotsNode}
+              view={view}
+              canvasWidth={outputDims.width}
+              canvasHeight={outputDims.height}
+              geometry={inputGeometry}
+              orientedWidth={anchorDims.width}
+              orientedHeight={anchorDims.height}
+            />
+          )}
+          {!overlayVisible && spotDraft && outputDims && (
+            <SpotDrawOverlay
+              dst={spotDraft.dst}
+              src={spotDraft.src}
+              radius={spotBrushRadius}
+              view={view}
+              canvasWidth={outputDims.width}
+              canvasHeight={outputDims.height}
+            />
+          )}
+          {!overlayVisible && compareMode && (
+            <div className="compare-pane-badge" data-testid="compare-pane-badge-main">
+              Current
+            </div>
+          )}
+        </div>
+        {/* Compare view (compare pack): a SECOND pane, ALWAYS mounted once an
+            image exists — never conditionally on compareMode — so its canvas
+            is transferred to the render worker exactly ONCE per image session
+            (transferControlToOffscreen itself is not idempotent, unlike
+            client.initCompare's own guard — see renderClient.ts); toggling
+            compare on/off only flips CSS visibility below, it never remounts
+            the canvas element. It does NOT bind its own pan/zoom listeners —
+            useCanvasViewport only ever attaches to `containerRef` above — this
+            pane's canvas just gets the exact same `view` transform applied to
+            it, "shared viewport, events bind once" per the brief. */}
+        {image && (
+          <div
+            className={`canvas-compare-pane${compareMode ? '' : ' canvas-compare-pane--hidden'}`}
+            data-testid="compare-pane"
+          >
+            <canvas
+              ref={compareCanvasRef}
+              className="compare-canvas-el"
+              style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
+              data-testid="compare-canvas"
+            />
+            {!overlayVisible && compareMode && (
+              <div className="compare-pane-badge" data-testid="compare-pane-badge">
+                {compareModeBNode ? outputName(compareModeBNode) : 'Before'}
+              </div>
+            )}
+          </div>
         )}
       </div>
-      {/* CropOverlay renders OUTSIDE .canvas-viewport (which clips overflow
-          to the zoomed/panned canvas) rather than inside it: the LR-style
-          rotate zones (UX pack B §2) sit ~34px past each corner, and
-          whenever the fitted image touches the viewport edge along an axis
-          (routine in 'fit' mode — a landscape photo in a similarly-shaped
-          viewport has ~0 vertical margin) that would clip the rotate zone
-          right where it's needed. Position/transform math is unaffected:
-          .canvas-viewport is itself `position:absolute; inset:0` inside this
-          same `.canvas-view` (position:relative), so both siblings share the
-          identical (0,0) origin — only the clipping differs. */}
+      {/* CropOverlay renders OUTSIDE .canvas-panes (which clips overflow to
+          the zoomed/panned canvas via each pane's own .canvas-viewport)
+          rather than inside it: the LR-style rotate zones (UX pack B §2) sit
+          ~34px past each corner, and whenever the fitted image touches the
+          viewport edge along an axis (routine in 'fit' mode — a landscape
+          photo in a similarly-shaped viewport has ~0 vertical margin) that
+          would clip the rotate zone right where it's needed. Position/
+          transform math is unaffected: .canvas-panes is itself
+          `position:absolute; inset:0` inside this same `.canvas-view`
+          (position:relative), so both siblings share the identical (0,0)
+          origin — only the clipping differs. Crop mode is itself a modal
+          tool mutually exclusive with compare (deactivateOtherTools,
+          appStore.ts), so there is never a second pane to worry about here. */}
       {!overlayVisible && cropMode && outputDims && (
         <CropOverlay
           view={view}

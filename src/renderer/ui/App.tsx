@@ -81,6 +81,16 @@ export function App() {
         if (ev.key === '\\') useAppStore.getState().toggleBefore();
         else useAppStore.getState().toggleGrayscaleView();
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'c') {
+        // Compare view (compare pack): splits the canvas into two synced
+        // panes (current vs before, or two outputs). ⌘⇧C is copyDevelopSettings
+        // above — that check requires `cmd`, so the two never collide.
+        if (isTextEntry(ev.target)) return;
+        if (useAppStore.getState().imageStatus !== 'ready') return;
+        ev.preventDefault();
+        const s = useAppStore.getState();
+        s.setCompareMode(!s.compareMode);
+      }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
         if (isTextEntry(ev.target)) return;
@@ -122,6 +132,12 @@ export function App() {
         // any) watches this same field flip to false and tears itself down
         // without committing.
         useAppStore.getState().setSpotMode(false);
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().compareMode) {
+        // Compare view (compare pack): Escape exits, same pattern as every
+        // other modal canvas tool above — no in-progress gesture to tear
+        // down (compare has none), just flip the flag off.
+        useAppStore.getState().setCompareMode(false);
       }
       if ((ev.key === 'Backspace' || ev.key === 'Delete') && useAppStore.getState().spotMode) {
         // Delete-key precedence (task #50): React Flow's own node editor

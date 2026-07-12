@@ -114,6 +114,44 @@ function OpenMenu() {
   );
 }
 
+/**
+ * Compare strip (compare pack): the second-output dropdown for Mode B, next
+ * to the "Compare" toggle. Only rendered while compare is active AND the doc
+ * has 2+ outputs — mirrors OutputSelector's own "appears only with 2+
+ * outputs" rule below. Picking "Before" (value "") returns to Mode A;
+ * picking any other output switches to Mode B against THAT output.
+ */
+function CompareStrip() {
+  const compareMode = useAppStore((s) => s.compareMode);
+  const graph = useAppStore((s) => s.graph);
+  const activeOutputId = useAppStore((s) => s.activeOutputId);
+  const compareOutputId = useAppStore((s) => s.compareOutputId);
+  const setCompareOutputId = useAppStore((s) => s.setCompareOutputId);
+  if (!compareMode) return null;
+  const outputs = graph.nodes.filter((n) => n.kind === 'output');
+  if (outputs.length <= 1) return null;
+  const activeId = activeOutputId && outputs.some((n) => n.id === activeOutputId) ? activeOutputId : outputs[0]!.id;
+  const candidates = outputs.filter((n) => n.id !== activeId);
+  const current = compareOutputId && candidates.some((n) => n.id === compareOutputId) ? compareOutputId : '';
+  return (
+    <label className="toolbar-output-select" title="Compare the active output against Before or a second output">
+      compare vs
+      <select
+        data-testid="compare-output-selector"
+        value={current}
+        onChange={(ev) => setCompareOutputId(ev.target.value || null)}
+      >
+        <option value="">Before</option>
+        {candidates.map((n) => (
+          <option key={n.id} value={n.id}>
+            {outputName(n)}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+}
+
 /** Output selector (spec §6): appears only when the doc has more than one output node. */
 function OutputSelector() {
   const graph = useAppStore((s) => s.graph);
@@ -165,6 +203,8 @@ export function Toolbar() {
   const spotMode = useAppStore((s) => s.spotMode);
   const setSpotMode = useAppStore((s) => s.setSpotMode);
   const spotsCapNotice = useAppStore((s) => s.spotsCapNotice);
+  const compareMode = useAppStore((s) => s.compareMode);
+  const setCompareMode = useAppStore((s) => s.setCompareMode);
   const setExportDialogOpen = useAppStore((s) => s.setExportDialogOpen);
   const setSettingsDialogOpen = useAppStore((s) => s.setSettingsDialogOpen);
   const [ping, setPing] = useState<PingResult | null>(null);
@@ -227,6 +267,16 @@ export function Toolbar() {
       >
         Spots
       </button>
+      <button
+        onClick={() => setCompareMode(!compareMode)}
+        disabled={imageStatus !== 'ready'}
+        data-testid="compare-toggle"
+        className={compareMode ? 'active' : undefined}
+        title="Compare view: current vs before, or a second output (C); Escape exits"
+      >
+        Compare
+      </button>
+      <CompareStrip />
       <AddNodeMenu />
       <span className="local-adjustment-buttons">
         <button

@@ -83,6 +83,8 @@ export class RenderWorkerClient {
   renderPostCount = 0;
   viewMode: 'color' | 'grayscale' = 'color';
   private onError: ((message: string) => void) | null = null;
+  /** initCompare is idempotent per client instance (transferControlToOffscreen can only run once per canvas element) — mirrors the constructor's own one-shot transfer. */
+  private compareInitialized = false;
 
   constructor(canvas: HTMLCanvasElement) {
     const w = getWorker();
@@ -144,6 +146,54 @@ export class RenderWorkerClient {
       overlayMaskNodeId: args.overlayMaskNodeId ?? null,
     };
     getWorker().postMessage(msg);
+  }
+
+  /**
+   * Compare view (compare pack): transfers a SECOND canvas's control to the
+   * SAME worker — see renderWorker.ts's doc comment for why this beats a
+   * second Worker instance (one shared GPUDevice, one shared customShaderNode
+   * artifact cache). Safe to call on every render-effect run; only the FIRST
+   * call actually transfers (transferControlToOffscreen throws on a second
+   * call against the same element, same guard shape as the constructor's).
+   */
+  initCompare(canvas: HTMLCanvasElement): void {
+    if (this.compareInitialized) return;
+    this.compareInitialized = true;
+    const offscreen = canvas.transferControlToOffscreen();
+    const msg: RenderWorkerCommand = { type: 'initCompare', canvas: offscreen };
+    getWorker().postMessage(msg, [offscreen]);
+  }
+
+  compareResize(width: number, height: number): void {
+    const msg: RenderWorkerCommand = { type: 'compareResize', width, height };
+    getWorker().postMessage(msg);
+  }
+
+  /**
+   * Renders into the compare pane. `showBefore`/`outputId` are the CALLER's
+   * responsibility to resolve into "Mode A" (before) vs "Mode B" (a second
+   * output) — see CanvasView.tsx's compare render effect. Shares this
+   * client's own `gen` counter with render() (stamped onto every command),
+   * but the WORKER tracks each surface's "current" gen separately, so a
+   * compareRender never marks a concurrent main render() stale, or vice versa
+   * (see renderWorker.ts's doc comment).
+   */
+  compareRender(args: { doc: GraphDoc; renderScale: number; showBefore: boolean; outputId?: string }): void {
+    this.gen++;
+    const msg: RenderWorkerCommand = {
+      type: 'compareRender',
+      gen: this.gen,
+      doc: args.doc,
+      renderScale: args.renderScale,
+      viewMode: this.viewMode,
+      showBefore: args.showBefore,
+      outputId: args.outputId,
+    };
+    getWorker().postMessage(msg);
+  }
+
+  compareReadbackMean(): Promise<{ r: number; g: number; b: number } | null> {
+    return request(this.gen, { method: 'compareReadbackMean' });
   }
 
   stats(): Promise<HistogramData | null> {

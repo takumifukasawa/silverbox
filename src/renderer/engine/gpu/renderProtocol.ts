@@ -43,6 +43,28 @@ export type RenderWorkerCommand =
       overlayMaskNodeId?: string | null;
     }
   | { type: 'resize'; width: number; height: number }
+  /**
+   * Compare view (compare pack): a SECOND OffscreenCanvas, transferred once
+   * (like 'init') and rendered into by a SECOND GraphRenderer instance living
+   * in this SAME worker — sharing the one GPUDevice (getGpuDevice's module
+   * singleton, graphRenderer.ts) and the one customShaderNode artifact cache
+   * (also module-scoped here), so no shader-artifact mirroring duplication is
+   * needed beyond what shaderArtifactSet/Clear already do. See renderWorker.ts's
+   * doc comment for why this beat a second Worker instance.
+   */
+  | { type: 'initCompare'; canvas: OffscreenCanvas }
+  | { type: 'compareResize'; width: number; height: number }
+  | {
+      type: 'compareRender';
+      gen: number;
+      doc: GraphDoc;
+      renderScale: number;
+      viewMode: 'color' | 'grayscale';
+      /** Mode A: true (the unedited decode, exactly like the main 'render' showBefore). Mode B: false. */
+      showBefore: boolean;
+      /** Mode B: the picked second output id. Mode A: unused (showBefore short-circuits buildPreviewPlan before outputId is ever consulted). */
+      outputId?: string;
+    }
   | { type: 'shaderArtifactSet'; nodeId: string; artifact: CustomShaderArtifact }
   | { type: 'shaderArtifactClear' };
 
@@ -55,6 +77,8 @@ export type RenderWorkerRequestMethod =
   | { method: 'rendererStats' }
   | { method: 'statsCrop'; x0: number; y0: number; w: number; h: number }
   | { method: 'encodedCropForVerify'; x0: number; y0: number; w: number; h: number }
+  /** Compare view: readback of the SECOND (compare-pane) GraphRenderer's current canvas content — see renderWorker.ts's compare* commands. */
+  | { method: 'compareReadbackMean' }
   | {
       method: 'renderToPixels';
       image: PreparedImage;

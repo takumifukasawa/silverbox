@@ -400,9 +400,23 @@ button:disabled {
   pointer-events: none;
 }
 
-.canvas-viewport {
+/* Wraps the main pane and the compare pane (compare pack) side by side —
+   occupies the exact same box .canvas-viewport used to alone (absolute
+   inset:0 inside .canvas-view, position:relative), so CropOverlay/
+   HistogramPanel/before-badge/canvas-controls (siblings of THIS, not of the
+   individual panes) keep the same coordinate origin unchanged. With only the
+   main pane present (compare hidden via display:none below) its flex:1 fills
+   the row exactly like the old single-pane layout. */
+.canvas-panes {
   position: absolute;
   inset: 0;
+  display: flex;
+}
+
+.canvas-viewport {
+  position: relative;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   cursor: grab;
 }
@@ -411,7 +425,50 @@ button:disabled {
   cursor: grabbing;
 }
 
-.canvas-view-canvas {
+/* Compare pane (compare pack): a second box in .canvas-panes, always mounted
+   once an image exists (see CanvasView.tsx's doc comment) — hidden via
+   display:none (not conditional JSX) so its canvas is transferred to the
+   render worker exactly once per image session. It never binds its own pan
+   gesture (useCanvasViewport only attaches to the MAIN .canvas-viewport), so
+   dragging it is a no-op by design — panning from the left pane moves both.
+   Deliberately its OWN class, not also `.canvas-viewport` — several verify
+   scripts locate `.canvas-viewport` expecting exactly one (Playwright strict
+   mode), and this pane sits alongside it, always in the DOM, not replacing
+   it. */
+.canvas-compare-pane {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  cursor: default;
+  border-left: 1px solid #333;
+}
+
+.canvas-compare-pane--hidden {
+  display: none;
+}
+
+.compare-pane-badge {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  padding: 3px 10px;
+  background: rgba(20, 20, 20, 0.72);
+  border: 1px solid #7ec8e3;
+  border-radius: 4px;
+  color: #7ec8e3;
+  font-size: 12px;
+  pointer-events: none;
+}
+
+/* .compare-canvas-el (compare pack) shares this exact positioning — but is a
+   SEPARATE class name, not also `.canvas-view-canvas`: many verify scripts
+   locate `.canvas-view-canvas` expecting exactly one match (Playwright
+   strict mode), and the compare pane's canvas is always in the DOM once an
+   image exists (see CanvasView.tsx's doc comment), not a replacement for the
+   main one. */
+.canvas-view-canvas,
+.compare-canvas-el {
   position: absolute;
   left: 0;
   top: 0;

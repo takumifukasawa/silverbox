@@ -199,6 +199,21 @@ interface AppState {
   /** Viewer-only: display the render as luminance (tone/contrast check). */
   grayscaleView: boolean;
   toggleGrayscaleView(): void;
+  /**
+   * Compare view (compare pack): splits the canvas into two synced panes
+   * sharing ONE viewport (pan/zoom moves both — LR behavior). Mode A
+   * (compareOutputId === null, the default): CURRENT vs BEFORE, reusing the
+   * exact same "before" render showBefore drives. Mode B (compareOutputId
+   * set, only reachable once the doc has 2+ outputs): the active output vs
+   * a second output picked from the compare strip's dropdown. A modal
+   * canvas tool like crop/spot/maskDraw/the eyedroppers — activating it
+   * deactivates them (deactivateOtherTools gains 'compare') and vice versa.
+   */
+  compareMode: boolean;
+  setCompareMode(active: boolean): void;
+  /** Mode B's picked second output id; null = Mode A (before). Cleared on a fresh image open, same as the other modal tools. */
+  compareOutputId: string | null;
+  setCompareOutputId(id: string | null): void;
   /** Crop/straighten tool active — the canvas previews the full (uncropped) rotated frame while true. */
   cropMode: boolean;
   toggleCropMode(): void;
@@ -614,16 +629,17 @@ function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppS
 /** Default brush radius for a fresh spot (task #50): ~1.5% of the max output dimension. */
 const DEFAULT_SPOT_BRUSH_RADIUS = 0.015;
 
-type CanvasTool = 'crop' | 'spot' | 'maskDraw' | 'wbPick' | 'colorKeyPick';
+type CanvasTool = 'crop' | 'spot' | 'maskDraw' | 'wbPick' | 'colorKeyPick' | 'compare';
 
 /**
  * One modal canvas tool at a time (Lightroom behavior): ACTIVATING any of
- * crop / spot removal / mask draw / the two eyedroppers deactivates the
- * others, so the canvas pointer, wheel, and cursor are never contested by
- * two tools at once (e.g. a WB-pick click must not also start a spot
- * gesture, and crop's full-viewport overlay must not sit over an armed
- * spot mode). Every tool ACTIVATION spreads this patch; deactivation paths
- * never need it.
+ * crop / spot removal / mask draw / the two eyedroppers / compare view
+ * deactivates the others, so the canvas pointer, wheel, and cursor are never
+ * contested by two tools at once (e.g. a WB-pick click must not also start a
+ * spot gesture, and crop's full-viewport overlay must not sit over an armed
+ * spot mode; compare's split view must not fight a crop/mask-draw overlay
+ * drawn against only the LEFT pane's coordinates). Every tool ACTIVATION
+ * spreads this patch; deactivation paths never need it.
  */
 function deactivateOtherTools(except: CanvasTool): Partial<AppState> {
   return {
@@ -632,6 +648,7 @@ function deactivateOtherTools(except: CanvasTool): Partial<AppState> {
     ...(except !== 'maskDraw' ? { maskDrawMode: null } : {}),
     ...(except !== 'wbPick' ? { wbPicking: false } : {}),
     ...(except !== 'colorKeyPick' ? { colorKeyPicking: false } : {}),
+    ...(except !== 'compare' ? { compareMode: false } : {}),
   };
 }
 
@@ -1058,6 +1075,8 @@ export const useAppStore = create<AppState>((set, get) => {
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
   grayscaleView: false,
+  compareMode: false,
+  compareOutputId: null,
   cropMode: false,
   wbPicking: false,
   colorKeyPicking: false,
@@ -1290,6 +1309,8 @@ export const useAppStore = create<AppState>((set, get) => {
         colorKeyPicking: false,
         spotMode: false,
         selectedSpotIndex: null,
+        compareMode: false,
+        compareOutputId: null,
       });
       revalidateShaders(graph);
       // Arm (re-arm) the main-process sidecar watcher for THIS image — see
@@ -1470,6 +1491,9 @@ export const useAppStore = create<AppState>((set, get) => {
           selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
           // null falls back to the doc's first output everywhere activeOutputId is consumed
           activeOutputId: s.activeOutputId === nodeId ? null : s.activeOutputId,
+          // null falls back to Mode A (before) — the compare strip's dropdown
+          // just loses this option, same "graceful fallback" as activeOutputId
+          compareOutputId: s.compareOutputId === nodeId ? null : s.compareOutputId,
         };
       }
       // bypass: route the node's input (blend: its 'a' input) to every target
@@ -1923,6 +1947,20 @@ export const useAppStore = create<AppState>((set, get) => {
 
   toggleGrayscaleView() {
     set((s) => ({ grayscaleView: !s.grayscaleView }));
+  },
+
+  setCompareMode(active) {
+    set((s) =>
+      s.compareMode === active
+        ? {}
+        : active
+          ? { compareMode: true, ...deactivateOtherTools('compare') }
+          : { compareMode: false }
+    );
+  },
+
+  setCompareOutputId(id) {
+    set({ compareOutputId: id });
   },
 
   toggleCropMode() {

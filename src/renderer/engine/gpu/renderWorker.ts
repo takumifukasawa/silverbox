@@ -22,11 +22,28 @@
  * metadata (createWbModel is a pure function of it — see whiteBalance.ts) —
  * cheaper and simpler than trying to structured-clone a WbModel, which
  * carries a bound `gains()` method and so isn't cloneable at all.
+ *
+ * Compare view (compare pack): a second OffscreenCanvas/GraphRenderer pair
+ * lives HERE, in this SAME worker, rather than in a second Worker instance.
+ * Both options were considered — a second Worker would be simpler to wire
+ * (its own independent module scope, no risk of one surface's state leaking
+ * into the other) but at the cost of a second GPUDevice/adapter (more GPU
+ * memory) AND a second customShaderNode artifact cache that every
+ * mirrorShaderArtifactSet/Clear call site would need to reach too, or a
+ * custom-shader node would silently render as identity in the compare pane
+ * only. Staying in this worker means getGpuDevice()'s module singleton
+ * (graphRenderer.ts) is shared automatically (one adapter/device, two
+ * GPUCanvasContexts) and the artifact cache needs no new plumbing at all —
+ * the tradeoff is the two render "surfaces" (main vs compare) needing their
+ * own generation counters below (currentGen / currentCompareGen) so a
+ * compareRender's staleness check never gets confused by an unrelated main
+ * 'render' bumping the shared client-side counter, and vice versa.
  */
 import { GraphRenderer } from './graphRenderer';
 import { buildPlan, type CompileContext, type GraphDoc, type RenderPlan } from '../graph/graphDoc';
 import { setCustomShaderArtifact, clearCustomShaderArtifacts } from '../graph/customShaderNode';
 import { createWbModel, type WbModel } from '../color/whiteBalance';
+import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderWorkerCommand, RenderWorkerRequest, RenderWorkerResponse } from './renderProtocol';
 
 let resolveRenderer: ((r: GraphRenderer) => void) | null = null;
@@ -39,8 +56,18 @@ let offscreenCanvas: OffscreenCanvas | null = null;
 let wbModel: WbModel = createWbModel({});
 /** Decoded dims of the current preview image — fed to buildPlan for anchor-space mask/spot conversion. */
 let currentImageDims: { width: number; height: number } | null = null;
-/** Gen of the most recently applied 'image'/'render' command (see renderProtocol.ts). */
+/** Gen of the most recently applied 'image'/'render' command (main surface — see renderProtocol.ts). */
 let currentGen = 0;
+
+// --- Compare view (compare pack): second surface, same worker (see this file's doc comment) ---
+let compareOffscreenCanvas: OffscreenCanvas | null = null;
+let resolveCompareRenderer: ((r: GraphRenderer) => void) | null = null;
+/** Null until the FIRST 'initCompare' lands (compare mode has never been entered this session) — every compare-* handler below no-ops on null instead of awaiting a promise that may never resolve. */
+let compareRendererReady: Promise<GraphRenderer> | null = null;
+/** Gen of the most recently applied 'image'/'compareRender' command (compare surface). Tracked SEPARATELY from currentGen — see this file's doc comment for why a shared counter would be wrong. */
+let currentCompareGen = 0;
+/** Most recently received 'image' command's payload, replayed onto the compare renderer if it initializes AFTER an image is already loaded (the ordinary case: the main canvas/image load first, compare mode is a later toggle). */
+let lastImage: PreparedImage | null = null;
 
 function post(message: RenderWorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(message, transfer);
@@ -63,12 +90,28 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
   // stale-request drop (efficiency only — see renderProtocol.ts doc comment;
   // never applied to renderToPixels, a deliberate one-shot export action
   // that must never be silently skipped just because the preview moved on).
-  if (req.method !== 'renderToPixels' && req.gen < currentGen) {
-    post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result: null });
+  // compareReadbackMean checks the COMPARE surface's own gen (currentCompareGen)
+  // — the shared client-side counter (renderClient.ts's `this.gen`) is stamped
+  // onto both surfaces' commands, but a main 'render' bumping past a
+  // compareRender's gen (or vice versa) must never mark the OTHER surface's
+  // request stale — see this file's doc comment.
+  const staleAgainst = req.method === 'compareReadbackMean' ? currentCompareGen : currentGen;
+  if (req.method !== 'renderToPixels' && req.gen < staleAgainst) {
+    post({ type: 'response', reqId: req.reqId, gen: staleAgainst, ok: true, result: null });
     return;
   }
   try {
     switch (req.method) {
+      case 'compareReadbackMean': {
+        if (!compareRendererReady) {
+          post({ type: 'response', reqId: req.reqId, gen: currentCompareGen, ok: true, result: null });
+          return;
+        }
+        const compareRenderer = await compareRendererReady;
+        const result = await compareRenderer.readbackMean();
+        post({ type: 'response', reqId: req.reqId, gen: currentCompareGen, ok: true, result });
+        return;
+      }
       case 'stats': {
         const result = await renderer.stats();
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result });
@@ -154,8 +197,10 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
     }
     case 'image': {
       currentGen = msg.gen;
+      currentCompareGen = msg.gen;
       wbModel = createWbModel(msg.image.color ?? {});
       currentImageDims = { width: msg.image.width, height: msg.image.height };
+      lastImage = msg.image;
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -164,6 +209,17 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
         .catch((err) => {
           post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
         });
+      // Compare pane (compare pack): only push if the compare surface has
+      // ever been initialized this session (initCompare) — a fresh doc's
+      // 'initCompare' handler below replays `lastImage` itself, so there is
+      // no ordering requirement between the two.
+      if (compareRendererReady) {
+        void compareRendererReady
+          .then((renderer) => renderer.setImage(msg.image))
+          .catch((err) => {
+            post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          });
+      }
       return;
     }
     case 'render': {
@@ -205,6 +261,63 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
         offscreenCanvas.width = msg.width;
         offscreenCanvas.height = msg.height;
       }
+      return;
+    }
+    case 'initCompare': {
+      compareOffscreenCanvas = msg.canvas;
+      compareRendererReady = new Promise((resolve) => {
+        resolveCompareRenderer = resolve;
+      });
+      GraphRenderer.create(msg.canvas).then(
+        (renderer) => {
+          // Replay whatever image is already loaded — the ordinary case is
+          // compare mode being toggled ON well after the main image opened
+          // (see this file's doc comment on `lastImage`).
+          if (lastImage) renderer.setImage(lastImage);
+          resolveCompareRenderer!(renderer);
+        },
+        (err) => {
+          post({ type: 'initError', message: err instanceof Error ? err.message : String(err) });
+        }
+      );
+      return;
+    }
+    case 'compareResize': {
+      if (compareOffscreenCanvas) {
+        compareOffscreenCanvas.width = msg.width;
+        compareOffscreenCanvas.height = msg.height;
+      }
+      return;
+    }
+    case 'compareRender': {
+      currentCompareGen = msg.gen;
+      const gen = msg.gen;
+      // No-op until initCompare has landed (compare mode not yet entered
+      // this session) — mirrors 'render''s own rendererReady await, just
+      // over a promise that may not exist yet at all.
+      if (!compareRendererReady) return;
+      void compareRendererReady
+        .then(async (renderer) => {
+          if (gen !== currentCompareGen) return;
+          const plan = buildPreviewPlan(
+            msg.doc,
+            {
+              wb: wbModel,
+              renderScale: msg.renderScale,
+              outputId: msg.outputId,
+              srcWidth: currentImageDims?.width,
+              srcHeight: currentImageDims?.height,
+            },
+            msg.showBefore
+          );
+          renderer.viewMode = msg.viewMode;
+          await renderer.setGraph(plan);
+          if (gen !== currentCompareGen) return;
+          renderer.render(null);
+        })
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
       return;
     }
     case 'shaderArtifactSet': {
