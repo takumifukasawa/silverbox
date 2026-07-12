@@ -19,6 +19,7 @@ import { DEFAULT_WB_MODEL, type WbModel } from '../color/whiteBalance';
 import { sanitizeCurvePoints } from '../color/toneCurve';
 import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams, type MaskShape } from './maskNode';
 import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams, type Spot } from './spotsNode';
+import { defaultImageParams, IMAGE_KIND, imageBaseName, sanitizeImageParams, type ImageParams } from './imageNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy } from '../../../../shared/ipc';
 
@@ -32,7 +33,8 @@ export type GraphNodeKind =
   | typeof BLEND_KIND
   | typeof DEVELOP_KIND
   | typeof MASK_KIND
-  | typeof SPOTS_KIND;
+  | typeof SPOTS_KIND
+  | typeof IMAGE_KIND;
 
 export interface GraphNode {
   id: string;
@@ -52,6 +54,8 @@ export interface GraphNode {
   mask?: MaskParams;
   /** Non-destructive clone-circle list (spot removal, task #50); only for kind 'spots'. */
   spots?: SpotsParams;
+  /** Referenced-file path (composite/mask-by-another-file feature); only for kind 'image'. */
+  image?: ImageParams;
   /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
   name?: string;
   /**
@@ -86,7 +90,14 @@ export interface GraphDoc {
   edges: GraphEdge[];
 }
 
-export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND | typeof MASK_KIND | typeof SPOTS_KIND | 'output';
+export type AddableKind =
+  | OpKind
+  | typeof CUSTOM_KIND
+  | typeof BLEND_KIND
+  | typeof MASK_KIND
+  | typeof SPOTS_KIND
+  | typeof IMAGE_KIND
+  | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
 export function outputName(node: GraphNode): string {
@@ -107,6 +118,10 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
   if (node.kind === BLEND_KIND) return 'blend';
   if (node.kind === MASK_KIND) return 'mask';
   if (node.kind === SPOTS_KIND) return 'spots';
+  if (node.kind === IMAGE_KIND) {
+    const path = node.image?.path ?? '';
+    return path ? `image — ${imageBaseName(path)}` : 'image';
+  }
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
 }
@@ -211,7 +226,7 @@ export function sanitizeExportOverrides(raw: unknown, nodeId: string): ExportOve
 }
 
 export function defaultParams(
-  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | 'output'>
+  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | typeof IMAGE_KIND | 'output'>
 ): Record<string, number> {
   const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
@@ -545,6 +560,7 @@ const KNOWN_NODE_KEYS = new Set([
   'lens',
   'mask',
   'spots',
+  'image',
   'name',
   'export',
 ]);
@@ -603,6 +619,7 @@ export function serializeGraphDoc(
           ...(n.lens ? { lens: n.lens } : {}),
           ...(n.mask ? { mask: n.mask } : {}),
           ...(n.spots ? { spots: n.spots } : {}),
+          ...(n.image ? { image: n.image } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
         };
@@ -699,6 +716,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
       n.kind !== DEVELOP_KIND &&
       n.kind !== MASK_KIND &&
       n.kind !== SPOTS_KIND &&
+      n.kind !== IMAGE_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -727,6 +745,9 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     }
     if (n.kind === SPOTS_KIND) {
       n.spots = sanitizeSpotsParams(n.spots, n.id);
+    }
+    if (n.kind === IMAGE_KIND) {
+      n.image = sanitizeImageParams(n.image, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -893,6 +914,22 @@ export type PlanStep =
       srcB: number;
       /** Optional mask input (spec §3): out = mix(a, b, maskValue.r * uniform.amount) when present. */
       srcMask?: number;
+    }
+  | {
+      nodeId: string;
+      type: 'image';
+      /**
+       * Raw (as-authored) `image.path` — the render worker's per-path GPU
+       * texture cache key (see graphRenderer.ts's setImageNodeTexture);
+       * relative-to-sidecar resolution happens OUTSIDE buildPlan, on the
+       * main thread, before the decoded pixels ever reach the worker (image
+       * node feature's fragile-spot note). Empty string = no file chosen.
+       * ZERO inputs — this is a SOURCE step like the decoded main image
+       * (index -1), not a transform of one; it has no CPU mirror (like a
+       * spatial op — see planHasCpuReference/cpuEvalPlan) because it reads
+       * an entirely separate texture the CPU reference path never loads.
+       */
+      path: string;
     };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -1054,6 +1091,17 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
         steps.push({ nodeId: id, type: 'blend', uniform, srcA, srcB, ...(srcMask !== undefined ? { srcMask } : {}) });
         index = steps.length - 1;
       }
+    } else if (node.kind === IMAGE_KIND) {
+      // Zero-input SOURCE (like 'input') — never checked against `ins`
+      // (see the generic ins.length!==1 guard below, which this branch
+      // deliberately runs BEFORE). Always emits a step: unlike an
+      // identity op, "no file chosen" (path '') still needs to render
+      // something (solid mid-gray, per the renderer) whenever this node is
+      // reachable from the resolved output, so there is no pass-through
+      // ancestor to resolve to instead.
+      const img = node.image ?? defaultImageParams();
+      steps.push({ nodeId: id, type: 'image', path: img.path });
+      index = steps.length - 1;
     } else {
       if (ins.length !== 1) throw new Error(`node ${id} needs exactly one input (has ${ins.length})`);
       const src = resolve(ins[0]!.source);
@@ -1218,6 +1266,13 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
     if (step.type === 'passes') {
       if (!step.cpu) throw new Error(`step ${step.nodeId} has no CPU reference`);
       outputs.push(step.cpu(at(step.src), x, y, width, height));
+    } else if (step.type === 'image') {
+      // No CPU mirror — an image-node step reads an entirely separate
+      // texture the CPU reference path never decodes (see PlanStep's doc
+      // comment). Callers must check planHasCpuReference first, same
+      // contract this function's own doc comment already states for a
+      // custom-shader/spatial-op's null `cpu`.
+      throw new Error(`step ${step.nodeId} has no CPU reference`);
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -1240,5 +1295,9 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
  */
 export function planHasCpuReference(plan: RenderPlan): boolean {
   if (plan.geometry || plan.lens) return false;
-  return plan.steps.every((s) => s.type !== 'passes' || s.cpu !== null);
+  return plan.steps.every((s) => {
+    if (s.type === 'passes') return s.cpu !== null;
+    if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
+    return true; // blend (always has a CPU-evaluable inline mix)
+  });
 }

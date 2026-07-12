@@ -46,6 +46,8 @@ import {
   type MaskShape,
 } from '../engine/graph/maskNode';
 import { defaultSpotsParams, SPOTS_KIND, type Spot, type SpotsParams } from '../engine/graph/spotsNode';
+import { dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
+import { imageNodeDecodeCount, syncImageNodeSources } from '../engine/graph/imageNodeSource';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
@@ -201,6 +203,12 @@ declare global {
       spotState(): { mode: boolean; brushRadius: number; selectedIndex: number | null; capNotice: string | null };
       /** Verify-only convenience: set the brush radius directly (bypasses the slider's UI range so scripts can dial in a "generous" radius). */
       setSpotBrushRadius(radius: number): void;
+      /** Image node (composite/mask-by-another-file feature): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'image'. */
+      imageNodeState(nodeId?: string): { path: string; missing: boolean } | null;
+      /** Verify-only: set an image node's referenced-file path — one undo entry (bypasses the Inspector's native "Choose…" dialog). */
+      setImagePath(nodeId: string, path: string): void;
+      /** Verify-only render-worker-cache check: how many times imageNodeSource.ts has actually decoded (cache misses only) — see its own doc comment. */
+      imageNodeDecodeCount(): number;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
@@ -309,6 +317,15 @@ export function CanvasView() {
   // override) — see graphForBuild's assignment.
   const previewLook = useAppStore((s) => s.previewLook);
   const shaderRev = useAppStore((s) => s.shaderRev);
+  // Image node (composite/mask-by-another-file feature): imagePath is the
+  // main image's own path, used only to derive the SIDECAR directory a
+  // relative image-node path resolves against (see imageNode.ts's
+  // resolveImagePath) — imageNodeRev is the shaderRev-style "an async
+  // decode settled, re-render" bump (see appStore.ts's doc comment).
+  const imagePath = useAppStore((s) => s.imagePath);
+  const imageNodeRev = useAppStore((s) => s.imageNodeRev);
+  const bumpImageNodeRev = useAppStore((s) => s.bumpImageNodeRev);
+  const setImageNodeMissing = useAppStore((s) => s.setImageNodeMissing);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
   const grayscaleView = useAppStore((s) => s.grayscaleView);
@@ -560,6 +577,22 @@ export function CanvasView() {
         client.setImage(image);
         lastImageRef.current = image;
       }
+      // Image node (composite/mask-by-another-file feature): decode any
+      // referenced file THIS doc needs, lazily, cached per path — see
+      // imageNodeSource.ts. Fire-and-forget from this effect's own point of
+      // view: `image` (captured now) is the staleness guard (dropped if the
+      // main image has switched by the time a decode resolves), and
+      // bumpImageNodeRev (imageNodeRev is a dependency below) is what makes
+      // THIS SAME effect re-run and post a fresh render once a referenced
+      // file's texture actually lands worker-side.
+      syncImageNodeSources(
+        planDoc,
+        imagePath ? dirnameOf(imagePath) : null,
+        client,
+        () => useAppStore.getState().image !== image,
+        setImageNodeMissing,
+        bumpImageNodeRev
+      );
       const renderScale = Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight);
       // a broken input→output path renders as pass-through with a banner in
       // the node editor instead of killing the preview. buildPlan is pure and
@@ -709,6 +742,8 @@ export function CanvasView() {
     compareMode,
     compareOutputId,
     inspectNodeId,
+    imagePath,
+    imageNodeRev,
   ]);
 
   useEffect(() => {
@@ -1048,6 +1083,22 @@ export function CanvasView() {
       },
       setSpotBrushRadius(radius) {
         useAppStore.getState().setSpotBrushRadius(radius);
+      },
+      /** Image node (composite/mask-by-another-file feature): path + missing-badge state for `nodeId` (defaults to the current selection); null when it isn't an image node. */
+      imageNodeState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (node?.kind !== IMAGE_KIND) return null;
+        return { path: node.image?.path ?? '', missing: s.imageNodeMissing[node.id] === true };
+      },
+      /** Verify-only: set an image node's referenced-file path without driving the Inspector's "Choose…" native dialog. */
+      setImagePath(nodeId, path) {
+        useAppStore.getState().setImagePath(nodeId, path, null);
+      },
+      /** Verify-only render-worker-cache check: bumped once per REAL decode (cache miss) — see imageNodeSource.ts. */
+      imageNodeDecodeCount() {
+        return imageNodeDecodeCount();
       },
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;

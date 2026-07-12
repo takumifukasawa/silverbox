@@ -109,6 +109,59 @@ const ENCODE_SHADER_P3 = buildEncodeShader(WGSL_WORK_TO_P3);
 /** Box-filter taps per axis for THUMBNAIL_SHADER — 4×4 = 16 samples per output texel, plenty of anti-aliasing at a ~64px thumbnail and still trivial GPU cost. */
 const THUMBNAIL_TAPS = 4;
 
+// --- Image node (composite/mask-by-another-file feature) ---------------------
+//
+// A zero-input SOURCE step (graphDoc.ts's PlanStep 'image'): no upstream
+// texture to read, so it gets its OWN pair of tiny pipelines instead of the
+// generic one-input-transform shape every other node pass uses.
+// IMAGE_COVER_SHADER runs when the referenced file has been decoded and
+// uploaded (setImageNodeTexture); IMAGE_GRAY_SHADER runs otherwise (no path
+// chosen yet, decode still in flight, or the file is missing/unreadable) —
+// picking the PIPELINE at the JS level (rather than branching in one shader
+// on a "hasImage" uniform) avoids ever needing a dummy placeholder texture
+// binding. Both write into the step's own rgba16float texture exactly like
+// any other step, so thumbnails()/readbacks/export need no special casing.
+
+/** Linear-space fallback color for a missing/not-yet-decoded image-node reference — a simple, undramatic placeholder, not an LR-calibration constant. */
+const IMAGE_NODE_MISSING_GRAY = 0.5;
+
+const IMAGE_GRAY_SHADER = /* wgsl */ `
+@group(0) @binding(0) var<uniform> params: vec4f; // x = linear gray level
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return vec4f(params.x, params.x, params.x, 1.0);
+}
+`;
+
+/**
+ * Cover-fit blit: the referenced image is scaled UNIFORMLY (aspect
+ * preserved) and centered so it fully covers the consumer's frame — cropping
+ * whichever axis overflows, same "background-size: cover" mapping as CSS.
+ * `u.p0` = (scale, offsetX, offsetY, unused), computed CPU-side by
+ * GraphRenderer.coverFit from the frame dims and the cached texture's own
+ * dims; srcPx = (outputPx - offset) / scale is the inverse of
+ * outputPx = srcPx*scale + offset. No sampler filtering surprises at the
+ * edges: uv is clamped to [0,1] defensively (the cover math keeps it in
+ * range except for float noise at the exact border).
+ */
+const IMAGE_COVER_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var coverSampler: sampler;
+struct CoverParams {
+  p0: vec4f, // x = scale, y = offsetX (output px), z = offsetY (output px), w unused
+}
+@group(0) @binding(2) var<uniform> u: CoverParams;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let dims = vec2f(textureDimensions(src));
+  let srcPx = (pos.xy - vec2f(u.p0.y, u.p0.z)) / u.p0.x;
+  let uv = clamp(srcPx / dims, vec2f(0.0), vec2f(1.0));
+  return vec4f(textureSampleLevel(src, coverSampler, uv, 0.0).rgb, 1.0);
+}
+`;
+
 // Node thumbnails (per-node-preview pack, tier 1): downsamples a step's own
 // rgba16float output to a tiny display-ready rgba8unorm target — same exit
 // transform as ENCODE_SHADER (WORK_TO_SRGB + the exact sRGB curve) so a
@@ -541,11 +594,16 @@ interface ExecPhase {
 interface ExecStep {
   /** Sequential fullscreen passes; the last one writes the step's output. */
   phases: ExecPhase[];
+  /** Unused (-1) for an image-node step (see `imageView`/`imageMissing` below) — it has no upstream. */
   src: number;
   /** Present only on blend steps (second input). */
   srcB?: number;
   /** Present only on masked blend steps (third input). */
   srcMask?: number;
+  /** Image-node step (cover-fit case): the cached per-path texture view, read directly instead of `src` — see IMAGE_COVER_SHADER. */
+  imageView?: GPUTextureView;
+  /** Image-node step (no cached texture yet — missing/loading/no path): renders IMAGE_NODE_MISSING_GRAY instead. */
+  imageMissing?: boolean;
 }
 
 
@@ -585,6 +643,20 @@ export class GraphRenderer {
   private stepTextures: GPUTexture[] = [];
   /** Intra-step ping-pong target for multi-pass steps. */
   private scratchTexture: GPUTexture | null = null;
+  /**
+   * Image-node feature: per-path decoded-texture cache, keyed by the SAME
+   * raw path string a PlanStep 'image' carries (see graphDoc.ts). Populated
+   * by setImageNodeTexture (renderWorker.ts's 'imageNode' command, itself
+   * fed by the main thread's decode — see imageNodeSource.ts); cleared on
+   * setImage (main-image switch — the image-node feature's own fragile-spot
+   * note: a doc opened against a DIFFERENT photo must never see a stale
+   * relative-path→wrong-file mapping survive from the previous one).
+   */
+  private imageNodeTextures = new Map<string, GPUTexture>();
+  /** Compiled once, on first use — the image-node cover-fit blit (see IMAGE_COVER_SHADER). */
+  private imageCoverPipelineCache: GPURenderPipeline | null = null;
+  /** Compiled once, on first use — the image-node missing/loading placeholder (see IMAGE_GRAY_SHADER). */
+  private imageGrayPipelineCache: GPURenderPipeline | null = null;
   private steps: ExecStep[] = [];
   private outputIndex = -1;
   private blendPipelineCache: GPURenderPipeline | null = null;
@@ -752,6 +824,12 @@ export class GraphRenderer {
     this.stepTextures = [];
     this.destroyTexture(this.scratchTexture);
     this.scratchTexture = null;
+    // Image-node cache invalidation on main-image switch (see the field's
+    // own doc comment) — a fresh photo starts with no referenced-file
+    // textures uploaded; syncImageNodeSources (main thread) re-posts
+    // whatever the new doc's own image nodes need.
+    for (const t of this.imageNodeTextures.values()) this.destroyTexture(t);
+    this.imageNodeTextures.clear();
     this.destroyTexture(this.baseTexture);
     this.baseTexture = null;
     this.destroyBuffer(this.resampleUniform);
@@ -766,6 +844,72 @@ export class GraphRenderer {
     this.srcHeight = height;
     this.width = width;
     this.height = height;
+  }
+
+  /**
+   * Upload (or replace) the decoded texture for one image-node path — see
+   * `imageNodeTextures`'s doc comment. Independent of the main preview
+   * image/step-texture lifecycle: this can land at any time relative to a
+   * setGraph()/render() call, same "eventually consistent" tolerance
+   * customShaderNode artifacts already get (a step reads whatever is
+   * cached AT DRAW TIME — see resolveSteps' 'image' branch — so a decode
+   * that lands after this render already started simply shows up on the
+   * NEXT one, no different from a custom shader validating a moment late).
+   */
+  setImageNodeTexture(path: string, image: PreparedImage): void {
+    const { data, width, height } = image;
+    this.destroyTexture(this.imageNodeTextures.get(path));
+    const tex = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const half = new Float16Array(data.length);
+    half.set(data);
+    this.device.queue.writeTexture({ texture: tex }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [width, height]);
+    this.imageNodeTextures.set(path, tex);
+  }
+
+  /**
+   * Cover-fit (CSS `background-size: cover`-style) mapping of a `srcW`×`srcH`
+   * texture into a `frameW`×`frameH` output: uniformly scaled so it fully
+   * covers the frame (cropping whichever axis overflows), centered. Returns
+   * the params IMAGE_COVER_SHADER's inverse map consumes directly.
+   */
+  private static coverFit(
+    frameW: number,
+    frameH: number,
+    srcW: number,
+    srcH: number
+  ): { scale: number; offsetX: number; offsetY: number } {
+    const scale = Math.max(frameW / srcW, frameH / srcH);
+    return { scale, offsetX: (frameW - srcW * scale) / 2, offsetY: (frameH - srcH * scale) / 2 };
+  }
+
+  /** Pipeline for the image-node missing/loading placeholder (see IMAGE_GRAY_SHADER) — compiled once, on first use. */
+  private imageGrayPipeline(): GPURenderPipeline {
+    if (!this.imageGrayPipelineCache) {
+      const module = this.device.createShaderModule({ code: IMAGE_GRAY_SHADER });
+      this.imageGrayPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.imageGrayPipelineCache;
+  }
+
+  /** Pipeline for the image-node cover-fit blit (see IMAGE_COVER_SHADER) — compiled once, on first use. */
+  private imageCoverPipeline(): GPURenderPipeline {
+    if (!this.imageCoverPipelineCache) {
+      const module = this.device.createShaderModule({ code: IMAGE_COVER_SHADER });
+      this.imageCoverPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.imageCoverPipelineCache;
   }
 
   /** Pipeline for the resample (geometry+lens) pass — compiled once, shared by every consumer. */
@@ -996,7 +1140,16 @@ export class GraphRenderer {
     return buffer;
   }
 
-  private resolveSteps(plan: RenderPlan): ExecStep[] {
+  /**
+   * `frameWidth`/`frameHeight` are the CONSUMER frame every step texture in
+   * this plan shares (this.width/this.height for the preview path, the
+   * export's own baseDims for renderToPixels) — needed ONLY by an 'image'
+   * step's cover-fit math, so both call sites must pass the frame they are
+   * ACTUALLY about to render into (not necessarily `this.width/height`,
+   * which for applyGraph aren't updated to the new plan's dims until after
+   * this call — see applyGraph's own doc comment on ordering).
+   */
+  private resolveSteps(plan: RenderPlan, frameWidth: number, frameHeight: number): ExecStep[] {
     return plan.steps.map((op): ExecStep => {
       if (op.type === 'passes') {
         const phases = op.passes.map((pass): ExecPhase => {
@@ -1011,6 +1164,24 @@ export class GraphRenderer {
           return { pipeline: this.passPipeline(pass.shaderId, pass.wgsl), uniformBuffer };
         });
         return { phases, src: op.src };
+      }
+      if (op.type === 'image') {
+        const tex = this.imageNodeTextures.get(op.path);
+        if (!tex) {
+          // No path chosen yet, decode still in flight, or the file is
+          // missing/unreadable — solid gray, no texture binding needed.
+          return {
+            phases: [{ pipeline: this.imageGrayPipeline(), uniformBuffer: this.vec4Buffer([IMAGE_NODE_MISSING_GRAY, 0, 0, 0]) }],
+            src: -1,
+            imageMissing: true,
+          };
+        }
+        const fit = GraphRenderer.coverFit(frameWidth, frameHeight, tex.width, tex.height);
+        return {
+          phases: [{ pipeline: this.imageCoverPipeline(), uniformBuffer: this.vec4Buffer([fit.scale, fit.offsetX, fit.offsetY, 0]) }],
+          src: -1,
+          imageView: tex.createView(),
+        };
       }
       const hasMask = op.srcMask !== undefined;
       return {
@@ -1028,7 +1199,15 @@ export class GraphRenderer {
 
   private async applyGraph(plan: RenderPlan): Promise<void> {
     const gen = ++this.setGraphGen;
-    const steps = this.resolveSteps(plan);
+    // Base dims computed BEFORE resolveSteps (reordered for the image-node
+    // feature): an 'image' step's cover-fit math needs the CONSUMER frame
+    // this plan is about to use, which is `nextWidth`/`nextHeight` below —
+    // `this.width`/`this.height` still hold the PREVIOUS plan's dims at this
+    // point (they're only assigned after the dimsChanged branch further
+    // down), so resolveSteps must be handed the freshly computed pair
+    // explicitly rather than reading `this.width`/`this.height` itself.
+    const { width: nextWidth, height: nextHeight } = GraphRenderer.baseDims(plan, this.srcWidth, this.srcHeight);
+    const steps = this.resolveSteps(plan, nextWidth, nextHeight);
     if (gen !== this.setGraphGen) {
       this.destroySteps(steps);
       return;
@@ -1040,7 +1219,6 @@ export class GraphRenderer {
     // Base dims: the source itself when geometry is identity (zero cost, no
     // extra texture/pass), else the crop rectangle at source resolution. Lens
     // never changes dims — only geometry's crop does.
-    const { width: nextWidth, height: nextHeight } = GraphRenderer.baseDims(plan, this.srcWidth, this.srcHeight);
     const dimsChanged = nextWidth !== this.width || nextHeight !== this.height;
 
     // The resample pass activates when EITHER geometry or lens is active —
@@ -1134,12 +1312,26 @@ export class GraphRenderer {
     sourceView: GPUTextureView,
     stepTextures: GPUTexture[],
     scratch: GPUTexture | null,
-    encoder: GPUCommandEncoder
+    encoder: GPUCommandEncoder,
+    /** Bilinear clamp-to-edge sampler for an image-node step's cover-fit blit (see IMAGE_COVER_SHADER) — the SAME sampler `effectiveSourceView`'s resample pass uses, reused rather than compiling a second one. */
+    imageSampler: GPUSampler
   ): GPUTextureView {
     const views = stepTextures.map((t) => t.createView());
     const scratchView = scratch?.createView() ?? null;
     const at = (i: number) => (i < 0 ? sourceView : views[i]!);
     steps.forEach((step, i) => {
+      if (step.imageMissing || step.imageView) {
+        const phase = step.phases[0]!;
+        const entries: GPUBindGroupEntry[] = step.imageView
+          ? [
+              { binding: 0, resource: step.imageView },
+              { binding: 1, resource: imageSampler },
+              { binding: 2, resource: { buffer: phase.uniformBuffer! } },
+            ]
+          : [{ binding: 0, resource: { buffer: phase.uniformBuffer! } }];
+        addPass(encoder, views[i]!, phase.pipeline, entries);
+        return;
+      }
       if (step.srcB !== undefined) {
         const phase = step.phases[0]!;
         const entries: GPUBindGroupEntry[] = [
@@ -1201,7 +1393,8 @@ export class GraphRenderer {
       sourceView,
       this.stepTextures,
       this.scratchTexture,
-      encoder
+      encoder,
+      this.resampleSampler()
     );
   }
 
@@ -1275,7 +1468,11 @@ export class GraphRenderer {
       return t;
     };
 
-    const steps = this.resolveSteps(plan);
+    // Image-node cover-fit target: THIS export's own frame (width/height
+    // above), not the preview's this.width/this.height — an image-node
+    // reference composites at whatever resolution its consumer renders at,
+    // export included (see resolveSteps' doc comment).
+    const steps = this.resolveSteps(plan, width, height);
     try {
       const encoder = device.createCommandEncoder();
       let baseView = source.createView();
@@ -1320,7 +1517,8 @@ export class GraphRenderer {
         baseView,
         stepTextures,
         scratch,
-        encoder
+        encoder,
+        this.resampleSampler()
       );
       const target = makeTarget('rgba8unorm', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
       const bytesPerRow = Math.ceil((width * 4) / 256) * 256;

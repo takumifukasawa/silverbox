@@ -94,6 +94,7 @@ const ALL_SCRIPTS = [
   { name: 'compare', file: 'verify-compare.mjs' },
   { name: 'nodepreview', file: 'verify-nodepreview.mjs' },
   { name: 'ratings', file: 'verify-ratings.mjs' },
+  { name: 'imagenode', file: 'verify-imagenode.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

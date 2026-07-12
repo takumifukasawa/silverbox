@@ -31,6 +31,7 @@ import {
   type MaskShape,
 } from '../engine/graph/maskNode';
 import { SPOTS_CAP, SPOTS_KIND } from '../engine/graph/spotsNode';
+import { IMAGE_KIND, imageBaseName } from '../engine/graph/imageNode';
 import { anchorRadiusToOutput, outputRadiusToAnchor } from '../engine/graph/anchorSpace';
 import {
   defaultDevelopParams,
@@ -954,6 +955,46 @@ function OutputInspector({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * Image node (composite/mask-by-another-file feature): path + a "Choose…"
+ * button (main-process open dialog, images filter — reuses openImageDialog,
+ * the same one the main "Open…" toolbar action uses) + the filename, plus a
+ * graphBroken-style notice (not a hard error) when the referenced file
+ * failed to decode. v1 only ever WRITES an absolute path here; a relative
+ * one is merely ACCEPTED on parse (see imageNode.ts's resolveImagePath).
+ */
+function ImageInspector({ node }: { node: GraphNode }) {
+  const setImagePath = useAppStore((s) => s.setImagePath);
+  const missing = useAppStore((s) => s.imageNodeMissing[node.id] === true);
+  const path = node.image?.path ?? '';
+  const choose = async () => {
+    const result = await window.silverbox.openImageDialog();
+    if (result.canceled) return;
+    setImagePath(node.id, result.path, null);
+  };
+  return (
+    <>
+      <div className="inspector-title">Image: composite with / mask by another file.</div>
+      <Section title="Referenced file">
+        <div className="param-row">
+          <span className="param-label">File</span>
+          <span className="image-node-filename" title={path || 'No file chosen'} data-testid="image-node-filename">
+            {path ? imageBaseName(path) : 'No file chosen'}
+          </span>
+        </div>
+        <button type="button" data-testid="image-node-choose" onClick={() => void choose()}>
+          Choose…
+        </button>
+        {missing && (
+          <div className="inspector-notice" data-testid="image-node-missing-notice">
+            File not found — rendering solid gray until it's fixed or replaced.
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -980,6 +1021,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   }
   if (node.kind === SPOTS_KIND) {
     return <SpotsInspector node={node} />;
+  }
+  if (node.kind === IMAGE_KIND) {
+    return <ImageInspector node={node} />;
   }
   if (node.kind === 'input') {
     return (

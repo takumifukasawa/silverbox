@@ -19,12 +19,14 @@ import { BLEND_KIND, CUSTOM_KIND, isOpKind } from '../engine/graph/ops';
 import { DEVELOP_KIND, nodeLabel, type GraphDoc } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
+import { IMAGE_KIND } from '../engine/graph/imageNode';
 
-/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions. */
+/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own. */
 interface OpNodeData {
   label: string;
   thumbUrl?: string;
   inspecting: boolean;
+  missing?: boolean;
   [key: string]: unknown;
 }
 
@@ -94,7 +96,31 @@ function BlendNode({ id, data, selected }: NodeProps) {
   );
 }
 
-const nodeTypes = { blend: BlendNode, op: OpNode };
+/**
+ * Image node body (composite/mask-by-another-file feature): zero inputs —
+ * unlike OpNode, there is no target Handle to wire up (an 'image' node is a
+ * SOURCE like 'input', just referencing a different file — see graphDoc.ts)
+ * — plus a "missing file" badge when the referenced path failed to decode
+ * (graphBroken-style notice, not a hard error; see appStore.ts's
+ * imageNodeMissing / imageNodeSource.ts).
+ */
+function ImageSourceNode({ id, data, selected }: NodeProps) {
+  const { label, thumbUrl, inspecting, missing } = data as unknown as OpNodeData;
+  return (
+    <div className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
+      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
+      <span>{label}</span>
+      {missing && (
+        <span className="op-node-badge" data-testid={`image-node-missing-${id}`} title="referenced file not found">
+          ⚠
+        </span>
+      )}
+      <Handle type="source" position={Position.Right} />
+    </div>
+  );
+}
+
+const nodeTypes = { blend: BlendNode, op: OpNode, image: ImageSourceNode };
 
 /** Pure GraphDoc → React Flow Node[] projection, shared by the initial state and the resync effect below. */
 function buildNodes(
@@ -102,7 +128,8 @@ function buildNodes(
   fileName: string | null,
   selectedNodeId: string | null,
   nodeThumbs: Record<string, string>,
-  inspectNodeId: string | null
+  inspectNodeId: string | null,
+  imageNodeMissing: Record<string, boolean>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
@@ -110,11 +137,12 @@ function buildNodes(
   return graph.nodes.map((n) => ({
     id: n.id,
     type:
-      n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : 'op',
+      n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : n.kind === IMAGE_KIND ? 'image' : 'op',
     data: {
       label: nodeLabel(n, fileName),
       thumbUrl: nodeThumbs[n.id],
       inspecting: n.id === inspectNodeId,
+      missing: n.kind === IMAGE_KIND ? imageNodeMissing[n.id] === true : undefined,
     },
     position: n.position,
     selected: n.id === selectedNodeId,
@@ -127,6 +155,7 @@ function buildNodes(
       n.kind === DEVELOP_KIND ||
       n.kind === MASK_KIND ||
       n.kind === SPOTS_KIND ||
+      n.kind === IMAGE_KIND ||
       (n.kind === 'output' && outputCount > 1),
   })) as Node[];
 }
@@ -157,6 +186,9 @@ export function NodeEditorPanel() {
   const nodeThumbs = useAppStore((s) => s.nodeThumbs);
   const inspectNodeId = useAppStore((s) => s.inspectNodeId);
   const setInspectNode = useAppStore((s) => s.setInspectNode);
+  // Image node feature: missing-file badge state, resynced the same
+  // debounced way nodeThumbs/inspectNodeId are (see below).
+  const imageNodeMissing = useAppStore((s) => s.imageNodeMissing);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -172,7 +204,7 @@ export function NodeEditorPanel() {
   // below (they change at most every ~300ms, via CanvasView's debounce — far
   // below drag-lag territory, so no extra guard is needed for them).
   const [rfNodes, setRfNodes] = useState<Node[]>(() =>
-    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId)
+    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing)
   );
   // Suppressed while a drag is in flight: the store's node position is still
   // the PRE-drag value until drop, so resyncing from it mid-drag would fight
@@ -180,8 +212,8 @@ export function NodeEditorPanel() {
   const draggingRef = useRef(false);
   useEffect(() => {
     if (draggingRef.current) return;
-    setRfNodes(buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId));
-  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId]);
+    setRfNodes(buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing));
+  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing]);
 
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,

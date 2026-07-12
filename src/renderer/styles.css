@@ -1848,6 +1848,26 @@ button:disabled {
   color: #ff7a76;
 }
 
+/* Image node (composite/mask-by-another-file feature): Inspector's
+   graphBroken-style missing-file notice — same palette as node-editor-banner. */
+.inspector-notice {
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  background: rgba(60, 50, 20, 0.92);
+  border: 1px solid #f0c674;
+  color: #f0c674;
+}
+
+.image-node-filename {
+  font-size: 12px;
+  color: #ccd;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* React Flow's default handle dot is 6px — too small to reliably grab for
    wiring edges. Bump the visible dot to 12px and, same trick as
    .crop-handle above, add an invisible ::after padding hitbox that reaches
@@ -1961,6 +1981,17 @@ button:disabled {
 
 .op-node-eye--active {
   color: #c299f0;
+}
+
+/* Image node (composite/mask-by-another-file feature): missing/unreadable
+   referenced-file badge — graphBroken-style notice, not a hard error. */
+.op-node-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  color: #e8c96b;
+  font-size: 12px;
+  line-height: 1;
 }
 
 /* ---- export dialog (UX pack B §4) ---- */

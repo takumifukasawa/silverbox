@@ -126,6 +126,18 @@ export class RenderWorkerClient {
     getWorker().postMessage(msg);
   }
 
+  /**
+   * Image node (composite/mask-by-another-file feature): post one
+   * referenced file's decoded pixels, keyed by its raw (as-authored) path —
+   * see renderProtocol.ts's 'imageNode' doc comment. `image.data`'s buffer
+   * is transferred (imageNodeSource.ts's caller owns a disposable decode
+   * result, same convention as setImage/renderToPixels).
+   */
+  setImageNodeSource(path: string, image: PreparedImage): void {
+    const msg: RenderWorkerCommand = { type: 'imageNode', path, image };
+    getWorker().postMessage(msg, [image.data.buffer]);
+  }
+
   render(args: {
     doc: GraphDoc;
     renderScale: number;

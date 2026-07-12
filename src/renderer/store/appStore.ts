@@ -29,6 +29,8 @@ import {
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
+import { defaultImageParams, IMAGE_KIND } from '../engine/graph/imageNode';
+import { clearImageNodeSourceCache } from '../engine/graph/imageNodeSource';
 import type { HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
@@ -425,6 +427,27 @@ interface AppState {
    * GraphDoc itself did not change.
    */
   shaderRev: number;
+  /** Replace an image node's referenced-file path (Inspector's "Choose…"); `coalesceKey` null = its own undo entry, same convention as setMaskShape/renameOutput. */
+  setImagePath(nodeId: string, path: string, coalesceKey: string | null): void;
+  /**
+   * nodeId → true once that image node's referenced-file decode has
+   * actually FAILED (missing/unreadable) — never true merely while a decode
+   * is still in flight or before one has started (see imageNodeSource.ts's
+   * syncImageNodeSources). Drives the node-editor badge (image node
+   * feature); an absent/empty path is never "missing", just gray.
+   */
+  imageNodeMissing: Record<string, boolean>;
+  setImageNodeMissing(nodeId: string, missing: boolean): void;
+  /**
+   * Bumped whenever an image-node decode settles (success or failure) —
+   * imageNodeSource.ts's decode is fire-and-forget from the render effect's
+   * own point of view, so this is what makes CanvasView's render effect
+   * re-run (and post a fresh 'render'/texture) once the referenced file's
+   * pixels are actually ready, mirroring shaderRev's role for async custom-
+   * shader validation.
+   */
+  imageNodeRev: number;
+  bumpImageNodeRev(): void;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -1367,6 +1390,14 @@ export const useAppStore = create<AppState>((set, get) => {
       // from "coincidentally the same id, totally different image" — clear
       // both explicitly, revoking every blob: URL before dropping the map.
       clearNodeThumbs(get().nodeThumbs);
+      // Image node (composite/mask-by-another-file feature): the main-thread
+      // decode cache is keyed by raw path strings that mean nothing outside
+      // THIS doc's own sidecar directory — clear it on every image switch
+      // (same "never let stale per-photo state survive" rule nodeThumbs/
+      // shader artifacts already follow above), and let the render worker's
+      // own per-path caches clear themselves inside the 'image' command they
+      // are about to receive (see graphRenderer.ts's setImage doc comment).
+      clearImageNodeSourceCache();
       set({
         ...clearOpeningPreview(get()),
         imageStatus: 'ready',
@@ -1375,6 +1406,7 @@ export const useAppStore = create<AppState>((set, get) => {
         graphDirty: false,
         selectedNodeId: null,
         nodeThumbs: {},
+        imageNodeMissing: {},
         inspectNodeId: null,
         history: emptyHistory(),
         shaderErrors: {},
@@ -1523,6 +1555,28 @@ export const useAppStore = create<AppState>((set, get) => {
         };
       }
 
+      if (kind === IMAGE_KIND) {
+        // Zero-input SOURCE (like 'input') — splicing it into the existing
+        // input→output chain the way every other kind below does would
+        // REPLACE the real photo with the referenced file, which is never
+        // the point (the use case is compositing/masking WITH it, via a
+        // blend's 'b'/'mask' port). Lands disconnected instead, same "wire
+        // it up freely afterwards" treatment 'output' gets above.
+        const id = nextId(g, 'image');
+        const node: GraphNode = {
+          id,
+          kind: IMAGE_KIND,
+          position: { x: out.position.x, y: out.position.y + 200 },
+          image: defaultImageParams(),
+        };
+        return {
+          ...pushHistory(s, null),
+          graph: { ...g, nodes: [...g.nodes, node] },
+          graphDirty: true,
+          selectedNodeId: id,
+        };
+      }
+
       const inEdge = g.edges.find((e) => e.target === out.id);
       if (!inEdge) return {};
       const id = nextId(g, kind);
@@ -1623,12 +1677,17 @@ export const useAppStore = create<AppState>((set, get) => {
           scratch = { ...scratch, edges: [...scratch.edges, edge] };
         }
       }
+      // Prune this node's own missing-file badge state (image node feature)
+      // the same immediate way nodeThumbs is pruned above it, rather than
+      // waiting for the next syncImageNodeSources pass to notice it's gone.
+      const { [nodeId]: _pruned, ...imageNodeMissing } = s.imageNodeMissing;
       return {
         ...pushHistory(s, null),
         graph: scratch,
         graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
         nodeThumbs: pruneNodeThumb(s.nodeThumbs, nodeId),
+        imageNodeMissing,
         inspectNodeId: s.inspectNodeId === nodeId ? null : s.inspectNodeId,
       };
     });
@@ -1909,6 +1968,32 @@ export const useAppStore = create<AppState>((set, get) => {
 
   async applyShaderSource(nodeId, src) {
     await validateShaderSource(nodeId, src, { history: true });
+  },
+
+  setImagePath(nodeId, path, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== IMAGE_KIND) return {};
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, image: { path } } : n)) },
+        graphDirty: true,
+        // A path edit invalidates whatever "missing" verdict the OLD path
+        // earned — imageNodeSource.ts's next syncImageNodeSources call (the
+        // render effect the graph change itself triggers) re-settles it.
+        imageNodeMissing: { ...s.imageNodeMissing, [nodeId]: false },
+      };
+    });
+  },
+
+  imageNodeMissing: {},
+  setImageNodeMissing(nodeId, missing) {
+    set((s) => (s.imageNodeMissing[nodeId] === missing ? {} : { imageNodeMissing: { ...s.imageNodeMissing, [nodeId]: missing } }));
+  },
+
+  imageNodeRev: 0,
+  bumpImageNodeRev() {
+    set((s) => ({ imageNodeRev: s.imageNodeRev + 1 }));
   },
 
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {

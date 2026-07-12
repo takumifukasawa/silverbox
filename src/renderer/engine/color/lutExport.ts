@@ -50,11 +50,13 @@ import {
   DEVELOP_KIND,
   type CompileContext,
   type GraphDoc,
+  type GraphEdge,
   type RenderPlan,
 } from '../graph/graphDoc';
 import { defaultDevelopParams, isIdentityDetail, isIdentityEffectsSpatial } from '../graph/developNode';
-import { CUSTOM_KIND } from '../graph/ops';
+import { BLEND_KIND, CUSTOM_KIND } from '../graph/ops';
 import { SPOTS_KIND } from '../graph/spotsNode';
+import { IMAGE_KIND } from '../graph/imageNode';
 import type { WbModel } from './whiteBalance';
 import { srgbDecode, srgbEncode } from './srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB } from './workingSpace';
@@ -175,22 +177,92 @@ function reduceGraphForLut(doc: GraphDoc, ctx: CompileContext): { doc: GraphDoc;
         removeIds.add(node.id);
         const aEdge = working.edges.find((e) => e.target === node.id && e.targetHandle === 'a');
         if (aEdge) bypassSource.set(node.id, aEdge.source);
+      } else if (step.type === 'image') {
+        // Image node (composite/mask-by-another-file feature): a per-pixel
+        // TEXTURE source, not an RGB→RGB formula — a LUT lattice point has
+        // no position and never loads the referenced file's pixels, so this
+        // is unconditionally unrepresentable (unlike Detail/fx-spatial there
+        // is no identity-reset escape hatch — "don't read another image" IS
+        // the whole node). Removed with NO bypass mapping (it has no input
+        // to fall back to, unlike custom/spots — see PlanStep's doc
+        // comment); the cascading closure below degrades whatever consumes
+        // it (typically a blend's 'b' port — its 'mask' port is already
+        // caught unconditionally above, regardless of what feeds it).
+        sawIssue = true;
+        skipped.push(`${step.nodeId}: image node (reads pixels from another file, no CPU reference) — not representable in a LUT`);
+        removeIds.add(step.nodeId);
       }
     }
 
     if (!sawIssue) return { doc: working, skipped };
 
+    const resolveSource = (id: string): string => {
+      let cur = id;
+      const seen = new Set<string>();
+      while (removeIds.has(cur) && !seen.has(cur)) {
+        seen.add(cur);
+        const next = bypassSource.get(cur);
+        if (next === undefined) break;
+        cur = next;
+      }
+      return cur;
+    };
+
+    // Cascading closure: a removed node with NO bypass mapping (only an
+    // image node reaches this — custom/spots always have exactly one input
+    // to fall back to) leaves whoever consumes it with nothing valid either,
+    // UNLESS that consumer is a blend degrading via its own 'a' fallback
+    // (same convention as the masked-blend/custom bypasses above). Propagate
+    // one level at a time until nothing new is found — bounded by the node
+    // count, and 'input'/'output' are never touched (an output must always
+    // keep SOME resolution, however unrepresentable — deleting it would
+    // violate "the doc always has an output"; a doc whose ENTIRE resolved
+    // chain is unrepresentable, e.g. an image node wired straight to output
+    // with no blend in between, is outside this feature's documented use
+    // case and simply produces a LUT of whatever residual color ops remain).
+    const incomingByTarget = new Map<string, GraphEdge[]>();
+    for (const e of working.edges) incomingByTarget.set(e.target, [...(incomingByTarget.get(e.target) ?? []), e]);
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (const node of working.nodes) {
+        if (removeIds.has(node.id) || node.kind === 'input' || node.kind === 'output') continue;
+        const ins = incomingByTarget.get(node.id) ?? [];
+        if (node.kind === BLEND_KIND) {
+          const aEdge = ins.find((e) => e.targetHandle === 'a');
+          const resolvedA = aEdge ? resolveSource(aEdge.source) : undefined;
+          if (resolvedA !== undefined && removeIds.has(resolvedA)) {
+            removeIds.add(node.id);
+            skipped.push(`${node.id}: its base ('a') input is itself unrepresentable — not representable in a LUT`);
+            progressed = true;
+            continue;
+          }
+          const bEdge = ins.find((e) => e.targetHandle === 'b');
+          const resolvedB = bEdge ? resolveSource(bEdge.source) : undefined;
+          // Only degrade to 'a' when 'a' actually EXISTS as a fallback (a
+          // malformed/disconnected blend missing its 'a' edge never reaches
+          // buildPlan's own validation — it isn't reachable from the
+          // resolved output — so this can't assume aEdge is present here).
+          if (aEdge && resolvedB !== undefined && removeIds.has(resolvedB)) {
+            bypassSource.set(node.id, aEdge.source);
+            removeIds.add(node.id);
+            skipped.push(`${node.id}: composited with an unrepresentable source on its 'b' input — not representable in a LUT`);
+            progressed = true;
+          }
+        } else {
+          const inEdge = ins[0];
+          const resolvedIn = inEdge ? resolveSource(inEdge.source) : undefined;
+          if (resolvedIn !== undefined && removeIds.has(resolvedIn)) {
+            removeIds.add(node.id);
+            skipped.push(`${node.id}: fed directly by an unrepresentable node — not representable in a LUT`);
+            progressed = true;
+          }
+        }
+      }
+    }
+
     let nextEdges = working.edges;
     if (removeIds.size > 0) {
-      const resolveSource = (id: string): string => {
-        let cur = id;
-        const seen = new Set<string>();
-        while (removeIds.has(cur) && !seen.has(cur)) {
-          seen.add(cur);
-          cur = bypassSource.get(cur) ?? cur;
-        }
-        return cur;
-      };
       nextEdges = working.edges
         .filter((e) => !removeIds.has(e.target))
         .map((e) => (removeIds.has(e.source) ? { ...e, source: resolveSource(e.source) } : e));

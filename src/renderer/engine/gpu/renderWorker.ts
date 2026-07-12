@@ -69,6 +69,19 @@ let currentCompareGen = 0;
 /** Most recently received 'image' command's payload, replayed onto the compare renderer if it initializes AFTER an image is already loaded (the ordinary case: the main canvas/image load first, compare mode is a later toggle). */
 let lastImage: PreparedImage | null = null;
 
+/**
+ * Image node (composite/mask-by-another-file feature): every 'imageNode'
+ * command received so far, keyed by its raw path — mirrors `lastImage`'s
+ * replay role, but for image-node textures instead of the main decode: a
+ * compare pane initialized AFTER one or more image nodes already loaded
+ * (the ordinary case — main canvas first, compare mode a later toggle)
+ * needs every one of them applied to its OWN GraphRenderer too, not just
+ * whichever loaded most recently. Cleared on every 'image' command (main
+ * image switch) — see that handler's own comment for why a stale
+ * relative-path→wrong-file mapping must never survive into a new doc.
+ */
+const imageNodeCache = new Map<string, PreparedImage>();
+
 function post(message: RenderWorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(message, transfer);
 }
@@ -214,6 +227,13 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       wbModel = createWbModel(msg.image.color ?? {});
       currentImageDims = { width: msg.image.width, height: msg.image.height };
       lastImage = msg.image;
+      // Image-node cache invalidation on main-image switch (see
+      // `imageNodeCache`'s own doc comment) — each GraphRenderer instance
+      // clears its OWN per-path GPU texture map inside setImage() itself
+      // (graphRenderer.ts); this worker-level cache is the separate replay
+      // list for a compare pane that initializes later, and must be wiped
+      // in lockstep so it never replays a since-abandoned photo's textures.
+      imageNodeCache.clear();
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -229,6 +249,26 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       if (compareRendererReady) {
         void compareRendererReady
           .then((renderer) => renderer.setImage(msg.image))
+          .catch((err) => {
+            post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          });
+      }
+      return;
+    }
+    case 'imageNode': {
+      // Cached here (not just applied) so a compare pane created LATER
+      // (initCompare below) can replay every image node loaded so far, not
+      // just whichever arrives after the pane exists — mirrors `lastImage`'s
+      // own replay role for the main decode.
+      imageNodeCache.set(msg.path, msg.image);
+      void rendererReady
+        .then((renderer) => renderer.setImageNodeTexture(msg.path, msg.image))
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
+      if (compareRendererReady) {
+        void compareRendererReady
+          .then((renderer) => renderer.setImageNodeTexture(msg.path, msg.image))
           .catch((err) => {
             post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
           });
@@ -288,6 +328,11 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
           // compare mode being toggled ON well after the main image opened
           // (see this file's doc comment on `lastImage`).
           if (lastImage) renderer.setImage(lastImage);
+          // Same replay for every image-node texture loaded so far (compare
+          // Mode B can show a chain containing an image node) — setImage
+          // above already cleared the fresh renderer's OWN per-path map, so
+          // this is the full, correct set for whatever doc is current.
+          for (const [path, image] of imageNodeCache) renderer.setImageNodeTexture(path, image);
           resolveCompareRenderer!(renderer);
         },
         (err) => {

@@ -30,6 +30,20 @@ import type { ExportColorSpace } from '../../../../shared/ipc';
 export type RenderWorkerCommand =
   | { type: 'init'; canvas: OffscreenCanvas }
   | { type: 'image'; gen: number; image: PreparedImage }
+  /**
+   * Image node (composite/mask-by-another-file feature): the main thread
+   * decodes a referenced file via the SAME imageLoader the main image uses
+   * (this file's own doc comment — render-isolation, DESIGN.md §10 — is why
+   * the worker never runs libraw itself) and posts the result here, keyed
+   * by the RAW (as-authored) `image.path` — the SAME string a PlanStep
+   * 'image' carries (graphDoc.ts), so the worker's per-path cache and
+   * buildPlan's step never need to agree on any resolved/absolute form.
+   * Applied to BOTH the main and compare GraphRenderer instances (compare
+   * Mode B can show a chain containing the image node too) and cached
+   * worker-side so a compare pane initialized LATER can replay it — see
+   * renderWorker.ts's `imageNodeCache`/`initCompare` handler.
+   */
+  | { type: 'imageNode'; path: string; image: PreparedImage }
   | {
       type: 'render';
       gen: number;

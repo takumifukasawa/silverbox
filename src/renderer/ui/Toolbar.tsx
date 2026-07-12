@@ -5,6 +5,7 @@ import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
 import { outputName, type AddableKind } from '../engine/graph/graphDoc';
 import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
+import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { PresetsMenu } from './PresetsMenu';
 
 /**
@@ -22,6 +23,7 @@ function AddNodeMenu() {
     BLEND_KIND,
     MASK_KIND,
     SPOTS_KIND,
+    IMAGE_KIND,
     'output',
     ...(Object.keys(OPS) as AddableKind[]),
   ];
