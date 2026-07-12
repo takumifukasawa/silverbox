@@ -83,8 +83,19 @@ export const HSL_BAND_CENTER_DEG: Record<HslBand, number> = {
 
 export interface DetailParams {
   sharpen: { amount: number; radius: number; masking: number };
-  noiseLuminance: { amount: number };
-  noiseColor: { amount: number };
+  /**
+   * `detail`/`contrast` are LR Classic's Luminance sub-sliders (0–100),
+   * exposing the bilateral NR pass's own degrees of freedom — see packNr's
+   * NR_LUM_DETAIL_RANGE_STOPS / NR_LUM_CONTRAST_GAIN mapping constants.
+   * Defaults (50/0) reproduce today's fixed formula exactly.
+   */
+  noiseLuminance: { amount: number; detail: number; contrast: number };
+  /**
+   * `detail`/`smoothness` are LR Classic's Color sub-sliders (0–100) — see
+   * packNr's NR_COLOR_DETAIL_RANGE_STOPS / NR_COLOR_SMOOTHNESS_SIGMA_STOPS.
+   * Defaults (50/50) reproduce today's fixed formula exactly.
+   */
+  noiseColor: { amount: number; detail: number; smoothness: number };
 }
 
 /** One color-grading wheel: hue 0–360°, saturation 0–100, luminance −100..+100. */
@@ -167,7 +178,11 @@ export function defaultDevelopParams(): DevelopParams {
       blending: 50,
       balance: 0,
     },
-    detail: { sharpen: { amount: 0, radius: 1.0, masking: 0 }, noiseLuminance: { amount: 0 }, noiseColor: { amount: 0 } },
+    detail: {
+      sharpen: { amount: 0, radius: 1.0, masking: 0 },
+      noiseLuminance: { amount: 0, detail: 50, contrast: 0 },
+      noiseColor: { amount: 0, detail: 50, smoothness: 50 },
+    },
     effects: {
       dehaze: 0,
       clarity: 0,
@@ -506,13 +521,22 @@ const DETAIL_DEC_WGSL = nodePassWgsl({
 // drives BOTH the range sigma and the blend with the original. Color NR:
 // gaussian on Cb/Cr with a loose luma-edge guard. Y untouched by color NR
 // and Cb/Cr by luminance NR.
+//
+// LR six-knob sub-sliders (manual-noise-reduction pack) ride the SAME
+// bilateral math above via four named mapping constants (packNr): Luminance
+// Detail/Contrast tune the luma range sigma / re-inject high-frequency luma
+// after smoothing; Color Detail/Smoothness tune the chroma luma-edge guard /
+// chroma spatial sigma. Every mapping is centered on its default sub-slider
+// value (50/0/50/50) so f(default) reproduces today's fixed constants
+// exactly — see packNr's doc comment for the f(default)=1 proof.
 const DETAIL_NR_WGSL = nodePassWgsl({
   uniformDecl: /* wgsl */ `
 struct NrParams {
   // x = 1/(2σ²) luma spatial, y = 1/(2σ²) chroma spatial,
   // z = kernel radius (whole render px), w = 1/(2σ²) luma range
   p0: vec4f,
-  // x = luma blend, y = chroma blend, z = 1/(2σ²) chroma luma-edge guard
+  // x = luma blend, y = chroma blend, z = 1/(2σ²) chroma luma-edge guard,
+  // w = luma high-frequency contrast re-injection fraction (0 at default)
   p1: vec4f,
 }
 @group(0) @binding(1) var<uniform> u: NrParams;
@@ -541,7 +565,13 @@ struct NrParams {
         wC += wc;
       }
     }
-    c = vec3f(mix(v0.x, sumY / wY, u.p1.x), mix(v0.yz, sumC / wC, u.p1.y));
+    // Luminance Contrast: re-inject a fraction of the high-frequency luma the
+    // bilateral filter removed (fights the "plastic" over-smoothed look)
+    // BEFORE blending toward the original by amount; 0 at default leaves
+    // this numerically identical to the plain filtered result.
+    let filteredY = sumY / wY;
+    let restoredY = filteredY + u.p1.w * (v0.x - filteredY);
+    c = vec3f(mix(v0.x, restoredY, u.p1.x), mix(v0.yz, sumC / wC, u.p1.y));
   }
 `,
 });
@@ -596,16 +626,46 @@ struct SharpenParams {
 
 const inv2s2 = (sigma: number): number => 1 / (2 * sigma * sigma);
 
+/**
+ * LR six-knob sub-slider mapping constants — LR-CALIBRATION CANDIDATES.
+ * Each sub-slider (0–100) scales an EXISTING bilateral degree of freedom by
+ * a ±1-stop (2×) multiplier centered on its default value, so at the
+ * default sub-slider the multiplier is exactly 1 and every formula below
+ * reduces to today's fixed constant — f(default) = today's behavior, for
+ * ANY amount. Only the spread (how many stops 0..100 travels) is a tuning
+ * choice; the recentering itself is what buys back-compat.
+ */
+const NR_LUM_DETAIL_RANGE_STOPS = 1.0;
+/** Luminance NR "Contrast": max fraction of the removed high-frequency luma re-injected at contrast=100 (0 at the contrast=0 default — no-op). */
+const NR_LUM_CONTRAST_GAIN = 0.6;
+const NR_COLOR_DETAIL_RANGE_STOPS = 1.0;
+const NR_COLOR_SMOOTHNESS_SIGMA_STOPS = 1.0;
+
+/** 2^((default - v) / 50 * stops): the sub-slider → multiplier curve shared by all four mappings (1 at v = default). */
+const subSliderMul = (v: number, defaultV: number, stops: number): number => Math.pow(2, ((defaultV - v) / 50) * stops);
+
 function packNr(d: DetailParams, scale: number): ArrayBuffer {
   const aL = Math.min(1, d.noiseLuminance.amount / 100);
   const aC = Math.min(1, d.noiseColor.amount / 100);
   const sLum = Math.max(DETAIL_SIGMA_MIN, NR_LUM_SIGMA_FULL * scale);
-  const sChroma = Math.max(DETAIL_SIGMA_MIN, NR_CHROMA_SIGMA_FULL * scale);
+  // Color Smoothness: chroma SPATIAL sigma scale (how large a color blotch
+  // gets averaged away) — centered at 50 so the default leaves NR_CHROMA_SIGMA_FULL untouched.
+  const chromaSpatialMul = subSliderMul(d.noiseColor.smoothness, 50, -NR_COLOR_SMOOTHNESS_SIGMA_STOPS);
+  const sChroma = Math.max(DETAIL_SIGMA_MIN, NR_CHROMA_SIGMA_FULL * scale * chromaSpatialMul);
   // the kernel radius covers only the ACTIVE component(s)
   const sMax = Math.max(aL > 0 ? sLum : 0, aC > 0 ? sChroma : 0);
   const radius = Math.min(NR_KERNEL_RADIUS_MAX, Math.max(1, Math.ceil(2 * sMax)));
-  // range sigma (encoded-luma units): how much local contrast reads as noise
-  const sigmaRange = 0.02 + 0.1 * aL;
+  // Luminance Detail: luma RANGE sigma (encoded-luma units) — higher detail
+  // = smaller sigma = more structure counts as edge and survives; centered
+  // at 50 so the default leaves the old `0.02 + 0.1·amount` formula intact.
+  const lumaRangeMul = subSliderMul(d.noiseLuminance.detail, 50, NR_LUM_DETAIL_RANGE_STOPS);
+  const sigmaRange = (0.02 + 0.1 * aL) * lumaRangeMul;
+  // Color Detail: chroma range sigma — same shape as Luminance Detail, but
+  // scales the chroma pass's loose luma-edge guard (was a fixed 0.25).
+  const chromaGuardMul = subSliderMul(d.noiseColor.detail, 50, NR_COLOR_DETAIL_RANGE_STOPS);
+  const chromaGuardSigma = 0.25 * chromaGuardMul;
+  // Luminance Contrast: 0 at the default (contrast=0) — see DETAIL_NR_WGSL.
+  const contrastReinject = (d.noiseLuminance.contrast / 100) * NR_LUM_CONTRAST_GAIN;
   const buf = new ArrayBuffer(32);
   const f = new Float32Array(buf);
   f[0] = inv2s2(sLum);
@@ -614,7 +674,8 @@ function packNr(d: DetailParams, scale: number): ArrayBuffer {
   f[3] = inv2s2(sigmaRange);
   f[4] = aL;
   f[5] = aC;
-  f[6] = inv2s2(0.25); // loose luma-edge guard for chroma smoothing
+  f[6] = inv2s2(chromaGuardSigma);
+  f[7] = contrastReinject;
   return buf;
 }
 

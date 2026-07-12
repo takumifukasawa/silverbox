@@ -9,7 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { existsSync, statSync, unlinkSync } from 'node:fs';
+import { existsSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
@@ -20,8 +20,40 @@ const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
 const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+const SIDECAR = ARW_PATH + '.silverbox.json';
+rmSidecarSync(SIDECAR, { force: true });
 const GPU_CPU_TOLERANCE = 1 / 255;
+// GPU-vs-GPU render-equality tolerance (same shader, same uniforms — near
+// bit-exact, not the GPU/CPU-reference 1/255 above).
+const RENDER_EQUALITY_TOLERANCE = 1e-5;
+
+/**
+ * schemaVersion-4 wire wrapper (serializeGraphDoc's shape — see
+ * verify-ratings.mjs/verify-cli.mjs precedent) carrying a Develop node whose
+ * `detail` is exactly `develop`. Used by the back-compat fixture check below:
+ * a `noiseLuminance`/`noiseColor` object that OMITS the new sub-slider
+ * fields is exactly what a pre-pack sidecar looked like.
+ */
+function writeDetailSidecar(develop) {
+  const nowIso = new Date().toISOString();
+  const wrapper = {
+    schemaVersion: 4,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    graph: {
+      nodes: [
+        { id: 'in', type: 'input', position: { x: 20, y: 60 } },
+        { id: 'dev', type: 'Develop', position: { x: 220, y: 60 }, develop },
+        { id: 'out', type: 'output', position: { x: 420, y: 60 } },
+      ],
+      edges: [
+        { id: 'e0', from: 'in', to: 'dev' },
+        { id: 'e1', from: 'dev', to: 'out' },
+      ],
+    },
+  };
+  writeFileSync(SIDECAR, JSON.stringify(wrapper, null, 2) + '\n');
+}
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -104,6 +136,75 @@ try {
   });
   await setDev('detail.noiseColor.amount', 0);
 
+  console.log('verify-detail (LR six-knob sub-sliders — direction, at fixed amount):');
+  // Luminance Detail: higher = smaller range sigma = more structure counts
+  // as edge and survives = LESS smoothing = higher luma gradient energy.
+  await setDev('detail.noiseLuminance.amount', 100);
+  await setDev('detail.noiseLuminance.detail', 0);
+  const lumaDetailLow = await sharpness();
+  await setDev('detail.noiseLuminance.detail', 100);
+  const lumaDetailHigh = await sharpness();
+  check('Luminance Detail 100 sharpens more than Detail 0 (less over-smoothing)', lumaDetailHigh.luma > lumaDetailLow.luma, {
+    low: lumaDetailLow.luma,
+    high: lumaDetailHigh.luma,
+  });
+  await setDev('detail.noiseLuminance.detail', 50); // back to default
+
+  // Luminance Contrast: re-injects removed high-frequency luma, fighting the
+  // "plastic" look — higher contrast raises luma gradient energy back up.
+  await setDev('detail.noiseLuminance.contrast', 0);
+  const lumaContrastLow = await sharpness();
+  await setDev('detail.noiseLuminance.contrast', 100);
+  const lumaContrastHigh = await sharpness();
+  check('Luminance Contrast 100 raises luma energy vs Contrast 0', lumaContrastHigh.luma > lumaContrastLow.luma, {
+    low: lumaContrastLow.luma,
+    high: lumaContrastHigh.luma,
+  });
+  await setDev('detail.noiseLuminance.contrast', 0); // back to default
+  await setDev('detail.noiseLuminance.amount', 0);
+
+  // Color Detail: same shape as Luminance Detail but for the chroma pass's
+  // luma-edge guard — higher preserves more chroma detail near luma edges.
+  await setDev('detail.noiseColor.amount', 100);
+  await setDev('detail.noiseColor.detail', 0);
+  const colorDetailLow = await sharpness();
+  await setDev('detail.noiseColor.detail', 100);
+  const colorDetailHigh = await sharpness();
+  check('Color Detail 100 preserves more chroma energy than Detail 0', colorDetailHigh.chroma > colorDetailLow.chroma, {
+    low: colorDetailLow.chroma,
+    high: colorDetailHigh.chroma,
+  });
+  await setDev('detail.noiseColor.detail', 50); // back to default
+
+  // Color Smoothness: chroma SPATIAL sigma scale — higher averages away
+  // larger color blotches, so chroma gradient energy goes DOWN.
+  await setDev('detail.noiseColor.smoothness', 0);
+  const colorSmoothLow = await sharpness();
+  await setDev('detail.noiseColor.smoothness', 100);
+  const colorSmoothHigh = await sharpness();
+  check('Color Smoothness 100 lowers chroma energy vs Smoothness 0', colorSmoothHigh.chroma < colorSmoothLow.chroma, {
+    low: colorSmoothLow.chroma,
+    high: colorSmoothHigh.chroma,
+  });
+  await setDev('detail.noiseColor.smoothness', 50); // back to default
+  await setDev('detail.noiseColor.amount', 0);
+
+  console.log('verify-detail (identity: amount 0 ignores sub-slider values regardless of magnitude):');
+  await setDev('detail.noiseLuminance.detail', 100);
+  await setDev('detail.noiseLuminance.contrast', 100);
+  await setDev('detail.noiseColor.detail', 0);
+  await setDev('detail.noiseColor.smoothness', 100);
+  const extremeSubValues = await gpuMean();
+  check('amount 0 + extreme sub-slider values still pass through (mean unchanged)', meansMatch(extremeSubValues, neutral), {
+    neutral,
+    extremeSubValues,
+  });
+  // back to the shipped defaults for the rest of the script
+  await setDev('detail.noiseLuminance.detail', 50);
+  await setDev('detail.noiseLuminance.contrast', 0);
+  await setDev('detail.noiseColor.detail', 50);
+  await setDev('detail.noiseColor.smoothness', 50);
+
   console.log('verify-detail (all-zero = exact pass-through):');
   const back = await gpuMean();
   check('zeroed Detail restores the neutral render', meansMatch(back, neutral), { neutral, back });
@@ -111,12 +212,62 @@ try {
   console.log('verify-detail (Detail UI rows):');
   await page.locator('.react-flow__node[data-id="dev"]').click();
   const detailSection = page.locator('.inspector-section').filter({ hasText: 'Detail' }).first();
+  await detailSection.scrollIntoViewIfNeeded();
   check(
-    'Detail section shows the 5 sliders and the resolution hint',
-    (await detailSection.locator('.param-row').count()) === 5 &&
+    'Detail section shows the 9 sliders (3 sharpen + 6 LR six-knob NR) and the resolution hint',
+    (await detailSection.locator('.param-row').count()) === 9 &&
       (await detailSection.locator('.detail-hint').count()) === 1,
     await detailSection.locator('.param-row').count()
   );
+  for (const testId of [
+    'detail-noise-luminance-detail',
+    'detail-noise-luminance-contrast',
+    'detail-noise-color-detail',
+    'detail-noise-color-smoothness',
+  ]) {
+    check(`${testId} slider is present`, (await detailSection.locator(`[data-testid="${testId}"]`).count()) === 1, testId);
+  }
+
+  console.log('verify-detail (back-compat: sidecars without the new sub-slider fields):');
+  // A pre-pack sidecar only ever wrote { amount }. mergeDevelopParams' generic
+  // deep-merge fills the rest from defaultDevelopParams() — sub-slider
+  // defaults (50/0/50/50) — so this must render BYTE-COMPARABLY to an
+  // otherwise-identical doc that spells the defaults out explicitly.
+  writeDetailSidecar({
+    detail: { noiseLuminance: { amount: 60 }, noiseColor: { amount: 70 } },
+  });
+  await page.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, ARW_PATH);
+  await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  const prePackMean = await gpuMean();
+  const prePackSharp = await sharpness();
+
+  writeDetailSidecar({
+    detail: {
+      noiseLuminance: { amount: 60, detail: 50, contrast: 0 },
+      noiseColor: { amount: 70, detail: 50, smoothness: 50 },
+    },
+  });
+  await page.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, ARW_PATH);
+  await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  const explicitDefaultsMean = await gpuMean();
+  const explicitDefaultsSharp = await sharpness();
+
+  check(
+    'sidecar missing the new fields renders identically to one with explicit defaults (mean)',
+    meansMatch(prePackMean, explicitDefaultsMean, RENDER_EQUALITY_TOLERANCE),
+    { prePackMean, explicitDefaultsMean }
+  );
+  check(
+    'sidecar missing the new fields renders identically to one with explicit defaults (sharpness)',
+    Math.abs(prePackSharp.luma - explicitDefaultsSharp.luma) < RENDER_EQUALITY_TOLERANCE &&
+      Math.abs(prePackSharp.chroma - explicitDefaultsSharp.chroma) < RENDER_EQUALITY_TOLERANCE,
+    { prePackSharp, explicitDefaultsSharp }
+  );
+  if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 
   console.log('verify-detail (export runs the kernels at full resolution):');
   await setDev('detail.sharpen.amount', 80);

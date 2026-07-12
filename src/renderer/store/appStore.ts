@@ -1500,9 +1500,15 @@ export const useAppStore = create<AppState>((set, get) => {
                     // and with DETAIL_SHARPEN_GAIN aligning the slider scale,
                     // our 40 ≈ LR's 40. Visible/editable in the Detail
                     // section like every other piece of the default look.
+                    // Default color NR (manual-noise-reduction pack): LR
+                    // Classic also seeds RAW imports with Color 25 (Detail
+                    // 50 / Smoothness 50 — the sub-slider defaults already
+                    // reproduce today's fixed formula, so only `amount`
+                    // needs to move); Luminance NR stays 0, same as LR.
                     detail: {
                       ...n.develop.detail,
                       sharpen: { ...n.develop.detail.sharpen, amount: 40, radius: 1.0, masking: 0 },
+                      noiseColor: { ...n.develop.detail.noiseColor, amount: 25 },
                     },
                   },
                 }

@@ -158,6 +158,22 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
     seededSharpen && seededSharpen.amount === 40 && seededSharpen.radius === 1.0 && seededSharpen.masking === 0,
     seededSharpen
   );
+  // Default color NR rides the same seeding (manual-noise-reduction pack):
+  // LR Classic seeds RAW imports with Color 25 (Detail 50 / Smoothness 50);
+  // Luminance NR stays 0 — JPEGs stay 0 too, asserted in the JPEG section.
+  const seededDetail = await page.evaluate(() => {
+    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
+    return dev?.develop?.detail ?? null;
+  });
+  check(
+    'fresh ARW seeds default color NR 25/50/50 (LR RAW default), luminance NR untouched',
+    seededDetail &&
+      seededDetail.noiseColor.amount === 25 &&
+      seededDetail.noiseColor.detail === 50 &&
+      seededDetail.noiseColor.smoothness === 50 &&
+      seededDetail.noiseLuminance.amount === 0,
+    seededDetail
+  );
   const seededP50 = await histP50();
 
   // --- 4a. Reset restores identity (a darker render) ---
@@ -180,6 +196,11 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
     return dev?.develop?.detail?.sharpen ?? null;
   });
   check('JPEG open keeps sharpening at 0 (LR behavior: in-camera JPEGs are pre-sharpened)', jpegSharpen?.amount === 0, jpegSharpen);
+  const jpegDetail = await page.evaluate(() => {
+    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
+    return dev?.develop?.detail ?? null;
+  });
+  check('JPEG open keeps color NR at 0 (no default-look NR for JPEGs)', jpegDetail?.noiseColor?.amount === 0, jpegDetail);
   const jpegP50 = await histP50();
 
   // --- 2. seeded render lands far closer to the JPEG at p50 ---

@@ -60,6 +60,7 @@ function ParamSlider({
   value,
   defaultValue,
   setValue,
+  testId,
 }: {
   nodeId: string;
   def: OpParamDef;
@@ -67,6 +68,8 @@ function ParamSlider({
   defaultValue?: number;
   /** Overrides the default updateNodeParam(nodeId, def.key, v) commit (e.g. the input node's lens, which isn't stored under node.params). */
   setValue?: (v: number) => void;
+  /** Optional data-testid on the range input (spot-inspector-radius precedent) — most rows are found by label/position instead. */
+  testId?: string;
 }) {
   const updateNodeParam = useAppStore((s) => s.updateNodeParam);
   const set = (v: number) => {
@@ -84,6 +87,7 @@ function ParamSlider({
       <span className={`param-label${changed ? ' changed' : ''}`}>{def.label}</span>
       <input
         type="range"
+        data-testid={testId}
         className={def.gradient ? 'param-range--gradient' : undefined}
         style={def.gradient ? { background: def.gradient } : undefined}
         min={isLog ? 0 : def.min}
@@ -279,8 +283,32 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         />
         <ParamSlider
           nodeId={node.id}
+          def={{ key: 'detail.noiseLuminance.detail', label: 'Luminance Detail', min: 0, max: 100, step: 1, default: 50 }}
+          value={params.detail.noiseLuminance.detail}
+          testId="detail-noise-luminance-detail"
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.noiseLuminance.contrast', label: 'Luminance Contrast', min: 0, max: 100, step: 1, default: 0 }}
+          value={params.detail.noiseLuminance.contrast}
+          testId="detail-noise-luminance-contrast"
+        />
+        <ParamSlider
+          nodeId={node.id}
           def={{ key: 'detail.noiseColor.amount', label: 'Color', min: 0, max: 100, step: 1, default: 0 }}
           value={params.detail.noiseColor.amount}
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.noiseColor.detail', label: 'Color Detail', min: 0, max: 100, step: 1, default: 50 }}
+          value={params.detail.noiseColor.detail}
+          testId="detail-noise-color-detail"
+        />
+        <ParamSlider
+          nodeId={node.id}
+          def={{ key: 'detail.noiseColor.smoothness', label: 'Color Smoothness', min: 0, max: 100, step: 1, default: 50 }}
+          value={params.detail.noiseColor.smoothness}
+          testId="detail-noise-color-smoothness"
         />
         <div className="detail-hint">
           Preview is downsampled — judge sharpening/NR at 100% zoom or in the exported file.
