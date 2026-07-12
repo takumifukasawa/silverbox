@@ -45,6 +45,7 @@ import { setCustomShaderArtifact, clearCustomShaderArtifacts } from '../graph/cu
 import { createWbModel, type WbModel } from '../color/whiteBalance';
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderWorkerCommand, RenderWorkerRequest, RenderWorkerResponse } from './renderProtocol';
+import type { ExternalToolResult } from '../../../../shared/ipc';
 
 let resolveRenderer: ((r: GraphRenderer) => void) | null = null;
 const rendererReady = new Promise<GraphRenderer>((resolve) => {
@@ -81,6 +82,18 @@ let lastImage: PreparedImage | null = null;
  * relative-path→wrong-file mapping must never survive into a new doc.
  */
 const imageNodeCache = new Map<string, PreparedImage>();
+/**
+ * External-tool results replay list (mirrors imageNodeCache's role): the
+ * worker's GraphRenderers each hold their own bounded texture LRU, but a
+ * compare pane that initializes AFTER a result landed needs the bytes
+ * replayed — and every result must reach BOTH renderers (double-check
+ * finding: results previously reached the main renderer only, so a chain
+ * containing an external node rendered pass-through in the compare pane
+ * while the main pane showed the tool's output). Bounded to the same
+ * capacity as the per-renderer texture LRU; insertion-order eviction.
+ */
+const externalResultCache = new Map<string, { encoded: boolean; result: ExternalToolResult }>();
+const EXTERNAL_RESULT_CACHE_CAPACITY = 12;
 
 function post(message: RenderWorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(message, transfer);
@@ -264,6 +277,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       // list for a compare pane that initializes later, and must be wiped
       // in lockstep so it never replays a since-abandoned photo's textures.
       imageNodeCache.clear();
+      externalResultCache.clear();
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -351,11 +365,25 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       return;
     }
     case 'externalResult': {
+      externalResultCache.delete(msg.cacheKey);
+      externalResultCache.set(msg.cacheKey, { encoded: msg.encoded, result: msg.result });
+      while (externalResultCache.size > EXTERNAL_RESULT_CACHE_CAPACITY) {
+        const oldest = externalResultCache.keys().next().value;
+        if (oldest === undefined) break;
+        externalResultCache.delete(oldest);
+      }
       void rendererReady
         .then((renderer) => renderer.setExternalResult(msg.cacheKey, msg.encoded, msg.result))
         .catch((err) => {
           post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
         });
+      if (compareRendererReady) {
+        void compareRendererReady
+          .then((renderer) => renderer.setExternalResult(msg.cacheKey, msg.encoded, msg.result))
+          .catch((err) => {
+            post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          });
+      }
       return;
     }
     case 'resize': {
@@ -381,6 +409,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
           // above already cleared the fresh renderer's OWN per-path map, so
           // this is the full, correct set for whatever doc is current.
           for (const [path, image] of imageNodeCache) renderer.setImageNodeTexture(path, image);
+          for (const [key, entry] of externalResultCache) renderer.setExternalResult(key, entry.encoded, entry.result);
           resolveCompareRenderer!(renderer);
         },
         (err) => {
