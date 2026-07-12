@@ -61,10 +61,15 @@ your portfolio. None of this needed a plugin API, because the file *is*
 the API.
 
 The same conviction, inverted, sets the boundary: Silverbox will not
-become a catalog. No database, no import ceremony, no keywords engine.
-Your folders are your library; git is your history; the sidecar is the
-single source of truth. Views may help you browse — they will never
-own your photos.
+become a catalog. To be precise about the word: multi-photo work is
+core — browse a folder, rate, select many, sync a look across them,
+batch-develop from the shell. What Silverbox refuses is the *database
+that owns photos*: the import ceremony, the central library file, the
+collections engine that holds your archive hostage. Everything
+multi-photo here acts statelessly on the folder you opened and writes
+nothing but sidecars. Your folders are your library; git is your
+history; the sidecar is the single source of truth. Views may help you
+browse — they will never own your photos.
 
 ## What this costs
 
