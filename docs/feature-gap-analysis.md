@@ -71,6 +71,10 @@ or dilute the moat?"
 
 ## Recommended order (post-Fable queue)
 
+(UI shell packs — docs/ui-architecture.md — are deliberately deferred:
+user decision, features/image-quality first; the shell is changeable at
+any later point by design.)
+
 1. **Node bypass toggle** (B, small, graph usability daily-driver)
 2. **B&W mixer + Auto tone** (A, small pair, rounds out develop)
 3. **Profile fit** (C, designed, Opus) — the image-quality headliner

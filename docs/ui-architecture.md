@@ -83,6 +83,10 @@ stable or update every script that uses them IN THE SAME pack).
    multi-select (gap analysis A) but ship view-only first.
 5. Later, with their features: Snapshots/History tabs.
 
-Recommended interleave with the feature queue: Shell A before the
-bypass toggle (bypass wants the node-editor header), then features and
-shell packs alternating so the UI debt never re-accumulates.
+Priority (user decision 2026-07-13): UI/UX is NOT the essence at this
+stage — features and image quality come first. These packs are
+deliberately chrome-only/behavior-preserving so they can be executed at
+ANY later point in any order without breaking anything; defer them
+until the clutter actually hurts daily use. (The bypass toggle does NOT
+depend on Shell A — it lands fine in the current toolbar.) This doc's
+job is that the DECISIONS are already made when that day comes.
