@@ -62,7 +62,7 @@ declare global {
       /** Folder filmstrip (ROADMAP "nice to have") state: the open folder (if any) + its sorted listing + which path is current. */
       folderState(): {
         dir: string | null;
-        entries: { name: string; path: string; hasSidecar: boolean; mtimeMs: number }[];
+        entries: { name: string; path: string; hasSidecar: boolean; mtimeMs: number; rating: number }[];
         currentPath: string | null;
       };
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
@@ -88,7 +88,8 @@ declare global {
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
-      sidecarState(): { notice: string | null; unreadable: boolean };
+      /** `rating` is the ratings pack's star rating (0..5) — see appStore.ts's sidecarRating. */
+      sidecarState(): { notice: string | null; unreadable: boolean; rating: number };
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
       shaderErrors(): Record<string, string>;
@@ -733,7 +734,7 @@ export function CanvasView() {
         const s = useAppStore.getState();
         return {
           dir: s.folderDir,
-          entries: s.folderEntries.map((e) => ({ name: e.name, path: e.path, hasSidecar: e.hasSidecar, mtimeMs: e.mtimeMs })),
+          entries: s.folderEntries.map((e) => ({ name: e.name, path: e.path, hasSidecar: e.hasSidecar, mtimeMs: e.mtimeMs, rating: e.rating })),
           currentPath: s.imagePath,
         };
       },
@@ -826,7 +827,7 @@ export function CanvasView() {
       },
       sidecarState() {
         const s = useAppStore.getState();
-        return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable };
+        return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable, rating: s.sidecarRating };
       },
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {

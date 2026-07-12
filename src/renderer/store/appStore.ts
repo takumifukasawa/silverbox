@@ -16,6 +16,7 @@ import {
   parseGraphDoc,
   resolveExportSettings,
   sanitizeExportOverrides,
+  sanitizeRating,
   serializeGraphDoc,
   type AddableKind,
   type ExportOverrides,
@@ -173,6 +174,25 @@ interface AppState {
   sidecarUnreadable: boolean;
   /** createdAt carried through sidecar round-trips (set on first save). */
   sidecarCreatedAt: string | null;
+  /**
+   * Star rating 0..5 (ratings pack): sidecar WRAPPER metadata about the
+   * PHOTO, not the look — lives next to sidecarCreatedAt, not in `graph`, so
+   * rating a photo never pushes a develop-history entry (setRating below is
+   * the only writer, and it deliberately skips pushHistory — a documented
+   * divergence from every other graph mutation in this store, all of which
+   * DO push history). 0 = unrated; reset to 0 on every image open before a
+   * sidecar (if any) restores it, same as sidecarCreatedAt.
+   */
+  sidecarRating: number;
+  /**
+   * Set (1-5) or clear (0) the current image's rating — the toolbar's star
+   * display and App.tsx's 1-5/0 key handler both call this. Marks the doc
+   * dirty (autosave's own subscribe watches sidecarRating in addition to
+   * `graph` — see the bottom of this file) but is NOT a history entry: see
+   * this field's own doc comment for why ratings deliberately don't undo
+   * like every other graph edit. No-op without an open image.
+   */
+  setRating(rating: number): void;
   /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
   sidecarUnknownFields: Record<string, unknown> | null;
   /**
@@ -864,6 +884,7 @@ function applyExternalGraph(s: AppState, parsed: SidecarDoc, rawText: string): P
     selectedNodeId: graph.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
     selectedSpotIndex: null,
     sidecarCreatedAt: parsed.createdAt ?? null,
+    sidecarRating: parsed.rating,
     sidecarUnknownFields: parsed.unknown ?? null,
     sidecarUnreadable: false,
     sidecarNotice: null,
@@ -1063,6 +1084,32 @@ export const useAppStore = create<AppState>((set, get) => {
     return text;
   };
 
+  /**
+   * `--min-rating`'s cheap sidecar read (ratings pack): a bare JSON.parse of
+   * just the wrapper's `rating` key, deliberately NOT the full parseGraphDoc
+   * (which validates/migrates the whole graph and can throw) — runCliRender
+   * calls this BEFORE openImageByPath's expensive decode, so a batch over a
+   * folder full of below-threshold images never pays for decoding any of
+   * them. No sidecar, unreadable file, or malformed/missing `rating` key all
+   * resolve to 0 (unrated), same fallback listImages' own cheap read uses
+   * (main/index.ts's extractSidecarRating).
+   */
+  const readSidecarRatingCheap = async (imagePath: string): Promise<number> => {
+    let text: string | null;
+    try {
+      text = await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
+    } catch {
+      return 0;
+    }
+    if (text === null) return 0;
+    try {
+      const wrapper = JSON.parse(text) as { rating?: unknown };
+      return sanitizeRating(wrapper.rating);
+    } catch {
+      return 0;
+    }
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -1093,6 +1140,7 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarNotice: null,
   sidecarUnreadable: false,
   sidecarCreatedAt: null,
+  sidecarRating: 0,
   sidecarUnknownFields: null,
   lastSidecarText: null,
   sidecarHotReloadNotice: null,
@@ -1186,6 +1234,7 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarNotice: string | null = null;
       let sidecarUnreadable = false;
       let sidecarCreatedAt: string | null = null;
+      let sidecarRating = 0;
       let sidecarUnknownFields: Record<string, unknown> | null = null;
       let usedSidecar = false;
       // Raw disk text this session is about to account for (hot-reload's
@@ -1212,6 +1261,7 @@ export const useAppStore = create<AppState>((set, get) => {
             const parsed = parseGraphDoc(sidecar, { width: image.width, height: image.height });
             graph = parsed.graph;
             sidecarCreatedAt = parsed.createdAt ?? null;
+            sidecarRating = parsed.rating;
             sidecarUnknownFields = parsed.unknown ?? null;
             usedSidecar = true;
           } catch (err) {
@@ -1331,6 +1381,7 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarNotice,
         sidecarUnreadable,
         sidecarCreatedAt,
+        sidecarRating,
         sidecarUnknownFields,
         lastSidecarText: sidecarRawText,
         sidecarHotReloadNotice: null,
@@ -2247,6 +2298,13 @@ export const useAppStore = create<AppState>((set, get) => {
     for (const input of job.images) {
       const startedAt = Date.now();
       try {
+        // --min-rating (ratings pack): a cheap sidecar read BEFORE the
+        // expensive decode/render below — an image with no rating (or a
+        // rating below the threshold) is reported as a skip, never rendered.
+        if (job.minRating !== null && (await readSidecarRatingCheap(input)) < job.minRating) {
+          onResult({ input, status: 'skipped-rating' });
+          continue;
+        }
         // job.preset REPLACES the sidecar entirely (see openImageByPath's
         // skipSidecar doc comment): open as a truly fresh doc with identity
         // geometry, which is all applyLook below actually preserves — the
@@ -2381,11 +2439,27 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   },
 
+  setRating(rating) {
+    // no image open: nothing to rate, and no sidecar to eventually write it to
+    if (!get().imagePath) return;
+    const next = sanitizeRating(rating);
+    if (next === get().sidecarRating) return; // e.g. pressing the same star twice — nothing changed, nothing to save
+    // Deliberately NOT pushHistory: a rating is per-photo metadata, not an
+    // undoable look edit (see AppState.sidecarRating's doc comment) — this
+    // is the one graph-adjacent mutation in this store that skips it.
+    // graphDirty:true still marks the doc dirty so autosave persists it (the
+    // bottom-of-file autosave subscribe watches sidecarRating in addition to
+    // `graph` for exactly this reason — a rating-only change never touches
+    // `graph` itself).
+    set({ sidecarRating: next, graphDirty: true });
+  },
+
   async saveGraph() {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
     cancelAutosaveTimer();
-    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarUnreadable, sidecarUnknownFields } = get();
+    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarRating, sidecarUnreadable, sidecarUnknownFields } =
+      get();
     if (!imagePath || !fileName || sidecarUnreadable) return;
     const source = {
       fileName,
@@ -2393,7 +2467,7 @@ export const useAppStore = create<AppState>((set, get) => {
       kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
     };
     const createdAt = sidecarCreatedAt ?? new Date().toISOString();
-    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined);
+    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined, sidecarRating);
     await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, content);
     // Record exactly what we just wrote (hot-reload's self-write-suppression
     // baseline) and clear any hot-reload notice: our edits just overwrote
@@ -2498,11 +2572,19 @@ if (typeof window !== 'undefined' && window.silverbox) {
 // debounce that saves once edits settle. Subscribing here, after the store
 // exists, is the only point that can see "the graph object changed" without
 // threading a scheduling call through every one of the many graph-mutating
-// actions above.
+// actions above. `sidecarRating` is watched the same way (by VALUE, not
+// reference — it's a plain number) because setRating deliberately never
+// replaces `graph` (ratings pack: a rating is not a graph edit — see
+// AppState.sidecarRating's doc comment) — without this, a rating-only
+// change would mark graphDirty but never actually get autosaved.
 let lastAutosaveGraph: GraphDoc | null = null;
+let lastAutosaveRating: number | null = null;
 useAppStore.subscribe((state) => {
-  if (state.graph === lastAutosaveGraph) return;
+  const graphChanged = state.graph !== lastAutosaveGraph;
+  const ratingChanged = state.sidecarRating !== lastAutosaveRating;
+  if (!graphChanged && !ratingChanged) return;
   lastAutosaveGraph = state.graph;
+  lastAutosaveRating = state.sidecarRating;
   if (!state.graphDirty || !state.settings.autosaveSidecar) return;
   if (!state.imagePath || !state.fileName || state.sidecarUnreadable) return;
   cancelAutosaveTimer();

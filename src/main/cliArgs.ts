@@ -39,9 +39,13 @@ export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg> [mor
   --max-dim <px>        cap the long edge, preserving aspect (default: none)
   --metadata <policy>   all|minimal|none (default all)
   --colorspace <space>  srgb|p3 (default srgb)
+  --min-rating <0-5>    skip inputs whose sidecar rating is absent or below
+                        n, reported as {input,status:"skipped-rating"} — a
+                        skip never counts as a failure (exit code unaffected)
   --json                NDJSON progress on stdout: one object per rendered
                         file, {input,output,width,height,bytes,ms} on
-                        success or {input,error} on failure
+                        success, {input,status:"skipped-rating"} on a
+                        --min-rating skip, or {input,error} on failure
   --help                show this help
 
 Without --preset, each image uses its own sidecar if one exists, else the
@@ -91,6 +95,8 @@ export interface CliParsedArgs {
   maxDim: number | null;
   metadata: ExportMetadataPolicy;
   colorSpace: ExportColorSpace;
+  /** --min-rating: only meaningful with mode 'render'; null = no filtering. */
+  minRating: number | null;
   json: boolean;
   help: boolean;
   /** --update: only meaningful with mode 'check'. */
@@ -117,6 +123,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     maxDim: null,
     metadata: 'all',
     colorSpace: 'srgb',
+    minRating: null,
     json: false,
     help: false,
     update: false,
@@ -180,6 +187,12 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         opts.colorSpace = v as ExportColorSpace;
         break;
       }
+      case '--min-rating': {
+        const v = Number(argv[++i]);
+        if (!Number.isInteger(v) || v < 0 || v > 5) return { error: '--min-rating expects an integer 0-5' };
+        opts.minRating = v;
+        break;
+      }
       default:
         if (arg.startsWith('--')) return { error: `unknown option: ${arg}` };
         opts.images.push(arg);
@@ -193,6 +206,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.maxDim !== null) return { error: '--max-dim is not valid with --check (goldens are fixed at 512px long edge)' };
     if (opts.metadata !== 'all') return { error: '--metadata is not valid with --check' };
     if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --check' };
+    if (opts.minRating !== null) return { error: '--min-rating is not valid with --check' };
   } else {
     if (opts.update) return { error: '--update requires --check' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
@@ -230,6 +244,7 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
     maxDim: parsed.maxDim,
     metadata: parsed.metadata,
     colorSpace: parsed.colorSpace,
+    minRating: parsed.minRating,
   };
   return job;
 }
@@ -244,6 +259,10 @@ export function formatCliProgress(result: CliProgressResult, json: boolean): { s
   if (json) return { stderr: false, line: JSON.stringify(result) };
   if ('error' in result) return { stderr: true, line: `${result.input}: ERROR ${result.error}` };
   if ('status' in result) {
+    // --render's own status (--min-rating skip) is never a failure — a
+    // completely different bucket from --check's no-golden/dims-changed
+    // statuses below (which ARE failures unless --update just wrote them).
+    if (result.status === 'skipped-rating') return { stderr: false, line: `${result.input}: SKIPPED (rating)` };
     const isFailure = result.status !== 'updated';
     const label = result.status === 'updated' ? 'UPDATED' : result.status === 'no-golden' ? 'NO GOLDEN' : 'DIMS CHANGED';
     return { stderr: isFailure, line: `${result.input}: ${label}` };

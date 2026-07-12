@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
 import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
+import { MAX_RATING } from '../engine/graph/graphDoc';
 
 /**
  * One cell: a thumbnail button that opens its image on click. The thumbnail
@@ -51,7 +52,48 @@ function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: b
       {entry.hasSidecar && (
         <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved sidecar" />
       )}
+      {entry.rating > 0 && (
+        // Tiny rating indicator (ratings pack) — read cheaply off the
+        // sidecar wrapper by main's listImages handler (see shared/ipc.ts's
+        // FolderImageEntry.rating doc comment), not re-parsed here.
+        <span
+          className="filmstrip-rating"
+          data-testid="filmstrip-rating"
+          data-rating={entry.rating}
+          title={`${entry.rating} star${entry.rating === 1 ? '' : 's'}`}
+        >
+          {'★'.repeat(entry.rating)}
+        </span>
+      )}
     </button>
+  );
+}
+
+/**
+ * "★n+" view-only filter (ratings pack): narrows the visible cells to
+ * `rating >= minRating`, purely client-side over the already-fetched
+ * `folderEntries` — never persisted, never touches the filesystem again
+ * (same "browse a folder, not a catalog" spirit as the strip itself). Lives
+ * as local component state in Filmstrip below, reset to "All" on every
+ * folder switch (the strip itself remounts per folder — see this file's own
+ * doc comment on `key={dir}`).
+ */
+function RatingFilter({ value, onChange }: { value: number; onChange: (rating: number) => void }) {
+  return (
+    <label className="filmstrip-rating-filter" title="Show only images rated at least this high (view only — not saved)">
+      <select
+        data-testid="filmstrip-rating-filter"
+        value={value}
+        onChange={(ev) => onChange(Number(ev.target.value))}
+      >
+        <option value={0}>All</option>
+        {Array.from({ length: MAX_RATING }, (_, i) => i + 1).map((n) => (
+          <option key={n} value={n}>
+            {'★'.repeat(n)}+
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 
@@ -68,6 +110,10 @@ function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: b
 export function Filmstrip() {
   const folderEntries = useAppStore((s) => s.folderEntries);
   const imagePath = useAppStore((s) => s.imagePath);
+  // ★n+ filter (ratings pack): strip-local view state, reset to "All" every
+  // time this component remounts (a fresh folder — see the doc comment
+  // above on `key={dir}`), never persisted.
+  const [minRating, setMinRating] = useState(0);
 
   // Folder-switch cleanup: this instance is remounted (key={dir} at the
   // mount site — see App.tsx) whenever the folder changes, so this cleanup
@@ -75,11 +121,21 @@ export function Filmstrip() {
   // instance takes over — never leaked, never revoked while still in use.
   useEffect(() => () => revokeAllThumbnails(), []);
 
+  const visibleEntries = useMemo(
+    () => (minRating === 0 ? folderEntries : folderEntries.filter((e) => e.rating >= minRating)),
+    [folderEntries, minRating]
+  );
+
   return (
-    <div className="filmstrip" data-testid="filmstrip">
-      {folderEntries.map((entry) => (
-        <FilmstripCell key={entry.path} entry={entry} current={entry.path === imagePath} />
-      ))}
+    <div className="filmstrip-wrap" data-testid="filmstrip-wrap">
+      <div className="filmstrip-toolbar">
+        <RatingFilter value={minRating} onChange={setMinRating} />
+      </div>
+      <div className="filmstrip" data-testid="filmstrip">
+        {visibleEntries.map((entry) => (
+          <FilmstripCell key={entry.path} entry={entry} current={entry.path === imagePath} />
+        ))}
+      </div>
     </div>
   );
 }

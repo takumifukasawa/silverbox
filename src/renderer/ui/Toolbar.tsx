@@ -152,6 +152,25 @@ function CompareStrip() {
   );
 }
 
+/**
+ * Star-rating display (ratings pack): read-only in the toolbar — 1-5/0 keys
+ * (App.tsx) are the actual editing surface, exactly like `\`/`showBefore`
+ * having no toolbar button of its own either. Always 5 glyphs (filled up to
+ * `rating`, empty past it) rather than hiding at 0, so "this photo is
+ * unrated" is visible at a glance, not just absence-of-something.
+ */
+function RatingStars({ rating }: { rating: number }) {
+  return (
+    <span className="toolbar-rating" data-testid="toolbar-rating" data-rating={rating} title={`Rating: ${rating}/5 (keys 1-5, 0 clears)`}>
+      {Array.from({ length: 5 }, (_, i) => (
+        <span key={i} className={i < rating ? 'star star--filled' : 'star star--empty'}>
+          ★
+        </span>
+      ))}
+    </span>
+  );
+}
+
 /** Output selector (spec §6): appears only when the doc has more than one output node. */
 function OutputSelector() {
   const graph = useAppStore((s) => s.graph);
@@ -189,6 +208,7 @@ export function Toolbar() {
   const sidecarNotice = useAppStore((s) => s.sidecarNotice);
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
+  const sidecarRating = useAppStore((s) => s.sidecarRating);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
@@ -375,6 +395,7 @@ export function Toolbar() {
         {image && fileName ? (
           <>
             <span style={{ color: '#fff', fontWeight: 'bold' }}>{fileName}</span>
+            <RatingStars rating={sidecarRating} />
             <span>
               {image.fullWidth}×{image.fullHeight}
             </span>

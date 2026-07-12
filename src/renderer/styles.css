@@ -78,6 +78,21 @@ button:disabled {
   color: #999;
 }
 
+/* Star-rating display (ratings pack) in the toolbar's info strip — read-only,
+   see Toolbar.tsx's RatingStars doc comment for why (1-5/0 keys are the
+   actual editing surface). */
+.toolbar-rating {
+  letter-spacing: 1px;
+}
+
+.toolbar-rating .star--filled {
+  color: #f0d060;
+}
+
+.toolbar-rating .star--empty {
+  color: #555;
+}
+
 .drop-overlay {
   position: fixed;
   inset: 0;
@@ -348,7 +363,34 @@ button:disabled {
 
 /* Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
    catalog): bottom of the canvas area, LR convention. Rendered only while a
-   folder context exists (App.tsx) — a single-file open shows none of this. */
+   folder context exists (App.tsx) — a single-file open shows none of this.
+   .filmstrip-wrap stacks the tiny rating-filter toolbar above the scrolling
+   strip itself (ratings pack). */
+.filmstrip-wrap {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.filmstrip-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  padding: 2px 6px;
+  background: #1a1a1a;
+  border-top: 1px solid #111;
+}
+
+.filmstrip-rating-filter select {
+  background: #2a2a2a;
+  color: #d4d4d4;
+  border: 1px solid #444;
+  border-radius: 3px;
+  font-size: 11px;
+  padding: 1px 4px;
+}
+
 .filmstrip {
   flex: 0 0 84px;
   display: flex;
@@ -358,7 +400,6 @@ button:disabled {
   overflow-x: auto;
   overflow-y: hidden;
   background: #1a1a1a;
-  border-top: 1px solid #111;
 }
 
 .filmstrip-cell {
@@ -397,6 +438,19 @@ button:disabled {
   border-radius: 50%;
   background: #f0a832;
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
+
+/* Tiny star-rating indicator on a filmstrip cell (ratings pack) — bottom-left
+   so it never collides with the "edited" dot's top-right corner. */
+.filmstrip-rating {
+  position: absolute;
+  left: 3px;
+  bottom: 2px;
+  color: #f0d060;
+  font-size: 9px;
+  letter-spacing: -1px;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
   pointer-events: none;
 }
 

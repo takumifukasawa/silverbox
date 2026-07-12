@@ -91,6 +91,19 @@ export function App() {
         const s = useAppStore.getState();
         s.setCompareMode(!s.compareMode);
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && /^[0-5]$/.test(ev.key)) {
+        // Ratings pack: 1-5 sets the star rating, 0 clears it. Deliberately
+        // NOT a develop-history entry (see appStore.ts's setRating doc
+        // comment) — a rating is metadata about the photo, not an undoable
+        // look edit. isTextEntry already covers every digit-accepting
+        // surface that must win this keystroke instead (type="number"
+        // inputs, Monaco's shader editor); no other control in the app
+        // binds bare digit keys, so there is nothing else to collide with.
+        if (isTextEntry(ev.target)) return;
+        if (useAppStore.getState().imageStatus !== 'ready') return;
+        ev.preventDefault();
+        useAppStore.getState().setRating(Number(ev.key));
+      }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
         if (isTextEntry(ev.target)) return;

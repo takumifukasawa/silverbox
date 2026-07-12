@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { watch, type FSWatcher } from 'node:fs';
-import { access, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename, extname } from 'node:path';
 import {
@@ -40,6 +40,28 @@ const IMAGE_EXTENSIONS = ['arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'orf', 'rw2'
 const RENDER_FLAG_INDEX = process.argv.indexOf('--render');
 const isCliRenderMode = RENDER_FLAG_INDEX !== -1;
 const cliArgv = isCliRenderMode ? process.argv.slice(RENDER_FLAG_INDEX + 1) : [];
+
+/**
+ * Best-effort star-rating extraction from a sidecar's raw JSON text (ratings
+ * pack) — never throws: malformed JSON, a missing `rating` key, or an
+ * out-of-range/non-numeric value all sanitize quietly to 0 (unrated). This
+ * is deliberately NOT the renderer's full parseGraphDoc/graphDoc.ts (that
+ * module pulls in the whole engine graph — ops, Develop, custom shaders —
+ * and throws on anything its own schema migration doesn't understand);
+ * listImages needs exactly one wrapper-level number, cheaply, for every file
+ * in a folder, so it stays a tiny standalone JSON.parse here in main instead
+ * of importing renderer code into the main process.
+ */
+function extractSidecarRating(raw: string): number {
+  try {
+    const wrapper = JSON.parse(raw) as { rating?: unknown };
+    const r = wrapper.rating;
+    if (typeof r !== 'number' || !Number.isFinite(r)) return 0;
+    return Math.min(5, Math.max(0, Math.round(r)));
+  } catch {
+    return 0;
+  }
+}
 
 function assertSidecarPath(path: unknown): string {
   if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
@@ -150,10 +172,21 @@ function registerIpc(): void {
       if (!IMAGE_EXTENSIONS.includes(ext)) continue;
       const path = join(dir, dirent.name);
       const st = await stat(path);
-      const hasSidecar = await access(path + SIDECAR_SUFFIX)
-        .then(() => true)
-        .catch(() => false);
-      entries.push({ name: dirent.name, path, hasSidecar, mtimeMs: st.mtimeMs });
+      // Read the sidecar's content (not just check existence) so the rating
+      // star (ratings pack) is available for free — hasSidecar and rating
+      // both fall out of the same read, so the previous access()-only check
+      // costs no more than a plain existence probe would have.
+      let hasSidecar = false;
+      let rating = 0;
+      try {
+        const sidecarText = await readFile(path + SIDECAR_SUFFIX, 'utf8');
+        hasSidecar = true;
+        rating = extractSidecarRating(sidecarText);
+      } catch {
+        // ENOENT (no sidecar) or any other read failure: same "not edited,
+        // not rated" fallback listImages has always used for hasSidecar.
+      }
+      entries.push({ name: dirent.name, path, hasSidecar, mtimeMs: st.mtimeMs, rating });
     }
     // Filename order, not mtime: hardlinked test fixtures (the verify suite's
     // own isolation trick — see run-verify.mjs) share one inode and so an
@@ -357,7 +390,10 @@ async function runCliMode(): Promise<void> {
   // CLI_USAGE's documented exit codes for both modes.
   const onProgress = (_ev: unknown, result: CliProgressResult): void => {
     if ('error' in result) hadFailure = true;
-    else if ('status' in result && result.status !== 'updated') hadFailure = true;
+    // '--min-rating' skips are a deliberate no-op, not a failure (see
+    // CliRenderJob.minRating's doc comment) — every other 'status' value
+    // (--check's no-golden/dims-changed) IS a failure unless --update.
+    else if ('status' in result && result.status !== 'updated' && result.status !== 'skipped-rating') hadFailure = true;
     else if ('pass' in result && !result.pass) hadFailure = true;
     const { stderr, line } = formatCliProgress(result, parsed.json);
     (stderr ? process.stderr : process.stdout).write(line + '\n');

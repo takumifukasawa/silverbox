@@ -245,11 +245,39 @@ export interface SidecarDoc {
   graph: GraphDoc;
   source?: SidecarSource;
   createdAt?: string;
+  /**
+   * Star rating 0..5 (ratings pack): metadata about the PHOTO, not the look
+   * — it sits next to `createdAt` on the wrapper, not inside `graph`, so
+   * rating a photo never touches develop history (see appStore.ts's
+   * setRating, which deliberately never calls pushHistory). Always present
+   * (0 = unrated, the default for every doc with no `rating` key at all —
+   * see sanitizeRating); serializeGraphDoc omits the key entirely at 0 to
+   * keep an unrated sidecar's JSON exactly as before this pack existed.
+   */
+  rating: number;
   /** Unrecognized wrapper-level keys (DESIGN §9 passthrough) — round-tripped verbatim by serializeGraphDoc. */
   unknown?: Record<string, unknown>;
 }
 
 export const SIDECAR_SCHEMA_VERSION = 4;
+
+/** Rating stars, 0 (unrated) .. 5. */
+export const MAX_RATING = 5;
+
+/**
+ * Normalize an untrusted `rating` payload to an integer 0..MAX_RATING;
+ * anything non-numeric/out-of-range/absent sanitizes quietly to 0 (unrated)
+ * rather than throwing — a malformed rating must never take the rest of an
+ * otherwise-good sidecar down with it (unlike e.g. sanitizeLens, which throws
+ * on structural garbage because a bad lens field has no safe fallback other
+ * than "reject the whole doc"; a bad rating's safe fallback is just
+ * "unrated"). Shared by parseGraphDoc, appStore's setRating action, and the
+ * headless CLI's cheap `--min-rating` sidecar read.
+ */
+export function sanitizeRating(raw: unknown): number {
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0;
+  return Math.min(MAX_RATING, Math.max(0, Math.round(raw)));
+}
 
 // --- Geometry: non-destructive crop + straighten (input node only) ----------
 //
@@ -504,7 +532,7 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
 }
 
 /** Wrapper-level keys `serializeGraphDoc`/`parseGraphDoc` know about; anything else round-trips verbatim (DESIGN §9). */
-const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'graph']);
+const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'graph']);
 /** Node-level keys the schema knows about; anything else round-trips verbatim per node. */
 const KNOWN_NODE_KEYS = new Set([
   'id',
@@ -533,12 +561,20 @@ const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
  * ride along on a parsed node/edge object — see parseGraphDoc) are written
  * back verbatim, with known keys winning on conflict (DESIGN §9). Pretty-
  * printed and newline-terminated for git.
+ *
+ * `rating` (ratings pack, default 0) is the wrapper's own star rating —
+ * omitted entirely from the written JSON at 0 (unrated), so an untouched/
+ * never-rated sidecar's bytes are identical to before this pack existed
+ * (same "identity ⇒ not emitted" convention `name`/`export`/`mask`/`spots`
+ * already follow on nodes). presetDoc.ts's captureLook round-trip calls this
+ * with no `rating` arg at all — a preset is a look, not a per-photo rating.
  */
 export function serializeGraphDoc(
   doc: GraphDoc,
   source: SidecarSource | null,
   createdAt: string | null,
-  unknownWrapperFields?: Record<string, unknown>
+  unknownWrapperFields?: Record<string, unknown>,
+  rating = 0
 ): string {
   const now = new Date().toISOString();
   const wrapper = {
@@ -546,6 +582,7 @@ export function serializeGraphDoc(
     schemaVersion: SIDECAR_SCHEMA_VERSION,
     ...(source ? { source } : {}),
     createdAt: createdAt ?? now,
+    ...(rating > 0 ? { rating: sanitizeRating(rating) } : {}),
     updatedAt: now,
     graph: {
       nodes: doc.nodes.map((n) => {
@@ -617,6 +654,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     schemaVersion?: unknown;
     source?: SidecarSource;
     createdAt?: unknown;
+    rating?: unknown;
     graph?: { nodes?: unknown; edges?: unknown };
   };
   const version = wrapper.schemaVersion;
@@ -727,6 +765,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     graph: doc,
     ...(wrapper.source ? { source: wrapper.source } : {}),
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
+    rating: sanitizeRating(wrapper.rating),
     ...(Object.keys(unknownWrapper).length > 0 ? { unknown: unknownWrapper } : {}),
   };
 }

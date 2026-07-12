@@ -84,6 +84,15 @@ export interface FolderImageEntry {
   hasSidecar: boolean;
   /** mtime in ms. Not used for sorting today (filename order is — see listImages's doc comment), kept for a possible future "sort by date". */
   mtimeMs: number;
+  /**
+   * Star rating 0..5 (ratings pack), read cheaply off the sidecar's wrapper
+   * (main's listImages handler JSON.parses just this one key — never the
+   * full GraphDoc schema, and never throws on a malformed sidecar; see
+   * extractSidecarRating in src/main/index.ts). 0 for both "no sidecar" and
+   * "sidecar has no/invalid rating" — the filmstrip cell and the ★n+ filter
+   * treat those identically (unrated).
+   */
+  rating: number;
 }
 
 export interface SilverboxApi {
@@ -216,11 +225,27 @@ export interface CliRenderJob {
   maxDim: number | null;
   metadata: ExportMetadataPolicy;
   colorSpace: ExportColorSpace;
+  /**
+   * `--min-rating n` (ratings pack): skip any input whose sidecar rating is
+   * absent or < n, reported via cliProgress as `{input,status:"skipped-
+   * rating"}` rather than rendered — read cheaply (readSidecar + a bare
+   * JSON.parse of the wrapper's `rating` key, see appStore.ts's
+   * readSidecarRatingCheap) BEFORE the expensive decode/render, so a
+   * `--min-rating` batch over a folder full of unrated images never pays for
+   * decoding any of them. null = no filtering (every image renders).
+   */
+  minRating: number | null;
 }
 
-/** One rendered file's result, or one image's failure — streamed via cliProgress, one per line under `--json` (NDJSON). */
+/**
+ * One rendered file's result, one skipped-by-rating input (`--min-rating`,
+ * never counted as a failure — see main/index.ts's runCliMode), or one
+ * image's failure — streamed via cliProgress, one per line under `--json`
+ * (NDJSON).
+ */
 export type CliRenderResult =
   | { input: string; output: string; width: number; height: number; bytes: number; ms: number }
+  | { input: string; status: 'skipped-rating' }
   | { input: string; error: string };
 
 /**
