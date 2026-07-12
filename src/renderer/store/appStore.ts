@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
+import { extractSonyEmbeddedPreview } from '../engine/lens/sonyLensProfile';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
 import {
   buildPlan,
@@ -78,6 +79,17 @@ interface AppState {
   fileName: string | null;
   imagePath: string | null;
   imageError: string | null;
+  /**
+   * Embedded-preview-first opening (the Lightroom trick): the ARW's own
+   * embedded camera JPEG, shown as a CanvasView overlay the instant it's
+   * sliced out — no decode — while the real libraw decode + GPU render runs
+   * behind it. Set only for a fresh RAW open (extractSonyEmbeddedPreview);
+   * null for JPEGs (they decode fast enough that a preview overlay would
+   * itself be the bottleneck) and non-Sony RAWs. Cleared (URL revoked — see
+   * clearOpeningPreview) once the real image reaches 'ready', the open
+   * fails, or another open starts.
+   */
+  openingPreview: { url: string; width: number; height: number } | null;
   graph: GraphDoc;
   /** Graph differs from what the sidecar holds (or would hold). */
   graphDirty: boolean;
@@ -405,6 +417,30 @@ function cancelAutosaveTimer(): void {
     clearTimeout(autosaveTimer);
     autosaveTimer = null;
   }
+}
+
+// --- Embedded-preview-first opening (AppState.openingPreview) --------------
+//
+// Revoke the overlay's blob: URL and drop it — call sites: a new open
+// starting (openImageByPath's top), the real image reaching 'ready', or the
+// open failing. Never leaves a blob: URL live past whichever of those three
+// happens first, so two rapid opens never leak the first one's URL.
+//
+// Verify-only: every URL actually revoked here, in order — lets
+// verify-preview.mjs prove a rapid second open revoked the FIRST open's URL
+// specifically (not just that openingPreview is now null, which a leaked
+// URL sitting unreferenced would also show).
+const revokedOpeningPreviewUrls: string[] = [];
+export function openingPreviewRevocationLog(): readonly string[] {
+  return revokedOpeningPreviewUrls;
+}
+
+function clearOpeningPreview(state: Pick<AppState, 'openingPreview'>): { openingPreview: null } {
+  if (state.openingPreview) {
+    URL.revokeObjectURL(state.openingPreview.url);
+    revokedOpeningPreviewUrls.push(state.openingPreview.url);
+  }
+  return { openingPreview: null };
 }
 
 /** History advance for a graph mutation; `key` coalesces slider-drag runs. */
@@ -895,6 +931,7 @@ export const useAppStore = create<AppState>((set, get) => {
   fileName: null,
   imagePath: null,
   imageError: null,
+  openingPreview: null,
   graph: defaultGraphDoc(),
   graphDirty: false,
   selectedNodeId: null,
@@ -938,6 +975,11 @@ export const useAppStore = create<AppState>((set, get) => {
     // a pending autosave from whatever image was open belongs to THAT
     // image/path; never let it fire against the one we're about to open
     cancelAutosaveTimer();
+    // Whatever preview overlay belonged to the PREVIOUS open (still 'loading',
+    // or just never got cleaned up) is now stale — drop it before this open
+    // does anything else, so two rapid opens never leave a leaked blob: URL
+    // or a stale overlay showing the wrong photo.
+    set(clearOpeningPreview(get()));
     const fileName = path.split('/').pop() ?? path;
     const kind = isRawFileName(fileName) ? 'raw' : isJpegFileName(fileName) ? 'jpg' : null;
     if (!kind) {
@@ -947,6 +989,28 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
     try {
       const bytes = await window.silverbox.readFile(path);
+      // Embedded-preview-first opening: slice the camera JPEG OUT of `bytes`
+      // (extractSonyEmbeddedPreview copies via ArrayBuffer.slice — never a
+      // view into `bytes`) before loadImage transfers it to the decode
+      // worker below (postMessage's transfer list detaches it synchronously
+      // inside that call). JPEG opens skip this entirely — they decode fast
+      // enough that a preview overlay would itself be the visible delay.
+      if (kind === 'raw') {
+        const preview = extractSonyEmbeddedPreview(bytes);
+        if (preview) {
+          // Revoke whatever preview URL is CURRENTLY live before installing
+          // this one — guards a race the top-of-function clear can't: two
+          // overlapping opens each await their own readFile, so a second
+          // open's extraction can land while the first open's preview is
+          // still showing (the first open's OWN `await loadImage(...)`
+          // hasn't resolved yet to reach its ready/error clear). Without
+          // this, that would silently overwrite (leak) the first URL
+          // instead of revoking it.
+          set(clearOpeningPreview(get()));
+          const url = URL.createObjectURL(new Blob([preview.bytes], { type: 'image/jpeg' }));
+          set({ openingPreview: { url, width: preview.width, height: preview.height } });
+        }
+      }
       const image = await loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV);
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
@@ -1063,6 +1127,7 @@ export const useAppStore = create<AppState>((set, get) => {
       mirrorShaderArtifactClear();
       shaderEpoch++;
       set({
+        ...clearOpeningPreview(get()),
         imageStatus: 'ready',
         image,
         graph,
@@ -1092,7 +1157,12 @@ export const useAppStore = create<AppState>((set, get) => {
       // here just means no hot-reload push for this image, not a broken open.
       void window.silverbox.watchSidecar(path + SIDECAR_SUFFIX);
     } catch (err) {
-      set({ imageStatus: 'error', image: null, imageError: err instanceof Error ? err.message : String(err) });
+      set({
+        ...clearOpeningPreview(get()),
+        imageStatus: 'error',
+        image: null,
+        imageError: err instanceof Error ? err.message : String(err),
+      });
     }
   },
 

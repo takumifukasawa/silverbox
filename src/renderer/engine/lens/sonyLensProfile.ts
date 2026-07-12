@@ -48,6 +48,11 @@ const TAG_CA = 0x7035;
 const TAG_DISTORTION = 0x7037;
 const TAG_EXIF_IFD = 0x8769;
 const TAG_LENS_MODEL = 0xa434;
+const TAG_MAKE = 0x010f;
+/** JPEGInterchangeFormat / …Length — the standard TIFF/EXIF preview-JPEG
+ * pointer pair (embedded-preview-first opening; see extractSonyEmbeddedPreview). */
+const TAG_JPEG_OFFSET = 0x0201;
+const TAG_JPEG_LENGTH = 0x0202;
 
 interface IfdEntry {
   tag: number;
@@ -283,4 +288,159 @@ export function distortionNormalizer(knots: number[], width: number, height: num
     s = Math.max(s, distortionGain(knots, rTB), distortionGain(knots, rLR));
   }
   return s;
+}
+
+// --- Embedded preview extraction (embedded-preview-first opening) -----------
+
+/** A sliced-out (COPY, not a view into the source buffer) embedded JPEG. */
+export interface EmbeddedPreview {
+  bytes: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+/**
+ * Cheap JPEG dimension read: scans markers from SOI looking for a Start-Of-
+ * Frame segment (0xFFC0-0xFFCF, excluding the DHT/JPG/DAC markers C4/C8/CC)
+ * and reads its height/width fields — no pixel decode, just a header walk
+ * that stops at the first SOF (always near the front of a baseline/
+ * progressive JPEG, well before the entropy-coded scan data). Returns null on
+ * anything that doesn't parse as a JPEG within `[offset, offset+length)`.
+ */
+function readJpegDimensions(view: DataView, offset: number, length: number): { width: number; height: number } | null {
+  if (offset < 0 || length < 4 || offset + length > view.byteLength) return null;
+  if (view.getUint16(offset, false) !== 0xffd8) return null; // SOI
+  const end = offset + length;
+  let p = offset + 2;
+  while (p + 4 <= end) {
+    if (view.getUint8(p) !== 0xff) return null; // not a marker where one was expected
+    const marker = view.getUint8(p + 1);
+    if (marker === 0xff) {
+      p++; // fill byte
+      continue;
+    }
+    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd9) || marker === 0x01) {
+      p += 2; // markers with no payload (RSTn, SOI/EOI, TEM)
+      continue;
+    }
+    const segLen = view.getUint16(p + 2, false);
+    const isSof = marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc;
+    if (isSof) {
+      if (p + 9 > end) return null;
+      const height = view.getUint16(p + 5, false);
+      const width = view.getUint16(p + 7, false);
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    if (marker === 0xda || segLen < 2) return null; // start-of-scan reached (or bogus length) — no more headers
+    p += 2 + segLen;
+  }
+  return null;
+}
+
+/**
+ * Collect every (offset, length) JPEGInterchangeFormat pair reachable from
+ * IFD0: this camera generation (a7C II) parks three of them across the
+ * top-level next-IFD chain, NOT just IFD0/IFD1 —
+ *
+ *   IFD0            1616×1080  ~300KB  ("PreviewImage")
+ *   IFD1 (chained)   160×120   ~11KB   (the plain TIFF thumbnail)
+ *   IFD2 (chained)  4608×3072  ~1.6MB  ("JpgFromRaw" — the full camera frame)
+ *
+ * verified with `exiftool -v3` against the default ARW; see
+ * extractSonyEmbeddedPreview's doc comment). Also checks IFD0's SubIFDs (tag
+ * 0x014a, the same link parseSonyLensProfile walks) in case a different body
+ * parks a preview there instead. Capped chain length as a safety net against
+ * a corrupt/circular next-IFD pointer.
+ */
+function collectJpegCandidates(view: DataView, le: boolean, ifd0Off: number): { offset: number; length: number }[] {
+  const candidates: { offset: number; length: number }[] = [];
+  const visit = (entries: IfdEntry[]) => {
+    const offEntry = entries.find((e) => e.tag === TAG_JPEG_OFFSET);
+    const lenEntry = entries.find((e) => e.tag === TAG_JPEG_LENGTH);
+    if (!offEntry || !lenEntry) return;
+    const offset = view.getUint32(offEntry.valueOffset, le);
+    const length = view.getUint32(lenEntry.valueOffset, le);
+    if (offset > 0 && length > 0 && offset + length <= view.byteLength) candidates.push({ offset, length });
+  };
+  let ifdOff = ifd0Off;
+  let guard = 0;
+  while (ifdOff && guard < 8) {
+    if (ifdOff <= 0 || ifdOff + 2 > view.byteLength) break;
+    const count = view.getUint16(ifdOff, le);
+    const end = ifdOff + 2 + count * 12;
+    if (end + 4 > view.byteLength) break;
+    const entries = readIfd(view, ifdOff, le);
+    if (!entries) break;
+    visit(entries);
+    if (guard === 0) {
+      const subTag = entries.find((e) => e.tag === TAG_SUBIFDS);
+      if (subTag) {
+        const subOffsets: number[] = [];
+        if (subTag.count === 1) {
+          subOffsets.push(view.getUint32(subTag.valueOffset, le));
+        } else {
+          for (let i = 0; i < subTag.count; i++) {
+            const o = subTag.valueOffset + i * 4;
+            if (o + 4 <= view.byteLength) subOffsets.push(view.getUint32(o, le));
+          }
+        }
+        for (const subOff of subOffsets) {
+          const sub = readIfd(view, subOff, le);
+          if (sub) visit(sub);
+        }
+      }
+    }
+    ifdOff = view.getUint32(end, le);
+    guard++;
+  }
+  return candidates;
+}
+
+/**
+ * Extract the LARGEST embedded full-frame JPEG preview from a Sony ARW, as a
+ * cheap byte-range slice (no decode) — task: embedded-preview-first opening.
+ * Shown immediately in the UI while the real libraw decode + GPU render runs
+ * behind it, then swapped out once the real image reaches 'ready'.
+ *
+ * Gated to Sony (Make tag 0x010f) — a non-Sony TIFF-based RAW may carry the
+ * same standard 0x0201/0x0202 tag pair, but this function's chain-walk
+ * (collectJpegCandidates) is tuned against this camera generation's specific
+ * IFD layout and hasn't been validated elsewhere, so it stays in scope with
+ * the rest of this file's "Sony only, the file is the profile" approach.
+ *
+ * Returns null (never throws) for a JPEG, a non-Sony RAW, a truncated/garbage
+ * buffer, or a Sony ARW whose preview tags don't parse as a JPEG with a
+ * readable SOF header.
+ */
+export function extractSonyEmbeddedPreview(buffer: ArrayBuffer): EmbeddedPreview | null {
+  try {
+    const view = new DataView(buffer);
+    if (view.byteLength < 8) return null;
+    const bom = view.getUint16(0, false);
+    let le: boolean;
+    if (bom === 0x4949) le = true;
+    else if (bom === 0x4d4d) le = false;
+    else return null;
+    if (view.getUint16(2, le) !== 42) return null;
+    const ifd0Off = view.getUint32(4, le);
+    const ifd0 = readIfd(view, ifd0Off, le);
+    if (!ifd0) return null;
+    const makeEntry = ifd0.find((e) => e.tag === TAG_MAKE);
+    const make = makeEntry ? readAscii(view, makeEntry.valueOffset, makeEntry.count) : null;
+    if (!make || !make.toUpperCase().startsWith('SONY')) return null;
+
+    const candidates = collectJpegCandidates(view, le, ifd0Off);
+    let best: EmbeddedPreview | null = null;
+    for (const { offset, length } of candidates) {
+      const dims = readJpegDimensions(view, offset, length);
+      if (!dims) continue;
+      const area = dims.width * dims.height;
+      if (!best || area > best.width * best.height) {
+        best = { bytes: buffer.slice(offset, offset + length), width: dims.width, height: dims.height };
+      }
+    }
+    return best;
+  } catch {
+    return null;
+  }
 }

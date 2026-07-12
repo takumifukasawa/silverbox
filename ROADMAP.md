@@ -87,6 +87,12 @@ dimension mismatch (the image's aspect ratio changed — a crop edit since the
 golden was made) is also a FAILURE (`dims-changed`), never resampled to
 force a comparison. Engine updates become detectable choices instead of
 silent drift in a photo's rendered look.
+Embedded-preview-first opening (the Lightroom trick): a fresh ARW open shows
+the camera's own embedded full-size JPEG (Sony's "JpgFromRaw" tag — a sliced
+byte range, no decode) as a canvas overlay the instant it's extracted, while
+the real libraw decode + GPU render runs behind it; the overlay swaps out the
+moment the real image reaches 'ready'. JPEG opens skip the whole path (they
+decode fast enough that a preview would itself be the delay).
 
 ## In flight / agreed order
 
@@ -131,9 +137,6 @@ offset (value decided in the Lightroom calibration session).
 
 ## Nice to have
 
-- **Embedded-preview-first opening**: show the ARW's embedded JPEG within
-  ~100ms while the real decode runs, then swap — the Lightroom trick;
-  near-zero perceived load time
 - **Folder filmstrip** (NOT a catalog): open a folder, thumbnail strip from
   embedded previews, click to switch images; no database — and ratings, if
   they come, live in the sidecar so they stay git-native

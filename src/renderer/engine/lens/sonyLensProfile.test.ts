@@ -14,6 +14,7 @@ import {
   caGain,
   vignetteGain,
   distortionNormalizer,
+  extractSonyEmbeddedPreview,
 } from './sonyLensProfile';
 
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
@@ -78,6 +79,54 @@ describe('parseSonyLensModel', () => {
     const junk = new Uint8Array(4096);
     for (let i = 0; i < junk.length; i++) junk[i] = (i * 37) & 0xff;
     expect(parseSonyLensModel(junk.buffer)).toBeNull();
+  });
+});
+
+describe('extractSonyEmbeddedPreview', () => {
+  it('extracts the LARGEST embedded JPEG (JpgFromRaw, not PreviewImage/Thumbnail) from the real ARW', () => {
+    // Ground truth from `exiftool -j -PreviewImage -JpgFromRaw -ThumbnailImage`
+    // on the default ARW: three JPEGInterchangeFormat pairs exist across the
+    // IFD0→IFD1→IFD2 chain (1616×1080 "PreviewImage" in IFD0, 160×120 TIFF
+    // thumbnail in IFD1, 4608×3072 "JpgFromRaw" in IFD2) — the full-frame one
+    // is the largest by a wide margin and lives in IFD2, one link further
+    // than the brief's "IFD0/IFD1" starting guess (see the doc comment on
+    // collectJpegCandidates).
+    const preview = extractSonyEmbeddedPreview(bytesOf(ARW_PATH));
+    expect(preview).not.toBeNull();
+    expect(preview!.width).toBe(4608);
+    expect(preview!.height).toBe(3072);
+    expect(preview!.bytes.byteLength).toBe(1633713);
+    // it's a real, independently decodable JPEG (SOI/EOI markers)
+    const bytes = new Uint8Array(preview!.bytes);
+    expect(bytes[0]).toBe(0xff);
+    expect(bytes[1]).toBe(0xd8);
+    expect(bytes[bytes.length - 2]).toBe(0xff);
+    expect(bytes[bytes.length - 1]).toBe(0xd9);
+  });
+
+  it('returns a COPY, not a view into the source buffer', () => {
+    const source = bytesOf(ARW_PATH);
+    const preview = extractSonyEmbeddedPreview(source);
+    expect(preview).not.toBeNull();
+    // detaching (simulating the postMessage transfer to the decode worker)
+    // must not affect the already-extracted preview bytes
+    const before = new Uint8Array(preview!.bytes.slice(0, 16));
+    new MessageChannel().port1.postMessage(source, [source]);
+    expect(source.byteLength).toBe(0); // confirms the transfer actually detached it
+    expect(new Uint8Array(preview!.bytes.slice(0, 16))).toEqual(before);
+  });
+
+  it('returns null for a JPEG', () => {
+    expect(extractSonyEmbeddedPreview(bytesOf(JPG_PATH))).toBeNull();
+  });
+
+  it('returns null for a truncated ARW header and a garbage buffer', () => {
+    const full = bytesOf(ARW_PATH);
+    expect(extractSonyEmbeddedPreview(full.slice(0, 64))).toBeNull();
+    expect(extractSonyEmbeddedPreview(new ArrayBuffer(0))).toBeNull();
+    const junk = new Uint8Array(4096);
+    for (let i = 0; i < junk.length; i++) junk[i] = (i * 37) & 0xff;
+    expect(extractSonyEmbeddedPreview(junk.buffer)).toBeNull();
   });
 });
 

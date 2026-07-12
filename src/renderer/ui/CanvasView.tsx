@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { findActiveSpotsNodeId, useAppStore } from '../store/appStore';
+import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
@@ -50,6 +50,10 @@ declare global {
   interface Window {
     __debug?: {
       imageState(): { status: string; width?: number; height?: number; fullWidth?: number; fullHeight?: number };
+      /** Embedded-preview-first opening (Lightroom trick): the overlay's current state, or null once cleared. */
+      openingPreviewState(): { url: string; width: number; height: number } | null;
+      /** Verify-only: every blob: URL clearOpeningPreview has revoked so far, in order (proves a rapid second open doesn't leak the first's URL). */
+      openingPreviewRevocations(): string[];
       rendererKind(): 'webgpu';
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
@@ -228,6 +232,7 @@ export function CanvasView() {
   const setGpuError = useAppStore((s) => s.setGpuError);
   const imageStatus = useAppStore((s) => s.imageStatus);
   const image = useAppStore((s) => s.image);
+  const openingPreview = useAppStore((s) => s.openingPreview);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
   const shaderRev = useAppStore((s) => s.shaderRev);
@@ -528,6 +533,12 @@ export function CanvasView() {
           fullWidth: s.image?.fullWidth,
           fullHeight: s.image?.fullHeight,
         };
+      },
+      openingPreviewState() {
+        return useAppStore.getState().openingPreview;
+      },
+      openingPreviewRevocations() {
+        return [...openingPreviewRevocationLog()];
       },
       rendererKind() {
         return 'webgpu';
@@ -1193,6 +1204,29 @@ export function CanvasView() {
           <span className="canvas-zoom-readout" data-testid="zoom-readout">
             {Math.round(view.scale * devicePixelRatio * 100)}%
           </span>
+        </div>
+      )}
+      {/* Embedded-preview-first opening (the Lightroom trick): the ARW's own
+          embedded camera JPEG, shown the instant extraction (no decode)
+          succeeds and gone the moment the real image reaches 'ready' — see
+          appStore.ts's openImageByPath / clearOpeningPreview. Dead simple by
+          design: no pan/zoom wiring, no crossfade (v1 — see ROADMAP), and it
+          renders BEFORE (so, beneath) the "Decoding…" indicator below so
+          that text stays readable over it. Gated on imageStatus alone, not
+          overlayVisible (which also fires on gpuError) — a stale preview has
+          no business surviving a GPU error on some OTHER already-ready
+          image. */}
+      {imageStatus === 'loading' && openingPreview && (
+        <img
+          src={openingPreview.url}
+          alt="Camera preview"
+          className="opening-preview-overlay"
+          data-testid="opening-preview-overlay"
+        />
+      )}
+      {imageStatus === 'loading' && openingPreview && (
+        <div className="preview-badge" data-testid="preview-badge">
+          Preview
         </div>
       )}
       {overlayVisible && (

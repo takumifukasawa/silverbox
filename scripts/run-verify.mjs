@@ -89,6 +89,7 @@ const ALL_SCRIPTS = [
   { name: 'hotreload', file: 'verify-hotreload.mjs' },
   { name: 'cli', file: 'verify-cli.mjs' },
   { name: 'golden', file: 'verify-golden.mjs' },
+  { name: 'preview', file: 'verify-preview.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

@@ -77,6 +77,10 @@ not — are written down in [DESIGN.md](DESIGN.md).
   indicators, plus luma waveform, RGB parade and a vectorscope.
 - Before/after compare (`\`) and a grayscale check view (`G`), zoom/pan with
   fit and 1:1 views, undo/redo with gesture coalescing, drag & drop opening.
+- **Instant preview on open** — a fresh ARW shows its own embedded full-size
+  camera JPEG immediately (a byte-range slice, no decode) while the real
+  libraw decode + GPU render finishes behind it, then swaps — the Lightroom
+  trick, near-zero perceived load time.
 - **LUT export** — the active output's color pipeline as a standard .cube,
   Unity/Unreal strip PNGs and a WebGL sampling snippet, for bringing a
   Silverbox look into a game engine. Geometry (crop/lens) never applies; any
