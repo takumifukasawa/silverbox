@@ -253,6 +253,13 @@ export function CanvasView() {
   const openingPreview = useAppStore((s) => s.openingPreview);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
+  // LR-style preset hover preview (round-7 UX pack G §4): a transient look
+  // that overrides the RENDER only — everything else in this component
+  // (selection, mask/spot overlays, the node editor's own reads of `graph`)
+  // stays bound to the real `graph` below; only graphForBuild substitutes
+  // this in, and only at the top of its derivation (before cropMode's own
+  // override) — see graphForBuild's assignment.
+  const previewLook = useAppStore((s) => s.previewLook);
   const shaderRev = useAppStore((s) => s.shaderRev);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
@@ -289,6 +296,14 @@ export function CanvasView() {
   const anchorDims = image
     ? orientedDims(image.width, image.height, inputGeometry.orientation ?? defaultGeometryOrientation())
     : null;
+  // Preset hover preview (UX pack G §4) substitutes in at the TOP of this
+  // derivation — before cropMode's own override below — so a preview during
+  // crop mode (edge case; the two tools aren't normally used together) still
+  // gets the crop-suppressed full-frame treatment same as the real graph
+  // would. previewLook already carries the CURRENT geometry (setPreviewLook
+  // merges it in — see appStore.ts), so this substitution alone never changes
+  // outputDims.
+  const previewBase = previewLook ?? graph;
   // Crop mode previews the FULL (uncropped) straightened frame — the overlay
   // lets you re-adjust the crop rect against the whole image — so force crop
   // back to identity for RENDERING only; the true crop committed in the graph
@@ -297,8 +312,8 @@ export function CanvasView() {
   const graphForBuild =
     cropMode && image
       ? {
-          ...graph,
-          nodes: graph.nodes.map((n) =>
+          ...previewBase,
+          nodes: previewBase.nodes.map((n) =>
             n.kind === 'input'
               ? {
                   ...n,
@@ -311,7 +326,7 @@ export function CanvasView() {
               : n
           ),
         }
-      : graph;
+      : previewBase;
   // Output dims (post-crop) computed SYNCHRONOUSLY from store state — the
   // canvas/viewport must not wait on the GPU renderer's async setGraph()
   // round-trip to know its own size, or fit-to-view would race it (see ms9).
@@ -336,7 +351,7 @@ export function CanvasView() {
   // see NodeEditorPanel.tsx). planDoc keeps the SAME reference across such
   // edits; it — not graphForBuild directly — drives the render effect below.
   const planDoc = usePlanDoc(graphForBuild);
-  const { view, fit, oneToOne, setViewFree } = useCanvasViewport(
+  const { view, fit, fitAnimated, oneToOne, setViewFree } = useCanvasViewport(
     containerRef,
     outputDims,
     wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode,
@@ -346,6 +361,16 @@ export function CanvasView() {
   viewRef.current = view;
   const statsTimerRef = useRef<number | undefined>(undefined);
   const scopeMode = useAppStore((s) => s.scopeMode);
+
+  // Space's animated fit (UX pack G §2): register this mount's fitAnimated
+  // with the store so App.tsx's window-level Space handler can reach it —
+  // same "component-local imperative thing, store-reachable" pattern as
+  // setRenderer below. Cleared on unmount so a stale closure never lingers
+  // after the canvas goes away.
+  useEffect(() => {
+    useAppStore.getState().setViewportFitAnimated(fitAnimated);
+    return () => useAppStore.getState().setViewportFitAnimated(null);
+  }, [fitAnimated]);
 
   // Spot mode (task #50): the plain wheel gesture adjusts the brush radius
   // instead of zooming (useCanvasViewport's own onWheel opts out via

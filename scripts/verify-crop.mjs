@@ -615,6 +615,138 @@ try {
     geomAfterMinRotate
   );
 
+  console.log('verify-crop (round-7 UX pack G §1: alt = resize the crop from center):');
+  await page.locator('[data-testid="crop-ratio"]').selectOption('free');
+
+  // A mid-frame rect with generous room on every side — isolates "grows from
+  // the center" from the edge-of-frame clamp (tested separately below).
+  await setGeometry({ crop: { x: 0.3, y: 0.3, w: 0.2, h: 0.2 }, angle: 0 });
+  const altStart = await geometryState();
+  const eHandleAlt = page.locator('[data-testid="crop-handle-e"]');
+  await eHandleAlt.scrollIntoViewIfNeeded();
+  const eBoxAlt = await eHandleAlt.boundingBox();
+  const eCenterAlt = { x: eBoxAlt.x + eBoxAlt.width / 2, y: eBoxAlt.y + eBoxAlt.height / 2 };
+
+  // Plain (no-alt) drag first, as the "1x" baseline the alt/center-mode "2x"
+  // growth is compared against below — avoids hand-deriving the pixel↔crop-
+  // fraction scale factor to predict an absolute expected width.
+  await page.mouse.move(eCenterAlt.x, eCenterAlt.y);
+  await page.mouse.down();
+  await page.mouse.move(eCenterAlt.x + 80, eCenterAlt.y, { steps: 6 });
+  await page.mouse.up();
+  const geomPlainE = await geometryState();
+  const plainGrowth = geomPlainE.crop.w - altStart.crop.w;
+  check('sanity: the plain (no-alt) E-handle drag actually grew w', plainGrowth > 1e-6, {
+    before: altStart.crop.w,
+    after: geomPlainE.crop.w,
+  });
+
+  await setGeometry(altStart); // reseed the exact same start rect
+  await page.mouse.move(eCenterAlt.x, eCenterAlt.y);
+  await page.mouse.down();
+  await page.keyboard.down('Alt');
+  await page.mouse.move(eCenterAlt.x + 80, eCenterAlt.y, { steps: 6 });
+  // still mid-drag with Alt held: the center-dot affordance should be showing
+  const dotVisibleMidDrag = (await page.locator('[data-testid="crop-center-dot"]').count()) === 1;
+  await page.keyboard.up('Alt');
+  await page.mouse.up();
+  const geomAltE = await geometryState();
+
+  check(
+    'alt-drag on "e" moves the WEST edge too (x actually changed, unlike the plain drag which pins it)',
+    Math.abs(geomAltE.crop.x - altStart.crop.x) > 1e-6,
+    { before: altStart.crop.x, after: geomAltE.crop.x }
+  );
+  check(
+    'alt-drag on "e": the rect\'s center (x + w/2) is unchanged from the drag-start center',
+    Math.abs(geomAltE.crop.x + geomAltE.crop.w / 2 - (altStart.crop.x + altStart.crop.w / 2)) < 1e-6,
+    { before: altStart.crop.x + altStart.crop.w / 2, after: geomAltE.crop.x + geomAltE.crop.w / 2 }
+  );
+  const altGrowth = geomAltE.crop.w - altStart.crop.w;
+  check(
+    'alt-drag on "e" grows w by ~2x the plain (anchored) drag\'s growth for the identical pointer delta',
+    Math.abs(altGrowth - 2 * plainGrowth) < 1e-3,
+    { plainGrowth, altGrowth, ratio: altGrowth / plainGrowth }
+  );
+  check('the alt/center-resize dot was visible mid-drag while Alt was held', dotVisibleMidDrag, dotVisibleMidDrag);
+  check(
+    'the dot is gone once Alt is released and the drag ends (not stuck on)',
+    (await page.locator('[data-testid="crop-center-dot"]').count()) === 0,
+    await page.locator('[data-testid="crop-center-dot"]').count()
+  );
+
+  console.log('verify-crop (round-7 UX pack G §1: alt at the frame edge stops symmetrically, center still fixed):');
+  // Center close to the LEFT edge (cx=0.15) so a big rightward drag saturates
+  // the center clamp well before it would hit the right edge — the room on
+  // the left (0.15) is the binding constraint, exactly the "min of both
+  // sides' room" the brief calls for.
+  await setGeometry({ crop: { x: 0.05, y: 0.3, w: 0.2, h: 0.2 }, angle: 0 });
+  const edgeStart = await geometryState();
+  const cxEdgeStart = edgeStart.crop.x + edgeStart.crop.w / 2;
+  const eHandleEdge = page.locator('[data-testid="crop-handle-e"]');
+  await eHandleEdge.scrollIntoViewIfNeeded();
+  const eBoxEdge = await eHandleEdge.boundingBox();
+  await page.mouse.move(eBoxEdge.x + eBoxEdge.width / 2, eBoxEdge.y + eBoxEdge.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down('Alt');
+  await page.mouse.move(eBoxEdge.x + 900, eBoxEdge.y + eBoxEdge.height / 2, { steps: 6 }); // drag far past the right edge
+  await page.keyboard.up('Alt');
+  await page.mouse.up();
+  const geomEdge = await geometryState();
+  check(
+    'alt-drag saturated at the frame edge WITHOUT drifting the center',
+    Math.abs(geomEdge.crop.x + geomEdge.crop.w / 2 - cxEdgeStart) < 1e-6,
+    { cxEdgeStart, cxAfter: geomEdge.crop.x + geomEdge.crop.w / 2 }
+  );
+  check('the cap used the SMALLER side\'s room (west, 0.15) — west edge stops exactly at 0', Math.abs(geomEdge.crop.x) < 1e-6, geomEdge.crop);
+  check('…so w saturates at 2× that room (0.3)', Math.abs(geomEdge.crop.w - 2 * cxEdgeStart) < 1e-6, geomEdge.crop);
+
+  console.log('verify-crop (round-7 UX pack G §1: alt + ratio-lock corner keeps CENTER and RATIO):');
+  await page.locator('[data-testid="crop-ratio"]').selectOption('1:1');
+  await setGeometry({ crop: { x: 0.6, y: 0.6, w: 0.2, h: 0.2 }, angle: 0 });
+  const seStartAlt = await geometryState();
+  const cxSeAlt = seStartAlt.crop.x + seStartAlt.crop.w / 2;
+  const cySeAlt = seStartAlt.crop.y + seStartAlt.crop.h / 2;
+  const seHandleAlt = page.locator('[data-testid="crop-handle-se"]');
+  await seHandleAlt.scrollIntoViewIfNeeded();
+  const seBoxAlt = await seHandleAlt.boundingBox();
+  await page.mouse.move(seBoxAlt.x + seBoxAlt.width / 2, seBoxAlt.y + seBoxAlt.height / 2);
+  await page.mouse.down();
+  await page.keyboard.down('Alt');
+  await page.mouse.move(seBoxAlt.x + 900, seBoxAlt.y + 900, { steps: 6 }); // drag far past both edges
+  await page.keyboard.up('Alt');
+  await page.mouse.up();
+  const geomSeAlt = await geometryState();
+  check(
+    'alt+ratio-lock corner: center (x+w/2, y+h/2) unchanged from the drag-start center',
+    Math.abs(geomSeAlt.crop.x + geomSeAlt.crop.w / 2 - cxSeAlt) < 1e-6 && Math.abs(geomSeAlt.crop.y + geomSeAlt.crop.h / 2 - cySeAlt) < 1e-6,
+    { before: { cx: cxSeAlt, cy: cySeAlt }, after: { cx: geomSeAlt.crop.x + geomSeAlt.crop.w / 2, cy: geomSeAlt.crop.y + geomSeAlt.crop.h / 2 } }
+  );
+  const seAltOutputAr = (geomSeAlt.crop.w * baselineDims.width) / (geomSeAlt.crop.h * baselineDims.height);
+  check('alt+ratio-lock corner: aspect ratio survived the clamp (output w/h ≈ 1:1)', Math.abs(seAltOutputAr - 1) < 0.02, {
+    crop: geomSeAlt.crop,
+    seAltOutputAr,
+  });
+  check(
+    'alt+ratio-lock corner: rect stays inside the frame ([0,1] on both axes)',
+    geomSeAlt.crop.x >= -1e-6 && geomSeAlt.crop.y >= -1e-6 && geomSeAlt.crop.x + geomSeAlt.crop.w <= 1 + 1e-6 && geomSeAlt.crop.y + geomSeAlt.crop.h <= 1 + 1e-6,
+    geomSeAlt.crop
+  );
+
+  console.log('verify-crop (round-7 UX pack G §1: UI legibility — hover-only dot, hint line):');
+  await page.locator('[data-testid="crop-ratio"]').selectOption('free');
+  await setGeometry({ crop: { x: 0, y: 0, w: 1, h: 1 }, angle: 0 });
+  check('the "⌥ = resize from center" hint is always present in crop mode', (await page.locator('[data-testid="crop-alt-hint"]').textContent())?.includes('center'), await page.locator('[data-testid="crop-alt-hint"]').textContent());
+  const seHandleHover = page.locator('[data-testid="crop-handle-se"]');
+  await seHandleHover.scrollIntoViewIfNeeded();
+  await seHandleHover.hover();
+  check('hovering a handle WITHOUT Alt held shows no center dot', (await page.locator('[data-testid="crop-center-dot"]').count()) === 0, await page.locator('[data-testid="crop-center-dot"]').count());
+  await page.keyboard.down('Alt');
+  check('hovering a handle WITH Alt held shows the center dot (no drag needed)', (await page.locator('[data-testid="crop-center-dot"]').count()) === 1, await page.locator('[data-testid="crop-center-dot"]').count());
+  await page.keyboard.up('Alt');
+  check('releasing Alt while still hovering hides the dot again', (await page.locator('[data-testid="crop-center-dot"]').count()) === 0, await page.locator('[data-testid="crop-center-dot"]').count());
+  await page.mouse.move(10, 10); // move off the handle so it doesn't affect later sections
+
   // restore Free ratio + identity, exit crop mode — back to baseline for the sections below
   await page.locator('[data-testid="crop-ratio"]').selectOption('free');
   await page.locator('[data-testid="crop-reset"]').click();

@@ -179,6 +179,28 @@ export function App() {
         ev.preventDefault();
         s.stepFilmstrip(ev.key === 'ArrowRight' ? 1 : -1);
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key === ' ') {
+        // Space = smooth animated fit/center (round-7 UX pack G §2,
+        // "スペースでpreviewにフィットする感じで滑らかに中央に戻る"). Deliberately GLOBAL
+        // (not gated on cropMode) — recentering the preview is useful in any
+        // tool, not just crop. isTextEntry keeps Space typing a literal space
+        // in text fields; the canvas-ish target check below additionally
+        // keeps Space ACTIVATING a focused <button>/<select> (its native
+        // behavior) instead of being hijacked — only body/html/the canvas
+        // area itself count as "nothing else wants this Space".
+        if (isTextEntry(ev.target)) return;
+        const target = ev.target as HTMLElement | null;
+        // '.canvas-viewport' is the actual pannable canvas container — NOT
+        // the outer '.canvas-view' wrapper, which also contains the
+        // Fit/100%/crop-controls BUTTONS (a focused button must keep
+        // Space's native "activate" behavior, not have it hijacked here).
+        const canvasish = target === document.body || target === document.documentElement || !!target?.closest?.('.canvas-viewport');
+        if (!canvasish) return;
+        const s = useAppStore.getState();
+        if (s.imageStatus !== 'ready') return;
+        ev.preventDefault();
+        s.viewportFitAnimated?.(250);
+      }
     };
     // Capture phase + window target: these shortcuts must fire regardless of
     // which panel currently holds focus (node editor pane, canvas, inspector)

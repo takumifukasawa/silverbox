@@ -21,9 +21,19 @@
  *     carry it — applying never touches the input node's geometry.
  *  8. A malformed .json in the presets dir is skipped, never breaking the
  *     list for the valid presets alongside it.
+ *  9. Update (round-7 UX pack G §3): overwrites the SAME preset file with
+ *     the current look — name/slug/createdAt preserved, content/mtime
+ *     changed — and a later re-apply after reset picks up the update.
+ * 10. Hover preview (round-7 UX pack G §4): hovering a preset row previews
+ *     its look on the canvas without touching graphState()/historyState()/
+ *     graphDirty; mouseleave restores the baseline render; hover-then-apply
+ *     matches a plain apply's render.
+ *
+ * The preset list is a plain row list (data-testid="preset-row"), not a
+ * native <select> — real DOM rows are what make the hover preview possible.
  */
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -122,6 +132,11 @@ try {
     }
   };
 
+  /** Row locator by exact display name (rows replaced the native <select> — round-7 UX pack G §4). */
+  const presetRow = (name) => page.locator('[data-testid="preset-row"]').filter({ hasText: name });
+  /** Click (= select, same as choosing an <option> used to) the row with this display name. */
+  const selectPresetRow = (name) => presetRow(name).click();
+
   // ---------------------------------------------------------------------
   console.log('verify-presets (1. edited graph -> save preset via the UI -> file exists):');
   await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.6));
@@ -170,7 +185,7 @@ try {
   const beforeApplyMean = await gpuMean();
 
   await openPresetsMenu();
-  await page.locator('[data-testid="preset-select"]').selectOption({ label: 'My Look' });
+  await selectPresetRow('My Look');
   await page.locator('[data-testid="preset-apply"]').click();
   await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 4));
 
@@ -243,11 +258,11 @@ try {
 
   // ---------------------------------------------------------------------
   console.log('verify-presets (6. delete via the UI removes the file and the select entry):');
-  await page.locator('[data-testid="preset-select"]').selectOption({ label: 'My/Look' });
+  await selectPresetRow('My/Look');
   await page.locator('[data-testid="preset-delete"]').click();
   await waitForCondition(() => !existsSync(secondPath));
   check('the file is gone from disk', !existsSync(secondPath), secondPath);
-  const optionsAfterDelete = await page.locator('[data-testid="preset-select"] option').allTextContents();
+  const optionsAfterDelete = await page.locator('[data-testid="preset-row"]').allTextContents();
   check('the deleted preset no longer appears in the select', !optionsAfterDelete.includes('My/Look'), optionsAfterDelete);
   check('"My Look" (the other, differently-named preset) is unaffected', existsSync(myLookPath), myLookPath);
 
@@ -273,7 +288,7 @@ try {
   check('reopening reset the geometry back to identity', geometryBeforeApply.crop.w === 1 && geometryBeforeApply.angle === 0, geometryBeforeApply);
 
   await openPresetsMenu();
-  await page.locator('[data-testid="preset-select"]').selectOption({ label: 'Crop Test' });
+  await selectPresetRow('Crop Test');
   await page.locator('[data-testid="preset-apply"]').click();
   await waitForCondition(() => page.evaluate(() => window.__debug.historyState().past === 1));
   const geometryAfterApply = await geometryState();
@@ -299,6 +314,124 @@ try {
     listAfterMalformed
   );
   check('the malformed file itself is left untouched on disk', existsSync(join(presetsDir, 'broken.json')), true);
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (9. Update: overwrites the SAME preset — name/slug/createdAt preserved, content/mtime changed):');
+  await openAndWait(ARW_PATH); // fresh default graph
+  await openPresetsMenu();
+  await selectPresetRow('My Look');
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 4));
+
+  const beforeUpdateOnDisk = JSON.parse(readFileSync(myLookPath, 'utf8'));
+  const mtimeBeforeUpdate = statSync(myLookPath).mtimeMs;
+  // tweak a develop param post-apply, then overwrite via Update (not Save —
+  // Update is the button under test, separate from the name-based Save flow)
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.9));
+  await new Promise((resolve) => setTimeout(resolve, 20)); // let mtime clock tick past beforeUpdateOnDisk's
+
+  await page.locator('[data-testid="preset-update"]').click();
+  await waitForCondition(() => {
+    if (!existsSync(myLookPath)) return false;
+    const onDisk = JSON.parse(readFileSync(myLookPath, 'utf8'));
+    return onDisk.look.graph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.9;
+  });
+  const afterUpdateOnDisk = JSON.parse(readFileSync(myLookPath, 'utf8'));
+  check(
+    'Update wrote the tweak to the SAME file',
+    afterUpdateOnDisk.look.graph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.9,
+    afterUpdateOnDisk.look.graph.nodes
+  );
+  check('Update preserved the preset name', afterUpdateOnDisk.name === beforeUpdateOnDisk.name, {
+    before: beforeUpdateOnDisk.name,
+    after: afterUpdateOnDisk.name,
+  });
+  check('Update preserved createdAt', afterUpdateOnDisk.createdAt === beforeUpdateOnDisk.createdAt, {
+    before: beforeUpdateOnDisk.createdAt,
+    after: afterUpdateOnDisk.createdAt,
+  });
+  check('Update kept the same slug (still the one file on disk)', existsSync(myLookPath), myLookPath);
+  const mtimeAfterUpdate = statSync(myLookPath).mtimeMs;
+  check('the file was actually rewritten (mtime advanced)', mtimeAfterUpdate > mtimeBeforeUpdate, {
+    mtimeBeforeUpdate,
+    mtimeAfterUpdate,
+  });
+
+  await openAndWait(ARW_PATH); // reset, then re-apply from a clean session
+  await openPresetsMenu();
+  await selectPresetRow('My Look');
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() =>
+    page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.9)
+  );
+  const reappliedGraph = await graphState();
+  check(
+    're-applying after reset picks up the update (the tweak really is in the preset file, not just in-memory)',
+    reappliedGraph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.9,
+    reappliedGraph.nodes
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (10. hover preview: LR-style, no doc mutation):');
+  await openAndWait(ARW_PATH); // fresh default graph, empty history, autosave off
+  const baselineMeanHover = await gpuMean();
+  const baselineGraphHover = await graphState();
+  const baselineHistoryHover = await historyState();
+
+  await openPresetsMenu();
+  const myLookRow = presetRow('My Look');
+  await myLookRow.scrollIntoViewIfNeeded();
+  await myLookRow.hover(); // real mouseenter, not a synthetic dispatch
+  const changedFromBaseline = (m) =>
+    Math.abs(m.r - baselineMeanHover.r) > 1e-3 || Math.abs(m.g - baselineMeanHover.g) > 1e-3 || Math.abs(m.b - baselineMeanHover.b) > 1e-3;
+  // the preview is debounced ~120ms (see PresetsMenu.tsx) — poll for the
+  // render to actually change rather than racing a fixed sleep against it
+  await waitForCondition(async () => changedFromBaseline(await gpuMean()));
+  const hoverMean = await gpuMean();
+  check('hovering a preset row previews its look (readbackMean changed)', changedFromBaseline(hoverMean), {
+    baselineMeanHover,
+    hoverMean,
+  });
+  check('hover preview does not mutate graphState()', JSON.stringify(await graphState()) === JSON.stringify(baselineGraphHover), {
+    before: baselineGraphHover,
+    after: await graphState(),
+  });
+  check(
+    'hover preview pushes no history entry',
+    JSON.stringify(await historyState()) === JSON.stringify(baselineHistoryHover),
+    await historyState()
+  );
+  check('hover preview does not mark the doc dirty', (await page.evaluate(() => window.__debug.graphDirty())) === false, {
+    graphDirty: await page.evaluate(() => window.__debug.graphDirty()),
+  });
+
+  // mouseleave restores the real (untouched) doc's render
+  await page.mouse.move(0, 0);
+  await waitForCondition(async () => {
+    const m = await gpuMean();
+    return Math.abs(m.r - baselineMeanHover.r) < 1e-4 && Math.abs(m.g - baselineMeanHover.g) < 1e-4 && Math.abs(m.b - baselineMeanHover.b) < 1e-4;
+  });
+  const afterLeaveMean = await gpuMean();
+  check('mouseleave restores the baseline render (within 1e-4)', meansMatch(afterLeaveMean, baselineMeanHover, 1e-4), {
+    baselineMeanHover,
+    afterLeaveMean,
+  });
+
+  // hover-then-apply must equal a plain apply's render (same merge helper —
+  // see appStore.ts's mergeLookWithCurrentGeometry)
+  await myLookRow.hover();
+  await waitForCondition(async () => {
+    const m = await gpuMean();
+    return Math.abs(m.r - hoverMean.r) < 1e-4 && Math.abs(m.g - hoverMean.g) < 1e-4 && Math.abs(m.b - hoverMean.b) < 1e-4;
+  });
+  await selectPresetRow('My Look'); // click also selects it, same as before
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 4));
+  const appliedAfterHoverMean = await gpuMean();
+  check('hover-then-apply matches the hover preview render (within 1e-4)', meansMatch(appliedAfterHoverMean, hoverMean, 1e-4), {
+    hoverMean,
+    appliedAfterHoverMean,
+  });
 
   check('no page errors across the presets checks', pageErrors.length === 0, pageErrors);
 } finally {

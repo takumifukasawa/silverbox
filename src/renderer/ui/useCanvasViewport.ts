@@ -62,23 +62,43 @@ export function useCanvasViewport(
     return { mode: 'fit', scale, tx: (cw - img.width * scale) / 2, ty: (ch - img.height * scale) / 2 };
   }, [containerRef]);
 
+  // Space's animated fit (round-7 UX pack G §2, "スペースでpreviewにフィットする感じで滑らかに中央に戻る"):
+  // an in-flight rAF loop driving fitAnimated below. Any OTHER viewport
+  // mutation (wheel/pinch zoom, drag pan, double-click fit, the crop
+  // overlay's rotate-gesture setViewFree) must cancel it immediately — "a new
+  // gesture wins instantly, no fighting the user" — so every one of those
+  // entry points calls this first.
+  const fitAnimRef = useRef<number | null>(null);
+  const cancelFitAnim = useCallback(() => {
+    if (fitAnimRef.current !== null) {
+      cancelAnimationFrame(fitAnimRef.current);
+      fitAnimRef.current = null;
+    }
+  }, []);
+  useEffect(() => cancelFitAnim, [cancelFitAnim]); // stop the rAF loop on unmount
+
   const fit = useCallback(() => {
+    cancelFitAnim();
     const next = computeFit();
     if (next) setView(next);
-  }, [computeFit]);
+  }, [computeFit, cancelFitAnim]);
 
   /** Zoom so the image point under (mx,my) stays put. */
-  const zoomAt = useCallback((mx: number, my: number, targetScale: number) => {
-    setView((v) => {
-      const scale = Math.min(Math.max(targetScale, 0.02), MAX_SCALE);
-      return {
-        mode: 'free',
-        scale,
-        tx: mx - ((mx - v.tx) * scale) / v.scale,
-        ty: my - ((my - v.ty) * scale) / v.scale,
-      };
-    });
-  }, []);
+  const zoomAt = useCallback(
+    (mx: number, my: number, targetScale: number) => {
+      cancelFitAnim();
+      setView((v) => {
+        const scale = Math.min(Math.max(targetScale, 0.02), MAX_SCALE);
+        return {
+          mode: 'free',
+          scale,
+          tx: mx - ((mx - v.tx) * scale) / v.scale,
+          ty: my - ((my - v.ty) * scale) / v.scale,
+        };
+      });
+    },
+    [cancelFitAnim]
+  );
 
   /**
    * Programmatic view override that also flips to 'free' mode. Used by the
@@ -88,9 +108,53 @@ export function useCanvasViewport(
    * zoomAt): the gesture computes an exact scale from the auto-shrink fit, and
    * a clamp here would let the rect's screen footprint drift.
    */
-  const setViewFree = useCallback((tx: number, ty: number, scale: number) => {
-    setView({ mode: 'free', scale, tx, ty });
-  }, []);
+  const setViewFree = useCallback(
+    (tx: number, ty: number, scale: number) => {
+      cancelFitAnim();
+      setView({ mode: 'free', scale, tx, ty });
+    },
+    [cancelFitAnim]
+  );
+
+  /**
+   * Animated fit (Space, global shortcut — see App.tsx/CanvasView.tsx's
+   * viewportFitAnimated wiring): eases the CURRENT {tx,ty,scale} to the fit
+   * target over `durationMs` via easeOutCubic, instead of fit()'s instant
+   * jump. Reads the live view off `viewRef` (not the `view` closed over at
+   * call time) so re-triggering mid-flight — or any of the cancellers above
+   * firing right before this runs — starts from wherever the view actually
+   * is. The FINAL frame sets the exact `computeFit()` object (not the
+   * interpolated formula at t=1, which can differ by float epsilon) so a
+   * poll for "reached the fit target" can compare directly against a fresh
+   * computeFit() call.
+   */
+  const fitAnimated = useCallback(
+    (durationMs = 250) => {
+      const target = computeFit();
+      if (!target) return;
+      cancelFitAnim();
+      const from = { tx: viewRef.current.tx, ty: viewRef.current.ty, scale: viewRef.current.scale };
+      const t0 = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - t0) / durationMs);
+        if (t >= 1) {
+          setView(target);
+          fitAnimRef.current = null;
+          return;
+        }
+        const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+        setView({
+          mode: 'free',
+          scale: from.scale + (target.scale - from.scale) * eased,
+          tx: from.tx + (target.tx - from.tx) * eased,
+          ty: from.ty + (target.ty - from.ty) * eased,
+        });
+        fitAnimRef.current = requestAnimationFrame(step);
+      };
+      fitAnimRef.current = requestAnimationFrame(step);
+    },
+    [computeFit, cancelFitAnim]
+  );
 
   const oneToOne = useCallback(
     (mx?: number, my?: number) => {
@@ -156,6 +220,7 @@ export function useCanvasViewport(
       // which silently drifts the view out of 'fit' on every mask edit.
       const target = ev.target as HTMLElement | null;
       if (target?.closest('.crop-rect, .crop-handle, .crop-controls, .mask-handle, .spot-handle, .spot-controls')) return;
+      cancelFitAnim();
       dragging = { x: ev.clientX, y: ev.clientY };
       container.setPointerCapture(ev.pointerId);
     };
@@ -183,7 +248,7 @@ export function useCanvasViewport(
       container.removeEventListener('pointermove', onPointerMove);
       container.removeEventListener('pointerup', onPointerUp);
     };
-  }, [containerRef, zoomAt, fit, oneToOne]);
+  }, [containerRef, zoomAt, fit, oneToOne, cancelFitAnim]);
 
-  return { view, fit, oneToOne, setViewFree };
+  return { view, fit, fitAnimated, oneToOne, setViewFree };
 }

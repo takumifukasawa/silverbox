@@ -199,6 +199,49 @@ button:disabled {
   font-size: 12px;
 }
 
+/* Round-7 UX pack G §4: a plain row list replaces the old native <select> —
+   real DOM rows are what make hover-to-preview possible (an OS-drawn
+   <select> popup isn't a reliable hover target). Scrolls once the list
+   outgrows the menu instead of pushing Apply/Update/Delete off-screen. */
+.preset-rows {
+  display: flex;
+  flex-direction: column;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 3px;
+  background: #1b1b1b;
+}
+
+.preset-row {
+  padding: 4px 6px;
+  font-size: 12px;
+  color: #ddd;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preset-row:hover {
+  background: #333;
+}
+
+.preset-row--selected {
+  background: #3a5a8a;
+  color: #fff;
+}
+
+.preset-row--empty {
+  color: #777;
+  cursor: default;
+  font-style: italic;
+}
+
+.preset-row--empty:hover {
+  background: none;
+}
+
 .toolbar-export-opts {
   display: flex;
   gap: 8px;
@@ -676,6 +719,29 @@ button:disabled {
 
 .crop-rotate-zone:hover .crop-rotate-glyph {
   opacity: 1;
+}
+
+/* Alt/center-resize dot (UX pack G §1): pinned at the crop rect's own center
+   via the parent .crop-rect's percentage box (so it moves/scales with the
+   rect automatically, no extra JS math needed) — shown while Alt is held over
+   a handle (hover or drag), see CropOverlay.tsx's altCenterVisible. */
+.crop-center-dot {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  margin: -5px;
+  border-radius: 50%;
+  background: #6a9fe8;
+  border: 1px solid #fff;
+  pointer-events: none;
+}
+
+.crop-hint {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
 }
 
 .crop-controls {

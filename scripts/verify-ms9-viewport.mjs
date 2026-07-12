@@ -124,6 +124,60 @@ try {
     after: afterPinch.scale,
   });
 
+  console.log('verify-ms9 (round-7 UX pack G §2: Space = smooth animated fit/center):');
+  // still zoomed in from the pinch section above
+  const beforeSpace = await viewState();
+  check('setup: currently zoomed in (not already at fit)', beforeSpace.mode !== 'fit', beforeSpace);
+  await page.keyboard.press('Space');
+  // poll-until, not wall-clock: fitAnimated's FINAL frame sets mode:'fit' with
+  // the exact computeFit() result (same as a plain fit() call) — wait for
+  // that instead of assuming the ~250ms duration.
+  await page.waitForFunction(() => window.__debug.canvasView().mode === 'fit', { timeout: 2_000 });
+  const afterSpace = await viewState();
+  check('Space lands exactly on the fit target (scale)', Math.abs(afterSpace.scale - fitView.scale) < 1e-6, {
+    expected: fitView.scale,
+    actual: afterSpace.scale,
+  });
+  check(
+    'Space lands exactly on the fit target (tx/ty)',
+    Math.abs(afterSpace.tx - fitView.tx) < 1e-6 && Math.abs(afterSpace.ty - fitView.ty) < 1e-6,
+    { expected: { tx: fitView.tx, ty: fitView.ty }, actual: { tx: afterSpace.tx, ty: afterSpace.ty } }
+  );
+
+  console.log('verify-ms9 (round-7: a wheel event mid-animation cancels it — a new gesture wins instantly):');
+  await page.locator('[data-testid="view-100"]').click(); // back to zoomed in, away from fit
+  // The click above focuses the "100%" BUTTON — Space must keep activating a
+  // focused button natively (App.tsx's guard), so it wouldn't reach the
+  // viewport's fitAnimated at all from here. A plain click on the canvas
+  // itself blurs the button back to no-particular-focus (body), same as the
+  // double-click earlier in this script.
+  await page.mouse.click(cx, cy);
+  const beforeSpace2 = await viewState();
+  await page.keyboard.press('Space');
+  await page.waitForTimeout(30); // interrupt well before the ~250ms animation would finish
+  await page.mouse.move(cx, cy);
+  await page.mouse.wheel(0, -240); // wheel zooms in further — must win instantly
+  const rightAfterWheel = await viewState();
+  // give a (correctly-cancelled) rAF loop a couple more frames' worth of grace
+  // — if it were somehow still running, scale would keep drifting afterward
+  await page.waitForTimeout(100);
+  const settledAfterWheel = await viewState();
+  check(
+    'the animation actually stopped (no further drift after the interrupting wheel event)',
+    Math.abs(settledAfterWheel.scale - rightAfterWheel.scale) < 1e-9,
+    { rightAfterWheel, settledAfterWheel }
+  );
+  check('the wheel zoom took effect (scale followed the wheel, zoomed in further from 100%)', settledAfterWheel.scale > beforeSpace2.scale, {
+    beforeSpace2,
+    settledAfterWheel,
+  });
+  check(
+    'the interrupted fit never completed (scale stayed well away from the fit target)',
+    Math.abs(settledAfterWheel.scale - fitView.scale) > 0.05,
+    { fitScale: fitView.scale, settledAfterWheel }
+  );
+  check('mode is "free" (not "fit") after a wheel interrupts the animation', settledAfterWheel.mode === 'free', settledAfterWheel);
+
   await page.screenshot({ path: join(projectRoot, 'test-artifacts', 'ms9-zoom.png') });
   console.log('screenshot: test-artifacts/ms9-zoom.png');
 } finally {

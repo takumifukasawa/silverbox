@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import {
   clampGeometry,
@@ -90,6 +90,99 @@ function anchorClampRatioLocked(kind: HandleId, start: GeometryCrop, x: number, 
   return { x, y, w, h };
 }
 
+/**
+ * Alt/center-resize proposal (round-7 UX pack G §1, "alt押しながらだと中央基準でcrop"):
+ * mirrors BOTH edges of the driving axis/axes about the drag-start rect's
+ * CENTER instead of anchoring the opposite edge — dragging 'e' by `dx` grows
+ * east by `dx` AND west by `dx` (w grows by 2·dx, x shifts by -dx) so the
+ * center stays exactly at the drag-start center. Independent per axis, same
+ * as the anchored dx/dy assignment this replaces: an edge handle only
+ * touches its own axis, a corner touches both.
+ */
+function centerResize(kind: HandleId, start: GeometryCrop, dx: number, dy: number) {
+  let { x, y, w, h } = start;
+  if (kind.includes('e')) {
+    w = start.w + 2 * dx;
+    x = start.x - dx;
+  } else if (kind.includes('w')) {
+    w = start.w - 2 * dx;
+    x = start.x + dx;
+  }
+  if (kind.includes('s')) {
+    h = start.h + 2 * dy;
+    y = start.y - dy;
+  } else if (kind.includes('n')) {
+    h = start.h - 2 * dy;
+    y = start.y + dy;
+  }
+  return { x, y, w, h };
+}
+
+/**
+ * Symmetric counterpart of anchorClamp for alt/center-mode resizes: the
+ * "anchor" is the drag-start rect's CENTER (fixed on both axes at once), so
+ * the cap on each axis is the SMALLER of the room on either side of that
+ * center — growing further would push one edge or the other past the frame
+ * before the other edge runs out of room. Caps by shrinking the HALF-size and
+ * re-deriving position from the (fixed) center, rather than anchorClamp's
+ * "cap the driving size, keep the far edge fixed" — a plain min/max on x or w
+ * alone would not keep the center fixed.
+ */
+function centerClamp(kind: HandleId, start: GeometryCrop, x: number, y: number, w: number, h: number) {
+  if (kind.includes('e') || kind.includes('w')) {
+    const cx = start.x + start.w / 2;
+    const halfW = Math.min(w / 2, cx, 1 - cx);
+    x = cx - halfW;
+    w = halfW * 2;
+  }
+  if (kind.includes('n') || kind.includes('s')) {
+    const cy = start.y + start.h / 2;
+    const halfH = Math.min(h / 2, cy, 1 - cy);
+    y = cy - halfH;
+    h = halfH * 2;
+  }
+  return { x, y, w, h };
+}
+
+/**
+ * Alt/center-mode ratio lock: same driving-axis convention as the non-alt
+ * ratio-lock block below (horizontal edges 'n'/'s' drive off `h`; every other
+ * kind — vertical edges AND corners — drives off `w`), but only derives the
+ * size here; centerClampRatioLocked (below) re-centers both axes on the
+ * drag-start center, since center mode never pins an edge or corner the way
+ * the non-alt path does.
+ */
+function centerRatioLock(kind: HandleId, w: number, h: number, ar: number, canvasWidth: number, canvasHeight: number) {
+  const isHorizontalEdge = kind === 'n' || kind === 's';
+  if (isHorizontalEdge) {
+    w = (h * canvasHeight * ar) / canvasWidth;
+  } else {
+    h = (w * canvasWidth) / (ar * canvasHeight);
+  }
+  return { w, h };
+}
+
+/**
+ * Symmetric counterpart of anchorClampRatioLocked: the ratio recompute above
+ * can grow the DERIVED axis past its own center-room even though the DRIVING
+ * axis was already capped by centerClamp — scale both axes back together
+ * (preserving the ratio), then re-derive x/y from the fixed center. Same
+ * one-pass argument as anchorClampRatioLocked: shrinking a size that already
+ * satisfied its own center-room bound can't make it violate that bound.
+ */
+function centerClampRatioLocked(start: GeometryCrop, w: number, h: number) {
+  const cx = start.x + start.w / 2;
+  const cy = start.y + start.h / 2;
+  const wRoom = 2 * Math.min(cx, 1 - cx);
+  const hRoom = 2 * Math.min(cy, 1 - cy);
+  const scale = Math.min(1, w > 0 ? wRoom / w : 1, h > 0 ? hRoom / h : 1);
+  if (scale < 1) {
+    w *= scale;
+    h *= scale;
+  }
+  return { x: cx - w / 2, y: cy - h / 2, w, h };
+}
+
 interface Props {
   view: ViewportState;
   /** Render-output dims (px) — the crop rect is normalized against these. */
@@ -126,6 +219,32 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
   const angleSessionRef = useRef<number | null>(null);
   const cropRectRef = useRef<HTMLDivElement>(null);
 
+  // Alt/center-resize UI legibility (round-7 UX pack G §1): the center dot
+  // must show up BOTH while a resize drag with Alt held is in flight and
+  // while merely hovering a handle with Alt already down (so the affordance
+  // is discoverable before you commit to a drag) — two independent booleans,
+  // OR'd together for the dot/handle styling below. `altKeyDown` tracks the
+  // key itself at the window level (Alt can be pressed before or during the
+  // hover/drag); `hoveredHandle` is which handle (if any) the pointer is
+  // currently over at rest.
+  const [altKeyDown, setAltKeyDown] = useState(false);
+  const [hoveredHandle, setHoveredHandle] = useState<HandleId | null>(null);
+  /** True while an in-flight resize drag has Alt held (read live per pointer-move — see beginDrag). */
+  const [resizeAltActive, setResizeAltActive] = useState(false);
+  const altCenterVisible = resizeAltActive || (hoveredHandle !== null && altKeyDown);
+
+  useEffect(() => {
+    const onAltChange = (ev: KeyboardEvent) => {
+      if (ev.key === 'Alt') setAltKeyDown(ev.type === 'keydown');
+    };
+    window.addEventListener('keydown', onAltChange);
+    window.addEventListener('keyup', onAltChange);
+    return () => {
+      window.removeEventListener('keydown', onAltChange);
+      window.removeEventListener('keyup', onAltChange);
+    };
+  }, []);
+
   // `canvasWidth`/`canvasHeight` are the ORIENTED full-frame dims (see the
   // component doc comment) — exactly what an output-px aspect ratio needs.
   const arFor = (key: string): number | null => {
@@ -144,6 +263,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
     ev.preventDefault();
     sessionRef.current = Date.now();
     setDragging(true);
+    if (kind !== 'move') setResizeAltActive(ev.altKey);
     dragRef.current = { crop, startX: ev.clientX, startY: ev.clientY };
     const ar = arFor(ratioKey);
 
@@ -157,59 +277,79 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
         x = start.crop.x + dx;
         y = start.crop.y + dy;
       } else {
-        if (kind.includes('w')) {
-          x = start.crop.x + dx;
-          w = start.crop.w - dx;
-        }
-        if (kind.includes('e')) {
-          w = start.crop.w + dx;
-        }
-        if (kind.includes('n')) {
-          y = start.crop.y + dy;
-          h = start.crop.h - dy;
-        }
-        if (kind.includes('s')) {
-          h = start.crop.h + dy;
-        }
+        // Alt/center-resize (UX pack G §1): read LIVE off this move event (not
+        // captured at drag start) — LR lets you press/release Alt mid-drag and
+        // it takes effect immediately, since the whole rect is recomputed fresh
+        // from `start.crop` on every move anyway (nothing incremental to reconcile).
+        const centerMode = e.altKey;
+        setResizeAltActive(centerMode);
+        if (centerMode) {
+          // Alt-symmetric proposal FIRST, then its own center-anchored clamp
+          // (a symmetric variant of anchorClamp — the "anchor" is the rect
+          // CENTER, so the cap is the min of both sides' room) — see
+          // centerResize/centerClamp's doc comments.
+          ({ x, y, w, h } = centerResize(kind, start.crop, dx, dy));
+          ({ x, y, w, h } = centerClamp(kind, start.crop, x, y, w, h));
 
-        // Anchor-aware clamp: cap the DRIVING axis at its fixed opposite edge
-        // BEFORE any ratio-lock math runs, so a drag that would grow past
-        // the frame boundary stops there instead of shoving the anchor edge
-        // inward (round-6 bug — see anchorClamp's doc comment).
-        ({ x, y, w, h } = anchorClamp(kind, start.crop, x, y, w, h));
-
-        // Aspect-ratio lock (normalized crop fractions, ratio in OUTPUT px —
-        // account for the source's own aspect: outputAr = (w*canvasWidth) /
-        // (h*canvasHeight)). Corners + vertical edges (e/w) drive off the
-        // freeform `w` and recompute `h`; horizontal edges (n/s) drive off
-        // `h` and recompute `w`. Each case repositions whichever edge must
-        // stay pinned (the opposite corner for corners, the center for a
-        // single-edge drag) so the constrained rect grows/shrinks naturally.
-        if (ar !== null) {
-          const isVerticalEdge = kind === 'e' || kind === 'w';
-          const isHorizontalEdge = kind === 'n' || kind === 's';
-          if (isHorizontalEdge) {
-            const wNew = (h * canvasHeight * ar) / canvasWidth;
-            const xCenter = start.crop.x + start.crop.w / 2;
-            x = xCenter - wNew / 2;
-            w = wNew;
-          } else {
-            const hNew = (w * canvasWidth) / (ar * canvasHeight);
-            if (isVerticalEdge) {
-              const yCenter = start.crop.y + start.crop.h / 2;
-              y = yCenter - hNew / 2;
-            } else if (kind.includes('n')) {
-              y = start.crop.y + start.crop.h - hNew;
-            }
-            h = hNew;
+          if (ar !== null) {
+            ({ w, h } = centerRatioLock(kind, w, h, ar, canvasWidth, canvasHeight));
+            ({ x, y, w, h } = centerClampRatioLocked(start.crop, w, h));
+          }
+        } else {
+          if (kind.includes('w')) {
+            x = start.crop.x + dx;
+            w = start.crop.w - dx;
+          }
+          if (kind.includes('e')) {
+            w = start.crop.w + dx;
+          }
+          if (kind.includes('n')) {
+            y = start.crop.y + dy;
+            h = start.crop.h - dy;
+          }
+          if (kind.includes('s')) {
+            h = start.crop.h + dy;
           }
 
-          // The ratio recompute above can grow the DERIVED axis past ITS
-          // OWN anchor (e.g. a corner+ratio drag: capping `w` still leaves
-          // room for the derived `h` to overshoot the north/south anchor).
-          // Scale both axes back together so the lock survives — see
-          // anchorClampRatioLocked's doc comment.
-          ({ x, y, w, h } = anchorClampRatioLocked(kind, start.crop, x, y, w, h));
+          // Anchor-aware clamp: cap the DRIVING axis at its fixed opposite edge
+          // BEFORE any ratio-lock math runs, so a drag that would grow past
+          // the frame boundary stops there instead of shoving the anchor edge
+          // inward (round-6 bug — see anchorClamp's doc comment).
+          ({ x, y, w, h } = anchorClamp(kind, start.crop, x, y, w, h));
+
+          // Aspect-ratio lock (normalized crop fractions, ratio in OUTPUT px —
+          // account for the source's own aspect: outputAr = (w*canvasWidth) /
+          // (h*canvasHeight)). Corners + vertical edges (e/w) drive off the
+          // freeform `w` and recompute `h`; horizontal edges (n/s) drive off
+          // `h` and recompute `w`. Each case repositions whichever edge must
+          // stay pinned (the opposite corner for corners, the center for a
+          // single-edge drag) so the constrained rect grows/shrinks naturally.
+          if (ar !== null) {
+            const isVerticalEdge = kind === 'e' || kind === 'w';
+            const isHorizontalEdge = kind === 'n' || kind === 's';
+            if (isHorizontalEdge) {
+              const wNew = (h * canvasHeight * ar) / canvasWidth;
+              const xCenter = start.crop.x + start.crop.w / 2;
+              x = xCenter - wNew / 2;
+              w = wNew;
+            } else {
+              const hNew = (w * canvasWidth) / (ar * canvasHeight);
+              if (isVerticalEdge) {
+                const yCenter = start.crop.y + start.crop.h / 2;
+                y = yCenter - hNew / 2;
+              } else if (kind.includes('n')) {
+                y = start.crop.y + start.crop.h - hNew;
+              }
+              h = hNew;
+            }
+
+            // The ratio recompute above can grow the DERIVED axis past ITS
+            // OWN anchor (e.g. a corner+ratio drag: capping `w` still leaves
+            // room for the derived `h` to overshoot the north/south anchor).
+            // Scale both axes back together so the lock survives — see
+            // anchorClampRatioLocked's doc comment.
+            ({ x, y, w, h } = anchorClampRatioLocked(kind, start.crop, x, y, w, h));
+          }
         }
       }
       w = Math.min(1, Math.max(GEOMETRY_MIN_CROP_SIZE, w));
@@ -246,6 +386,7 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
       dragRef.current = null;
       sessionRef.current = null;
       setDragging(false);
+      setResizeAltActive(false);
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
@@ -475,8 +616,20 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
               className={`crop-handle crop-handle-${h}`}
               data-testid={`crop-handle-${h}`}
               onPointerDown={beginDrag(h)}
+              onPointerEnter={() => setHoveredHandle(h)}
+              onPointerLeave={() => setHoveredHandle((cur) => (cur === h ? null : cur))}
             />
           ))}
+          {/* Alt/center-resize affordance (UX pack G §1): a small dot at the
+              rect's own center, shown while Alt is held over a handle (hover
+              OR an in-flight drag) — the cursor keeps its normal per-handle
+              resize direction (nwse/ns/ew/nesw) since there's no standard CSS
+              cursor for "resize about the center", so this dot is the primary
+              legibility cue (see the crop-controls hint line below for the
+              always-visible discoverability half of the same affordance). */}
+          {altCenterVisible && (
+            <div className="crop-center-dot" data-testid="crop-center-dot" aria-hidden="true" />
+          )}
         </div>
       </div>
       {/* stopPropagation here keeps the viewport's pan handler (which grabs
@@ -538,6 +691,12 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
         <button data-testid="crop-done" onClick={toggleCropMode} title="Exit crop mode">
           Done
         </button>
+        {/* Always-on discoverability half of the alt/center-resize affordance
+            (UX pack G §1) — cheap, and the only part of the affordance
+            visible before the pointer ever reaches a handle. */}
+        <span className="crop-hint" data-testid="crop-alt-hint">
+          ⌥ = resize from center
+        </span>
       </div>
     </>
   );

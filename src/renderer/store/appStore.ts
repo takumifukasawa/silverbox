@@ -225,6 +225,24 @@ interface AppState {
   applyPreset(slug: string): Promise<void>;
   /** Delete a saved preset's file; refreshes the list. No confirm dialog (see PresetsMenu's low-friction-but-not-accidental design). */
   deletePreset(slug: string): Promise<void>;
+  /**
+   * LR-style preset hover preview (round-7 UX pack G §4): the RAW captured
+   * look (pre-geometry-merge) a preset row is currently hovered over, or null
+   * between hovers. Transient UI state ONLY — never serialized, never pushed
+   * to history, never touched by autosave (those all key off `graph`, which
+   * this never writes to). CanvasView's graphForBuild reads
+   * `previewLook ?? graph` at the top of its derivation so the preview rides
+   * the exact same render path a real apply would.
+   */
+  previewLook: GraphDoc | null;
+  /**
+   * Set (or clear, with null) the hover preview. Internally merges `look`
+   * with the CURRENT input node's geometry via the same helper applyLook
+   * uses (mergeLookWithCurrentGeometry) — so what's stored here, and what
+   * CanvasView renders, is bit-for-bit what an actual Apply would produce,
+   * minus the history push.
+   */
+  setPreviewLook(look: GraphDoc | null): void;
   /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
@@ -353,6 +371,16 @@ interface AppState {
   removeShaderParam(nodeId: string, name: string): void;
   updateShaderParam(nodeId: string, name: string, value: number): void;
   setRenderer(renderer: RenderWorkerClient): void;
+  /**
+   * The live preview viewport's animated-fit trigger (round-7 UX pack G §2,
+   * Space): CanvasView registers useCanvasViewport's `fitAnimated` here on
+   * mount (same "component-local imperative thing, reachable from the
+   * window-level shortcut chain in App.tsx" pattern as `renderer` above) and
+   * clears it on unmount. Null whenever no canvas is mounted (or before it
+   * mounts) — App.tsx's Space handler just no-ops in that case.
+   */
+  viewportFitAnimated: ((durationMs?: number) => void) | null;
+  setViewportFitAnimated(fn: ((durationMs?: number) => void) | null): void;
   setHistogram(histogram: HistogramData | null): void;
   /** Write the graph to the image's sidecar (`<image>.silverbox.json`). */
   saveGraph(): Promise<void>;
@@ -705,22 +733,32 @@ export function captureLook(graph: GraphDoc): GraphDoc {
 }
 
 /**
- * Apply a captured look to `s`'s CURRENT graph: `look`'s nodes/edges replace
- * the current graph wholesale, except the input node's geometry, which is
- * preserved from whatever's open right now — a look must never carry
- * another photo's crop. One undo entry (pushHistory's `null` = its own
- * discrete entry, coalescing nothing). This is the entire body of
- * pasteDevelopSettings; applyPreset (the preset "Apply" action) shares it
- * unchanged, so paste and preset-apply are one implementation with one
- * merge semantics.
+ * Merge a captured look with a CURRENT graph's own geometry: `look`'s
+ * nodes/edges replace the current graph wholesale, except the input node's
+ * geometry, which is preserved from whatever's open right now — a look must
+ * never carry another photo's crop. Shared by applyLook (below, the real
+ * paste/apply — one undo entry) and setPreviewLook (the hover-preview
+ * action, no history push) so the preview is bit-for-bit what an apply would
+ * produce, not a second implementation of the same merge.
  */
-function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: GraphDoc } {
-  const currentInput = s.graph.nodes.find((n) => n.kind === 'input');
+function mergeLookWithCurrentGeometry(currentGraph: GraphDoc, look: GraphDoc): GraphDoc {
+  const currentInput = currentGraph.nodes.find((n) => n.kind === 'input');
   const currentGeometry = currentInput?.geometry;
-  const graph: GraphDoc = structuredClone({
+  return structuredClone({
     ...look,
     nodes: look.nodes.map((n) => (n.kind === 'input' ? { ...n, geometry: currentGeometry } : n)),
   });
+}
+
+/**
+ * Apply a captured look to `s`'s CURRENT graph (mergeLookWithCurrentGeometry
+ * above), as one undo entry (pushHistory's `null` = its own discrete entry,
+ * coalescing nothing). This is the entire body of pasteDevelopSettings;
+ * applyPreset (the preset "Apply" action) shares it unchanged, so paste and
+ * preset-apply are one implementation with one merge semantics.
+ */
+function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: GraphDoc } {
+  const graph = mergeLookWithCurrentGeometry(s.graph, look);
   return { ...pushHistory(s, null), graph, graphDirty: true };
 }
 
@@ -983,6 +1021,7 @@ export const useAppStore = create<AppState>((set, get) => {
   selectedNodeId: null,
   shaderErrors: {},
   renderer: null,
+  viewportFitAnimated: null,
   exportStatus: 'idle',
   exportError: null,
   exportDialogOpen: false,
@@ -1045,7 +1084,14 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ imageStatus: 'error', imageError: `unsupported file type: ${fileName}` });
       return;
     }
-    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
+    // A preset hover preview (round-7 UX pack G §4) belongs to whatever image
+    // was open a moment ago — its merged geometry would be stale (and, in
+    // the pathological case of the mouse holding still across a filmstrip
+    // arrow-key switch, would ride along into the NEW image's render).
+    // Clearing it here, synchronously and unconditionally, is simpler and
+    // safer than trying to reason about every call site that could leave a
+    // preview active.
+    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null, previewLook: null });
     try {
       const bytes = await window.silverbox.readFile(path);
       if (stale()) return;
@@ -1815,6 +1861,10 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ renderer });
   },
 
+  setViewportFitAnimated(fn) {
+    set({ viewportFitAnimated: fn });
+  },
+
   toggleBefore() {
     set((s) => ({ showBefore: !s.showBefore }));
   },
@@ -1915,6 +1965,12 @@ export const useAppStore = create<AppState>((set, get) => {
   async deletePreset(slug) {
     await window.silverbox.presetDelete(slug);
     set({ presets: await window.silverbox.presetsList() });
+  },
+
+  previewLook: null,
+
+  setPreviewLook(look) {
+    set((s) => ({ previewLook: look ? mergeLookWithCurrentGeometry(s.graph, look) : null }));
   },
 
   setGeometry(geo, coalesceKey) {
