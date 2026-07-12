@@ -456,6 +456,13 @@ function cancelAutosaveTimer(): void {
   }
 }
 
+/**
+ * Monotonic id of the most recent openImageByPath call — the newest-open-wins
+ * epoch guard (see that method's doc comment). Module scope for the same
+ * definition-order reason as autosaveTimer above.
+ */
+let openImageEpoch = 0;
+
 // --- Embedded-preview-first opening (AppState.openingPreview) --------------
 //
 // Revoke the overlay's blob: URL and drop it — call sites: a new open
@@ -1011,6 +1018,16 @@ export const useAppStore = create<AppState>((set, get) => {
   gpuError: null,
 
   async openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) {
+    // Newest-open-wins epoch guard: this method awaits three times (readFile,
+    // loadImage, readSidecar), and nothing else stopped an OLDER in-flight
+    // open from resolving AFTER a newer one and clobbering its state — with
+    // the filmstrip's arrow-key switching (rapid consecutive opens of
+    // multi-second RAW decodes) that stale-open-wins race became a real,
+    // reachable bug rather than a double-click curiosity. Every await
+    // checkpoint below bails silently when a newer open has started; the
+    // newer call owns ALL UI state from the moment it increments the epoch.
+    const epoch = ++openImageEpoch;
+    const stale = () => epoch !== openImageEpoch;
     // a pending autosave from whatever image was open belongs to THAT
     // image/path; never let it fire against the one we're about to open
     cancelAutosaveTimer();
@@ -1031,6 +1048,7 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null });
     try {
       const bytes = await window.silverbox.readFile(path);
+      if (stale()) return;
       // Embedded-preview-first opening: slice the camera JPEG OUT of `bytes`
       // (extractSonyEmbeddedPreview copies via ArrayBuffer.slice — never a
       // view into `bytes`) before loadImage transfers it to the decode
@@ -1054,6 +1072,7 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
       const image = await loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV);
+      if (stale()) return;
       // The graph belongs to the image: restore its sidecar, or start fresh.
       // A malformed sidecar falls back to the default doc (and stays on disk
       // untouched until the user saves over it) with a toolbar notice.
@@ -1074,6 +1093,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // were on disk at all, even when a sidecar genuinely exists — see
         // AppState.openImageByPath's doc comment.
         const sidecar = opts?.skipSidecar ? null : await window.silverbox.readSidecar(path + SIDECAR_SUFFIX);
+        if (stale()) return;
         sidecarRawText = sidecar;
         if (sidecar !== null) {
           // the sidecar file EXISTS — a parse failure here (unlike readSidecar
@@ -1199,6 +1219,9 @@ export const useAppStore = create<AppState>((set, get) => {
       // here just means no hot-reload push for this image, not a broken open.
       void window.silverbox.watchSidecar(path + SIDECAR_SUFFIX);
     } catch (err) {
+      // a STALE open's failure must not clobber the newer open's state — the
+      // newer call owns the UI from its epoch increment onward
+      if (stale()) return;
       set({
         ...clearOpeningPreview(get()),
         imageStatus: 'error',

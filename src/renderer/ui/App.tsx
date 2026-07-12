@@ -12,7 +12,7 @@ import { isRawFileName } from '../engine/decoder/librawDecoder';
 declare global {
   interface Window {
     /** Verify-harness hook: open an image bypassing the native dialog. */
-    __openImageByPath: (path: string) => Promise<void>;
+    __openImageByPath: (path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) => Promise<void>;
     /** Verify-harness hook: open a folder (filmstrip) bypassing the native directory dialog. */
     __openFolderByPath: (path: string) => Promise<void>;
   }
@@ -55,7 +55,7 @@ export function App() {
   const [dropActive, setDropActive] = useState(false);
 
   useEffect(() => {
-    window.__openImageByPath = (path: string) => useAppStore.getState().openImageByPath(path);
+    window.__openImageByPath = (path, opts) => useAppStore.getState().openImageByPath(path, opts);
     window.__openFolderByPath = (path: string) => useAppStore.getState().openFolder(path).then(() => undefined);
     const onKeyDown = (ev: KeyboardEvent) => {
       const cmd = ev.metaKey || ev.ctrlKey;

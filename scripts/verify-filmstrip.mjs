@@ -111,7 +111,16 @@ try {
   // === 1. Open the folder — 4 cells, sorted, first image open ===
   console.log('verify-filmstrip (open a folder shows the strip, sorted, first image open):');
   await openFolderFireAndForget(folderA);
-  await waitReadyOrError();
+  // waitReadyOrError() alone is satisfiable by the PREVIOUS image's stale
+  // 'ready' (openFolder hasn't even flipped to 'loading' while its
+  // listImages IPC is in flight) — under parallel-suite contention that
+  // window is wide enough to read section-1 state mid-decode. Wait for the
+  // compound condition instead: the folder's FIRST image is current AND ready.
+  await page.waitForFunction(
+    (p) => window.__debug.folderState().currentPath === p && window.__debug.imageState().status === 'ready',
+    aDsc1,
+    { timeout: 120_000 }
+  );
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length === 4, {
     timeout: 15_000,
   });
@@ -176,6 +185,39 @@ try {
   await waitReadyOrError();
   await page.waitForFunction((p) => window.__debug.folderState().currentPath === p, cDsc3, { timeout: 15_000 });
   check('ArrowLeft steps back to c_DSC3 (prev)', true, null);
+
+  console.log('verify-filmstrip (rapid switching: newest open wins — the epoch guard):');
+  // Fire three opens back-to-back WITHOUT waiting between them: c -> a -> b.
+  // Before the openImageEpoch guard, whichever RAW decode resolved LAST won
+  // the UI (multi-second decodes make out-of-order resolution routine), so
+  // the displayed image could disagree with the strip highlight. The guard
+  // makes "last requested" == "displayed" by construction; assert it settles
+  // on b_DSC2 and NEVER regresses afterwards.
+  await page.evaluate(
+    ([p1, p2, p3]) => {
+      void window.__openImageByPath(p1, { keepFolderContext: true });
+      void window.__openImageByPath(p2, { keepFolderContext: true });
+      void window.__openImageByPath(p3, { keepFolderContext: true });
+    },
+    [cDsc3, aDsc1, bDsc2]
+  );
+  await page.waitForFunction(
+    (p) => window.__debug.imageState().status === 'ready' && window.__debug.folderState().currentPath === p,
+    bDsc2,
+    { timeout: 120_000 }
+  );
+  // give any stale (slower) open a window to wrongly clobber the state
+  await page.waitForTimeout(2_000);
+  const afterBurst = await page.evaluate(() => ({
+    current: window.__debug.folderState().currentPath,
+    status: window.__debug.imageState().status,
+  }));
+  check('after a 3-open burst, the LAST-requested image is the one displayed (and stays)', afterBurst.current === bDsc2 && afterBurst.status === 'ready', afterBurst);
+
+  // step back to c_DSC3 for the text-entry check below
+  await page.click(`[data-testid="filmstrip-cell"][data-path="${cDsc3}"]`);
+  await waitReadyOrError();
+  await page.waitForFunction((p) => window.__debug.folderState().currentPath === p, cDsc3, { timeout: 15_000 });
 
   // Arrow keys must not fire while a text input is focused (isTextEntry's
   // guard, App.tsx) — focus a real <input type="text"> and confirm no
