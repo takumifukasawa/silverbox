@@ -138,6 +138,8 @@ declare global {
        * select an ARBITRARY node deterministically).
        */
       selectNode(id: string | null): void;
+      /** Node bypass toggle (Resolve's Ctrl+D-equivalent) — verify-only convenience, drives the exact same store action as ⌘D/the node body's bypass button. */
+      toggleNodeDisabled(nodeId: string): void;
       /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
       exportBatchState(): { count: number; paths: string[] } | null;
       /** Current `<userData>/settings.json` state (loaded at boot / after any settingsUpdate). */
@@ -968,6 +970,9 @@ export function CanvasView() {
       },
       selectNode(id) {
         useAppStore.getState().selectNode(id);
+      },
+      toggleNodeDisabled(nodeId) {
+        useAppStore.getState().toggleNodeDisabled(nodeId);
       },
       exportState() {
         const s = useAppStore.getState();

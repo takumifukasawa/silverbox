@@ -12,6 +12,7 @@ import {
   defaultLensParams,
   defaultParams,
   DEVELOP_KIND,
+  isBypassableNodeKind,
   nextId,
   outputName,
   parseGraphDoc,
@@ -331,6 +332,15 @@ interface AppState {
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
+  /**
+   * Node bypass toggle (Resolve's Ctrl+D-equivalent, ⌘D / the node body's
+   * bypass button): flips `disabled` on `nodeId`, one plain undo entry per
+   * toggle (unlike updateNodeParam's coalescing param-drag key — every ⌘D/
+   * click is its own discrete edit, not a continuous drag). No-op on a kind
+   * the toggle doesn't apply to (isBypassableNodeKind — 'input'/'output'/
+   * 'image' have nothing sensible to bypass to) or a missing nodeId.
+   */
+  toggleNodeDisabled(nodeId: string): void;
   moveNode(nodeId: string, position: { x: number; y: number }): void;
   addOpNode(kind: AddableKind): void;
   removeOpNode(nodeId: string): void;
@@ -1694,6 +1704,21 @@ export const useAppStore = create<AppState>((set, get) => {
       },
       graphDirty: true,
     }));
+  },
+
+  toggleNodeDisabled(nodeId) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || !isBypassableNodeKind(node.kind)) return {};
+      return {
+        ...pushHistory(s, null),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, disabled: n.disabled ? undefined : true } : n)),
+        },
+        graphDirty: true,
+      };
+    });
   },
 
   moveNode(nodeId, position) {

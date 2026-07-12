@@ -22,7 +22,7 @@ import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 
-/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error). */
+/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's. */
 interface OpNodeData {
   label: string;
   thumbUrl?: string;
@@ -30,19 +30,38 @@ interface OpNodeData {
   missing?: boolean;
   badge?: string;
   badgeTitle?: string;
+  disabled?: boolean;
   [key: string]: unknown;
 }
 
 /**
  * Live thumbnail body (per-node-preview pack, tier 1) + the "eye" inspect
- * toggle (tier 2) shared by every non-input/non-output node type below.
- * `thumbUrl` is undefined for a node buildPlan never reached from the
- * resolved output (a disconnected branch) — shown as a plain "=" placeholder
- * rather than nothing, so an editor full of freshly-added, not-yet-wired
- * nodes doesn't read as "thumbnails are broken".
+ * toggle (tier 2) + the bypass toggle (node bypass feature) shared by every
+ * non-input/non-output node type below. `thumbUrl` is undefined for a node
+ * buildPlan never reached from the resolved output (a disconnected branch) —
+ * shown as a plain "=" placeholder rather than nothing, so an editor full of
+ * freshly-added, not-yet-wired nodes doesn't read as "thumbnails are
+ * broken". A bypassed node's thumbUrl needs no special handling here: buildPlan
+ * resolves it to its ancestor's step (same mechanism an identity-valued op
+ * already gets — see graphDoc.ts's resolve()), so the thumbnail naturally
+ * shows the passthrough result.
  */
-function NodeThumb({ id, thumbUrl, inspecting }: { id: string; thumbUrl?: string; inspecting: boolean }) {
+function NodeThumb({
+  id,
+  thumbUrl,
+  inspecting,
+  disabled,
+  bypassable,
+}: {
+  id: string;
+  thumbUrl?: string;
+  inspecting: boolean;
+  disabled?: boolean;
+  /** False for the image node (not a bypassable kind — see isBypassableNodeKind): no button rendered at all, "the UI simply doesn't offer it there" per the bypass feature's decided semantics. */
+  bypassable?: boolean;
+}) {
   const setInspectNode = useAppStore((s) => s.setInspectNode);
+  const toggleNodeDisabled = useAppStore((s) => s.toggleNodeDisabled);
   return (
     <div className="op-node-body">
       <div
@@ -52,6 +71,20 @@ function NodeThumb({ id, thumbUrl, inspecting }: { id: string; thumbUrl?: string
       >
         {!thumbUrl && <span aria-hidden>=</span>}
       </div>
+      {bypassable && (
+        <button
+          type="button"
+          className={`op-node-bypass${disabled ? ' op-node-bypass--active' : ''}`}
+          title={disabled ? 'Re-enable this node (⌘D)' : 'Bypass this node (⌘D)'}
+          data-testid={`node-bypass-${id}`}
+          onClick={(ev) => {
+            ev.stopPropagation();
+            toggleNodeDisabled(id);
+          }}
+        >
+          {disabled ? '⊘' : '⊙'}
+        </button>
+      )}
       <button
         type="button"
         className={`op-node-eye${inspecting ? ' op-node-eye--active' : ''}`}
@@ -68,14 +101,16 @@ function NodeThumb({ id, thumbUrl, inspecting }: { id: string; thumbUrl?: string
   );
 }
 
-/** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack); an optional `badge` (external-tool hook node's needs-confirm/pending/error state, task #41) renders the same small corner glyph the image node's missing-file badge uses. */
+/** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack); an optional `badge` (external-tool hook node's needs-confirm/pending/error state, task #41) renders the same small corner glyph the image node's missing-file badge uses. `disabled` (node bypass feature) mutes the whole body and strikes the label. */
 function OpNode({ id, data, selected }: NodeProps) {
-  const { label, thumbUrl, inspecting, badge, badgeTitle } = data as unknown as OpNodeData;
+  const { label, thumbUrl, inspecting, badge, badgeTitle, disabled } = data as unknown as OpNodeData;
   return (
-    <div className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
+    <div
+      className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}${disabled ? ' op-node--disabled' : ''}`}
+    >
       <Handle type="target" position={Position.Left} />
-      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
-      <span>{label}</span>
+      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} disabled={disabled} bypassable />
+      <span className="op-node-label">{label}</span>
       {badge && (
         <span className="op-node-badge" data-testid={`external-node-badge-${id}`} title={badgeTitle}>
           {badge}
@@ -86,19 +121,21 @@ function OpNode({ id, data, selected }: NodeProps) {
   );
 }
 
-/** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output, same thumbnail/eye body as OpNode. */
+/** Blend node: three labeled inputs (a = base, b = overlay, mask = optional), one output, same thumbnail/eye/bypass body as OpNode. */
 function BlendNode({ id, data, selected }: NodeProps) {
-  const { label, thumbUrl, inspecting } = data as unknown as OpNodeData;
+  const { label, thumbUrl, inspecting, disabled } = data as unknown as OpNodeData;
   return (
-    <div className={`blend-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
+    <div
+      className={`blend-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}${disabled ? ' op-node--disabled' : ''}`}
+    >
       <Handle type="target" id="a" position={Position.Left} style={{ top: '30%' }} />
       <Handle type="target" id="b" position={Position.Left} style={{ top: '70%' }} />
       <Handle type="target" id="mask" position={Position.Bottom} style={{ left: '50%' }} />
       <span className="blend-node-ports">
         a<br />b
       </span>
-      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
-      <span>{label}</span>
+      <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} disabled={disabled} bypassable />
+      <span className="op-node-label">{label}</span>
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -170,6 +207,7 @@ function buildNodes(
         missing: n.kind === IMAGE_KIND ? imageNodeMissing[n.id] === true : undefined,
         badge,
         badgeTitle,
+        disabled: n.disabled === true,
       },
       position: n.position,
       selected: n.id === selectedNodeId,

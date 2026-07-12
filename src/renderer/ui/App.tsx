@@ -8,6 +8,7 @@ import { ExportDialog } from './ExportDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
+import { isBypassableNodeKind } from '../engine/graph/graphDoc';
 
 declare global {
   interface Window {
@@ -110,6 +111,18 @@ export function App() {
         ev.preventDefault();
         if (ev.shiftKey) useAppStore.getState().redo();
         else useAppStore.getState().undo();
+      }
+      if (cmd && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'd') {
+        // Node bypass toggle (Resolve's Ctrl+D-equivalent): preventDefault
+        // UNCONDITIONALLY, before the isTextEntry check — unlike undo/redo
+        // (which defers to Monaco's own binding while typing), ⌘D has no
+        // legitimate text-entry meaning to defer to, so the browser's native
+        // "bookmark this page" must never surface here regardless of focus.
+        ev.preventDefault();
+        if (isTextEntry(ev.target)) return;
+        const s = useAppStore.getState();
+        const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
+        if (node && isBypassableNodeKind(node.kind)) s.toggleNodeDisabled(node.id);
       }
       if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'c' || ev.key === 'C')) {
         if (isTextEntry(ev.target)) return;

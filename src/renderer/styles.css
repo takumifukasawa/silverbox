@@ -1935,6 +1935,20 @@ button:disabled {
   border-color: #c299f0;
 }
 
+/* Bypassed node (node bypass feature, ⌘D): muted opacity + a struck-through
+   label — the thumbnail itself is left alone (it already shows the natural
+   passthrough result via buildPlan's identity resolution, nothing to
+   additionally mark there). */
+.op-node--disabled,
+.blend-node.op-node--disabled {
+  opacity: 0.45;
+}
+
+.op-node--disabled .op-node-label,
+.blend-node.op-node--disabled .op-node-label {
+  text-decoration: line-through;
+}
+
 /* Thumbnail + eye button row (tier 1/2), shared by .op-node and .blend-node. */
 .op-node-body {
   position: relative;
@@ -1981,6 +1995,29 @@ button:disabled {
 
 .op-node-eye--active {
   color: #c299f0;
+}
+
+/* Bypass toggle (node bypass feature, ⌘D) — same footprint/corner treatment
+   as .op-node-eye, mirrored to the opposite (bottom-left) corner so the two
+   never overlap. */
+.op-node-bypass {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  width: 16px;
+  height: 16px;
+  line-height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(20, 20, 20, 0.75);
+  color: #aab;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.op-node-bypass--active {
+  color: #e8c96b;
 }
 
 /* Image node (composite/mask-by-another-file feature): missing/unreadable

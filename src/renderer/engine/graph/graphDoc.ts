@@ -60,6 +60,25 @@ export interface GraphNode {
   image?: ImageParams;
   /** External-tool hook node (denoise v1, task #41): command template + color-boundary toggle; only for kind 'external'. */
   external?: ExternalParams;
+  /**
+   * Bypass toggle (node bypass feature, Resolve's Ctrl+D): absent/false =
+   * active (default). Legal on every 1-in/1-out chain kind (ops, custom,
+   * Develop, mask, spots, external) plus blend — see isBypassableNodeKind and
+   * buildPlan's resolve() for what "bypassed" means per kind (chain kinds and
+   * blend resolve to their input(s) exactly like an identity-valued node;
+   * a disabled MASK node additionally makes any blend consuming it via the
+   * 'mask' edge treat that edge as absent, not just resolve the mask node to
+   * its own upstream color). NOT legal on 'input'/'output'/'image' (a source
+   * has nothing sensible to bypass TO) — the UI never offers the toggle
+   * there and appStore's toggleNodeDisabled no-ops if asked anyway. Additive
+   * to schemaVersion 4 (no version bump): serialized only when true; a doc
+   * with disabled nodes opened by an OLDER build that doesn't know this key
+   * round-trips it verbatim (DESIGN §9 unknown-field passthrough) but RENDERS
+   * every node ACTIVE, since old buildPlan code never reads it — acceptable
+   * forward-compat behavior (worth noting for anyone debugging "why does
+   * this look different in an older build"), not a data-loss risk.
+   */
+  disabled?: boolean;
   /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
   name?: string;
   /**
@@ -130,6 +149,19 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
   if (node.kind === EXTERNAL_KIND) return 'external';
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
+}
+
+/**
+ * True for every node kind the bypass toggle (⌘D / the node body's bypass
+ * button) may target — every 1-in/1-out chain kind plus blend. 'input',
+ * 'output', and 'image' are the only exclusions: a source node has nothing
+ * upstream to bypass TO (see GraphNode.disabled's doc comment). Shared by
+ * appStore's toggleNodeDisabled (the single writer of `disabled`) and the
+ * UI (App.tsx's ⌘D handler, NodeEditorPanel's bypass button) so both agree
+ * on exactly the same set without duplicating the exclusion list.
+ */
+export function isBypassableNodeKind(kind: GraphNodeKind): boolean {
+  return kind !== 'input' && kind !== 'output' && kind !== IMAGE_KIND;
 }
 
 // --- Export overrides: per-output export settings ---------------------------
@@ -571,6 +603,7 @@ const KNOWN_NODE_KEYS = new Set([
   'spots',
   'image',
   'external',
+  'disabled',
   'name',
   'export',
 ]);
@@ -631,6 +664,7 @@ export function serializeGraphDoc(
           ...(n.spots ? { spots: n.spots } : {}),
           ...(n.image ? { image: n.image } : {}),
           ...(n.external ? { external: n.external } : {}),
+          ...(n.disabled ? { disabled: true } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
         };
@@ -741,6 +775,13 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     for (const v of Object.values(n.params ?? {})) {
       if (typeof v !== 'number' || !Number.isFinite(v)) throw new Error(`node ${n.id} has a non-numeric param`);
     }
+    // Bypass toggle (additive to schemaVersion 4): lenient coercion, not
+    // structural validation, like sanitizeRating — a stray non-boolean value
+    // has a safe fallback ("just treat it as absent") rather than needing to
+    // reject the whole doc. truthy → true, everything else (absent/false/
+    // garbage) → absent, so serializeGraphDoc's own `n.disabled ? … : {}`
+    // omission rule sees exactly one of those two states.
+    n.disabled = n.disabled ? true : undefined;
     if (n.kind === DEVELOP_KIND) {
       // fill missing sections/keys with identity defaults; reject bad numbers
       n.develop = mergeDevelopParams(n.develop);
@@ -1116,10 +1157,23 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       if (!ea || !eb || ins.length !== expectedCount) throw new Error(`blend ${id} needs exactly inputs a and b`);
       const srcA = resolve(ea.source);
       const srcB = resolve(eb.source);
-      const srcMask = emask ? resolve(emask.source) : undefined;
+      // Resolved regardless of the mask node's own `disabled` (so its OWN
+      // nodeSteps entry — and thus its thumbnail/inspect view — still
+      // reflects its normal identity-when-disabled behavior, handled where
+      // MASK_KIND is dispatched below); but a DISABLED mask source makes
+      // THIS blend treat the edge as if it were never wired at all (bypass
+      // feature's decided semantics) — the resolved index is deliberately
+      // discarded below rather than fed in as srcMask, because feeding the
+      // mask node's own (identity-resolved) upstream color in as a mask
+      // value would multiply by whatever that upstream pixel happens to be,
+      // not by "no mask" (see srcMask's absent-vs-present contract in
+      // cpuEvalPlan/the WGSL blend pass).
+      const maskNode = emask ? byId.get(emask.source) : undefined;
+      const srcMaskResolved = emask ? resolve(emask.source) : undefined;
+      const srcMask = maskNode?.disabled ? undefined : srcMaskResolved;
       const uniform = packBlendUniform(node.params ?? {});
-      if (uniform[0] === 0) {
-        // amount 0 = pure input a — identity, no step (mix(a,b,mask*0)=a regardless of the mask)
+      if (node.disabled || uniform[0] === 0) {
+        // Bypassed, or amount 0 = pure input a — identity, no step (mix(a,b,mask*0)=a regardless of the mask)
         index = srcA;
       } else {
         steps.push({ nodeId: id, type: 'blend', uniform, srcA, srcB, ...(srcMask !== undefined ? { srcMask } : {}) });
@@ -1140,6 +1194,17 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       if (ins.length !== 1) throw new Error(`node ${id} needs exactly one input (has ${ins.length})`);
       const src = resolve(ins[0]!.source);
       if (node.kind === 'output') {
+        index = src;
+      } else if (node.disabled) {
+        // Bypass toggle (node bypass feature): every 1-in/1-out chain kind
+        // (ops incl. whitebalance, custom, Develop, mask, spots, external)
+        // resolves to its own input exactly like an identity-valued node —
+        // the SAME mechanism/invariant each kind's own identity check below
+        // already uses, just short-circuited before any of those checks run.
+        // A disabled MASK node resolving this way is exactly what makes its
+        // OWN thumbnail/inspect view show a plain passthrough; a blend
+        // consuming it via the 'mask' edge has its OWN separate handling
+        // above (treats the edge as absent, not "mask = upstream color").
         index = src;
       } else if (node.kind === CUSTOM_KIND) {
         // Only validated artifacts render (customShaderNode cache); a node
