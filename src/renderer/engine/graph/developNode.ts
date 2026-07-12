@@ -668,14 +668,29 @@ const FX_DEHAZE_STRENGTH = 0.14;
  * calibration session.
  */
 const FX_DEHAZE_SAT = 0.22;
-/** Vignette ±100 → ±this many stops of exp2 gain at the far corners. */
-const FX_VIGNETTE_STOPS = 1.5;
-/** Clarity ±100 → this × the (midtone-weighted) luma highpass. */
-const FX_CLARITY_GAIN = 0.6;
+/**
+ * Vignette ±100 → ±this many stops of exp2 gain at the far corners.
+ * LR-calibrated 2026-07-12: LR Classic's post-crop vignette −50 moved the
+ * corner/center luma ratio ~3× more than our 1.5-stop scale did
+ * (Δ −0.383 vs −0.121 on the church interior); 4.5 puts −50 ≈ −2.3 stops
+ * at the corner, matching LR's dramatic range.
+ */
+const FX_VIGNETTE_STOPS = 4.5;
+/**
+ * Clarity ±100 → this × the (midtone-weighted) luma highpass.
+ * LR-calibrated 2026-07-12: +50 measured slightly weak vs LR (local-
+ * contrast energy Δ 4.01 vs LR 5.16 at σ≈15px-full-res scale) — 0.6 → 0.75.
+ */
+const FX_CLARITY_GAIN = 0.75;
 /** Clarity gaussian sigma in FULL-RESOLUTION pixels. */
 const FX_CLARITY_SIGMA_FULL = 15.0;
-/** Texture ±100 → this × the (unweighted) luma highpass. */
-const FX_TEXTURE_GAIN = 0.8;
+/**
+ * Texture ±100 → this × the (unweighted) luma highpass.
+ * LR-calibrated 2026-07-12: our +50 measured 5-6× STRONGER than LR's on
+ * both test scenes (fine-scale local-contrast energy Δ 4.16/1.08 vs LR
+ * 0.80/0.17) — LR's texture is a subtle mid-frequency lift; 0.8 → 0.15.
+ */
+const FX_TEXTURE_GAIN = 0.15;
 /** Texture gaussian sigma in FULL-RESOLUTION pixels. */
 const FX_TEXTURE_SIGMA_FULL = 3.0;
 /** Grain 100 → ±this noise amplitude in encoded units. */
