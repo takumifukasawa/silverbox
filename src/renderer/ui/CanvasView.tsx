@@ -48,6 +48,8 @@ import {
 import { defaultSpotsParams, SPOTS_KIND, type Spot, type SpotsParams } from '../engine/graph/spotsNode';
 import { dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
 import { imageNodeDecodeCount, syncImageNodeSources } from '../engine/graph/imageNodeSource';
+import { EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
@@ -78,6 +80,8 @@ declare global {
       rendererKind(): 'webgpu';
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
+      /** Verify-only (external-tool hook node, task #41): see graphRenderer.ts's readbackLinearMean doc comment. */
+      readbackLinearMean(): Promise<{ r: number; g: number; b: number } | null>;
       readbackSharpness(): Promise<{ luma: number; chroma: number } | null>;
       /** Compare pane (compare pack) readback — null before an image/compare pane exists (mirrors readbackMean's own guard). */
       compareReadbackMean(): Promise<{ r: number; g: number; b: number } | null>;
@@ -209,6 +213,18 @@ declare global {
       setImagePath(nodeId: string, path: string): void;
       /** Verify-only render-worker-cache check: how many times imageNodeSource.ts has actually decoded (cache misses only) — see its own doc comment. */
       imageNodeDecodeCount(): number;
+      /** External-tool hook node (task #41): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'external'. */
+      externalNodeState(
+        nodeId?: string
+      ): { command: string; encoded: boolean; needsConfirm: string | null; error: string | null } | null;
+      /** Verify-only: set an external node's command template — one undo entry (bypasses the Inspector's text input). */
+      setExternalCommand(nodeId: string, command: string): void;
+      /** Verify-only: toggle an external node's encoded/linear color-boundary mode. */
+      setExternalEncoded(nodeId: string, encoded: boolean): void;
+      /** Verify-only: click-equivalent of the Inspector's "Run external tool" confirm button. */
+      confirmExternalNode(nodeId: string): void;
+      /** Verify-only: real subprocess spawn count this session (main process — see externalTool.ts). */
+      externalToolSpawnCount(): Promise<number>;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
@@ -325,6 +341,11 @@ export function CanvasView() {
   const imagePath = useAppStore((s) => s.imagePath);
   const imageNodeRev = useAppStore((s) => s.imageNodeRev);
   const bumpImageNodeRev = useAppStore((s) => s.bumpImageNodeRev);
+  // External-tool hook node (task #41): bumped when a round trip settles or a
+  // cached result becomes ready with no run needed — same "re-run this
+  // effect so client.render() reposts and the fresh texture shows up" role
+  // as imageNodeRev above.
+  const externalNodeRev = useAppStore((s) => s.externalNodeRev);
   const setImageNodeMissing = useAppStore((s) => s.setImageNodeMissing);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
@@ -569,6 +590,26 @@ export function CanvasView() {
       if (!clientRef.current) {
         const client = new RenderWorkerClient(canvas);
         client.setErrorHandler((message) => setGpuError(message));
+        // External-tool hook node (task #41): the worker only knows WHAT to
+        // run (readback + hash + debounce — see GraphRenderer.checkExternalNodes);
+        // externalNodeRunner.ts owns the confirm gate + the actual IPC call.
+        // docKey (imagePath — falls back to 'unsaved' for a never-saved doc)
+        // is read FRESH from the store at request time, not closed over here,
+        // since this handler is registered once per canvas mount.
+        client.setExternalRunRequestHandler((req) => {
+          const s = useAppStore.getState();
+          void handleExternalRunRequest(
+            req,
+            s.imagePath ?? 'unsaved',
+            client,
+            (nodeId, command) => useAppStore.getState().setExternalNodeNeedsConfirm(nodeId, command),
+            (nodeId, ok, error) => {
+              useAppStore.getState().setExternalNodeError(nodeId, ok ? null : (error ?? 'unknown error'));
+              useAppStore.getState().bumpExternalNodeRev();
+            }
+          );
+        });
+        client.setExternalNodeReadyHandler(() => useAppStore.getState().bumpExternalNodeRev());
         clientRef.current = client;
         useAppStore.getState().setRenderer(client);
       }
@@ -744,6 +785,7 @@ export function CanvasView() {
     inspectNodeId,
     imagePath,
     imageNodeRev,
+    externalNodeRev,
   ]);
 
   useEffect(() => {
@@ -804,6 +846,11 @@ export function CanvasView() {
         const client = clientRef.current;
         if (!client || !client.hasImage) return null;
         return client.readbackMean();
+      },
+      async readbackLinearMean() {
+        const client = clientRef.current;
+        if (!client || !client.hasImage) return null;
+        return client.readbackLinearMean();
       },
       /** Compare pane (compare pack) readback — see compareReadbackMean's client-side doc comment. */
       async compareReadbackMean() {
@@ -1099,6 +1146,31 @@ export function CanvasView() {
       /** Verify-only render-worker-cache check: bumped once per REAL decode (cache miss) — see imageNodeSource.ts. */
       imageNodeDecodeCount() {
         return imageNodeDecodeCount();
+      },
+      /** External-tool hook node (task #41): command/encoded + needs-confirm/error badge state for `nodeId` (defaults to the current selection); null when it isn't an external node. */
+      externalNodeState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (node?.kind !== EXTERNAL_KIND) return null;
+        return {
+          command: node.external?.command ?? '',
+          encoded: node.external?.encoded ?? true,
+          needsConfirm: s.externalNodeNeedsConfirm[id!] ?? null,
+          error: s.externalNodeErrors[id!] ?? null,
+        };
+      },
+      setExternalCommand(nodeId, command) {
+        useAppStore.getState().setExternalCommand(nodeId, command, null);
+      },
+      setExternalEncoded(nodeId, encoded) {
+        useAppStore.getState().setExternalEncoded(nodeId, encoded);
+      },
+      confirmExternalNode(nodeId) {
+        useAppStore.getState().confirmExternalNode(nodeId);
+      },
+      externalToolSpawnCount() {
+        return window.silverbox.externalToolSpawnCount();
       },
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;

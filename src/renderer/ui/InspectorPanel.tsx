@@ -32,6 +32,7 @@ import {
 } from '../engine/graph/maskNode';
 import { SPOTS_CAP, SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND, imageBaseName } from '../engine/graph/imageNode';
+import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { anchorRadiusToOutput, outputRadiusToAnchor } from '../engine/graph/anchorSpace';
 import {
   defaultDevelopParams,
@@ -995,6 +996,79 @@ function ImageInspector({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * External-tool hook node (denoise v1, task #41): a `{in}`/`{out}` command
+ * template + the encoded/linear color-boundary toggle, plus the SECURITY
+ * confirm button (a doc's external node never auto-runs — see
+ * externalNodeRunner.ts) and a badge for the round trip's own status
+ * (pending confirm / failed — pass-through either way, never a hard error).
+ * An empty command is identity (bit-exact pass-through), same invariant
+ * every other node kind's default params uphold.
+ */
+function ExternalInspector({ node }: { node: GraphNode }) {
+  const setExternalCommand = useAppStore((s) => s.setExternalCommand);
+  const setExternalEncoded = useAppStore((s) => s.setExternalEncoded);
+  const needsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm[node.id]);
+  const error = useAppStore((s) => s.externalNodeErrors[node.id]);
+  const confirmExternalNode = useAppStore((s) => s.confirmExternalNode);
+  const params = node.external ?? defaultExternalParams();
+  const sessionRef = useRef<number | null>(null);
+  return (
+    <>
+      <div className="inspector-title">External: run a command over this node's input.</div>
+      <Section title="Command">
+        <input
+          type="text"
+          data-testid="external-node-command"
+          placeholder="gmic {in} -denoise_patchpca 5 -o {out}"
+          value={params.command}
+          onChange={(ev) => {
+            sessionRef.current ??= Date.now();
+            setExternalCommand(node.id, ev.target.value, `external-command:${node.id}:${sessionRef.current}`);
+          }}
+          onBlur={() => {
+            sessionRef.current = null;
+          }}
+        />
+        <div className="inspector-hint">
+          {'{in}'} / {'{out}'} are replaced with temp file paths; split on whitespace, no shell (double-quote a token to
+          keep spaces in it, e.g. "my tool" {'{in}'} --out {'{out}'}). Runs an external command — expect seconds, not
+          milliseconds.
+        </div>
+        <label className="param-row">
+          <span className="param-label">Encoded (sRGB)</span>
+          <input
+            type="checkbox"
+            data-testid="external-node-encoded"
+            checked={params.encoded}
+            onChange={(ev) => setExternalEncoded(node.id, ev.target.checked)}
+          />
+        </label>
+        <div className="inspector-hint">
+          {params.encoded
+            ? 'sRGB-encoded TIFF round trip (what most external denoisers expect).'
+            : 'Linear Rec.2020 TIFF round trip (for a color-space-aware tool; highlights above 1.0 clip at this boundary).'}
+        </div>
+      </Section>
+      {needsConfirm && (
+        <Section title="Confirm">
+          <div className="inspector-notice" data-testid="external-node-confirm-notice">
+            A fresh sidecar never auto-runs an external command.
+          </div>
+          <button type="button" data-testid="external-node-confirm" onClick={() => confirmExternalNode(node.id)}>
+            Run external tool: {needsConfirm}
+          </button>
+        </Section>
+      )}
+      {error && (
+        <div className="inspector-notice" data-testid="external-node-error-notice" title={error}>
+          Failed — rendering pass-through until it succeeds: {error}
+        </div>
+      )}
+    </>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -1024,6 +1098,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   }
   if (node.kind === IMAGE_KIND) {
     return <ImageInspector node={node} />;
+  }
+  if (node.kind === EXTERNAL_KIND) {
+    return <ExternalInspector node={node} />;
   }
   if (node.kind === 'input') {
     return (

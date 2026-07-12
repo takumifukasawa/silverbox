@@ -31,7 +31,9 @@ import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '..
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
 import { defaultImageParams, IMAGE_KIND } from '../engine/graph/imageNode';
 import { clearImageNodeSourceCache } from '../engine/graph/imageNodeSource';
-import type { HistogramData, ScopeSamples } from '../engine/gpu/graphRenderer';
+import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { confirmAndRetry, pendingExternalRequest } from '../engine/graph/externalNodeRunner';
+import { sha256Hex, type HistogramData, type ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
 import {
@@ -448,6 +450,22 @@ interface AppState {
    */
   imageNodeRev: number;
   bumpImageNodeRev(): void;
+  // --- External-tool hook node (denoise v1, task #41) ------------------------
+  /** Replace an external node's command template (Inspector's command input); `coalesceKey` null = its own undo entry, same convention as setImagePath. */
+  setExternalCommand(nodeId: string, command: string, coalesceKey: string | null): void;
+  /** Toggle an external node's color-boundary mode (encoded sRGB vs linear Rec.2020 — see externalNode.ts's ExternalParams doc comment). */
+  setExternalEncoded(nodeId: string, encoded: boolean): void;
+  /** nodeId → the command awaiting the user's explicit "Run external tool" confirm (SECURITY gate, see externalNodeRunner.ts) — absent once confirmed or with nothing pending. */
+  externalNodeNeedsConfirm: Record<string, string>;
+  setExternalNodeNeedsConfirm(nodeId: string, command: string | null): void;
+  /** Inspector's confirm button: marks (doc, command) confirmed for this session and immediately retries the last pending request for this node. */
+  confirmExternalNode(nodeId: string): void;
+  /** nodeId → the most recent round-trip failure reason (pass-through + badge on ANY failure) — absent = no error, or cleared by a subsequent success. */
+  externalNodeErrors: Record<string, string>;
+  setExternalNodeError(nodeId: string, error: string | null): void;
+  /** Bumped whenever an external-tool round trip settles (success or failure) or a cached result becomes ready with no run needed — mirrors imageNodeRev's role in re-running CanvasView's render effect. */
+  externalNodeRev: number;
+  bumpExternalNodeRev(): void;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -1046,11 +1064,101 @@ export const useAppStore = create<AppState>((set, get) => {
    * runCliRender, which all funnel through exportOnePath) shares, so there is
    * exactly one place effective settings get computed.
    */
+  /**
+   * External-tool hook node export cut point (task #41): rewrite `baseGraph`
+   * so every 'external' node it resolves to becomes an ordinary IMAGE_KIND
+   * node wired to a synthetic, already-decoded texture — reusing the
+   * image-node upload/composite machinery wholesale rather than teaching
+   * renderToPixels a third node shape. One node at a time (rebuilding the
+   * plan after each rewrite, same bounded "fix one, re-check" loop
+   * lutExport.ts's reduceGraphForLut uses), because removing one node can
+   * reveal another upstream of it. CACHE KEY mirrors
+   * GraphRenderer.checkExternalNodes' own scheme (pixel hash | command |
+   * encoded | nodeId) so an export can land on the SAME on-disk cache tier a
+   * preview edit already populated — a coincidence when it happens (preview
+   * and export render at different resolutions, so their pixel hashes
+   * normally differ), never a requirement: a cache MISS just spawns fresh at
+   * full res. ANY per-node failure (see externalTool.ts) bypasses that ONE
+   * node (pass-through, same invariant the interactive node upholds) with a
+   * console warning — a broken external command must never fail the whole
+   * export.
+   */
+  const resolveExternalNodesForExport = async (baseGraph: GraphDoc, full: PreparedImage): Promise<GraphDoc> => {
+    const renderer = get().renderer;
+    if (!renderer) return baseGraph;
+    let working = baseGraph;
+    for (let pass = 0; pass < 8; pass++) {
+      let plan: ReturnType<typeof buildPlan>;
+      try {
+        plan = buildPlan(working, { srcWidth: full.width, srcHeight: full.height });
+      } catch {
+        break;
+      }
+      const step = plan.steps.find((s) => s.type === 'external');
+      if (step === undefined) break;
+      if (step.type !== 'external') break; // narrows step for TS below; unreachable in practice
+      const inEdge = working.edges.find((e) => e.target === step.nodeId);
+      if (!inEdge) break; // an external node always has exactly one input once it reaches buildPlan's own validation
+      const nodeId = step.nodeId;
+      const command = step.command;
+      const encoded = step.encoded;
+      const bypass = (doc: GraphDoc): GraphDoc => ({
+        ...doc,
+        nodes: doc.nodes.filter((n) => n.id !== nodeId),
+        edges: doc.edges
+          .filter((e) => e.target !== nodeId)
+          .map((e) => (e.source === nodeId ? { ...e, source: inEdge.source } : e)),
+      });
+      try {
+        const captured = await renderer.captureExternalInput(full, working, 1, encoded, inEdge.source, undefined);
+        const pixelHash = await sha256Hex(captured.data.buffer as ArrayBuffer);
+        const cacheKey = await sha256Hex(
+          new TextEncoder().encode(`${pixelHash}|${command}|${encoded ? 1 : 0}|${nodeId}`).buffer
+        );
+        const result = await window.silverbox.runExternalTool({
+          command,
+          encoded,
+          cacheKey,
+          width: captured.width,
+          height: captured.height,
+          data: captured.data.buffer as ArrayBuffer,
+        });
+        if (!result.ok) {
+          console.warn(`external tool node ${nodeId} failed during export, passing through: ${result.reason}`);
+          working = bypass(working);
+          continue;
+        }
+        const linear = await renderer.decodeExternalResult(new Float32Array(result.data), result.width, result.height, encoded);
+        const syntheticPath = `external:${nodeId}:${cacheKey}`;
+        renderer.setImageNodeSource(syntheticPath, {
+          data: linear,
+          width: result.width,
+          height: result.height,
+          fullWidth: result.width,
+          fullHeight: result.height,
+          flip: 0,
+          decodeMs: 0,
+        });
+        working = {
+          ...working,
+          nodes: working.nodes.map((n) =>
+            n.id === nodeId ? { id: n.id, kind: IMAGE_KIND, position: n.position, image: { path: syntheticPath } } : n
+          ),
+        };
+      } catch (err) {
+        console.warn(`external tool node ${nodeId} failed during export, passing through:`, err);
+        working = bypass(working);
+      }
+    }
+    return working;
+  };
+
   const exportOnePath = async (
     targetPath: string,
     outputId: string | undefined,
-    opts?: ExportOverrides
-  ): Promise<{ width: number; height: number; bytes: number }> => {
+    opts?: ExportOverrides,
+    allowExternal = true
+  ): Promise<{ width: number; height: number; bytes: number; warnings?: string[] }> => {
     const { imagePath, fileName, graph, renderer } = get();
     if (!imagePath || !fileName || !renderer) throw new Error('no image open');
     // Resolve which output node this export actually targets — same
@@ -1064,9 +1172,31 @@ export const useAppStore = create<AppState>((set, get) => {
     const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
     const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER, get().settings.baselineExposureEV);
     const colorSpace = effective.colorSpace ?? 'srgb';
-    const { data, width, height } = await renderer.renderToPixels(full, graph, 1, colorSpace, outputId);
+    // External-tool hook node (task #41): a headless CLI render WITHOUT
+    // --allow-external never rewrites anything (allowExternal:false makes
+    // renderToPixels' own buildPlan skip every 'external' node itself,
+    // bit-exact — see graphDoc.ts's CompileContext.allowExternal) — just
+    // detect it for a warning line. WITH the flag (or the interactive UI
+    // export, which has its own per-node confirm gate already satisfied by
+    // the time a doc reaches export) the doc gets rewritten so the tool's
+    // result actually lands in the file.
+    let warnings: string[] | undefined;
+    let exportGraph = graph;
+    if (!allowExternal) {
+      try {
+        const probe = buildPlan(graph, { outputId, srcWidth: full.width, srcHeight: full.height });
+        if (probe.steps.some((s) => s.type === 'external')) {
+          warnings = ['external node(s) bypassed — pass --allow-external to run them'];
+        }
+      } catch {
+        // a broken graph surfaces via the render call below; nothing to warn about here
+      }
+    } else {
+      exportGraph = await resolveExternalNodesForExport(graph, full);
+    }
+    const { data, width, height } = await renderer.renderToPixels(full, exportGraph, 1, colorSpace, outputId, allowExternal);
     const cap = full.capture;
-    return window.silverbox.exportEncode({
+    const encodeResult = await window.silverbox.exportEncode({
       data: data.buffer,
       width,
       height,
@@ -1085,6 +1215,7 @@ export const useAppStore = create<AppState>((set, get) => {
         ...(cap?.timestamp ? { timestampIso: new Date(cap.timestamp).toISOString() } : {}),
       },
     });
+    return { ...encodeResult, ...(warnings ? { warnings } : {}) };
   };
 
   /**
@@ -1590,6 +1721,12 @@ export const useAppStore = create<AppState>((set, get) => {
         node = { id, kind, position: { ...out.position }, mask: defaultMaskParams() };
       } else if (kind === SPOTS_KIND) {
         node = { id, kind, position: { ...out.position }, spots: defaultSpotsParams() };
+      } else if (kind === EXTERNAL_KIND) {
+        // Spliced into the chain like every other 1-in-1-out kind above (NOT
+        // the disconnected-source treatment IMAGE_KIND gets) — an empty
+        // command is identity (bit-exact pass-through), so adding one never
+        // changes the render until the user actually types a command.
+        node = { id, kind, position: { ...out.position }, external: defaultExternalParams() };
       } else {
         // fresh WB atomics start at the image's as-shot values (= identity)
         const params =
@@ -1994,6 +2131,78 @@ export const useAppStore = create<AppState>((set, get) => {
   imageNodeRev: 0,
   bumpImageNodeRev() {
     set((s) => ({ imageNodeRev: s.imageNodeRev + 1 }));
+  },
+
+  setExternalCommand(nodeId, command, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== EXTERNAL_KIND) return {};
+      const prevEncoded = node.external?.encoded ?? defaultExternalParams().encoded;
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, external: { command, encoded: prevEncoded } } : n)),
+        },
+        graphDirty: true,
+        // A command edit is a NEW command — any stale "needs confirm"/error
+        // state for the OLD one no longer applies (the render effect's next
+        // pass will re-derive whatever the new command actually needs).
+        externalNodeNeedsConfirm: { ...s.externalNodeNeedsConfirm, [nodeId]: undefined as unknown as string },
+        externalNodeErrors: { ...s.externalNodeErrors, [nodeId]: undefined as unknown as string },
+      };
+    });
+  },
+
+  setExternalEncoded(nodeId, encoded) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== EXTERNAL_KIND) return {};
+      const prevCommand = node.external?.command ?? '';
+      return {
+        ...pushHistory(s, null),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, external: { command: prevCommand, encoded } } : n)),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
+  externalNodeNeedsConfirm: {},
+  setExternalNodeNeedsConfirm(nodeId, command) {
+    set((s) =>
+      command === (s.externalNodeNeedsConfirm[nodeId] ?? null)
+        ? {}
+        : { externalNodeNeedsConfirm: { ...s.externalNodeNeedsConfirm, [nodeId]: command ?? (undefined as unknown as string) } }
+    );
+  },
+
+  confirmExternalNode(nodeId) {
+    const { imagePath, renderer, externalNodeNeedsConfirm } = get();
+    const command = externalNodeNeedsConfirm[nodeId] ?? pendingExternalRequest(nodeId)?.command;
+    if (!renderer || !command) return;
+    const docKey = imagePath ?? 'unsaved';
+    set((s) => ({ externalNodeNeedsConfirm: { ...s.externalNodeNeedsConfirm, [nodeId]: undefined as unknown as string } }));
+    confirmAndRetry(nodeId, docKey, command, renderer, (settledNodeId, ok, error) => {
+      get().setExternalNodeError(settledNodeId, ok ? null : (error ?? 'unknown error'));
+      get().bumpExternalNodeRev();
+    });
+  },
+
+  externalNodeErrors: {},
+  setExternalNodeError(nodeId, error) {
+    set((s) =>
+      error === (s.externalNodeErrors[nodeId] ?? null)
+        ? {}
+        : { externalNodeErrors: { ...s.externalNodeErrors, [nodeId]: error ?? (undefined as unknown as string) } }
+    );
+  },
+
+  externalNodeRev: 0,
+  bumpExternalNodeRev() {
+    set((s) => ({ externalNodeRev: s.externalNodeRev + 1 }));
   },
 
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {
@@ -2435,12 +2644,17 @@ export const useAppStore = create<AppState>((set, get) => {
           let outPath = targets.length > 1 ? suffixExportPath(basePath, outputName(node)) : basePath;
           for (let n = 2; used.has(outPath); n++) outPath = suffixExportPath(basePath, `${outputName(node)}-${n}`);
           used.add(outPath);
-          const result = await exportOnePath(outPath, node.id, {
-            quality: job.quality,
-            maxDim: job.maxDim,
-            metadata: job.metadata,
-            colorSpace: job.colorSpace,
-          });
+          const result = await exportOnePath(
+            outPath,
+            node.id,
+            {
+              quality: job.quality,
+              maxDim: job.maxDim,
+              metadata: job.metadata,
+              colorSpace: job.colorSpace,
+            },
+            job.allowExternal
+          );
           onResult({
             input,
             output: outPath,
@@ -2448,6 +2662,7 @@ export const useAppStore = create<AppState>((set, get) => {
             height: result.height,
             bytes: result.bytes,
             ms: Date.now() - startedAt,
+            ...(result.warnings ? { warnings: result.warnings } : {}),
           });
         }
       } catch (err) {

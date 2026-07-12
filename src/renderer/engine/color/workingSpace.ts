@@ -96,5 +96,14 @@ export const WGSL_WORK_TO_SRGB = wgslMat3(WORK_TO_SRGB);
 /** `WORK_TO_P3` as an inline WGSL mat3x3f expression. */
 export const WGSL_WORK_TO_P3 = wgslMat3(WORK_TO_P3);
 
+/**
+ * `SRGB_TO_WORK` as an inline WGSL mat3x3f expression — the external-tool
+ * hook node's re-entry conversion (task #41): its 'encoded' mode hands the
+ * tool the SAME sRGB-encoded pixels ENCODE_SHADER produces (WORK_TO_SRGB +
+ * the exact OETF), so reading the result back in requires the exact inverse
+ * (sRGB EOTF, then this matrix) — see graphRenderer.ts's EXTERNAL_DECODE_SHADER.
+ */
+export const WGSL_SRGB_TO_WORK = wgslMat3(SRGB_TO_WORK);
+
 /** `WORKING_LUMA` as an inline WGSL vec3f expression. */
 export const WGSL_WORKING_LUMA = `vec3f(${f(WORKING_LUMA[0])}, ${f(WORKING_LUMA[1])}, ${f(WORKING_LUMA[2])})`;

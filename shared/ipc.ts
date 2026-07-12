@@ -39,6 +39,11 @@ export const IPC = {
   // is encoding, comparing against the golden PNG on disk, and reporting —
   // this one round-trip per image does all three, main-side.
   goldenCheck: 'golden:check',
+  // External-tool hook node (denoise v1 / task #41): main process spawns a
+  // user-configured command over temp TIFFs (see src/main/externalTool.ts).
+  externalToolRun: 'external:run',
+  /** Verify-only: how many times this session actually spawned a subprocess (cache hits/failures-before-spawn don't count) — scripts/verify-external.mjs's "does not re-spawn on an unchanged upstream" check. */
+  externalToolSpawnCount: 'external:spawnCount',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. */
@@ -194,6 +199,17 @@ export interface SilverboxApi {
    * encode/compare/report work is main-side — see runCliCheck's doc comment.
    */
   checkGoldenImage(req: CliCheckImageRequest): Promise<CliCheckOutcome>;
+  /**
+   * Run an external-tool hook node's command over temp TIFFs (task #41).
+   * SECURITY: the caller (externalNodeRunner.ts) is the ONLY gate — it must
+   * never call this for a (doc, command) pair the user (or `--allow-external`)
+   * hasn't explicitly confirmed this session. Resolves `{ok:false,reason}`
+   * rather than throwing on a subprocess failure/timeout/malformed output, so
+   * a broken command never surfaces as an unhandled rejection.
+   */
+  runExternalTool(req: ExternalToolRequest): Promise<ExternalToolResult>;
+  /** Verify-only: real subprocess spawn count this session (cache hits don't count) — scripts/verify-external.mjs. */
+  externalToolSpawnCount(): Promise<number>;
 }
 
 /**
@@ -235,6 +251,18 @@ export interface CliRenderJob {
    * decoding any of them. null = no filtering (every image renders).
    */
   minRating: number | null;
+  /**
+   * `--allow-external` (external-tool hook node, task #41): a doc's
+   * `external` nodes are non-realtime, opaque subprocess invocations — the
+   * CLI never runs one without this explicit opt-in (SECURITY: a batch job
+   * over someone else's sidecars must not silently execute arbitrary
+   * commands). Without it, every external node renders pass-through and a
+   * warning is appended to that file's CliRenderResult (see `warnings`
+   * below); with it, the SAME confirm-free trust the flag itself grants
+   * applies — no interactive confirm button (that's a UI-only concept, see
+   * externalNodeRunner.ts).
+   */
+  allowExternal: boolean;
 }
 
 /**
@@ -244,7 +272,16 @@ export interface CliRenderJob {
  * (NDJSON).
  */
 export type CliRenderResult =
-  | { input: string; output: string; width: number; height: number; bytes: number; ms: number }
+  | {
+      input: string;
+      output: string;
+      width: number;
+      height: number;
+      bytes: number;
+      ms: number;
+      /** Non-fatal notes for this file (currently only "external node bypassed — pass `--allow-external`"). Never affects the exit code. */
+      warnings?: string[];
+    }
   | { input: string; status: 'skipped-rating' }
   | { input: string; error: string };
 
@@ -444,6 +481,31 @@ export interface ExportLutResult {
   /** [cubePath, unityPngPath, uePngPath, webglTxtPath], in that order. */
   paths: string[];
 }
+
+/**
+ * External-tool hook node (denoise v1, task #41): one round trip through a
+ * user-configured command over temp TIFFs — see src/main/externalTool.ts.
+ * `data` is tightly-packed RGBA float32 pixels (alpha unused, always 1):
+ * sRGB-encoded (the SAME WORK_TO_SRGB matrix + exact OETF curve every other
+ * export/preview exit uses — see graphRenderer.ts's ENCODE_SHADER) when
+ * `encoded` is true, else raw linear Rec.2020 — the renderer applies/reverses
+ * that conversion on the GPU with the shared helpers; this module only ever
+ * sees already-converted numbers, so it stays pure I/O + subprocess plumbing.
+ * `cacheKey` is the renderer's content hash (see externalNode.ts) — main
+ * checks the on-disk cache by it BEFORE spawning anything.
+ */
+export interface ExternalToolRequest {
+  command: string;
+  encoded: boolean;
+  cacheKey: string;
+  width: number;
+  height: number;
+  data: ArrayBuffer;
+}
+
+export type ExternalToolResult =
+  | { ok: true; width: number; height: number; data: ArrayBuffer }
+  | { ok: false; reason: string };
 
 declare global {
   interface Window {

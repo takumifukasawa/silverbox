@@ -44,6 +44,8 @@ const api: SilverboxApi = {
   cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
   cliDone: () => ipcRenderer.send(IPC.cliDone),
   checkGoldenImage: (req) => ipcRenderer.invoke(IPC.goldenCheck, req),
+  runExternalTool: (req) => ipcRenderer.invoke(IPC.externalToolRun, req),
+  externalToolSpawnCount: () => ipcRenderer.invoke(IPC.externalToolSpawnCount),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

@@ -42,6 +42,11 @@ export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg> [mor
   --min-rating <0-5>    skip inputs whose sidecar rating is absent or below
                         n, reported as {input,status:"skipped-rating"} — a
                         skip never counts as a failure (exit code unaffected)
+  --allow-external      opt-in to running a doc's 'external' hook nodes (task
+                        #41) — a batch job over someone else's sidecars must
+                        not silently execute arbitrary commands, so without
+                        this flag every external node renders pass-through
+                        and the file's result carries a warning line instead
   --json                NDJSON progress on stdout: one object per rendered
                         file, {input,output,width,height,bytes,ms} on
                         success, {input,status:"skipped-rating"} on a
@@ -103,6 +108,8 @@ export interface CliParsedArgs {
   update: boolean;
   /** --threshold: only meaningful with mode 'check'; max mean ΔE for a PASS. */
   threshold: number;
+  /** --allow-external: only meaningful with mode 'render' (see CliRenderJob's doc comment). */
+  allowExternal: boolean;
 }
 
 const METADATA_VALUES: ExportMetadataPolicy[] = ['all', 'minimal', 'none'];
@@ -128,6 +135,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     help: false,
     update: false,
     threshold: DEFAULT_DELTAE_THRESHOLD,
+    allowExternal: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -138,6 +146,9 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       case '--json':
         opts.json = true;
+        break;
+      case '--allow-external':
+        opts.allowExternal = true;
         break;
       case '--check':
         opts.mode = 'check';
@@ -207,6 +218,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.metadata !== 'all') return { error: '--metadata is not valid with --check' };
     if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --check' };
     if (opts.minRating !== null) return { error: '--min-rating is not valid with --check' };
+    if (opts.allowExternal) return { error: '--allow-external is not valid with --check' };
   } else {
     if (opts.update) return { error: '--update requires --check' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
@@ -245,6 +257,7 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
     metadata: parsed.metadata,
     colorSpace: parsed.colorSpace,
     minRating: parsed.minRating,
+    allowExternal: parsed.allowExternal,
   };
   return job;
 }
@@ -275,8 +288,11 @@ export function formatCliProgress(result: CliProgressResult, json: boolean): { s
       line: `${result.input}: ${label}  ΔE mean=${mean.toFixed(3)} p95=${p95.toFixed(3)} max=${max.toFixed(3)}`,
     };
   }
-  return {
-    stderr: false,
-    line: `${result.input} -> ${result.output}  (${result.width}x${result.height}, ${result.bytes} bytes, ${result.ms}ms)`,
-  };
+  const base = `${result.input} -> ${result.output}  (${result.width}x${result.height}, ${result.bytes} bytes, ${result.ms}ms)`;
+  const warnings = result.warnings ?? [];
+  if (warnings.length === 0) return { stderr: false, line: base };
+  // Warnings never affect the exit code (see runCliMode's onProgress) — just
+  // extra lines under human output; --json keeps them inside the one object
+  // (handled by the early `if (json)` return above).
+  return { stderr: false, line: [base, ...warnings.map((w) => `  WARNING: ${w}`)].join('\n') };
 }

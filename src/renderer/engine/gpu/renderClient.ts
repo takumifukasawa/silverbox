@@ -14,7 +14,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
-import type { ExportColorSpace } from '../../../../shared/ipc';
+import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import type { HistogramData, RendererStats, ScopeSamples } from './graphRenderer';
 import type {
   RenderWorkerCommand,
@@ -57,6 +57,14 @@ function routeMessage(ev: MessageEvent<RenderWorkerResponse>): void {
     activeClient?.handleRuntimeError(msg.message);
     return;
   }
+  if (msg.type === 'externalRunRequest') {
+    activeClient?.handleExternalRunRequest(msg);
+    return;
+  }
+  if (msg.type === 'externalNodeReady') {
+    activeClient?.handleExternalNodeReady(msg.nodeId);
+    return;
+  }
   const entry = pending.get(msg.reqId);
   if (!entry) return;
   pending.delete(msg.reqId);
@@ -83,6 +91,11 @@ export class RenderWorkerClient {
   renderPostCount = 0;
   viewMode: 'color' | 'grayscale' = 'color';
   private onError: ((message: string) => void) | null = null;
+  /** External-tool hook node (task #41): registered by CanvasView.tsx, forwards to externalNodeRunner.ts (the confirm-gate + IPC relay lives there, not here). */
+  private onExternalRunRequest:
+    | ((req: { nodeId: string; cacheKey: string; command: string; encoded: boolean; width: number; height: number; data: ArrayBuffer }) => void)
+    | null = null;
+  private onExternalNodeReady: ((nodeId: string) => void) | null = null;
   /** initCompare is idempotent per client instance (transferControlToOffscreen can only run once per canvas element) — mirrors the constructor's own one-shot transfer. */
   private compareInitialized = false;
 
@@ -107,6 +120,39 @@ export class RenderWorkerClient {
   /** Routes an out-of-band worker failure (fire-and-forget 'image'/'render' rejecting) to the same handler as an init failure. */
   handleRuntimeError(message: string): void {
     this.onError?.(message);
+  }
+
+  /** External-tool hook node (task #41): registers the handler externalNodeRunner.ts's per-request entry point is wired through (CanvasView.tsx's mount effect). */
+  setExternalRunRequestHandler(
+    fn: (req: { nodeId: string; cacheKey: string; command: string; encoded: boolean; width: number; height: number; data: ArrayBuffer }) => void
+  ): void {
+    this.onExternalRunRequest = fn;
+  }
+
+  setExternalNodeReadyHandler(fn: (nodeId: string) => void): void {
+    this.onExternalNodeReady = fn;
+  }
+
+  handleExternalRunRequest(req: {
+    nodeId: string;
+    cacheKey: string;
+    command: string;
+    encoded: boolean;
+    width: number;
+    height: number;
+    data: ArrayBuffer;
+  }): void {
+    this.onExternalRunRequest?.(req);
+  }
+
+  handleExternalNodeReady(nodeId: string): void {
+    this.onExternalNodeReady?.(nodeId);
+  }
+
+  /** External-tool hook node (task #41): apply a completed/failed round trip worker-side (see graphRenderer.ts's setExternalResult) — `result.data` is transferred when `result.ok`. */
+  postExternalResult(nodeId: string, cacheKey: string, encoded: boolean, result: ExternalToolResult): void {
+    const msg: RenderWorkerCommand = { type: 'externalResult', nodeId, cacheKey, encoded, result };
+    getWorker().postMessage(msg, result.ok ? [result.data] : []);
   }
 
   /** Current generation — CanvasView's debounced stats/scope consumers compare a response's gen against this. */
@@ -222,6 +268,11 @@ export class RenderWorkerClient {
     return request(this.gen, { method: 'readbackMean' });
   }
 
+  /** Verify-only (task #41): see graphRenderer.ts's readbackLinearMean doc comment. */
+  readbackLinearMean(): Promise<{ r: number; g: number; b: number } | null> {
+    return request(this.gen, { method: 'readbackLinearMean' });
+  }
+
   readbackSharpness(): Promise<{ luma: number; chroma: number } | null> {
     return request(this.gen, { method: 'readbackSharpness' });
   }
@@ -253,17 +304,51 @@ export class RenderWorkerClient {
     return request(this.gen, { method: 'thumbnails', nodeSteps, longEdge });
   }
 
+  /**
+   * External-tool hook node export cut point (task #41): renders `doc` up to
+   * `inspectNodeId` at full resolution and reads the result back as
+   * linear-or-`encoded` RGBA float32 (see graphRenderer.ts's
+   * captureCutPointPixels) — appStore.ts's export-time doc-rewrite uses this
+   * BEFORE the real renderToPixels call, one external node at a time.
+   */
+  captureExternalInput(
+    image: PreparedImage,
+    doc: GraphDoc,
+    renderScale: number,
+    encoded: boolean,
+    inspectNodeId: string,
+    outputId?: string
+  ): Promise<{ data: Float32Array; width: number; height: number }> {
+    // Deliberately NOT transferring image.data.buffer (unlike renderToPixels'
+    // one-shot convention): a doc with N external nodes calls this N times
+    // (appStore.ts's export-time doc-rewrite loop) then still needs `image`
+    // intact for the FINAL renderToPixels call — a structured-clone COPY
+    // here costs one extra full-resolution buffer copy per external node,
+    // acceptable for this inherently non-realtime, export-only path.
+    return request(this.gen, { method: 'captureExternalInput', image, doc, renderScale, encoded, inspectNodeId, outputId });
+  }
+
+  /** External-tool hook node re-entry (task #41), export-side: see renderProtocol.ts's 'decodeExternalResult' doc comment. `data`'s buffer is transferred (the caller's own copy, freshly received from window.silverbox.runExternalTool). */
+  decodeExternalResult(data: Float32Array, width: number, height: number, encoded: boolean): Promise<Float32Array> {
+    return request<{ data: Float32Array }>(
+      this.gen,
+      { method: 'decodeExternalResult', data: data.buffer as ArrayBuffer, width, height, encoded },
+      [data.buffer as ArrayBuffer]
+    ).then((r) => r.data);
+  }
+
   /** Export: `image` is a disposable full-resolution decode (see appStore.ts's exportImage) — its buffer is transferred, not copied. */
   renderToPixels(
     image: PreparedImage,
     doc: GraphDoc,
     renderScale: number,
     colorSpace: ExportColorSpace,
-    outputId?: string
+    outputId?: string,
+    allowExternal?: boolean
   ): Promise<{ data: Uint8ClampedArray<ArrayBuffer>; width: number; height: number }> {
     return request(
       this.gen,
-      { method: 'renderToPixels', image, doc, renderScale, colorSpace, outputId },
+      { method: 'renderToPixels', image, doc, renderScale, colorSpace, outputId, allowExternal },
       [image.data.buffer]
     );
   }

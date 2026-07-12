@@ -20,6 +20,7 @@ import { sanitizeCurvePoints } from '../color/toneCurve';
 import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams, type MaskShape } from './maskNode';
 import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams, type Spot } from './spotsNode';
 import { defaultImageParams, IMAGE_KIND, imageBaseName, sanitizeImageParams, type ImageParams } from './imageNode';
+import { defaultExternalParams, EXTERNAL_KIND, isIdentityExternal, sanitizeExternalParams, type ExternalParams } from './externalNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy } from '../../../../shared/ipc';
 
@@ -34,7 +35,8 @@ export type GraphNodeKind =
   | typeof DEVELOP_KIND
   | typeof MASK_KIND
   | typeof SPOTS_KIND
-  | typeof IMAGE_KIND;
+  | typeof IMAGE_KIND
+  | typeof EXTERNAL_KIND;
 
 export interface GraphNode {
   id: string;
@@ -56,6 +58,8 @@ export interface GraphNode {
   spots?: SpotsParams;
   /** Referenced-file path (composite/mask-by-another-file feature); only for kind 'image'. */
   image?: ImageParams;
+  /** External-tool hook node (denoise v1, task #41): command template + color-boundary toggle; only for kind 'external'. */
+  external?: ExternalParams;
   /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
   name?: string;
   /**
@@ -97,6 +101,7 @@ export type AddableKind =
   | typeof MASK_KIND
   | typeof SPOTS_KIND
   | typeof IMAGE_KIND
+  | typeof EXTERNAL_KIND
   | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
@@ -122,6 +127,7 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
     const path = node.image?.path ?? '';
     return path ? `image — ${imageBaseName(path)}` : 'image';
   }
+  if (node.kind === EXTERNAL_KIND) return 'external';
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
 }
@@ -226,7 +232,10 @@ export function sanitizeExportOverrides(raw: unknown, nodeId: string): ExportOve
 }
 
 export function defaultParams(
-  kind: Exclude<AddableKind, typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | typeof IMAGE_KIND | 'output'>
+  kind: Exclude<
+    AddableKind,
+    typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | typeof IMAGE_KIND | typeof EXTERNAL_KIND | 'output'
+  >
 ): Record<string, number> {
   const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
   return Object.fromEntries(defs.map((p) => [p.key, p.default]));
@@ -561,6 +570,7 @@ const KNOWN_NODE_KEYS = new Set([
   'mask',
   'spots',
   'image',
+  'external',
   'name',
   'export',
 ]);
@@ -620,6 +630,7 @@ export function serializeGraphDoc(
           ...(n.mask ? { mask: n.mask } : {}),
           ...(n.spots ? { spots: n.spots } : {}),
           ...(n.image ? { image: n.image } : {}),
+          ...(n.external ? { external: n.external } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
         };
@@ -717,6 +728,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
       n.kind !== MASK_KIND &&
       n.kind !== SPOTS_KIND &&
       n.kind !== IMAGE_KIND &&
+      n.kind !== EXTERNAL_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -748,6 +760,9 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     }
     if (n.kind === IMAGE_KIND) {
       n.image = sanitizeImageParams(n.image, n.id);
+    }
+    if (n.kind === EXTERNAL_KIND) {
+      n.external = sanitizeExternalParams(n.external, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -930,6 +945,15 @@ export type PlanStep =
        * an entirely separate texture the CPU reference path never loads.
        */
       path: string;
+    }
+  | {
+      nodeId: string;
+      type: 'external';
+      src: number;
+      /** `{in}`/`{out}` command template (externalNode.ts) — the plan carries it verbatim; the runtime round trip (readback → subprocess → GPU re-entry) lives in graphRenderer.ts, keyed by a content hash it computes itself (not part of the plan — the plan is a pure function of the DOC, the hash depends on actual PIXELS). */
+      command: string;
+      /** true = 16-bit sRGB-encoded round trip; false = 32-bit linear Rec.2020 float — see externalNode.ts's ExternalParams doc comment. */
+      encoded: boolean;
     };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -1021,6 +1045,16 @@ export interface CompileContext {
    * never throw).
    */
   inspectNodeId?: string;
+  /**
+   * External-tool hook node gate (task #41): default true (interactive UI —
+   * the per-node confirm button, not this flag, is the real gate there). The
+   * headless CLI sets this false unless `--allow-external` was passed
+   * (appStore.ts's runCliRender) — false forces EVERY 'external' node to
+   * resolve as identity regardless of its command, the exact same
+   * bit-exact-pass-through mechanism an empty command already gets, so a
+   * batch job never executes an arbitrary command without explicit opt-in.
+   */
+  allowExternal?: boolean;
 }
 
 /**
@@ -1186,6 +1220,20 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           });
           index = steps.length - 1;
         }
+      } else if (node.kind === EXTERNAL_KIND) {
+        // External-tool hook node (task #41): identity when the command is
+        // empty OR the CLI withheld --allow-external (ctx.allowExternal ===
+        // false) — same bit-exact pass-through invariant every other node
+        // kind upholds for its own identity params. No CPU mirror (cpu: null
+        // territory) — the round trip depends on actual pixel content via an
+        // out-of-band subprocess, nothing cpuEvalPlan could ever mirror.
+        const params = node.external ?? defaultExternalParams();
+        if (isIdentityExternal(params) || ctx?.allowExternal === false) {
+          index = src;
+        } else {
+          steps.push({ nodeId: id, type: 'external', src, command: params.command, encoded: params.encoded });
+          index = steps.length - 1;
+        }
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip
@@ -1273,6 +1321,12 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
       // contract this function's own doc comment already states for a
       // custom-shader/spatial-op's null `cpu`.
       throw new Error(`step ${step.nodeId} has no CPU reference`);
+    } else if (step.type === 'external') {
+      // No CPU mirror — the round trip is an out-of-process subprocess over
+      // GPU-readback pixels; there is nothing a JS reference implementation
+      // could mirror even in principle. Same "check planHasCpuReference
+      // first" contract as 'image'/spatial ops.
+      throw new Error(`step ${step.nodeId} has no CPU reference`);
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -1298,6 +1352,7 @@ export function planHasCpuReference(plan: RenderPlan): boolean {
   return plan.steps.every((s) => {
     if (s.type === 'passes') return s.cpu !== null;
     if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
+    if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
     return true; // blend (always has a CPU-evaluable inline mix)
   });
 }

@@ -20,13 +20,16 @@ import { DEVELOP_KIND, nodeLabel, type GraphDoc } from '../engine/graph/graphDoc
 import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
+import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 
-/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own. */
+/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error). */
 interface OpNodeData {
   label: string;
   thumbUrl?: string;
   inspecting: boolean;
   missing?: boolean;
+  badge?: string;
+  badgeTitle?: string;
   [key: string]: unknown;
 }
 
@@ -65,14 +68,19 @@ function NodeThumb({ id, thumbUrl, inspecting }: { id: string; thumbUrl?: string
   );
 }
 
-/** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack). */
+/** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack); an optional `badge` (external-tool hook node's needs-confirm/pending/error state, task #41) renders the same small corner glyph the image node's missing-file badge uses. */
 function OpNode({ id, data, selected }: NodeProps) {
-  const { label, thumbUrl, inspecting } = data as unknown as OpNodeData;
+  const { label, thumbUrl, inspecting, badge, badgeTitle } = data as unknown as OpNodeData;
   return (
     <div className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}`}>
       <Handle type="target" position={Position.Left} />
       <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} />
       <span>{label}</span>
+      {badge && (
+        <span className="op-node-badge" data-testid={`external-node-badge-${id}`} title={badgeTitle}>
+          {badge}
+        </span>
+      )}
       <Handle type="source" position={Position.Right} />
     </div>
   );
@@ -129,35 +137,56 @@ function buildNodes(
   selectedNodeId: string | null,
   nodeThumbs: Record<string, string>,
   inspectNodeId: string | null,
-  imageNodeMissing: Record<string, boolean>
+  imageNodeMissing: Record<string, boolean>,
+  externalNodeNeedsConfirm: Record<string, string>,
+  externalNodeErrors: Record<string, string>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
   const outputCount = graph.nodes.filter((n) => n.kind === 'output').length;
-  return graph.nodes.map((n) => ({
-    id: n.id,
-    type:
-      n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : n.kind === IMAGE_KIND ? 'image' : 'op',
-    data: {
-      label: nodeLabel(n, fileName),
-      thumbUrl: nodeThumbs[n.id],
-      inspecting: n.id === inspectNodeId,
-      missing: n.kind === IMAGE_KIND ? imageNodeMissing[n.id] === true : undefined,
-    },
-    position: n.position,
-    selected: n.id === selectedNodeId,
-    sourcePosition: 'right',
-    targetPosition: 'left',
-    deletable:
-      isOpKind(n.kind) ||
-      n.kind === CUSTOM_KIND ||
-      n.kind === BLEND_KIND ||
-      n.kind === DEVELOP_KIND ||
-      n.kind === MASK_KIND ||
-      n.kind === SPOTS_KIND ||
-      n.kind === IMAGE_KIND ||
-      (n.kind === 'output' && outputCount > 1),
-  })) as Node[];
+  return graph.nodes.map((n) => {
+    // External-tool hook node (task #41): error takes priority over
+    // needs-confirm (a node that just failed is more actionable to notice
+    // than one merely awaiting its first confirm) — see externalNodeRunner.ts.
+    let badge: string | undefined;
+    let badgeTitle: string | undefined;
+    if (n.kind === EXTERNAL_KIND) {
+      if (externalNodeErrors[n.id]) {
+        badge = '⚠';
+        badgeTitle = externalNodeErrors[n.id];
+      } else if (externalNodeNeedsConfirm[n.id]) {
+        badge = '●';
+        badgeTitle = 'Confirm to run this external command (see the Inspector)';
+      }
+    }
+    return {
+      id: n.id,
+      type:
+        n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : n.kind === IMAGE_KIND ? 'image' : 'op',
+      data: {
+        label: nodeLabel(n, fileName),
+        thumbUrl: nodeThumbs[n.id],
+        inspecting: n.id === inspectNodeId,
+        missing: n.kind === IMAGE_KIND ? imageNodeMissing[n.id] === true : undefined,
+        badge,
+        badgeTitle,
+      },
+      position: n.position,
+      selected: n.id === selectedNodeId,
+      sourcePosition: 'right',
+      targetPosition: 'left',
+      deletable:
+        isOpKind(n.kind) ||
+        n.kind === CUSTOM_KIND ||
+        n.kind === BLEND_KIND ||
+        n.kind === DEVELOP_KIND ||
+        n.kind === MASK_KIND ||
+        n.kind === SPOTS_KIND ||
+        n.kind === IMAGE_KIND ||
+        n.kind === EXTERNAL_KIND ||
+        (n.kind === 'output' && outputCount > 1),
+    };
+  }) as Node[];
 }
 
 /**
@@ -189,6 +218,10 @@ export function NodeEditorPanel() {
   // Image node feature: missing-file badge state, resynced the same
   // debounced way nodeThumbs/inspectNodeId are (see below).
   const imageNodeMissing = useAppStore((s) => s.imageNodeMissing);
+  // External-tool hook node (task #41): needs-confirm/error badge state,
+  // resynced the same debounced way as imageNodeMissing above.
+  const externalNodeNeedsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm);
+  const externalNodeErrors = useAppStore((s) => s.externalNodeErrors);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -204,7 +237,7 @@ export function NodeEditorPanel() {
   // below (they change at most every ~300ms, via CanvasView's debounce — far
   // below drag-lag territory, so no extra guard is needed for them).
   const [rfNodes, setRfNodes] = useState<Node[]>(() =>
-    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing)
+    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors)
   );
   // Suppressed while a drag is in flight: the store's node position is still
   // the PRE-drag value until drop, so resyncing from it mid-drag would fight
@@ -212,8 +245,10 @@ export function NodeEditorPanel() {
   const draggingRef = useRef(false);
   useEffect(() => {
     if (draggingRef.current) return;
-    setRfNodes(buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing));
-  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing]);
+    setRfNodes(
+      buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors)
+    );
+  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors]);
 
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,

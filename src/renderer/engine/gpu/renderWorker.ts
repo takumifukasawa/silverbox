@@ -143,6 +143,11 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result });
         return;
       }
+      case 'readbackLinearMean': {
+        const result = await renderer.readbackLinearMean();
+        post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result });
+        return;
+      }
       case 'readbackSharpness': {
         const result = await renderer.readbackSharpness();
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result });
@@ -190,9 +195,34 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           outputId: req.outputId,
           srcWidth: req.image.width,
           srcHeight: req.image.height,
+          allowExternal: req.allowExternal,
         });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
         post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result }, [result.data.buffer]);
+        return;
+      }
+      case 'captureExternalInput': {
+        // External-tool hook node export cut point (task #41) — see
+        // appStore.ts's export-time doc-rewrite. `inspectNodeId` truncates
+        // the plan at the node FEEDING the external node (buildPlan's own
+        // "render up to node X" mechanism), exactly the same cut-point
+        // machinery the preview's inspect mode uses.
+        const wb = createWbModel(req.image.color ?? {});
+        const plan = buildPlan(req.doc, {
+          wb,
+          renderScale: req.renderScale,
+          outputId: req.outputId,
+          srcWidth: req.image.width,
+          srcHeight: req.image.height,
+          inspectNodeId: req.inspectNodeId,
+        });
+        const result = await renderer.captureCutPointPixels(req.image, plan, req.encoded);
+        post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result }, [result.data.buffer]);
+        return;
+      }
+      case 'decodeExternalResult': {
+        const data = await renderer.decodeExternalResultToCpu(new Float32Array(req.data), req.width, req.height, req.encoded);
+        post({ type: 'response', reqId: req.reqId, gen: currentGen, ok: true, result: { data } }, [data.buffer]);
         return;
       }
     }
@@ -304,7 +334,25 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
             ? plan.steps.findIndex((s) => s.nodeId === msg.overlayMaskNodeId)
             : -1;
           renderer.render(overlayStepIndex >= 0 ? overlayStepIndex : null);
+          // External-tool hook node (task #41): fire-and-forget scan for any
+          // 'external' steps in THIS plan — see GraphRenderer.checkExternalNodes'
+          // doc comment. Never awaited (readback+hash is cheap but not free;
+          // this must not delay the render() call above, and a superseding
+          // render's own gen check inside checkExternalNodes drops a stale scan).
+          void renderer.checkExternalNodes(
+            plan,
+            (reqPayload) => post({ type: 'externalRunRequest', ...reqPayload }, [reqPayload.data]),
+            (nodeId) => post({ type: 'externalNodeReady', nodeId })
+          );
         })
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
+      return;
+    }
+    case 'externalResult': {
+      void rendererReady
+        .then((renderer) => renderer.setExternalResult(msg.cacheKey, msg.encoded, msg.result))
         .catch((err) => {
           post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
         });

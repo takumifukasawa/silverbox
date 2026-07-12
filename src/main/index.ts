@@ -13,6 +13,8 @@ import {
   type ExportEncodeResult,
   type ExportLutRequest,
   type ExportLutResult,
+  type ExternalToolRequest,
+  type ExternalToolResult,
   type FolderImageEntry,
   type OpenImageDialogResult,
   type PingResult,
@@ -20,6 +22,7 @@ import {
   type Settings,
 } from '../../shared/ipc';
 import { CLI_USAGE, buildCliJob, formatCliProgress, parseCliArgs } from './cliArgs';
+import { externalToolSpawnCount, runExternalTool } from './externalTool';
 import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
@@ -284,6 +287,12 @@ function registerIpc(): void {
   ipcMain.handle(IPC.goldenCheck, async (_ev, req: CliCheckImageRequest): Promise<CliCheckOutcome> => {
     return checkGoldenImage(req);
   });
+
+  ipcMain.handle(IPC.externalToolRun, async (_ev, req: ExternalToolRequest): Promise<ExternalToolResult> => {
+    return runExternalTool(req);
+  });
+
+  ipcMain.handle(IPC.externalToolSpawnCount, async (): Promise<number> => externalToolSpawnCount());
 }
 
 /**

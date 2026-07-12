@@ -24,7 +24,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
-import type { ExportColorSpace } from '../../../../shared/ipc';
+import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 
 /** Fire-and-forget commands: main → worker, no response expected. */
 export type RenderWorkerCommand =
@@ -82,13 +82,24 @@ export type RenderWorkerCommand =
       outputId?: string;
     }
   | { type: 'shaderArtifactSet'; nodeId: string; artifact: CustomShaderArtifact }
-  | { type: 'shaderArtifactClear' };
+  | { type: 'shaderArtifactClear' }
+  /**
+   * External-tool hook node (denoise v1, task #41): the completed (or
+   * failed) result of one round trip through externalNodeRunner.ts's IPC
+   * call — see graphRenderer.ts's setExternalResult. Caching/decoding only;
+   * the caller (appStore.ts, via CanvasView's effect) is responsible for
+   * re-posting a 'render' command afterward so the fresh texture actually
+   * shows up (same "fire-and-forget, caller re-renders" shape as 'imageNode').
+   */
+  | { type: 'externalResult'; nodeId: string; cacheKey: string; encoded: boolean; result: ExternalToolResult };
 
 /** One entry of the request/response bridge's method union (see graphRenderer.ts for the referenced methods). */
 export type RenderWorkerRequestMethod =
   | { method: 'stats' }
   | { method: 'scopeSamples'; maxCols?: number; maxRows?: number }
   | { method: 'readbackMean' }
+  /** Verify-only (task #41 — scripts/verify-external.mjs): see graphRenderer.ts's readbackLinearMean doc comment. */
+  | { method: 'readbackLinearMean' }
   | { method: 'readbackSharpness' }
   | { method: 'rendererStats' }
   | { method: 'statsCrop'; x0: number; y0: number; w: number; h: number }
@@ -113,6 +124,39 @@ export type RenderWorkerRequestMethod =
       colorSpace: ExportColorSpace;
       /** Selects which output node to render when the doc has more than one; undefined = the doc's first. */
       outputId?: string;
+      /** External-tool hook node gate (task #41): false ONLY for a headless CLI render without `--allow-external` (see appStore.ts's exportOnePath) — every 'external' node then resolves as identity. Undefined/true = allowed (the interactive export path, and CLI WITH the flag — the doc-rewrite in exportOnePath has already replaced any real external node with an image node by the time this request is sent). */
+      allowExternal?: boolean;
+    }
+  | {
+      /**
+       * External-tool hook node export cut point (task #41): renders `doc`
+       * up to `inspectNodeId` (the node FEEDING the external node — see
+       * appStore.ts's export-time doc-rewrite) at full resolution and reads
+       * the result back as linear-or-encoded RGBA float32 — see
+       * graphRenderer.ts's captureCutPointPixels.
+       */
+      method: 'captureExternalInput';
+      image: PreparedImage;
+      doc: GraphDoc;
+      renderScale: number;
+      encoded: boolean;
+      outputId?: string;
+      inspectNodeId: string;
+    }
+  | {
+      /**
+       * External-tool hook node re-entry (task #41), export-side counterpart
+       * of GraphRenderer.setExternalResult: decode a completed round trip's
+       * pixels back to LINEAR Rec.2020 (a no-op when `encoded` is false) so
+       * appStore.ts's export-time doc-rewrite can wrap them as a
+       * PreparedImage and feed the EXISTING image-node upload path. See
+       * graphRenderer.ts's decodeExternalResultToCpu.
+       */
+      method: 'decodeExternalResult';
+      data: ArrayBuffer;
+      width: number;
+      height: number;
+      encoded: boolean;
     };
 
 export type RenderWorkerRequest = { type: 'request'; reqId: number; gen: number } & RenderWorkerRequestMethod;
@@ -128,4 +172,31 @@ export type RenderWorkerResponse =
    * to the client's error handler exactly like initError, surfacing it in
    * the UI the same way a pre-worker GraphRenderer rejection used to.
    */
-  | { type: 'error'; message: string };
+  | { type: 'error'; message: string }
+  /**
+   * External-tool hook node (task #41): the renderer wants to run `command`
+   * over the given pixels for `nodeId` — main-thread only from here
+   * (externalNodeRunner.ts owns the confirm gate + the actual IPC call, see
+   * shared/ipc.ts's SilverboxApi.runExternalTool doc comment). Posted from
+   * GraphRenderer.checkExternalNodes after the debounce settles; `data` is
+   * transferred (renderWorker.ts's 'render' handler owns it, freshly
+   * captured, never aliased elsewhere).
+   */
+  | {
+      type: 'externalRunRequest';
+      nodeId: string;
+      cacheKey: string;
+      command: string;
+      encoded: boolean;
+      width: number;
+      height: number;
+      data: ArrayBuffer;
+    }
+  /**
+   * External-tool hook node (task #41): a result was ALREADY cached for this
+   * node's current content hash (e.g. undo/redo back to previously-seen
+   * upstream content) — no subprocess needed, but the main thread must still
+   * re-post a 'render' command for resolveSteps to pick the cached texture up
+   * (see GraphRenderer.checkExternalNodes' `notifyReady` callback).
+   */
+  | { type: 'externalNodeReady'; nodeId: string };

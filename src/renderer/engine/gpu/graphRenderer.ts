@@ -28,9 +28,9 @@ import {
   LENS_PROFILE_MAX_KNOTS,
   type LensProfile,
 } from '../lens/sonyLensProfile';
-import { WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
-import { WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
-import type { ExportColorSpace } from '../../../../shared/ipc';
+import { WGSL_SRGB_TO_WORK, WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
+import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
+import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -105,6 +105,46 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 const ENCODE_SHADER = buildEncodeShader(WGSL_WORK_TO_SRGB);
 /** Export-only color-space variant (registered under shader id 'encode/p3'); the preview never uses this. */
 const ENCODE_SHADER_P3 = buildEncodeShader(WGSL_WORK_TO_P3);
+
+// --- External-tool hook node (denoise v1, task #41) --------------------------
+//
+// The round trip's color-space boundary reuses the SAME exact helpers every
+// other exit in this file uses — no bespoke math. 'encoded' mode hands the
+// tool literally the same numbers ENCODE_SHADER produces (WORK_TO_SRGB +
+// exact sRGB OETF), just rendered into an rgba16float target (instead of
+// ENCODE_SHADER's fixed rgba8unorm one) so the 16-bit-TIFF round trip keeps
+// its precision; EXTERNAL_DECODE_SHADER is the exact inverse (sRGB EOTF then
+// SRGB_TO_WORK) for reading the tool's result back in. 'linear' mode needs no
+// shader at all beyond a plain identity blit (EXTERNAL_PASSTHROUGH_SHADER),
+// reused for three purposes: (1) reading back an external step's LINEAR
+// input when encoded=false, (2) the node's default "no cached result yet"
+// pass-through render, and (3) blitting a cached/decoded result texture into
+// a step's own output slot.
+const EXTERNAL_PASSTHROUGH_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return textureLoad(src, vec2i(pos.xy), 0);
+}
+`;
+
+const EXTERNAL_DECODE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+${FULLSCREEN_VS}
+${WGSL_SRGB_DECODE}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let t = textureLoad(src, vec2i(pos.xy), 0);
+  let lin = ${WGSL_SRGB_TO_WORK} * srgbDecode(t.rgb);
+  return vec4f(lin, 1.0);
+}
+`;
+
+/** In-memory LRU capacity for decoded external-tool RESULT textures (graphRenderer.ts's own cache tier — see `externalResultTextures`); the on-disk tier (src/main/externalCache.ts) is the bounded-by-bytes one. A handful of recent edits' worth, not a formula. */
+const EXTERNAL_RESULT_LRU_CAPACITY = 12;
+/** Idle debounce before an external node's command actually runs, after the last upstream pixel change (see checkExternalNodes). */
+const EXTERNAL_DEBOUNCE_MS = 600;
 
 /** Box-filter taps per axis for THUMBNAIL_SHADER — 4×4 = 16 samples per output texel, plenty of anti-aliasing at a ~64px thumbnail and still trivial GPU cost. */
 const THUMBNAIL_TAPS = 4;
@@ -573,6 +613,21 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
+/**
+ * SHA-256 hex digest via the Web Crypto API (available in both the render
+ * worker and the main thread — no new dependency). Used by the external-tool
+ * hook node's cache key (checkExternalNodes): hashing real pixel bytes need
+ * not be cryptographically hardened here, but SHA-256 is already built in
+ * and collision-free enough for a cache key, so there is no reason to reach
+ * for anything weaker.
+ */
+export async function sha256Hex(data: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+}
+
 let devicePromise: Promise<GPUDevice> | null = null;
 
 function getGpuDevice(): Promise<GPUDevice> {
@@ -604,6 +659,8 @@ interface ExecStep {
   imageView?: GPUTextureView;
   /** Image-node step (no cached texture yet — missing/loading/no path): renders IMAGE_NODE_MISSING_GRAY instead. */
   imageMissing?: boolean;
+  /** External-tool step (task #41) with a FRESH cached result available for its current content hash: blit this view instead of `src` — see resolveSteps' 'external' branch. Absent = plain pass-through of `src` (the phases already read `src` via a passthrough pipeline in that case). */
+  externalResultView?: GPUTextureView;
 }
 
 
@@ -657,6 +714,16 @@ export class GraphRenderer {
   private imageCoverPipelineCache: GPURenderPipeline | null = null;
   /** Compiled once, on first use — the image-node missing/loading placeholder (see IMAGE_GRAY_SHADER). */
   private imageGrayPipelineCache: GPURenderPipeline | null = null;
+  // --- External-tool hook node (denoise v1, task #41) ------------------------
+  /** Decoded RESULT textures, keyed by content-hash cacheKey (see checkExternalNodes/setExternalResult) — a bounded LRU (EXTERNAL_RESULT_LRU_CAPACITY), Map insertion order doubling as recency order (re-set on touch). Cleared on setImage (new photo) like every other per-photo cache in this class. */
+  private externalResultTextures = new Map<string, GPUTexture>();
+  /** Each external node's MOST RECENTLY COMPUTED upstream content-hash cacheKey (updated every render, independent of whether a result texture exists for it yet — see checkExternalNodes). */
+  private externalNodeCacheKey = new Map<string, string>();
+  /** Per-node idle-debounce timers (EXTERNAL_DEBOUNCE_MS) before a changed cacheKey actually triggers a subprocess request. */
+  private externalDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private externalPassthroughPipelineCache: GPURenderPipeline | null = null;
+  private externalEncodePipelineCache: GPURenderPipeline | null = null;
+  private externalDecodePipelineCache: GPURenderPipeline | null = null;
   private steps: ExecStep[] = [];
   private outputIndex = -1;
   private blendPipelineCache: GPURenderPipeline | null = null;
@@ -830,6 +897,16 @@ export class GraphRenderer {
     // whatever the new doc's own image nodes need.
     for (const t of this.imageNodeTextures.values()) this.destroyTexture(t);
     this.imageNodeTextures.clear();
+    // External-tool hook node cache invalidation on main-image switch (task
+    // #41) — same rationale as imageNodeTextures above: a fresh photo starts
+    // with no cached results and no "last seen" hashes, and any in-flight
+    // debounce timer belonged to the OLD photo's content and must never fire
+    // against the new one.
+    for (const t of this.externalResultTextures.values()) this.destroyTexture(t);
+    this.externalResultTextures.clear();
+    this.externalNodeCacheKey.clear();
+    for (const t of this.externalDebounceTimers.values()) clearTimeout(t);
+    this.externalDebounceTimers.clear();
     this.destroyTexture(this.baseTexture);
     this.baseTexture = null;
     this.destroyBuffer(this.resampleUniform);
@@ -910,6 +987,248 @@ export class GraphRenderer {
       });
     }
     return this.imageCoverPipelineCache;
+  }
+
+  /** External-tool step (task #41): identity blit, rgba16float target — the "no cached result yet" pass-through AND the "blit a cached/decoded result texture" pipeline (same shader either way, see EXTERNAL_PASSTHROUGH_SHADER's doc comment). Also reused for the LINEAR-mode readback (no color conversion needed) and for reading a just-decoded result back to CPU. */
+  private externalPassthroughPipeline(): GPURenderPipeline {
+    if (!this.externalPassthroughPipelineCache) {
+      const module = this.device.createShaderModule({ code: EXTERNAL_PASSTHROUGH_SHADER });
+      this.externalPassthroughPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.externalPassthroughPipelineCache;
+  }
+
+  /** External-tool step (task #41), ENCODED mode: the SAME WGSL as ENCODE_SHADER (WORK_TO_SRGB + exact sRGB OETF), just targeting rgba16float instead of ENCODE_SHADER's fixed rgba8unorm pipelines — preserves 16-bit precision for the TIFF round trip. */
+  private externalEncodePipeline(): GPURenderPipeline {
+    if (!this.externalEncodePipelineCache) {
+      const module = this.device.createShaderModule({ code: ENCODE_SHADER });
+      this.externalEncodePipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.externalEncodePipelineCache;
+  }
+
+  /** External-tool step (task #41), ENCODED mode re-entry: exact inverse of externalEncodePipeline (sRGB EOTF then SRGB_TO_WORK) — see EXTERNAL_DECODE_SHADER. */
+  private externalDecodePipeline(): GPURenderPipeline {
+    if (!this.externalDecodePipelineCache) {
+      const module = this.device.createShaderModule({ code: EXTERNAL_DECODE_SHADER });
+      this.externalDecodePipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.externalDecodePipelineCache;
+  }
+
+  /**
+   * Render `sourceView` through `pipeline` into a transient rgba16float
+   * scratch texture and read it back as tightly packed RGBA float32 (no
+   * clamping/scaling beyond whatever the pipeline itself applied) — shared by
+   * the external-node preview readback (checkExternalNodes) and the
+   * export-time cut-point capture (captureCutPointPixels). The f16→f32
+   * upconversion is exact (Float16Array elements read back as full-precision
+   * JS numbers), the mirror image of setImage's f32→f16 upload.
+   */
+  private async captureViaPipeline(
+    sourceView: GPUTextureView,
+    pipeline: GPURenderPipeline,
+    width: number,
+    height: number
+  ): Promise<Float32Array> {
+    const scratch = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
+    const buffer = this.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      this.addPass(encoder, scratch.createView(), pipeline, [{ binding: 0, resource: sourceView }]);
+      encoder.copyTextureToBuffer({ texture: scratch }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
+      this.device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const half = new Float16Array(buffer.getMappedRange());
+      const halfPerRow = bytesPerRow / 2;
+      const out = new Float32Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        const rowStart = y * halfPerRow;
+        const destStart = y * width * 4;
+        for (let x = 0; x < width * 4; x++) out[destStart + x] = half[rowStart + x]!;
+      }
+      buffer.unmap();
+      return out;
+    } finally {
+      this.destroyBuffer(buffer);
+      this.destroyTexture(scratch);
+    }
+  }
+
+  /**
+   * Upload a Float32Array RGBA buffer (from an external-tool result — see
+   * ExternalToolResult) as an rgba16float texture, decoding it back to LINEAR
+   * (via externalDecodePipeline) when `encoded` is true. Returns a texture
+   * the caller owns (TEXTURE_BINDING usage) — either cached (preview,
+   * setExternalResult) or read back to CPU once more (export,
+   * decodeExternalResultToCpu).
+   */
+  private uploadExternalResult(data: Float32Array, width: number, height: number, encoded: boolean): GPUTexture {
+    const raw = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const half = new Float16Array(data.length);
+    half.set(data);
+    this.device.queue.writeTexture({ texture: raw }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [width, height]);
+    if (!encoded) return raw;
+    const linear = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    const encoder = this.device.createCommandEncoder();
+    this.addPass(encoder, linear.createView(), this.externalDecodePipeline(), [{ binding: 0, resource: raw.createView() }]);
+    this.device.queue.submit([encoder.finish()]);
+    this.destroyTexture(raw);
+    return linear;
+  }
+
+  /** Insert/refresh an external-result texture's LRU recency (Map re-insertion order), evicting the oldest entry once over EXTERNAL_RESULT_LRU_CAPACITY. */
+  private storeExternalResultTexture(cacheKey: string, tex: GPUTexture): void {
+    const existing = this.externalResultTextures.get(cacheKey);
+    if (existing) this.destroyTexture(existing);
+    this.externalResultTextures.delete(cacheKey);
+    this.externalResultTextures.set(cacheKey, tex);
+    while (this.externalResultTextures.size > EXTERNAL_RESULT_LRU_CAPACITY) {
+      const oldestKey = this.externalResultTextures.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.destroyTexture(this.externalResultTextures.get(oldestKey));
+      this.externalResultTextures.delete(oldestKey);
+    }
+  }
+
+  /** Bump an existing entry's LRU recency without touching its content (a cache HIT during checkExternalNodes). */
+  private touchExternalResultTexture(cacheKey: string): void {
+    const tex = this.externalResultTextures.get(cacheKey);
+    if (!tex) return;
+    this.externalResultTextures.delete(cacheKey);
+    this.externalResultTextures.set(cacheKey, tex);
+  }
+
+  /**
+   * Apply a completed (or failed) external-tool round trip (renderWorker.ts's
+   * 'externalResult' command, itself relayed from externalNodeRunner.ts's IPC
+   * call): on success, decode + cache the result texture under `cacheKey` so
+   * the NEXT render() picks it up (see resolveSteps' 'external' branch) —
+   * this method never triggers a render itself; the caller's `onSettled`
+   * (main-thread side, appStore.ts) bumps `externalNodeRev` for that. On
+   * failure, nothing is cached — the node stays/returns to pass-through,
+   * satisfying "ANY failure ⇒ pass through" with zero extra state to check.
+   */
+  setExternalResult(cacheKey: string, encoded: boolean, result: ExternalToolResult): void {
+    if (!result.ok) return;
+    const data = new Float32Array(result.data);
+    const tex = this.uploadExternalResult(data, result.width, result.height, encoded);
+    this.storeExternalResultTexture(cacheKey, tex);
+  }
+
+  /**
+   * Export-time re-entry (appStore.ts's exportOnePath doc-rewrite, task #41):
+   * decode an external-tool result back to a plain CPU Float32Array RGBA
+   * (linear Rec.2020) so the caller can wrap it as a PreparedImage and feed
+   * it through the EXISTING image-node upload path (setImageNodeTexture) —
+   * export needs no persistent GPU cache entry, just the pixels once.
+   */
+  async decodeExternalResultToCpu(data: Float32Array, width: number, height: number, encoded: boolean): Promise<Float32Array> {
+    if (!encoded) return data; // already linear — no GPU round trip needed at all
+    const tex = this.uploadExternalResult(data, width, height, true);
+    try {
+      return await this.captureViaPipeline(tex.createView(), this.externalPassthroughPipeline(), width, height);
+    } finally {
+      this.destroyTexture(tex);
+    }
+  }
+
+  /**
+   * After every render() (renderWorker.ts's 'render' handler), scan the
+   * PLAN's external steps: read back each one's CURRENT upstream pixels
+   * (linear when `encoded` is false, GPU-sRGB-encoded when true — the exact
+   * bytes the subprocess itself will receive), content-hash them, and act:
+   *  - unchanged since the last check ⇒ nothing to do (this is what makes
+   *    "re-run ONLY when upstream pixels actually changed" free — a stray
+   *    render() with no real upstream edit costs one cheap readback+hash,
+   *    never a re-run).
+   *  - changed, and a result is ALREADY cached for the new hash (undo/redo
+   *    back to previously-seen content) ⇒ touch its LRU recency and tell the
+   *    caller to re-render (`notifyReady`) so resolveSteps picks it up —
+   *    no subprocess needed.
+   *  - changed, no cached result yet ⇒ debounce (EXTERNAL_DEBOUNCE_MS); once
+   *    idle AND still the current hash (a further edit during the debounce
+   *    window simply re-arms it), hand the caller a full run request
+   *    (`requestRun`) — main-thread side (externalNodeRunner.ts) is the
+   *    confirm/IPC gate from here.
+   * Never throws into the caller: an individual step's readback failing
+   * (should not happen in practice — geometry/lens are always resolved by
+   * render() first) is simply skipped rather than aborting the whole scan.
+   */
+  async checkExternalNodes(
+    plan: RenderPlan,
+    requestRun: (req: { nodeId: string; cacheKey: string; command: string; encoded: boolean; width: number; height: number; data: ArrayBuffer }) => void,
+    notifyReady: (nodeId: string) => void
+  ): Promise<void> {
+    if (!this.source) return;
+    const myGen = this.setGraphGen;
+    const { width, height } = this;
+    for (const step of plan.steps) {
+      if (step.type !== 'external') continue;
+      try {
+        const view =
+          step.src < 0
+            ? this.planGeometry || this.lensActive
+              ? this.baseTexture?.createView()
+              : this.source?.createView()
+            : this.stepTextures[step.src]?.createView();
+        if (!view) continue;
+        const pipeline = step.encoded ? this.externalEncodePipeline() : this.externalPassthroughPipeline();
+        const rgba = await this.captureViaPipeline(view, pipeline, width, height);
+        if (myGen !== this.setGraphGen) return; // a newer render superseded this frame's readback — drop it
+        const pixelHash = await sha256Hex(rgba.buffer as ArrayBuffer);
+        const cacheKey = await sha256Hex(
+          new TextEncoder().encode(`${pixelHash}|${step.command}|${step.encoded ? 1 : 0}|${step.nodeId}`).buffer
+        );
+        if (this.externalNodeCacheKey.get(step.nodeId) === cacheKey) continue; // unchanged since last check
+        this.externalNodeCacheKey.set(step.nodeId, cacheKey);
+        if (this.externalResultTextures.has(cacheKey)) {
+          this.touchExternalResultTexture(cacheKey);
+          notifyReady(step.nodeId);
+          continue;
+        }
+        const nodeId = step.nodeId;
+        const command = step.command;
+        const encoded = step.encoded;
+        clearTimeout(this.externalDebounceTimers.get(nodeId));
+        const timer = setTimeout(() => {
+          this.externalDebounceTimers.delete(nodeId);
+          // Superseded by a later change during the debounce window — the
+          // later call already re-armed its own timer for the new hash.
+          if (this.externalNodeCacheKey.get(nodeId) !== cacheKey) return;
+          requestRun({ nodeId, cacheKey, command, encoded, width, height, data: rgba.buffer as ArrayBuffer });
+        }, EXTERNAL_DEBOUNCE_MS);
+        this.externalDebounceTimers.set(nodeId, timer);
+      } catch {
+        // Best-effort scan — one node's readback failing must never break
+        // every other node's check, or the render loop itself.
+      }
+    }
   }
 
   /** Pipeline for the resample (geometry+lens) pass — compiled once, shared by every consumer. */
@@ -1183,6 +1502,26 @@ export class GraphRenderer {
           imageView: tex.createView(),
         };
       }
+      if (op.type === 'external') {
+        // A fresh cached result for this node's CURRENT content hash (see
+        // checkExternalNodes) blits it in place of `src`; otherwise a plain
+        // identity pass-through of `src` — never gray, unlike a missing
+        // image-node source (this node's input IS a perfectly good picture,
+        // see externalNode.ts's doc comment).
+        const cacheKey = this.externalNodeCacheKey.get(op.nodeId);
+        const resultTex = cacheKey ? this.externalResultTextures.get(cacheKey) : undefined;
+        if (resultTex) {
+          return {
+            phases: [{ pipeline: this.externalPassthroughPipeline(), uniformBuffer: null }],
+            src: op.src,
+            externalResultView: resultTex.createView(),
+          };
+        }
+        return {
+          phases: [{ pipeline: this.externalPassthroughPipeline(), uniformBuffer: null }],
+          src: op.src,
+        };
+      }
       const hasMask = op.srcMask !== undefined;
       return {
         phases: [{ pipeline: hasMask ? this.blendMaskPipeline() : this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
@@ -1330,6 +1669,14 @@ export class GraphRenderer {
             ]
           : [{ binding: 0, resource: { buffer: phase.uniformBuffer! } }];
         addPass(encoder, views[i]!, phase.pipeline, entries);
+        return;
+      }
+      if (step.externalResultView) {
+        // External-tool step (task #41) with a fresh cached result: blit IT
+        // in, ignoring `at(step.src)` entirely — no uniform, same single-
+        // texture-binding shape as the plain pass-through phase below.
+        const phase = step.phases[0]!;
+        addPass(encoder, views[i]!, phase.pipeline, [{ binding: 0, resource: step.externalResultView }]);
         return;
       }
       if (step.srcB !== undefined) {
@@ -1551,6 +1898,117 @@ export class GraphRenderer {
   }
 
   /**
+   * Export-time cut point (external-tool hook node, task #41): renders
+   * `plan` (a plan TRUNCATED at the external node's own INPUT — the caller
+   * builds it via buildPlan's `inspectNodeId`, same "cut point" mechanism the
+   * per-node-preview inspect mode uses) over an arbitrary full-resolution
+   * `image`, and reads the result back as tightly packed RGBA float32 —
+   * ENCODED (sRGB, 16-bit-precision-equivalent) when `encoded`, else raw
+   * linear Rec.2020 — instead of renderToPixels' fixed rgba8unorm export
+   * encode. Structurally a near-twin of renderToPixels (same source
+   * upload/resample/steps setup); only the final exit pass + readback format
+   * differ, so the two are kept as separate methods rather than threading a
+   * format/pipeline choice through renderToPixels' export-specific callers.
+   */
+  async captureCutPointPixels(
+    image: PreparedImage,
+    plan: RenderPlan,
+    encoded: boolean
+  ): Promise<{ data: Float32Array; width: number; height: number }> {
+    const { device } = this;
+    const { data, width: srcWidth, height: srcHeight } = image;
+    const source = this.createTexture({
+      size: [srcWidth, srcHeight],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const half = new Float16Array(data.length);
+    half.set(data);
+    device.queue.writeTexture({ texture: source }, half, { bytesPerRow: srcWidth * 8, rowsPerImage: srcHeight }, [
+      srcWidth,
+      srcHeight,
+    ]);
+    const { width, height } = GraphRenderer.baseDims(plan, srcWidth, srcHeight);
+    const temps: GPUTexture[] = [source];
+    const tempBuffers: GPUBuffer[] = [];
+    const makeTarget = (format: GPUTextureFormat, usage: number) => {
+      const t = this.createTexture({ size: [width, height], format, usage });
+      temps.push(t);
+      return t;
+    };
+    const steps = this.resolveSteps(plan, width, height);
+    try {
+      const encoder = device.createCommandEncoder();
+      let baseView = source.createView();
+      const lensActive = GraphRenderer.lensActiveFor(plan.lens, image.profile);
+      if (plan.geometry || lensActive) {
+        const base = makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT);
+        const uniform = this.createBuffer({ size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+        tempBuffers.push(uniform);
+        device.queue.writeBuffer(uniform, 0, this.resampleUniformData(plan.geometry, plan.lens, srcWidth, srcHeight));
+        const orient = plan.geometry?.orientation ?? { quarterTurns: 0 as const, flipH: false };
+        const od = orientedDims(srcWidth, srcHeight, orient);
+        const profileUniform = this.createBuffer({
+          size: (8 + 4 * LENS_PROFILE_KNOT_CAP) * 4,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+        tempBuffers.push(profileUniform);
+        device.queue.writeBuffer(
+          profileUniform,
+          0,
+          GraphRenderer.profileUniformData(plan.lens, image.profile, od.width, od.height)
+        );
+        this.addPass(encoder, base.createView(), this.resamplePipeline(), [
+          { binding: 0, resource: source.createView() },
+          { binding: 1, resource: this.resampleSampler() },
+          { binding: 2, resource: { buffer: uniform } },
+          { binding: 3, resource: { buffer: profileUniform } },
+        ]);
+        baseView = base.createView();
+      }
+      const stepTextures = plan.steps.map(() =>
+        makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
+      );
+      const scratch = steps.some((s) => s.phases.length > 1)
+        ? makeTarget('rgba16float', GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT)
+        : null;
+      const linear = GraphRenderer.recordSteps(
+        this.addPass.bind(this),
+        steps,
+        plan.output,
+        baseView,
+        stepTextures,
+        scratch,
+        encoder,
+        this.resampleSampler()
+      );
+      const finalTarget = makeTarget('rgba16float', GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC);
+      const pipeline = encoded ? this.externalEncodePipeline() : this.externalPassthroughPipeline();
+      this.addPass(encoder, finalTarget.createView(), pipeline, [{ binding: 0, resource: linear }]);
+      const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
+      const buffer = this.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      tempBuffers.push(buffer);
+      encoder.copyTextureToBuffer({ texture: finalTarget }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
+      device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const mappedHalf = new Float16Array(buffer.getMappedRange());
+      const halfPerRow = bytesPerRow / 2;
+      const out = new Float32Array(width * height * 4);
+      for (let y = 0; y < height; y++) {
+        const rowStart = y * halfPerRow;
+        const destStart = y * width * 4;
+        for (let x = 0; x < width * 4; x++) out[destStart + x] = mappedHalf[rowStart + x]!;
+      }
+      buffer.unmap();
+      return { data: out, width, height };
+    } finally {
+      for (const t of temps) this.destroyTexture(t);
+      for (const b of tempBuffers) this.destroyBuffer(b);
+      this.destroySteps(steps);
+    }
+  }
+
+  /**
    * Run the chain + encode offscreen and hand the mapped RGBA8 rows to `use`.
    * `target`/`buffer` are created BEFORE the try so a throw between creation
    * and the try (there is none today, but the original code also left
@@ -1587,6 +2045,57 @@ export class GraphRenderer {
       buffer.unmap(); // spec: a no-op when not currently mapped — safe on any exit path
       this.destroyBuffer(buffer);
       this.destroyTexture(target);
+    }
+  }
+
+  /**
+   * Verify-only (external-tool hook node, task #41 — scripts/verify-external.mjs):
+   * mean of the chain's FINAL LINEAR (pre-encode) output, unlike readbackMean
+   * (which averages the display-ENCODED output every other consumer cares
+   * about). Exists because a node's effect in LINEAR space (e.g. "+0.1 to
+   * every linear-mode sample") is exactly predictable here, whereas the
+   * encoded mean is always warped by the sRGB curve + gamut matrix on top —
+   * this is what makes the verify script's numeric assertions possible
+   * without duplicating that math in JS.
+   */
+  async readbackLinearMean(): Promise<{ r: number; g: number; b: number } | null> {
+    await this.graphReady;
+    if (!this.source) return null;
+    const { width, height } = this;
+    const scratch = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
+    const buffer = this.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    try {
+      const encoder = this.device.createCommandEncoder();
+      const linear = this.addChainPasses(encoder);
+      this.addPass(encoder, scratch.createView(), this.externalPassthroughPipeline(), [{ binding: 0, resource: linear }]);
+      encoder.copyTextureToBuffer({ texture: scratch }, { buffer, bytesPerRow, rowsPerImage: height }, [width, height]);
+      this.device.queue.submit([encoder.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const half = new Float16Array(buffer.getMappedRange());
+      const halfPerRow = bytesPerRow / 2;
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      for (let y = 0; y < height; y++) {
+        const row = y * halfPerRow;
+        for (let x = 0; x < width; x++) {
+          const s = row + x * 4;
+          r += half[s]!;
+          g += half[s + 1]!;
+          b += half[s + 2]!;
+        }
+      }
+      const n = width * height;
+      buffer.unmap();
+      return { r: r / n, g: g / n, b: b / n };
+    } finally {
+      this.destroyBuffer(buffer);
+      this.destroyTexture(scratch);
     }
   }
 

@@ -57,6 +57,7 @@ import { defaultDevelopParams, isIdentityDetail, isIdentityEffectsSpatial } from
 import { BLEND_KIND, CUSTOM_KIND } from '../graph/ops';
 import { SPOTS_KIND } from '../graph/spotsNode';
 import { IMAGE_KIND } from '../graph/imageNode';
+import { EXTERNAL_KIND } from '../graph/externalNode';
 import type { WbModel } from './whiteBalance';
 import { srgbDecode, srgbEncode } from './srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB } from './workingSpace';
@@ -169,6 +170,22 @@ function reduceGraphForLut(doc: GraphDoc, ctx: CompileContext): { doc: GraphDoc;
           const inEdge = working.edges.find((e) => e.target === node.id);
           if (inEdge) bypassSource.set(node.id, inEdge.source);
         }
+      } else if (step.type === 'external') {
+        // External-tool hook node (task #41): an arbitrary out-of-process
+        // command over a per-frame content hash — nothing a fixed 33^3
+        // lattice sample could ever represent (it isn't even a pure function
+        // of the pixel VALUE the way every other color op is; it depends on
+        // the whole frame's content and a live subprocess). Same bypass
+        // shape as custom/spots: one input, so the consumer just falls back
+        // to it (not the 'image' node's no-fallback case — an external node
+        // always has exactly one upstream input to degrade to).
+        const node = byId.get(step.nodeId);
+        if (!node) continue;
+        sawIssue = true;
+        skipped.push(`${step.nodeId}: external tool node (runs an out-of-process command, no CPU reference) — not representable in a LUT`);
+        removeIds.add(step.nodeId);
+        const inEdge = working.edges.find((e) => e.target === step.nodeId);
+        if (inEdge) bypassSource.set(step.nodeId, inEdge.source);
       } else if (step.type === 'blend' && step.srcMask !== undefined) {
         const node = byId.get(step.nodeId);
         if (!node) continue;
