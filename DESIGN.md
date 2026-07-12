@@ -222,3 +222,25 @@ beyond the sidecar, and search/collections/keywords do not exist. The
 filmstrip rating filter sits exactly ON the line — anything past it
 (saved filters, smart groups, cross-folder queries) is the catalog
 slope and gets rejected by default.
+
+## Visible path to every result (decided 2026-07-13)
+
+Every achievable RESULT must have a discoverable, clickable path.
+Keyboard shortcuts, modifier keys, and gestures are ACCELERATORS
+layered on top — never the only way to a result. The refinement that
+keeps this from bloating the UI: distinguish OPERATIONS from
+ACCELERATORS —
+- Operations (delete a node, create a mask, export, rate, toggle a
+  view) get visible controls.
+- An accelerator that merely speeds up an already-reachable result
+  (⌥-drag = center resize, reachable by dragging opposite edges;
+  wheel = brush radius, reachable by the slider) needs an inline HINT
+  (control-strip text / tooltip), not a button.
+- New-feature briefs must state, per interaction: which results it
+  adds, their clickable path, and which gestures are accelerators with
+  what hint. A `?` shortcuts overlay is the eventual single
+  discoverability net (docs/ui-architecture.md).
+
+Audit at adoption: one violation existed — copy/paste develop settings
+was ⌘⇧C/V-only; fixed by adding Copy/Paste entries to the Presets menu
+(the persistent cousin of the same concept).
