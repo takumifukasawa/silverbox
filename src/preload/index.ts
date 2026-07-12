@@ -44,6 +44,7 @@ const api: SilverboxApi = {
   cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
   cliDone: () => ipcRenderer.send(IPC.cliDone),
   checkGoldenImage: (req) => ipcRenderer.invoke(IPC.goldenCheck, req),
+  diffRenderImages: (req) => ipcRenderer.invoke(IPC.diffRenderImages, req),
   runExternalTool: (req) => ipcRenderer.invoke(IPC.externalToolRun, req),
   externalToolSpawnCount: () => ipcRenderer.invoke(IPC.externalToolSpawnCount),
 };

@@ -6,6 +6,7 @@ import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
 import { ExportDialog } from './ExportDialog';
 import { SettingsDialog } from './SettingsDialog';
+import { SidecarDiffDialog } from './SidecarDiffDialog';
 import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { isBypassableNodeKind } from '../engine/graph/graphDoc';
@@ -140,6 +141,9 @@ export function App() {
       if (ev.key === 'Escape' && useAppStore.getState().settingsDialogOpen) {
         useAppStore.getState().setSettingsDialogOpen(false);
       }
+      if (ev.key === 'Escape' && useAppStore.getState().sidecarDiffDialog) {
+        useAppStore.getState().closeSidecarDiff();
+      }
       if (ev.key === 'Escape' && useAppStore.getState().maskDrawMode !== null) {
         // draw-to-create masks (UX pack B §1): Escape cancels cleanly — no
         // nodes created. CanvasView's in-progress drag listener watches this
@@ -272,6 +276,8 @@ export function App() {
         // wiring `--render` already used) — see appStore.ts's runCliCheck.
         if (job.mode === 'check') {
           await useAppStore.getState().runCliCheck(job, (result) => window.silverbox.cliProgress(result));
+        } else if (job.mode === 'diff') {
+          await useAppStore.getState().runCliDiff(job, (result) => window.silverbox.cliProgress(result));
         } else {
           await useAppStore.getState().runCliRender(job, (result) => window.silverbox.cliProgress(result));
         }
@@ -372,6 +378,7 @@ export function App() {
       <NodeEditorPanel />
       <ExportDialog />
       <SettingsDialog />
+      <SidecarDiffDialog />
       {dropActive && (
         <div className="drop-overlay" data-testid="drop-overlay">
           <div className="drop-overlay-inner">Drop a RAW / JPEG file to open</div>

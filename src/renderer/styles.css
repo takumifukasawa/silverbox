@@ -2121,3 +2121,38 @@ button:disabled {
   gap: 8px;
 }
 
+/* Sidecar visual diff dialog (git-native completion brief §1) — wider than
+   the default .export-dialog (360px) since diff lines run long, and its own
+   scrollable line list rather than the default body's flex row gap. */
+.sidecar-diff-dialog {
+  width: 560px;
+}
+
+.sidecar-diff-lines {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 40vh;
+  overflow-y: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #ddd;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidecar-diff-lines li {
+  padding: 2px 0;
+  border-bottom: 1px solid #333;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* "Compare visually"'s active state — the .toolbar-scoped button.active rule
+   above doesn't reach in here, this dialog isn't inside .toolbar. */
+.sidecar-diff-dialog button.active {
+  background: #4a6b9a;
+  border-color: #6a9fe8;
+}
+

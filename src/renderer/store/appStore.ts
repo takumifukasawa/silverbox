@@ -55,11 +55,14 @@ import { sanitizeCurvePoints } from '../engine/color/toneCurve';
 import { baseCurveForModel } from '../engine/color/baseCurve';
 import { buildLutExport } from '../engine/color/lutExport';
 import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
+import { diffLook } from '../engine/look/diffLook';
 import {
   DEFAULT_SETTINGS,
   SIDECAR_SUFFIX,
   type CliCheckJob,
   type CliCheckResult,
+  type CliDiffJob,
+  type CliDiffResult,
   type CliRenderJob,
   type CliRenderResult,
   type FolderImageEntry,
@@ -238,6 +241,27 @@ interface AppState {
    * 'malformed' if the new content doesn't parse.
    */
   handleExternalSidecarChange(): Promise<void>;
+  /**
+   * Sidecar visual diff ("code review for looks" brief §1): the hot-reload
+   * notice's "Show diff" review moment. `lines` is diffLook's param-language
+   * summary between the CURRENT in-app graph+rating and the parsed disk
+   * content; `externalGraph` is that disk content's graph, kept around only
+   * so the dialog's "Compare visually" button can feed it to
+   * `setCompareDocOverride` without re-reading the file. Null = dialog
+   * closed. Transient UI state — never serialized, never pushed to history.
+   */
+  sidecarDiffDialog: { lines: string[]; externalGraph: GraphDoc } | null;
+  /**
+   * Re-read + re-parse the sidecar (same helper reloadSidecarNow uses) and
+   * open the diff dialog against the CURRENT in-app graph — the "Show diff"
+   * button next to a 'pending' hot-reload notice. No-op if the file can't be
+   * read/parsed right now (readAndParseSidecar's existing malformed/removed
+   * handling already keeps the toolbar notice honest about that) or if no
+   * image is open.
+   */
+  showSidecarDiff(): Promise<void>;
+  /** Close the diff dialog; also clears any visual compareDocOverride it turned on (see setCompareDocOverride's doc comment) so the compare pane cleanly falls back to its normal Mode A/B selection. */
+  closeSidecarDiff(): void;
   /** Result line for the toolbar after a successful export. */
   exportInfo: { width: number; height: number; bytes: number } | null;
   /** Per-image Kelvin/Tint model (as-shot estimate + relative gains). */
@@ -263,6 +287,19 @@ interface AppState {
   /** Mode B's picked second output id; null = Mode A (before). Cleared on a fresh image open, same as the other modal tools. */
   compareOutputId: string | null;
   setCompareOutputId(id: string | null): void;
+  /**
+   * Sidecar visual diff's "Compare visually" (git-native completion brief
+   * §1): a TRANSIENT whole-graph override for compare Mode B, the same
+   * "ride the existing machinery with a foreign doc" trick previewLook uses
+   * for the preset hover preview — see CanvasView.tsx's graphForBuild (for
+   * the main pane) and its compareRender call (for this one). When set,
+   * Mode B renders THIS graph's own first output instead of the
+   * compareOutputId-based second-output selection, regardless of
+   * compareOutputId. Never serialized, never pushed to history, cleared by
+   * closeSidecarDiff and on a fresh image open.
+   */
+  compareDocOverride: GraphDoc | null;
+  setCompareDocOverride(doc: GraphDoc | null): void;
   /** Crop/straighten tool active — the canvas previews the full (uncropped) rotated frame while true. */
   cropMode: boolean;
   toggleCropMode(): void;
@@ -555,6 +592,23 @@ interface AppState {
    * the loop continues.
    */
   runCliCheck(job: CliCheckJob, onResult: (result: CliCheckResult) => void): Promise<void>;
+  /**
+   * Sidecar visual diff CLI (main/index.ts's `--diff` mode, git-native
+   * completion brief §1): reads `job.sidecarA`/`job.sidecarB` as raw text
+   * (arbitrary files — neither has to be the image's own on-disk sidecar),
+   * decodes `job.image` TWICE (renderToPixels transfers its PreparedImage's
+   * data buffer — see exportOnePath's own doc comment — so each render needs
+   * its own fresh `loadImage()`, same discipline exportSelectedOutputs'
+   * per-output loop already follows), parses both docs with that image's own
+   * dims (anchor-space migration, same as any real open), and reports
+   * diffLook's lines plus either the ΔE stats between the two renders or
+   * `status:'dims-changed'` if their geometry disagrees badly enough to
+   * render different pixel dimensions. Same never-throws-per-job contract as
+   * runCliRender/runCliCheck: a failure becomes `{input,error}`; unlike those
+   * two, `job` is never a batch (see CliDiffJob's doc comment), so `onResult`
+   * fires exactly once.
+   */
+  runCliDiff(job: CliDiffJob, onResult: (result: CliDiffResult) => void): Promise<void>;
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
@@ -1414,12 +1468,14 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarUnknownFields: null,
   lastSidecarText: null,
   sidecarHotReloadNotice: null,
+  sidecarDiffDialog: null,
   exportInfo: null,
   wbModel: DEFAULT_WB_MODEL,
   showBefore: false,
   grayscaleView: false,
   compareMode: false,
   compareOutputId: null,
+  compareDocOverride: null,
   cropMode: false,
   wbPicking: false,
   colorKeyPicking: false,
@@ -1602,6 +1658,7 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarUnknownFields,
         lastSidecarText: sidecarRawText,
         sidecarHotReloadNotice: null,
+        sidecarDiffDialog: null,
         exportInfo: null,
         wbModel,
         activeOutputId: null,
@@ -1613,6 +1670,7 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedSpotIndex: null,
         compareMode: false,
         compareOutputId: null,
+        compareDocOverride: null,
       });
       revalidateShaders(graph);
       // Arm (re-arm) the main-process sidecar watcher for THIS image — see
@@ -2425,12 +2483,21 @@ export const useAppStore = create<AppState>((set, get) => {
           // mean two different "which node's result am I looking at" pickers
           // fighting over the one canvas.
           ? { compareMode: true, inspectNodeId: null, ...deactivateOtherTools('compare') }
-          : { compareMode: false }
+          // Leaving compare mode (however it happened — the toolbar toggle,
+          // 'C', or Escape) always drops any sidecar-diff compareDocOverride
+          // too: it is only ever meaningful WHILE compare is on, and leaving
+          // it set would silently resurrect the diff's pane B the next time
+          // compare gets turned on for an unrelated reason.
+          : { compareMode: false, compareDocOverride: null }
     );
   },
 
   setCompareOutputId(id) {
     set({ compareOutputId: id });
+  },
+
+  setCompareDocOverride(doc) {
+    set({ compareDocOverride: doc });
   },
 
   toggleCropMode() {
@@ -2778,6 +2845,65 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   },
 
+  async runCliDiff(job, onResult) {
+    try {
+      // openImageByPath's job here is ONLY to get an image decoded and the
+      // render-worker client mounted (CanvasView's client only exists once
+      // `image` is set — see its own doc comment) — its OWN sidecar-or-
+      // default `graph` result is discarded entirely below; sidecarA/
+      // sidecarB are parsed and rendered as two INDEPENDENT docs, same
+      // "supply my own graph, ignore whatever's open" shape exportOnePath
+      // already uses for ordinary exports.
+      await get().openImageByPath(job.image);
+      if (get().imageStatus !== 'ready') {
+        throw new Error(get().imageError ?? `failed to open ${job.image}`);
+      }
+      const { renderer } = get();
+      if (!renderer) throw new Error('no image open');
+
+      const readText = async (path: string): Promise<string> => new TextDecoder().decode(await window.silverbox.readFile(path));
+      const [textA, textB] = await Promise.all([readText(job.sidecarA), readText(job.sidecarB)]);
+
+      const kind = isRawFileName(job.image) ? 'raw' : 'jpg';
+      const baselineExposureEV = get().settings.baselineExposureEV;
+      // loadImage ALSO transfers (detaches) its own `bytes` ArrayBuffer to
+      // the decode worker — on top of renderToPixels transferring the
+      // resulting PreparedImage's data (see this function's own comment
+      // below) — so every decode needs its own FRESH readFile, not a shared
+      // `bytes` reused across the two loadImage calls.
+      const fullA = await loadImage(await window.silverbox.readFile(job.image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
+      const dims = { width: fullA.width, height: fullA.height };
+      const parsedA = parseGraphDoc(textA, dims);
+      const parsedB = parseGraphDoc(textB, dims);
+      const lines = diffLook(parsedA, parsedB);
+
+      // renderToPixels TRANSFERS its PreparedImage's data buffer (see
+      // exportOnePath's own doc comment) — a fresh decode per render, not a
+      // shared `full` reused across both docs.
+      const renderA = await renderer.renderToPixels(fullA, parsedA.graph, 1, 'srgb');
+      const fullB = await loadImage(await window.silverbox.readFile(job.image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
+      const renderB = await renderer.renderToPixels(fullB, parsedB.graph, 1, 'srgb');
+
+      if (renderA.width !== renderB.width || renderA.height !== renderB.height) {
+        // A geometry difference (e.g. a crop) that changed the rendered
+        // dimensions — reported, not resampled to force a comparison (same
+        // policy as --check's own dims-changed). The param lines above are
+        // unaffected — they need no successful pixel comparison at all.
+        onResult({ input: job.image, lines, status: 'dims-changed' });
+        return;
+      }
+      const { deltaE } = await window.silverbox.diffRenderImages({
+        dataA: renderA.data.buffer,
+        dataB: renderB.data.buffer,
+        width: renderA.width,
+        height: renderA.height,
+      });
+      onResult({ input: job.image, lines, deltaE });
+    } catch (err) {
+      onResult({ input: job.image, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
   async exportLut(path) {
     const { imagePath, fileName, graph, wbModel, imageStatus, exportStatus, activeOutputId } = get();
     if (!imagePath || !fileName || imageStatus !== 'ready' || exportStatus === 'working') return;
@@ -2907,6 +3033,28 @@ export const useAppStore = create<AppState>((set, get) => {
       return patch;
     });
     if (nextGraph) revalidateShaders(nextGraph);
+  },
+
+  async showSidecarDiff() {
+    const { imagePath, image, graph, sidecarRating } = get();
+    if (!imagePath || !image) return;
+    const result = await readAndParseSidecar(imagePath, image);
+    // a slow read can resolve after a DIFFERENT image was opened meanwhile,
+    // or after the user already moved on (undo, another edit) — either way
+    // `imagePath` no longer names what this read was about.
+    if (get().imagePath !== imagePath) return;
+    if (!result.ok) return; // readAndParseSidecar's own callers already keep sidecarHotReloadNotice honest about this
+    // The CURRENT side of the comparison is built fresh from live state, not
+    // from `lastSidecarText` — a dirty session's unsaved edits are exactly
+    // what "Show diff" exists to let the user review BEFORE they get
+    // clobbered by Reload, so the diff must reflect them.
+    const currentDoc: SidecarDoc = { graph, rating: sidecarRating };
+    const lines = diffLook(currentDoc, result.parsed);
+    set({ sidecarDiffDialog: { lines, externalGraph: result.parsed.graph } });
+  },
+
+  closeSidecarDiff() {
+    set({ sidecarDiffDialog: null, compareDocOverride: null });
   },
 
   async updateSettings(partial) {

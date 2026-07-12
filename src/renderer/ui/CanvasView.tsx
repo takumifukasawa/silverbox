@@ -98,6 +98,8 @@ declare global {
       sidecarState(): { notice: string | null; unreadable: boolean; rating: number };
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
+      /** Sidecar visual diff dialog state (git-native completion brief §1) — see appStore.ts's sidecarDiffDialog. */
+      sidecarDiffState(): { lines: string[] } | null;
       shaderErrors(): Record<string, string>;
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
@@ -356,6 +358,11 @@ export function CanvasView() {
   const toggleGrayscaleView = useAppStore((s) => s.toggleGrayscaleView);
   const compareMode = useAppStore((s) => s.compareMode);
   const compareOutputId = useAppStore((s) => s.compareOutputId);
+  // Sidecar visual diff's "Compare visually" (git-native completion brief
+  // §1): a transient whole-graph override for pane B — see appStore.ts's
+  // compareDocOverride doc comment. Takes priority over the ordinary
+  // compareOutputId-based Mode B selection below whenever set.
+  const compareDocOverride = useAppStore((s) => s.compareDocOverride);
   const cropMode = useAppStore((s) => s.cropMode);
   const wbPicking = useAppStore((s) => s.wbPicking);
   const setWbPicking = useAppStore((s) => s.setWbPicking);
@@ -705,22 +712,32 @@ export function CanvasView() {
           );
         }
         if (compareMode) {
-          const outputs = planDoc.nodes.filter((n) => n.kind === 'output');
-          const resolvedActiveId =
-            (activeOutputId && outputs.some((n) => n.id === activeOutputId) && activeOutputId) || outputs[0]?.id;
-          // Mode B only while the picked id still names a DIFFERENT, existing
-          // output — an output deleted out from under the selection (or a
-          // stale pick equal to the now-active output) falls back to Mode A.
-          const modeBOutputId =
-            compareOutputId && compareOutputId !== resolvedActiveId && outputs.some((n) => n.id === compareOutputId)
-              ? compareOutputId
-              : null;
-          client.compareRender({
-            doc: planDoc,
-            renderScale,
-            showBefore: modeBOutputId === null,
-            outputId: modeBOutputId ?? undefined,
-          });
+          if (compareDocOverride) {
+            // Sidecar visual diff's "Compare visually": pane B renders a
+            // WHOLE FOREIGN DOC (the parsed disk sidecar), its own first
+            // output — same "hand compareRender a different doc" trick Mode
+            // B's own second-output selection below already relies on
+            // (compareRender independently builds its own plan from `doc`,
+            // see renderWorker.ts's 'compareRender' handler).
+            client.compareRender({ doc: compareDocOverride, renderScale, showBefore: false, outputId: undefined });
+          } else {
+            const outputs = planDoc.nodes.filter((n) => n.kind === 'output');
+            const resolvedActiveId =
+              (activeOutputId && outputs.some((n) => n.id === activeOutputId) && activeOutputId) || outputs[0]?.id;
+            // Mode B only while the picked id still names a DIFFERENT, existing
+            // output — an output deleted out from under the selection (or a
+            // stale pick equal to the now-active output) falls back to Mode A.
+            const modeBOutputId =
+              compareOutputId && compareOutputId !== resolvedActiveId && outputs.some((n) => n.id === compareOutputId)
+                ? compareOutputId
+                : null;
+            client.compareRender({
+              doc: planDoc,
+              renderScale,
+              showBefore: modeBOutputId === null,
+              outputId: modeBOutputId ?? undefined,
+            });
+          }
         }
       }
       // refresh the histogram once edits settle (slider drags fire rapidly);
@@ -784,6 +801,7 @@ export function CanvasView() {
     selectedMaskNode?.id,
     compareMode,
     compareOutputId,
+    compareDocOverride,
     inspectNodeId,
     imagePath,
     imageNodeRev,
@@ -916,6 +934,11 @@ export function CanvasView() {
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {
         return useAppStore.getState().sidecarHotReloadNotice;
+      },
+      /** Sidecar visual diff dialog state (git-native completion brief §1) — structured line list, robust for verify against DOM text scraping. */
+      sidecarDiffState() {
+        const dialog = useAppStore.getState().sidecarDiffDialog;
+        return dialog ? { lines: dialog.lines } : null;
       },
       shaderErrors() {
         return useAppStore.getState().shaderErrors;
@@ -1559,7 +1582,7 @@ export function CanvasView() {
             />
             {!overlayVisible && compareMode && (
               <div className="compare-pane-badge" data-testid="compare-pane-badge">
-                {compareModeBNode ? outputName(compareModeBNode) : 'Before'}
+                {compareDocOverride ? 'Disk (sidecar diff)' : compareModeBNode ? outputName(compareModeBNode) : 'Before'}
               </div>
             )}
           </div>

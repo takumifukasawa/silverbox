@@ -39,6 +39,12 @@ export const IPC = {
   // is encoding, comparing against the golden PNG on disk, and reporting —
   // this one round-trip per image does all three, main-side.
   goldenCheck: 'golden:check',
+  // Sidecar visual diff CLI (`--diff <sidecarA> <sidecarB> --image <arw>` —
+  // see main/diffRender.ts): the renderer's job is producing BOTH docs'
+  // pixels (renderToPixels, same as any CLI render); main's job is
+  // resizing + computing the ΔE stats between them, same "renderer renders,
+  // main does the sharp/color-math half" split goldenCheck already uses.
+  diffRenderImages: 'cli:diffRender',
   // External-tool hook node (denoise v1 / task #41): main process spawns a
   // user-configured command over temp TIFFs (see src/main/externalTool.ts).
   externalToolRun: 'external:run',
@@ -200,6 +206,15 @@ export interface SilverboxApi {
    */
   checkGoldenImage(req: CliCheckImageRequest): Promise<CliCheckOutcome>;
   /**
+   * Sidecar visual diff CLI (`--diff`): given both docs' already-rendered
+   * full-resolution RGBA8 sRGB pixels (SAME width/height — the caller
+   * (appStore.ts's runCliDiff) already checked that and reports
+   * `dims-changed` itself otherwise, same as golden's own dims-changed
+   * short-circuit), resize both to the golden long edge and report CIE76 ΔE
+   * stats between them.
+   */
+  diffRenderImages(req: CliDiffImageRequest): Promise<CliDiffImageResult>;
+  /**
    * Run an external-tool hook node's command over temp TIFFs (task #41).
    * SECURITY: the caller (externalNodeRunner.ts) is the ONLY gate — it must
    * never call this for a (doc, command) pair the user (or `--allow-external`)
@@ -306,8 +321,27 @@ export interface CliCheckJob {
   threshold: number;
 }
 
+/**
+ * The whole job for one `--diff <sidecarA> <sidecarB> --image <arw>`
+ * invocation (sidecar visual diff, git-native completion brief §1), built by
+ * main (src/main/cliArgs.ts's buildCliJob). Unlike CliRenderJob/CliCheckJob
+ * this is never a batch over multiple images — the brief's own CLI shape is
+ * singular: two sidecar FILES (however the caller obtained them — the CLI's
+ * `--help` documents the `git show rev:path > tmp` recipe; this job never
+ * shells to git itself) compared against ONE image.
+ */
+export interface CliDiffJob {
+  mode: 'diff';
+  /** Absolute path to sidecar A's JSON text (the "before" side of the arrow in every diffLook line). */
+  sidecarA: string;
+  /** Absolute path to sidecar B's JSON text (the "after" side). */
+  sidecarB: string;
+  /** Absolute path to the image both sidecars are rendered against. */
+  image: string;
+}
+
 /** Either job shape `cli:run` can carry; the renderer branches on `mode`. */
-export type CliJob = CliRenderJob | CliCheckJob;
+export type CliJob = CliRenderJob | CliCheckJob | CliDiffJob;
 
 /** Golden-render outcome for one status that isn't a pass/fail ΔE comparison. */
 export type CliCheckStatus =
@@ -328,8 +362,25 @@ export type CliCheckOutcome =
 /** CliCheckOutcome plus the same {input,error} failure shape CliRenderResult uses — streamed via cliProgress. */
 export type CliCheckResult = CliCheckOutcome | { input: string; error: string };
 
+/**
+ * One `--diff` outcome: `lines` is diffLook's param-language summary
+ * (`engine/look/diffLook.ts`) between sidecarA and sidecarB — always present,
+ * even on a dims mismatch, since the PARAM diff needs no successful pixel
+ * comparison at all (`lines` is the load-bearing half; `deltaE` is the
+ * garnish, see the brief). `status: 'dims-changed'` mirrors CliCheckStatus's
+ * own case: the two docs' geometry (e.g. a crop) renders to different
+ * dimensions, so there is nothing to compare pixel-for-pixel — reported
+ * rather than resampled to force a comparison.
+ */
+export type CliDiffOutcome =
+  | { input: string; lines: string[]; deltaE: DeltaEStats }
+  | { input: string; lines: string[]; status: 'dims-changed' };
+
+/** CliDiffOutcome plus the same {input,error} failure shape every other CLI result uses — streamed via cliProgress. */
+export type CliDiffResult = CliDiffOutcome | { input: string; error: string };
+
 /** Whatever cliProgress carries — main's formatter (cliArgs.ts's formatCliProgress) branches on shape. */
-export type CliProgressResult = CliRenderResult | CliCheckResult;
+export type CliProgressResult = CliRenderResult | CliCheckResult | CliDiffResult;
 
 /**
  * Request for one image's golden check/update (`window.silverbox.checkGoldenImage`
@@ -346,6 +397,26 @@ export interface CliCheckImageRequest {
   height: number;
   update: boolean;
   threshold: number;
+}
+
+/**
+ * Request for one `--diff` comparison's ΔE half
+ * (`window.silverbox.diffRenderImages` — see main/diffRender.ts). `dataA`/
+ * `dataB` are the SAME full-resolution display-encoded RGBA8 sRGB pixels a
+ * normal export would produce, for sidecarA's and sidecarB's renders
+ * respectively — both MUST already share `width`/`height` (the caller checks
+ * this itself and reports `dims-changed` without ever calling this when they
+ * don't, see CliDiffOutcome's doc comment).
+ */
+export interface CliDiffImageRequest {
+  dataA: ArrayBuffer;
+  dataB: ArrayBuffer;
+  width: number;
+  height: number;
+}
+
+export interface CliDiffImageResult {
+  deltaE: DeltaEStats;
 }
 
 /**

@@ -8,6 +8,8 @@ import {
   SIDECAR_SUFFIX,
   type CliCheckImageRequest,
   type CliCheckOutcome,
+  type CliDiffImageRequest,
+  type CliDiffImageResult,
   type CliProgressResult,
   type ExportEncodeRequest,
   type ExportEncodeResult,
@@ -22,6 +24,7 @@ import {
   type Settings,
 } from '../../shared/ipc';
 import { CLI_USAGE, buildCliJob, formatCliProgress, parseCliArgs } from './cliArgs';
+import { diffRenderImages } from './diffRender';
 import { externalToolSpawnCount, runExternalTool } from './externalTool';
 import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
@@ -288,6 +291,10 @@ function registerIpc(): void {
     return checkGoldenImage(req);
   });
 
+  ipcMain.handle(IPC.diffRenderImages, async (_ev, req: CliDiffImageRequest): Promise<CliDiffImageResult> => {
+    return diffRenderImages(req);
+  });
+
   ipcMain.handle(IPC.externalToolRun, async (_ev, req: ExternalToolRequest): Promise<ExternalToolResult> => {
     return runExternalTool(req);
   });
@@ -382,7 +389,11 @@ async function runCliMode(): Promise<void> {
     app.exit(0);
     return;
   }
-  if (parsed.images.length === 0) {
+  // --diff never carries positional images (its one image comes via
+  // --image — see cliArgs.ts's own validation, which already rejects any
+  // positional image alongside --diff) — this guard is only meaningful for
+  // --render/--check's `<image…>` argument list.
+  if (parsed.mode !== 'diff' && parsed.images.length === 0) {
     console.error('silverbox-render: no input images given\n');
     console.error(CLI_USAGE);
     app.exit(2);
@@ -399,6 +410,14 @@ async function runCliMode(): Promise<void> {
   // CLI_USAGE's documented exit codes for both modes.
   const onProgress = (_ev: unknown, result: CliProgressResult): void => {
     if ('error' in result) hadFailure = true;
+    // --diff (CliDiffOutcome) is purely informational — never a failure,
+    // even its own 'dims-changed' status, regardless of whether differences
+    // were found (see cliArgs.ts's CLI_USAGE "git diff" exit-code note).
+    // Checked BEFORE the 'status'/'pass' branches below since a dims-changed
+    // diff outcome would otherwise be caught by the --check status check.
+    else if ('lines' in result) {
+      /* never a failure */
+    }
     // '--min-rating' skips are a deliberate no-op, not a failure (see
     // CliRenderJob.minRating's doc comment) — every other 'status' value
     // (--check's no-golden/dims-changed) IS a failure unless --update.

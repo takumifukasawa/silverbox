@@ -214,6 +214,7 @@ export function Toolbar() {
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
   const sidecarRating = useAppStore((s) => s.sidecarRating);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
+  const showSidecarDiff = useAppStore((s) => s.showSidecarDiff);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
@@ -371,9 +372,21 @@ export function Toolbar() {
               {sidecarHotReloadNotice.message}
             </span>
             {sidecarHotReloadNotice.kind === 'pending' && (
-              <button onClick={() => void reloadSidecarNow()} data-testid="hotreload-reload-button">
-                Reload
-              </button>
+              <>
+                {/* Sidecar visual diff (git-native completion brief §1): the
+                    AI-loop code-review moment — see this diff against the
+                    external content BEFORE deciding Reload vs keep your own
+                    unsaved edits. Only meaningful for 'pending' (the only
+                    kind where the in-app graph and disk genuinely disagree
+                    right now — 'reloaded' already applied, 'malformed' can't
+                    be parsed to diff against). */}
+                <button onClick={() => void showSidecarDiff()} data-testid="hotreload-diff-button">
+                  Show diff
+                </button>
+                <button onClick={() => void reloadSidecarNow()} data-testid="hotreload-reload-button">
+                  Reload
+                </button>
+              </>
             )}
           </span>
         )}

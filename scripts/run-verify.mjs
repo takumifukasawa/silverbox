@@ -88,6 +88,7 @@ const ALL_SCRIPTS = [
   { name: 'basecurve', file: 'verify-basecurve.mjs' },
   { name: 'hotreload', file: 'verify-hotreload.mjs' },
   { name: 'cli', file: 'verify-cli.mjs' },
+  { name: 'diff', file: 'verify-diff.mjs' },
   { name: 'golden', file: 'verify-golden.mjs' },
   { name: 'preview', file: 'verify-preview.mjs' },
   { name: 'filmstrip', file: 'verify-filmstrip.mjs' },

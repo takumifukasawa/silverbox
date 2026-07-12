@@ -13,6 +13,7 @@
 import { resolve } from 'node:path';
 import type {
   CliCheckJob,
+  CliDiffJob,
   CliJob,
   CliProgressResult,
   CliRenderJob,
@@ -23,6 +24,7 @@ import type {
 
 export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg> [more images…]
        silverbox-render --check [--update] [--threshold <deltaE>] [--json] <image…>
+       silverbox-render --diff <sidecarA> <sidecarB> --image <arw> [--json]
 
   --out <dir>          output directory (default: alongside each input)
   --preset <name|path> apply a preset instead of the image's own sidecar.
@@ -88,10 +90,40 @@ as {input,status:"dims-changed"} rather than resampled to compare.
 
 Exit codes (--check): 0 every image passed or was updated, 1 one or more
 failed/had no golden (without --update), 2 bad usage.
+
+Sidecar visual diff (--diff): "code review for looks" for two versions of a
+look — an AI-edited sidecar reviewed before you trust it, or two git
+revisions of the same file. Reports diffLook's human-readable param lines
+(added/removed nodes, changed values, curve changes summarized by their
+p25/p50/p75 — never a raw point dump) PLUS the ΔE stats between the two
+renders (same golden-render style CIE76 comparison --check uses, at the same
+512px long edge).
+
+  --diff <sidecarA> <sidecarB>
+                        two sidecar JSON files (schemaVersion 2/3/4 all
+                        accepted and migrated exactly like a normal open) —
+                        neither has to be the image's OWN on-disk sidecar.
+                        This CLI never shells to git; to diff against a git
+                        revision, produce the file yourself first:
+                          git show <rev>:path/to/photo.ARW.silverbox.json > /tmp/old.json
+                          silverbox-render --diff /tmp/old.json photo.ARW.silverbox.json --image photo.ARW
+  --image <path>        the image both sidecars render against — required
+                        with --diff, not valid otherwise. No positional
+                        image arguments with --diff (pass it via --image).
+
+A geometry difference that changes the rendered dimensions (e.g. a crop edit
+between the two sidecars) is reported as {input,lines,status:"dims-changed"}
+— the param lines still come through, but there is no pixel comparison to
+resample and force.
+
+Exit codes (--diff): 0 the comparison ran (regardless of whether it found
+differences — the same "diff always succeeds, its OUTPUT is the news"
+exit-code philosophy \`git diff\` itself uses), 1 a sidecar/the image could
+not be read or parsed, 2 bad usage.
 `;
 
 export interface CliParsedArgs {
-  mode: 'render' | 'check';
+  mode: 'render' | 'check' | 'diff';
   images: string[];
   outDir: string | null;
   preset: string | null;
@@ -110,6 +142,12 @@ export interface CliParsedArgs {
   threshold: number;
   /** --allow-external: only meaningful with mode 'render' (see CliRenderJob's doc comment). */
   allowExternal: boolean;
+  /** --diff <sidecarA> <sidecarB>'s first path; only meaningful with mode 'diff'. */
+  sidecarA: string | null;
+  /** --diff <sidecarA> <sidecarB>'s second path; only meaningful with mode 'diff'. */
+  sidecarB: string | null;
+  /** --image <path>; only meaningful with (and required by) mode 'diff'. */
+  diffImage: string | null;
 }
 
 const METADATA_VALUES: ExportMetadataPolicy[] = ['all', 'minimal', 'none'];
@@ -136,6 +174,9 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     update: false,
     threshold: DEFAULT_DELTAE_THRESHOLD,
     allowExternal: false,
+    sidecarA: null,
+    sidecarB: null,
+    diffImage: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -152,6 +193,19 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       case '--check':
         opts.mode = 'check';
+        break;
+      case '--diff': {
+        const a = argv[++i];
+        const b = argv[++i];
+        if (a === undefined || b === undefined) return { error: '--diff expects two sidecar file paths' };
+        opts.mode = 'diff';
+        opts.sidecarA = a;
+        opts.sidecarB = b;
+        break;
+      }
+      case '--image':
+        opts.diffImage = argv[++i] ?? null;
+        if (opts.diffImage === null) return { error: '--image expects a path' };
         break;
       case '--update':
         opts.update = true;
@@ -219,9 +273,25 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --check' };
     if (opts.minRating !== null) return { error: '--min-rating is not valid with --check' };
     if (opts.allowExternal) return { error: '--allow-external is not valid with --check' };
+    if (opts.diffImage !== null) return { error: '--image is not valid with --check' };
+  } else if (opts.mode === 'diff') {
+    if (opts.diffImage === null) return { error: '--diff requires --image <path>' };
+    if (opts.images.length > 0) return { error: '--diff takes no positional images — pass the image via --image' };
+    if (opts.outDir !== null) return { error: '--out is not valid with --diff' };
+    if (opts.preset !== null) return { error: '--preset is not valid with --diff' };
+    if (opts.output !== null) return { error: '--output is not valid with --diff' };
+    if (opts.quality !== 90) return { error: '--quality is not valid with --diff' };
+    if (opts.maxDim !== null) return { error: '--max-dim is not valid with --diff' };
+    if (opts.metadata !== 'all') return { error: '--metadata is not valid with --diff' };
+    if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --diff' };
+    if (opts.minRating !== null) return { error: '--min-rating is not valid with --diff' };
+    if (opts.allowExternal) return { error: '--allow-external is not valid with --diff' };
+    if (opts.update) return { error: '--update is not valid with --diff' };
+    if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --diff' };
   } else {
     if (opts.update) return { error: '--update requires --check' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
+    if (opts.diffImage !== null) return { error: '--image requires --diff' };
   }
   return opts;
 }
@@ -238,6 +308,18 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
   const images = parsed.images.map((p) => resolve(cwd, p));
   if (parsed.mode === 'check') {
     const job: CliCheckJob = { mode: 'check', images, update: parsed.update, threshold: parsed.threshold };
+    return job;
+  }
+  if (parsed.mode === 'diff') {
+    // parseCliArgs's own validation guarantees these three are set whenever
+    // mode reaches 'diff' (sidecarA/sidecarB come from the SAME --diff
+    // parse as the mode flip; diffImage's absence is rejected there too).
+    const job: CliDiffJob = {
+      mode: 'diff',
+      sidecarA: resolve(cwd, parsed.sidecarA!),
+      sidecarB: resolve(cwd, parsed.sidecarB!),
+      image: resolve(cwd, parsed.diffImage!),
+    };
     return job;
   }
   const preset: CliRenderPresetRef | null =
@@ -271,6 +353,24 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
 export function formatCliProgress(result: CliProgressResult, json: boolean): { stderr: boolean; line: string } {
   if (json) return { stderr: false, line: JSON.stringify(result) };
   if ('error' in result) return { stderr: true, line: `${result.input}: ERROR ${result.error}` };
+  if ('lines' in result) {
+    // --diff (CliDiffOutcome): checked BEFORE the 'status'/'deltaE' branches
+    // below — a dims-changed diff outcome also carries 'status', and a
+    // normal one also carries 'deltaE', so 'lines' (diff-only) is the one
+    // key that disambiguates both variants from --check's CliCheckOutcome.
+    // Never a failure (see this file's CLI_USAGE "git diff" exit-code note).
+    const lines = result.lines.map((l) => `  ${l}`);
+    if ('status' in result) {
+      return { stderr: false, line: [`${result.input}: DIMS CHANGED (no pixel comparison)`, ...lines].join('\n') };
+    }
+    const { mean, p95, max } = result.deltaE;
+    return {
+      stderr: false,
+      line: [`${result.input}:`, ...lines, `  ΔE mean=${mean.toFixed(3)} p95=${p95.toFixed(3)} max=${max.toFixed(3)}`].join(
+        '\n'
+      ),
+    };
+  }
   if ('status' in result) {
     // --render's own status (--min-rating skip) is never a failure — a
     // completely different bucket from --check's no-golden/dims-changed
