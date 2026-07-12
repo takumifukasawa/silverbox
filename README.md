@@ -91,6 +91,11 @@ not — are written down in [DESIGN.md](DESIGN.md).
   git-shareable JSON file under the app data dir, with the same
   capture/merge semantics as the develop clipboard (⌘⇧C/⌘⇧V) — a preset
   never carries another photo's crop.
+- **Folder filmstrip** — browse a folder, not a catalog: drop a folder (or
+  "Open…▾" → "Open Folder…") to see a horizontal, lazily-thumbnailed strip
+  below the canvas; click a cell or press ←/→ to switch images. No database,
+  no on-disk thumbnail cache, nothing persisted beyond the sidecars that
+  already exist.
 
 ## Engine
 

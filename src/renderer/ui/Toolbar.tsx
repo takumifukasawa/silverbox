@@ -57,6 +57,63 @@ function AddNodeMenu() {
   );
 }
 
+/**
+ * "Open…" split button + a small "▾" dropdown for "Open Folder…" (folder
+ * filmstrip, ROADMAP "nice to have"). The toolbar is already dense (Open,
+ * Save, undo/redo, Crop, Spots, Add node, +Radial/+Linear, Presets, mask
+ * overlay, Delete node, output selector, Export, Settings — wrapping across
+ * two rows on a laptop-width window), and "Open Folder…" is a rare,
+ * once-per-session action next to "Open…"'s everyday one — a second
+ * always-visible top-level button would just be more toolbar clutter for
+ * something used far less often. A tiny caret next to the existing button
+ * (same "▾" dropdown pattern as Add node/Presets below) keeps the common
+ * case exactly one click, unchanged, and tucks the rare case one click
+ * further behind instead of permanently widening the row.
+ */
+function OpenMenu() {
+  const imageStatus = useAppStore((s) => s.imageStatus);
+  const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
+  const openFolder = useAppStore((s) => s.openFolder);
+  const [open, setOpen] = useState(false);
+  const busy = imageStatus === 'loading';
+
+  return (
+    <span className="open-menu">
+      <button onClick={() => void openImageViaDialog()} disabled={busy} data-testid="open-button">
+        Open…
+      </button>
+      <button
+        onClick={() => setOpen(!open)}
+        disabled={busy}
+        data-testid="open-menu-toggle"
+        title="More open options"
+      >
+        ▾
+      </button>
+      {open && (
+        <>
+          <div className="add-node-menu-backdrop" onClick={() => setOpen(false)} />
+          <div className="add-node-menu-list" data-testid="open-menu">
+            <button
+              data-testid="open-folder-button"
+              title="Open a folder — thumbnail strip, click to switch images (no database, nothing persisted)"
+              onClick={() => {
+                setOpen(false);
+                void (async () => {
+                  const result = await window.silverbox.openFolderDialog();
+                  if (!result.canceled) await openFolder(result.path);
+                })();
+              }}
+            >
+              Open Folder…
+            </button>
+          </div>
+        </>
+      )}
+    </span>
+  );
+}
+
 /** Output selector (spec §6): appears only when the doc has more than one output node. */
 function OutputSelector() {
   const graph = useAppStore((s) => s.graph);
@@ -95,7 +152,6 @@ export function Toolbar() {
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
-  const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
@@ -128,9 +184,7 @@ export function Toolbar() {
 
   return (
     <div className="toolbar">
-      <button onClick={() => void openImageViaDialog()} disabled={imageStatus === 'loading'}>
-        Open…
-      </button>
+      <OpenMenu />
       <button
         onClick={() => void saveGraph()}
         disabled={imageStatus !== 'ready' || sidecarUnreadable}

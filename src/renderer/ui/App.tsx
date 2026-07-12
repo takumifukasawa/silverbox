@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Toolbar } from './Toolbar';
 import { CanvasView } from './CanvasView';
+import { Filmstrip } from './Filmstrip';
 import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
 import { ExportDialog } from './ExportDialog';
@@ -12,6 +13,8 @@ declare global {
   interface Window {
     /** Verify-harness hook: open an image bypassing the native dialog. */
     __openImageByPath: (path: string) => Promise<void>;
+    /** Verify-harness hook: open a folder (filmstrip) bypassing the native directory dialog. */
+    __openFolderByPath: (path: string) => Promise<void>;
   }
 }
 
@@ -53,6 +56,7 @@ export function App() {
 
   useEffect(() => {
     window.__openImageByPath = (path: string) => useAppStore.getState().openImageByPath(path);
+    window.__openFolderByPath = (path: string) => useAppStore.getState().openFolder(path).then(() => undefined);
     const onKeyDown = (ev: KeyboardEvent) => {
       const cmd = ev.metaKey || ev.ctrlKey;
       if (cmd && !ev.altKey && !ev.shiftKey && ev.key === 'o') {
@@ -152,6 +156,18 @@ export function App() {
         ev.preventDefault();
         s.toggleMaskOverlay();
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && (ev.key === 'ArrowRight' || ev.key === 'ArrowLeft')) {
+        // Folder filmstrip prev/next (ROADMAP "nice to have"): never steal
+        // arrow keys from a text field, and a complete no-op without a
+        // folder context (stepFilmstrip itself also guards this, but
+        // checking here too means a bare ArrowLeft/Right on a single-file
+        // open doesn't even preventDefault — nothing to lose focus/scroll to).
+        if (isTextEntry(ev.target)) return;
+        const s = useAppStore.getState();
+        if (!s.folderDir) return;
+        ev.preventDefault();
+        s.stepFilmstrip(ev.key === 'ArrowRight' ? 1 : -1);
+      }
     };
     // Capture phase + window target: these shortcuts must fire regardless of
     // which panel currently holds focus (node editor pane, canvas, inspector)
@@ -213,7 +229,28 @@ export function App() {
       ev.preventDefault(); // never navigate to the file
       depth = 0;
       setDropActive(false);
-      const file = pickDropFile([...(ev.dataTransfer?.files ?? [])]);
+      const files = [...(ev.dataTransfer?.files ?? [])];
+      // A dropped FOLDER also arrives as a single File entry (the OS gives
+      // no other signal), so a lone drop is ambiguous — try it as a folder
+      // first (folder filmstrip, ROADMAP "nice to have"): openFolder's own
+      // listImages call throws for anything that isn't a readable
+      // directory, which is exactly the "actually just a file" signal this
+      // needs. A multi-file drop is unambiguous (never a folder) and keeps
+      // today's exact pickDropFile behavior untouched.
+      if (files.length === 1) {
+        const path = window.silverbox.getPathForFile(files[0]!);
+        if (path) {
+          void (async () => {
+            const openedAsFolder = await useAppStore.getState().openFolder(path);
+            // Not a folder after all — a standalone single-file drop.
+            // openImageByPath itself exits folder-browsing by default (see
+            // its `keepFolderContext` doc comment), so nothing else to reset.
+            if (!openedAsFolder) await useAppStore.getState().openImageByPath(path);
+          })();
+        }
+        return;
+      }
+      const file = pickDropFile(files);
       if (!file) return;
       const path = window.silverbox.getPathForFile(file);
       if (path) void useAppStore.getState().openImageByPath(path);
@@ -231,11 +268,24 @@ export function App() {
     };
   }, []);
 
+  const folderDir = useAppStore((s) => s.folderDir);
+
   return (
     <div className="app-layout">
       <Toolbar />
       <div className="main-row">
-        <CanvasView />
+        {/* .canvas-column wraps CanvasView + the filmstrip as a vertical pair
+            taking the same horizontal slot CanvasView used to occupy alone —
+            CanvasView's own internal layout/CSS is untouched (still flex:1,
+            position:relative, filling whatever box it's given), so none of
+            its absolute-positioned overlays (crop/mask/spot handles) needed
+            to change. `key={folderDir}` forces a full remount of Filmstrip
+            on every folder switch — see Filmstrip.tsx's doc comment for why
+            that's what actually drives the thumbnail-cache cleanup. */}
+        <div className="canvas-column">
+          <CanvasView />
+          {folderDir !== null && <Filmstrip key={folderDir} />}
+        </div>
         <InspectorPanel />
       </div>
       <NodeEditorPanel />

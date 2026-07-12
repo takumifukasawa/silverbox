@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
+import { thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { srgbEncode } from '../engine/color/srgb';
 import { WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
@@ -54,6 +55,14 @@ declare global {
       openingPreviewState(): { url: string; width: number; height: number } | null;
       /** Verify-only: every blob: URL clearOpeningPreview has revoked so far, in order (proves a rapid second open doesn't leak the first's URL). */
       openingPreviewRevocations(): string[];
+      /** Folder filmstrip (ROADMAP "nice to have") state: the open folder (if any) + its sorted listing + which path is current. */
+      folderState(): {
+        dir: string | null;
+        entries: { name: string; path: string; hasSidecar: boolean; mtimeMs: number }[];
+        currentPath: string | null;
+      };
+      /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
+      thumbnailRevocations(): string[];
       rendererKind(): 'webgpu';
       outputSize(): { width: number; height: number } | null;
       readbackMean(): Promise<{ r: number; g: number; b: number } | null>;
@@ -539,6 +548,17 @@ export function CanvasView() {
       },
       openingPreviewRevocations() {
         return [...openingPreviewRevocationLog()];
+      },
+      folderState() {
+        const s = useAppStore.getState();
+        return {
+          dir: s.folderDir,
+          entries: s.folderEntries.map((e) => ({ name: e.name, path: e.path, hasSidecar: e.hasSidecar, mtimeMs: e.mtimeMs })),
+          currentPath: s.imagePath,
+        };
+      },
+      thumbnailRevocations() {
+        return [...thumbnailRevocationLog()];
       },
       rendererKind() {
         return 'webgpu';

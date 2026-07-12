@@ -10,6 +10,8 @@ import type { DeltaEStats } from './color/deltaE';
 export const IPC = {
   ping: 'app:ping',
   openImageDialog: 'dialog:openImage',
+  openFolderDialog: 'dialog:openFolder',
+  listImages: 'fs:listImages',
   readFile: 'file:read',
   readSidecar: 'sidecar:read',
   writeSidecar: 'sidecar:write',
@@ -66,10 +68,38 @@ export interface PingResult {
 
 export type OpenImageDialogResult = { canceled: true } | { canceled: false; path: string; fileName: string };
 
+/**
+ * One entry in a folder-filmstrip listing (ROADMAP "Folder filmstrip" —
+ * browse a folder, NOT a catalog: nothing here is written anywhere, it's
+ * recomputed from disk every time a folder is opened). `hasSidecar` and
+ * `mtimeMs` are read once at listing time by main (src/main/index.ts's
+ * listImages handler) — the renderer never polls the filesystem itself.
+ */
+export interface FolderImageEntry {
+  /** Basename (e.g. "DSC02993.ARW") — the cell's hover title. */
+  name: string;
+  /** Absolute path — what openImageByPath / the thumbnail cache key off of. */
+  path: string;
+  /** A `<path>.silverbox.json` sidecar exists next to this file (the filmstrip's "edited" dot). */
+  hasSidecar: boolean;
+  /** mtime in ms. Not used for sorting today (filename order is — see listImages's doc comment), kept for a possible future "sort by date". */
+  mtimeMs: number;
+}
+
 export interface SilverboxApi {
   ping(): Promise<PingResult>;
   /** Show the native open dialog filtered to supported image types. */
   openImageDialog(): Promise<OpenImageDialogResult>;
+  /** Show the native folder-picker dialog (folder filmstrip, ROADMAP "nice to have"). */
+  openFolderDialog(): Promise<OpenImageDialogResult>;
+  /**
+   * List `dir`'s supported images (IMAGE_EXTENSIONS, no recursion), sorted by
+   * filename — folder filmstrip's one piece of main-process surface. Throws
+   * (ENOTDIR/ENOENT etc.) if `dir` isn't a readable directory; callers that
+   * need to distinguish "dropped a folder" from "dropped a file" rely on
+   * that (see App.tsx's drop handler).
+   */
+  listImages(dir: string): Promise<FolderImageEntry[]>;
   /** Read a file's bytes (used after dialog / drag-and-drop resolves a path). */
   readFile(path: string): Promise<ArrayBuffer>;
   /** Read a `.silverbox.json` sidecar; null if it does not exist. */

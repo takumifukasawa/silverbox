@@ -101,6 +101,26 @@ button:disabled {
   position: relative;
 }
 
+/* "Open…" split button + "▾" dropdown for "Open Folder…" (folder filmstrip,
+   ROADMAP "nice to have") — see Toolbar.tsx's OpenMenu doc comment for why
+   this is a dropdown rather than a second always-visible button. */
+.open-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.open-menu button:first-child {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.open-menu button:last-child {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  border-left: none;
+  padding: 5px 8px;
+}
+
 /* "+ Radial"/"+ Linear" (draw-to-create masks, UX pack B §1) — a compact
    pair replacing the old single "+ Local Adjustment" button. */
 .local-adjustment-buttons {
@@ -263,11 +283,78 @@ button:disabled {
   min-height: 0;
 }
 
+/* Wraps CanvasView + the folder filmstrip (App.tsx) as a vertical pair
+   taking the same horizontal slot .canvas-view used to occupy alone in
+   .main-row — .canvas-view's own flex:1 still works unchanged as a vertical
+   flex item here. */
+.canvas-column {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
 .canvas-view {
   flex: 1;
   position: relative;
   background: #141414;
   min-width: 0;
+  min-height: 0;
+}
+
+/* Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
+   catalog): bottom of the canvas area, LR convention. Rendered only while a
+   folder context exists (App.tsx) — a single-file open shows none of this. */
+.filmstrip {
+  flex: 0 0 84px;
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: #1a1a1a;
+  border-top: 1px solid #111;
+}
+
+.filmstrip-cell {
+  position: relative;
+  flex: 0 0 auto;
+  width: 96px;
+  padding: 0;
+  border: 2px solid transparent;
+  border-radius: 4px;
+  background: #2a2a2a;
+  overflow: hidden;
+}
+
+.filmstrip-cell:hover {
+  border-color: #666;
+}
+
+.filmstrip-cell--current {
+  border-color: #6a9fe8;
+}
+
+.filmstrip-thumb {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
+.filmstrip-edited-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #f0a832;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
 }
 
 .canvas-viewport {

@@ -93,6 +93,22 @@ byte range, no decode) as a canvas overlay the instant it's extracted, while
 the real libraw decode + GPU render runs behind it; the overlay swaps out the
 moment the real image reaches 'ready'. JPEG opens skip the whole path (they
 decode fast enough that a preview would itself be the delay).
+Folder filmstrip (browse a folder, NOT a catalog): open a folder — via a
+folder drop (a dropped item is tried as a folder first, falling back to a
+regular file open if it isn't one) or the toolbar's "Open…▾" → "Open
+Folder…" — and a horizontal, lazily-thumbnailed strip appears below the
+canvas, listing that folder's images (no recursion) sorted by filename; click
+a cell, or ←/→, to switch. Thumbnails reuse the Sony embedded-preview
+extractor with a new size preference (the smallest embedded JPEG at least
+160px on its long edge — the a7C II's own IFD1 thumb, not the full-frame
+preview) for a RAW, or a decode-time `createImageBitmap` resize for a JPEG;
+loaded lazily (IntersectionObserver) through a small concurrency-limited
+queue, cached as blob: URLs per path with no on-disk cache (that stays
+catalog territory) and revoked on every folder switch. A single-file open
+(dialog, drop, or the verify harness's own open hook) always exits
+folder-browsing and shows no strip, matching today's exact experience.
+Ratings persisted in the sidecar (so they stay git-native) are explicit
+future work, not v1.
 
 ## In flight / agreed order
 
@@ -137,9 +153,10 @@ offset (value decided in the Lightroom calibration session).
 
 ## Nice to have
 
-- **Folder filmstrip** (NOT a catalog): open a folder, thumbnail strip from
-  embedded previews, click to switch images; no database — and ratings, if
-  they come, live in the sidecar so they stay git-native
+- **Ratings** for the folder filmstrip (Implemented above): a per-image
+  rating, stored in that image's OWN sidecar (not a database, not a
+  catalog-wide index) so it stays git-native like everything else here —
+  deliberately deferred out of the filmstrip's v1.
 - **Per-node preview** (UE-material-editor style): inspect any node's
   output in the preview / as node thumbnails — the renderer already keeps
   per-step textures

@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { watch, type FSWatcher } from 'node:fs';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { join, dirname, basename } from 'node:path';
+import { join, dirname, basename, extname } from 'node:path';
 import {
   IPC,
   SIDECAR_SUFFIX,
@@ -13,6 +13,7 @@ import {
   type ExportEncodeResult,
   type ExportLutRequest,
   type ExportLutResult,
+  type FolderImageEntry,
   type OpenImageDialogResult,
   type PingResult,
   type PresetSummary,
@@ -126,6 +127,41 @@ function registerIpc(): void {
     const path = result.filePaths[0];
     if (result.canceled || !path) return { canceled: true };
     return { canceled: false, path, fileName: basename(path) };
+  });
+
+  ipcMain.handle(IPC.openFolderDialog, async (): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return { canceled: true };
+    return { canceled: false, path, fileName: basename(path) };
+  });
+
+  ipcMain.handle(IPC.listImages, async (_ev, dir: unknown): Promise<FolderImageEntry[]> => {
+    if (typeof dir !== 'string') throw new Error('listImages: dir must be a string');
+    // No recursion (folder filmstrip v1 — ROADMAP "nice to have"): readdir
+    // throws ENOTDIR/ENOENT for anything that isn't a readable directory,
+    // which the renderer's drop handler relies on to tell "dropped a folder"
+    // from "dropped a file" (see App.tsx).
+    const dirents = await readdir(dir, { withFileTypes: true });
+    const entries: FolderImageEntry[] = [];
+    for (const dirent of dirents) {
+      if (!dirent.isFile()) continue;
+      const ext = extname(dirent.name).slice(1).toLowerCase();
+      if (!IMAGE_EXTENSIONS.includes(ext)) continue;
+      const path = join(dir, dirent.name);
+      const st = await stat(path);
+      const hasSidecar = await access(path + SIDECAR_SUFFIX)
+        .then(() => true)
+        .catch(() => false);
+      entries.push({ name: dirent.name, path, hasSidecar, mtimeMs: st.mtimeMs });
+    }
+    // Filename order, not mtime: hardlinked test fixtures (the verify suite's
+    // own isolation trick — see run-verify.mjs) share one inode and so an
+    // identical mtime across several distinctly-named files, which would sort
+    // ambiguously/unstably. Filename order is also just what a folder listing
+    // reads as "sorted" to a user.
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    return entries;
   });
 
   ipcMain.handle(IPC.readFile, async (_ev, path: unknown): Promise<ArrayBuffer> => {

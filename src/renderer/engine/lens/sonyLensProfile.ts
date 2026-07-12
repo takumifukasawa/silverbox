@@ -397,10 +397,27 @@ function collectJpegCandidates(view: DataView, le: boolean, ifd0Off: number): { 
 }
 
 /**
- * Extract the LARGEST embedded full-frame JPEG preview from a Sony ARW, as a
- * cheap byte-range slice (no decode) — task: embedded-preview-first opening.
- * Shown immediately in the UI while the real libraw decode + GPU render runs
- * behind it, then swapped out once the real image reaches 'ready'.
+ * Size preference for extractSonyEmbeddedPreview:
+ *  - 'largest' (default): the biggest embedded JPEG — embedded-preview-first
+ *    opening wants the full-frame camera JPEG.
+ *  - 'smallest-above': the SMALLEST embedded JPEG whose long edge is still
+ *    >= `minLongEdge` (default 160) — the filmstrip thumbnail cache wants the
+ *    a7C II's own 160×120 IFD1 thumb, not its 1616×1080 IFD0 preview or its
+ *    4608×3072 JpgFromRaw. Falls back to 'largest' if nothing clears the
+ *    floor (still returns something rather than nothing).
+ */
+export interface ExtractPreviewOptions {
+  prefer?: 'largest' | 'smallest-above';
+  /** Long-edge floor (px) for 'smallest-above'; ignored for 'largest'. */
+  minLongEdge?: number;
+}
+
+/**
+ * Extract an embedded full-frame JPEG preview from a Sony ARW, as a cheap
+ * byte-range slice (no decode) — task: embedded-preview-first opening (also
+ * reused by the folder filmstrip's thumbnail cache with `{ prefer:
+ * 'smallest-above' }`). Default (`opts` omitted) is unchanged from before
+ * this option existed: the LARGEST candidate.
  *
  * Gated to Sony (Make tag 0x010f) — a non-Sony TIFF-based RAW may carry the
  * same standard 0x0201/0x0202 tag pair, but this function's chain-walk
@@ -412,7 +429,7 @@ function collectJpegCandidates(view: DataView, le: boolean, ifd0Off: number): { 
  * buffer, or a Sony ARW whose preview tags don't parse as a JPEG with a
  * readable SOF header.
  */
-export function extractSonyEmbeddedPreview(buffer: ArrayBuffer): EmbeddedPreview | null {
+export function extractSonyEmbeddedPreview(buffer: ArrayBuffer, opts?: ExtractPreviewOptions): EmbeddedPreview | null {
   try {
     const view = new DataView(buffer);
     if (view.byteLength < 8) return null;
@@ -430,16 +447,25 @@ export function extractSonyEmbeddedPreview(buffer: ArrayBuffer): EmbeddedPreview
     if (!make || !make.toUpperCase().startsWith('SONY')) return null;
 
     const candidates = collectJpegCandidates(view, le, ifd0Off);
-    let best: EmbeddedPreview | null = null;
+    const dimsCandidates: { offset: number; length: number; width: number; height: number }[] = [];
     for (const { offset, length } of candidates) {
       const dims = readJpegDimensions(view, offset, length);
-      if (!dims) continue;
-      const area = dims.width * dims.height;
-      if (!best || area > best.width * best.height) {
-        best = { bytes: buffer.slice(offset, offset + length), width: dims.width, height: dims.height };
-      }
+      if (dims) dimsCandidates.push({ offset, length, ...dims });
     }
-    return best;
+    if (dimsCandidates.length === 0) return null;
+
+    const prefer = opts?.prefer ?? 'largest';
+    const pickLargest = () =>
+      dimsCandidates.reduce((best, c) => (c.width * c.height > best.width * best.height ? c : best));
+    let chosen: (typeof dimsCandidates)[number];
+    if (prefer === 'largest') {
+      chosen = pickLargest();
+    } else {
+      const minLongEdge = opts?.minLongEdge ?? 160;
+      const above = dimsCandidates.filter((c) => Math.max(c.width, c.height) >= minLongEdge);
+      chosen = above.length > 0 ? above.reduce((best, c) => (c.width * c.height < best.width * best.height ? c : best)) : pickLargest();
+    }
+    return { bytes: buffer.slice(chosen.offset, chosen.offset + chosen.length), width: chosen.width, height: chosen.height };
   } catch {
     return null;
   }

@@ -53,6 +53,7 @@ import {
   type CliRenderResult,
   type ExportColorSpace,
   type ExportMetadataPolicy,
+  type FolderImageEntry,
   type PresetSummary,
   type Settings,
 } from '../../../shared/ipc';
@@ -79,6 +80,33 @@ interface AppState {
   fileName: string | null;
   imagePath: string | null;
   imageError: string | null;
+  /**
+   * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
+   * catalog): non-null while the open image came from an explicit folder
+   * open (a folder drop or the toolbar's "Open Folder…"), holding that
+   * folder's sorted image listing. null for a standalone single-file open
+   * (Open… dialog, or dropping one file) — the filmstrip renders nothing at
+   * all while this is null, so a single-file open keeps today's exact
+   * experience (see openImageViaDialog / App.tsx's drop handler, which both
+   * clear this before opening).
+   */
+  folderDir: string | null;
+  /** The current folder's sorted image listing (see shared/ipc.ts's FolderImageEntry); empty when folderDir is null. */
+  folderEntries: FolderImageEntry[];
+  /**
+   * Open every image in `dir` (no recursion — see main's listImages) and
+   * show the filmstrip, opening the FIRST (sorted) entry. The drop handler
+   * (App.tsx), the toolbar's "Open Folder…" dialog action, and the verify
+   * harness's `__openFolderByPath` debug hook (dialogs are untestable) all
+   * funnel through this one action. Returns false (and touches nothing) if
+   * `dir` can't be listed as a directory — callers that need to distinguish
+   * "this wasn't actually a folder" (the drop handler's file-vs-folder
+   * ambiguity) branch on that; a real folder with zero images still returns
+   * true (the strip just renders empty).
+   */
+  openFolder(dir: string): Promise<boolean>;
+  /** ←/→ filmstrip navigation (folder context only): steps to the prev/next sorted entry, clamped at the ends (no wraparound). No-op without a folder context, with no entries, or while an image is already loading. */
+  stepFilmstrip(delta: 1 | -1): void;
   /**
    * Embedded-preview-first opening (the Lightroom trick): the ARW's own
    * embedded camera JPEG, shown as a CanvasView overlay the instant it's
@@ -207,8 +235,17 @@ interface AppState {
    * disk — the fresh-open defaults (lens profile, base curve) still apply
    * exactly as a truly-fresh open would, and the input node's geometry stays
    * identity, which is what a preset's applyLook then preserves.
+   *
+   * `opts.keepFolderContext` (folder filmstrip, ROADMAP "nice to have"):
+   * by default, EVERY call to this function exits folder-browsing (clears
+   * folderDir/folderEntries, hiding the strip) — that's what makes a
+   * standalone single-file open (Open… dialog, a single-file drop, the
+   * `__openImageByPath` verify hook) behave exactly like it always has, with
+   * no strip. The 3 call sites that must NOT do that — a filmstrip cell
+   * click, ←/→ (stepFilmstrip), and openFolder's own "open the first entry"
+   * — pass `true` here.
    */
-  openImageByPath(path: string, opts?: { skipSidecar?: boolean }): Promise<void>;
+  openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
@@ -931,6 +968,8 @@ export const useAppStore = create<AppState>((set, get) => {
   fileName: null,
   imagePath: null,
   imageError: null,
+  folderDir: null,
+  folderEntries: [],
   openingPreview: null,
   graph: defaultGraphDoc(),
   graphDirty: false,
@@ -971,7 +1010,7 @@ export const useAppStore = create<AppState>((set, get) => {
   spotsCapNotice: null,
   gpuError: null,
 
-  async openImageByPath(path: string, opts?: { skipSidecar?: boolean }) {
+  async openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) {
     // a pending autosave from whatever image was open belongs to THAT
     // image/path; never let it fire against the one we're about to open
     cancelAutosaveTimer();
@@ -980,6 +1019,9 @@ export const useAppStore = create<AppState>((set, get) => {
     // does anything else, so two rapid opens never leave a leaked blob: URL
     // or a stale overlay showing the wrong photo.
     set(clearOpeningPreview(get()));
+    // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
+    // default — see this method's `keepFolderContext` doc comment.
+    if (!opts?.keepFolderContext) set({ folderDir: null, folderEntries: [] });
     const fileName = path.split('/').pop() ?? path;
     const kind = isRawFileName(fileName) ? 'raw' : isJpegFileName(fileName) ? 'jpg' : null;
     if (!kind) {
@@ -1170,7 +1212,36 @@ export const useAppStore = create<AppState>((set, get) => {
     if (get().imageStatus === 'loading') return;
     const result = await window.silverbox.openImageDialog();
     if (result.canceled) return;
+    // openImageByPath itself exits folder-browsing by default (see its
+    // `keepFolderContext` doc comment) — nothing extra to do here.
     await get().openImageByPath(result.path);
+  },
+
+  async openFolder(dir: string) {
+    let entries: FolderImageEntry[];
+    try {
+      entries = await window.silverbox.listImages(dir);
+    } catch (err) {
+      // Not a (readable) directory — the drop handler's own fallback treats
+      // this as "not actually a folder drop" and opens it as a single file
+      // instead; any other caller (toolbar dialog, __openFolderByPath) just
+      // sees nothing happen.
+      console.warn(`openFolder: could not list ${dir}:`, err);
+      return false;
+    }
+    set({ folderDir: dir, folderEntries: entries });
+    if (entries.length > 0) await get().openImageByPath(entries[0]!.path, { keepFolderContext: true });
+    return true;
+  },
+
+  stepFilmstrip(delta) {
+    const { folderDir, folderEntries, imagePath, imageStatus } = get();
+    if (!folderDir || folderEntries.length === 0 || imageStatus === 'loading') return;
+    const idx = folderEntries.findIndex((e) => e.path === imagePath);
+    if (idx === -1) return;
+    const next = idx + delta;
+    if (next < 0 || next >= folderEntries.length) return;
+    void get().openImageByPath(folderEntries[next]!.path, { keepFolderContext: true });
   },
 
   selectNode(id) {
