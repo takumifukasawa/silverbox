@@ -98,17 +98,27 @@ Lightroom's **2-stage** default look:
 
 1. **Baseline exposure** — a fixed linear gain (`settings.baselineExposureEV`,
    default 0.5 EV) applied at decode time to RAW only (see `shared/ipc.ts`).
-2. **Base curve** — a display TONE CURVE fitted from the camera JPEG
+2. **Base curve** — a display TONE CURVE fitted from a reference rendering
    (`engine/color/baseCurve.ts`), seeded as VISIBLE, editable, deletable points
    into the Develop node's `toneCurve.rgb` on a fresh ARW open (no sidecar).
    It is NOT hidden decode magic: the points appear in the tone-curve editor,
    Reset removes them, and JPEG opens / restored sidecars are never seeded.
+3. **Default sharpening** — fresh RAW opens also seed `detail.sharpen`
+   40/1.0/0 (Lightroom's RAW-import default; JPEG opens stay 0 because
+   in-camera JPEGs are pre-sharpened), visible in the Detail section like
+   every other piece of the default look.
 
-The shipped curve is fitted per camera model (`ILCE-7CM2` today; a Sony a7C II
-fallback for other bodies). Refit with `npm run fit:basecurve <arw> <jpg>`
-(RMS ≈ 1.3 / 255 against the measured transfer). Both constants are provisional
-"feel" values: the pending Lightroom calibration session (see the
-Lightroom-reference memory note) may replace them.
+**Calibrated 2026-07-12 against Lightroom Classic** (the user's decision: LR's
+default rendering is the reference, not the in-camera JPEG). The shipped curve
+is the LR fit (RMS 1.12/255; luma matches LR within ±2/255 at every percentile
+band), per camera model (`ILCE-7CM2` today; that curve doubles as the fallback
+for other bodies). Refit with `npm run fit:basecurve <arw> <reference.jpg>` —
+the reference can be a camera JPEG or any exported rendering. The Effects and
+sharpen slider scales were calibrated in the same session (see the
+LR-calibration constants' doc comments in `developNode.ts`). KNOWN residual
+vs LR: Adobe Color's hue-dependent color character (cleaner neutrals, ~+5%
+chroma on colors) — not reachable with global sliders; the banked "profile
+fit" (a small fitted 3D color transform) is the structural answer.
 
 ## Migration plan
 

@@ -1,5 +1,15 @@
 # LR calibration session — procedure
 
+> **STATUS 2026-07-12: rounds 1-2 EXECUTED** (commits bfa2dd4, b11e2d7,
+> 1ff41b1, 15ce6bd, 48c7222): base curve refit to LR Classic, dehaze/
+> clarity/texture/vignette constants calibrated, sharpen scale aligned
+> (DETAIL_SHARPEN_GAIN 2.4) + default RAW sharpening 40/1.0/0 seeded,
+> crop-angle UI sign flipped to LR's. REMAINING below: item 2's grain
+> quality (formula upgrade), item 4 vignetting divisor (needs a
+> flat-field shot), and the color "profile fit" (Adobe Color's
+> hue-dependent character — see COLOR.md's Default rendering section).
+> The procedure is kept for future cameras / re-calibration.
+
 The user runs Lightroom side-by-side with Silverbox; the conductor drives,
 measures, and lands constant changes. Budget 30–60 min of the user's time.
 Everything here is conductor work (no implementer agent needed) except the
