@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ExportColorSpace, ExportMetadataPolicy, ExportPreset } from '../../../shared/ipc';
 import { useAppStore } from '../store/appStore';
-import { outputName } from '../engine/graph/graphDoc';
+import { describeExportOverrides, outputName } from '../engine/graph/graphDoc';
 
 /**
  * Export dialog (UX pack B §4): the quality/long-edge/metadata/color-space/
@@ -108,15 +108,22 @@ export function ExportDialog() {
                 disabled={exporting}
                 onChange={(ev) => setTarget(ev.target.value)}
               >
-                {outputs.map((n) => (
-                  <option key={n.id} value={n.id}>
-                    {outputName(n)}
-                  </option>
-                ))}
+                {outputs.map((n) => {
+                  const badge = describeExportOverrides(n);
+                  return (
+                    <option key={n.id} value={n.id}>
+                      {outputName(n)}
+                      {badge ? ` — ${badge}` : ''}
+                    </option>
+                  );
+                })}
                 <option value="all">All outputs</option>
               </select>
             </label>
           )}
+          <div className="export-dialog-defaults-label" data-testid="export-defaults-label">
+            Defaults (per-output overrides win)
+          </div>
           <label className="export-dialog-row" title="JPEG quality (1–100)">
             Quality
             <input

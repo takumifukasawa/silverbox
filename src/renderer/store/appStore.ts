@@ -14,8 +14,11 @@ import {
   nextId,
   outputName,
   parseGraphDoc,
+  resolveExportSettings,
+  sanitizeExportOverrides,
   serializeGraphDoc,
   type AddableKind,
+  type ExportOverrides,
   type GeometryParams,
   type GraphDoc,
   type GraphNode,
@@ -51,8 +54,6 @@ import {
   type CliCheckResult,
   type CliRenderJob,
   type CliRenderResult,
-  type ExportColorSpace,
-  type ExportMetadataPolicy,
   type FolderImageEntry,
   type PresetSummary,
   type Settings,
@@ -279,6 +280,17 @@ interface AppState {
   setActiveOutputId(id: string | null): void;
   /** Rename an output node (kind 'output' only); coalesced per keystroke run like a text field. */
   renameOutput(nodeId: string, name: string, coalesceKey: string | null): void;
+  /**
+   * Replace an output node's export-setting overrides wholesale (kind
+   * 'output' only; per-output export settings design note). An empty object
+   * normalizes to `undefined` on the node (same "no overrides" shape
+   * parseGraphDoc produces), keeping a fully-inherited output's sidecar
+   * free of a stray `"export": {}`. `coalesceKey` null = its own undo entry
+   * (InspectorPanel's per-field checkboxes are discrete toggles; a typed
+   * number field passes its own per-drag/typing session key, renameOutput's
+   * convention).
+   */
+  setExportOverrides(nodeId: string, overrides: ExportOverrides, coalesceKey: string | null): void;
   /** Replace shapes[0] of a mask node; `coalesceKey` null = its own undo entry (see CropOverlay's setGeometry precedent). */
   setMaskShape(nodeId: string, shape: MaskShape, coalesceKey: string | null): void;
   /** LR-style red mask-select overlay (canvas-only, present-time); toggled by 'O' while a mask node is selected. */
@@ -391,16 +403,7 @@ interface AppState {
    * before the export dialog existed; unaffected by the dialog's "All
    * outputs" mode, which goes through `exportSelectedOutputs` instead.
    */
-  exportImage(
-    path?: string,
-    opts?: {
-      quality?: number;
-      maxDim?: number | null;
-      metadata?: ExportMetadataPolicy;
-      colorSpace?: ExportColorSpace;
-      outputId?: string;
-    }
-  ): Promise<void>;
+  exportImage(path?: string, opts?: ExportOverrides & { outputId?: string }): Promise<void>;
   /**
    * Export dialog's "output" selector (UX pack B §4): `target` is a specific
    * output node id, `'active'` (the currently previewed output — the
@@ -408,13 +411,12 @@ interface AppState {
    * each). A single resolved target reuses `path` as-is (current behavior,
    * no suffix); 2+ targets get `<path>-<outputName>.<ext>` per file (see
    * `suffixExportPath`). One native save-dialog prompt for the whole batch
-   * (unless `path` is pre-supplied, e.g. by a verify script).
+   * (unless `path` is pre-supplied, e.g. by a verify script). Per-output
+   * `opts` here are the FALLBACKS (dialog controls / CLI flags) — a target
+   * node's own `node.export` overrides win per field (resolveExportSettings,
+   * applied inside exportOnePath).
    */
-  exportSelectedOutputs(
-    target: 'active' | 'all' | string,
-    path?: string,
-    opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
-  ): Promise<void>;
+  exportSelectedOutputs(target: 'active' | 'all' | string, path?: string, opts?: ExportOverrides): Promise<void>;
   /**
    * Headless CLI renderer's whole batch (main/index.ts's `--render` mode):
    * opens each image fresh (its own sidecar, or `job.preset` applied on the
@@ -952,18 +954,32 @@ export const useAppStore = create<AppState>((set, get) => {
    * required, not just convenient: renderToPixels TRANSFERS the prepared
    * image's data buffer to the render worker (see renderClient.ts), so a
    * `PreparedImage` is single-use and can't be reused across output nodes.
+   *
+   * `opts` are the FALLBACK settings (export dialog controls, or CLI flags);
+   * the actually-resolved output node's own `node.export` overrides win per
+   * field via resolveExportSettings — this is the ONE call site every export
+   * path (exportImage, exportSelectedOutputs, and the headless CLI's
+   * runCliRender, which all funnel through exportOnePath) shares, so there is
+   * exactly one place effective settings get computed.
    */
   const exportOnePath = async (
     targetPath: string,
     outputId: string | undefined,
-    opts?: { quality?: number; maxDim?: number | null; metadata?: ExportMetadataPolicy; colorSpace?: ExportColorSpace }
+    opts?: ExportOverrides
   ): Promise<{ width: number; height: number; bytes: number }> => {
     const { imagePath, fileName, graph, renderer } = get();
     if (!imagePath || !fileName || !renderer) throw new Error('no image open');
+    // Resolve which output node this export actually targets — same
+    // "matching id, else the doc's first output" rule buildPlan itself
+    // applies (CompileContext.outputId's doc comment) — so the settings
+    // resolved here always describe the SAME node the render targets.
+    const outputs = graph.nodes.filter((n) => n.kind === 'output');
+    const targetNode = (outputId && outputs.find((n) => n.id === outputId)) || outputs[0];
+    const effective = resolveExportSettings(targetNode, opts ?? {});
     const bytes = await window.silverbox.readFile(imagePath);
     const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
     const full = await loadImage(bytes, kind, Number.MAX_SAFE_INTEGER, get().settings.baselineExposureEV);
-    const colorSpace = opts?.colorSpace ?? 'srgb';
+    const colorSpace = effective.colorSpace ?? 'srgb';
     const { data, width, height } = await renderer.renderToPixels(full, graph, 1, colorSpace, outputId);
     const cap = full.capture;
     return window.silverbox.exportEncode({
@@ -971,9 +987,9 @@ export const useAppStore = create<AppState>((set, get) => {
       width,
       height,
       outPath: targetPath,
-      quality: Math.min(100, Math.max(1, Math.round(opts?.quality ?? 90))),
-      maxDim: opts?.maxDim ?? null,
-      metadata: opts?.metadata ?? 'all',
+      quality: Math.min(100, Math.max(1, Math.round(effective.quality ?? 90))),
+      maxDim: effective.maxDim ?? null,
+      metadata: effective.metadata ?? 'all',
       colorSpace,
       meta: {
         ...(cap?.cameraMake ? { cameraMake: cap.cameraMake } : {}),
@@ -1552,6 +1568,26 @@ export const useAppStore = create<AppState>((set, get) => {
       return {
         ...pushHistory(s, coalesceKey),
         graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, name } : n)) },
+        graphDirty: true,
+      };
+    });
+  },
+
+  setExportOverrides(nodeId, overrides, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== 'output') return {};
+      // sanitizeExportOverrides both validates and clamps (quality 1-100,
+      // maxDim > 0 or null) — the same normalization a sidecar load applies,
+      // so a value typed here round-trips identically through save/reload.
+      const sanitized = sanitizeExportOverrides(overrides, nodeId);
+      const nextExport = Object.keys(sanitized).length > 0 ? sanitized : undefined;
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, export: nextExport } : n)),
+        },
         graphDirty: true,
       };
     });

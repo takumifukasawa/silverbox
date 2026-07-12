@@ -21,7 +21,7 @@
  * create and clean up their own.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -429,7 +429,89 @@ try {
   });
 
   // ---------------------------------------------------------------------
-  console.log('verify-exportsettings (7. All outputs with COLLIDING names still writes distinct files):');
+  console.log('verify-exportsettings (7. per-output export overrides: node.export wins per field, dialog fills the rest):');
+  // 'web' (secondOutputId) gets q60/1024px overrides; 'main' (out) stays
+  // fully inherited — it must honor whatever the dialog says below.
+  await page.evaluate((id) => window.__debug.setExportOverrides(id, { quality: 60, maxDim: 1024 }), secondOutputId);
+  const overrideNode = await page.evaluate(
+    (id) => window.__debug.graphState().nodes.find((n) => n.id === id)?.export,
+    secondOutputId
+  );
+  check('setExportOverrides lands the overrides on the node (q60/1024px)', overrideNode?.quality === 60 && overrideNode?.maxDim === 1024, overrideNode);
+
+  const OUT_OVR_BASE = join(projectRoot, 'test-artifacts', 'exportsettings-overrides.jpg');
+  const OUT_OVR_MAIN = join(projectRoot, 'test-artifacts', 'exportsettings-overrides-main.jpg');
+  const OUT_OVR_WEB = join(projectRoot, 'test-artifacts', 'exportsettings-overrides-web.jpg');
+  for (const p of [OUT_OVR_BASE, OUT_OVR_MAIN, OUT_OVR_WEB]) if (existsSync(p)) unlinkSync(p);
+  // Dialog values stand in for the "defaults" the design note describes:
+  // q95, no maxDim (full resolution) — only 'web' should deviate from these.
+  await page.evaluate(
+    ([base, opts]) => window.__debug.exportOutputsTo('all', base, opts),
+    [OUT_OVR_BASE, { quality: 95, maxDim: null, metadata: 'all', colorSpace: 'srgb' }]
+  );
+  await page.waitForFunction(() => window.__debug.exportState().status !== 'working', { timeout: 300_000 });
+  const ovrState = await page.evaluate(() => window.__debug.exportState());
+  check('all-outputs export with a per-output override completes', ovrState.status === 'idle', ovrState);
+
+  const metaOvrMain = await sharp(OUT_OVR_MAIN).metadata();
+  const metaOvrWeb = await sharp(OUT_OVR_WEB).metadata();
+  check(
+    "main (no override) honors the dialog's own full-resolution default",
+    metaOvrMain.width === metaAll.width && metaOvrMain.height === metaAll.height,
+    { metaOvrMain: { width: metaOvrMain.width, height: metaOvrMain.height }, expected: { width: metaAll.width, height: metaAll.height } }
+  );
+  check(
+    "web's own maxDim:1024 override wins over the dialog's full-resolution default",
+    Math.max(metaOvrWeb.width, metaOvrWeb.height) === 1024,
+    metaOvrWeb
+  );
+
+  // Isolate the QUALITY half of the override at matching dims: re-export
+  // 'web' with its overrides cleared, but the dialog opts pinned to the SAME
+  // 1024px long edge (so only quality differs from the run above) — the
+  // override's q60 must be a smaller file than the dialog's own q95.
+  await page.evaluate((id) => window.__debug.setExportOverrides(id, {}), secondOutputId);
+  const OUT_OVR_WEB_NOOVERRIDE = join(projectRoot, 'test-artifacts', 'exportsettings-overrides-web-nooverride.jpg');
+  if (existsSync(OUT_OVR_WEB_NOOVERRIDE)) unlinkSync(OUT_OVR_WEB_NOOVERRIDE);
+  await page.evaluate(
+    ([id, path, opts]) => window.__debug.exportOutputsTo(id, path, opts),
+    [secondOutputId, OUT_OVR_WEB_NOOVERRIDE, { quality: 95, maxDim: 1024, metadata: 'all', colorSpace: 'srgb' }]
+  );
+  await page.waitForFunction(() => window.__debug.exportState().status !== 'working', { timeout: 300_000 });
+  const sizeOverrideQ60 = statSync(OUT_OVR_WEB).size;
+  const sizeDialogQ95 = statSync(OUT_OVR_WEB_NOOVERRIDE).size;
+  check(
+    "web's override quality:60 is a smaller file than the dialog's own q95 fallback at the SAME 1024px dims",
+    sizeOverrideQ60 < sizeDialogQ95,
+    { sizeOverrideQ60, sizeDialogQ95 }
+  );
+  // restore the overrides for the sidecar round-trip check below
+  await page.evaluate((id) => window.__debug.setExportOverrides(id, { quality: 60, maxDim: 1024 }), secondOutputId);
+
+  console.log('verify-exportsettings (7b. export overrides round-trip through save + reload):');
+  await page.keyboard.press('Meta+s');
+  await page.waitForTimeout(300);
+  const sidecarAfterOverrideSave = JSON.parse(readFileSync(SIDECAR, 'utf8'));
+  const savedOverrideNode = sidecarAfterOverrideSave.graph.nodes.find((n) => n.id === secondOutputId);
+  check(
+    'sidecar on disk carries the export overrides on the correct output node',
+    savedOverrideNode?.export?.quality === 60 && savedOverrideNode?.export?.maxDim === 1024,
+    savedOverrideNode?.export
+  );
+
+  await openAndWait(ARW_PATH); // fresh reload from disk — proves parseGraphDoc round-trips the field
+  const reloadedOverrideNode = await page.evaluate(
+    (id) => window.__debug.graphState().nodes.find((n) => n.id === id)?.export,
+    secondOutputId
+  );
+  check(
+    'reloading the sidecar keeps the export overrides on the node (parseGraphDoc/sanitizeExportOverrides round-trip)',
+    reloadedOverrideNode?.quality === 60 && reloadedOverrideNode?.maxDim === 1024,
+    reloadedOverrideNode
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-exportsettings (8. All outputs with COLLIDING names still writes distinct files):');
   // Two unnamed outputs both fall back to 'main' (graphDoc.ts's outputName)
   // — the user's original report ("two outputs, only one file written") is
   // exactly this shape, so the suffixes must disambiguate (-main, -main-2).
@@ -458,7 +540,7 @@ try {
   check('second colliding output file exists (…-main-2.jpg)', existsSync(OUT_DUP_2), existsSync(OUT_DUP_2));
 
   // ---------------------------------------------------------------------
-  console.log('verify-exportsettings (8. output nodes are deletable while another remains, never the last):');
+  console.log('verify-exportsettings (9. output nodes are deletable while another remains, never the last):');
   await page.locator(`.react-flow__node[data-id="${secondOutputId}"]`).click();
   const deleteButton = page.locator('[data-testid="delete-node-button"]');
   check('a second output is deletable (button enabled)', await deleteButton.isEnabled(), await deleteButton.isEnabled());

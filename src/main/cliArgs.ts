@@ -48,6 +48,11 @@ Without --preset, each image uses its own sidecar if one exists, else the
 same DEFAULT look a fresh open in the app shows (baseline exposure + the
 camera-matched base curve + the embedded Sony lens profile, when present).
 
+Per-output export overrides: an output node's own sidecar 'export' field
+(set via the app's Inspector, "Export overrides") always wins over
+--quality/--max-dim/--metadata/--colorspace, field by field — the flags
+above only fill in whatever a given output does NOT override.
+
 Exit codes: 0 every file succeeded, 1 one or more files failed (the rest
 still render and are reported), 2 bad usage.
 

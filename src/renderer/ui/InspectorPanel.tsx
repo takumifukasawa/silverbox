@@ -18,6 +18,7 @@ import {
   defaultGeometryParams,
   defaultLensParams,
   orientedDims,
+  type ExportOverrides,
   type GraphNode,
   type LensParams,
 } from '../engine/graph/graphDoc';
@@ -785,7 +786,146 @@ function SpotsInspector({ node }: { node: GraphNode }) {
   );
 }
 
-/** Output node inspector: editable display name (spec §6, default 'main'). */
+/**
+ * Export overrides section (per-output export settings design note): each
+ * control is "inherit" (checkbox off — the field is simply ABSENT from
+ * node.export) or a concrete value (checkbox on). Checking a box seeds the
+ * value from the export dialog's OWN current defaults (settings.export) so
+ * the starting point is "same as the dialog, now pinned to this output" —
+ * the user only has to change what should actually differ. maxDim's blank
+ * field means "full resolution", the same convention ExportDialog's own
+ * "Long edge" input uses (an explicit override CAN still be `null` — see
+ * ExportOverrides's doc comment).
+ */
+function ExportOverridesSection({ node }: { node: GraphNode }) {
+  const setExportOverrides = useAppStore((s) => s.setExportOverrides);
+  const dialogDefaults = useAppStore((s) => s.settings.export);
+  const sessionRef = useRef<Record<string, number | null>>({});
+  const overrides = node.export ?? {};
+
+  const commit = (next: ExportOverrides, key: string | null) => {
+    if (key === null) {
+      setExportOverrides(node.id, next, null);
+      return;
+    }
+    sessionRef.current[key] ??= Date.now();
+    setExportOverrides(node.id, next, `export-override:${node.id}:${key}:${sessionRef.current[key]}`);
+  };
+
+  const toggle = <K extends keyof ExportOverrides>(key: K, enabled: boolean, seed: ExportOverrides[K]) => {
+    const next: ExportOverrides = { ...overrides };
+    if (enabled) next[key] = seed;
+    else delete next[key];
+    commit(next, null);
+  };
+
+  return (
+    <Section title="Export overrides">
+      <div className="export-override-row">
+        <label className="export-override-toggle">
+          <input
+            type="checkbox"
+            data-testid="export-override-quality-enabled"
+            checked={'quality' in overrides}
+            onChange={(ev) => toggle('quality', ev.target.checked, dialogDefaults.quality)}
+          />
+          Quality
+        </label>
+        {overrides.quality !== undefined && (
+          <input
+            type="number"
+            className="export-override-value"
+            min={1}
+            max={100}
+            data-testid="export-override-quality"
+            value={overrides.quality}
+            onChange={(ev) => {
+              const v = Number(ev.target.value);
+              if (Number.isFinite(v)) commit({ ...overrides, quality: Math.round(v) }, 'quality');
+            }}
+          />
+        )}
+      </div>
+      <div className="export-override-row">
+        <label className="export-override-toggle">
+          <input
+            type="checkbox"
+            data-testid="export-override-maxdim-enabled"
+            checked={'maxDim' in overrides}
+            onChange={(ev) => toggle('maxDim', ev.target.checked, dialogDefaults.maxDim)}
+          />
+          Long edge
+        </label>
+        {'maxDim' in overrides && (
+          <input
+            type="number"
+            className="export-override-value"
+            min={16}
+            placeholder="full"
+            data-testid="export-override-maxdim"
+            value={overrides.maxDim ?? ''}
+            onChange={(ev) => {
+              const raw = ev.target.value.trim();
+              if (raw === '') {
+                commit({ ...overrides, maxDim: null }, 'maxdim');
+                return;
+              }
+              const v = Number(raw);
+              if (Number.isFinite(v) && v > 0) commit({ ...overrides, maxDim: Math.round(v) }, 'maxdim');
+            }}
+          />
+        )}
+      </div>
+      <div className="export-override-row">
+        <label className="export-override-toggle">
+          <input
+            type="checkbox"
+            data-testid="export-override-metadata-enabled"
+            checked={'metadata' in overrides}
+            onChange={(ev) => toggle('metadata', ev.target.checked, dialogDefaults.metadata)}
+          />
+          Metadata
+        </label>
+        {overrides.metadata !== undefined && (
+          <select
+            className="export-override-value"
+            data-testid="export-override-metadata"
+            value={overrides.metadata}
+            onChange={(ev) => commit({ ...overrides, metadata: ev.target.value as ExportOverrides['metadata'] }, null)}
+          >
+            <option value="all">all</option>
+            <option value="minimal">minimal</option>
+            <option value="none">none</option>
+          </select>
+        )}
+      </div>
+      <div className="export-override-row">
+        <label className="export-override-toggle">
+          <input
+            type="checkbox"
+            data-testid="export-override-colorspace-enabled"
+            checked={'colorSpace' in overrides}
+            onChange={(ev) => toggle('colorSpace', ev.target.checked, dialogDefaults.colorSpace)}
+          />
+          Color space
+        </label>
+        {overrides.colorSpace !== undefined && (
+          <select
+            className="export-override-value"
+            data-testid="export-override-colorspace"
+            value={overrides.colorSpace}
+            onChange={(ev) => commit({ ...overrides, colorSpace: ev.target.value as ExportOverrides['colorSpace'] }, null)}
+          >
+            <option value="srgb">sRGB</option>
+            <option value="p3">Display P3</option>
+          </select>
+        )}
+      </div>
+    </Section>
+  );
+}
+
+/** Output node inspector: editable display name (spec §6, default 'main') + per-output export overrides. */
 function OutputInspector({ node }: { node: GraphNode }) {
   const renameOutput = useAppStore((s) => s.renameOutput);
   const sessionRef = useRef<number | null>(null);
@@ -809,6 +949,7 @@ function OutputInspector({ node }: { node: GraphNode }) {
           />
         </label>
       </Section>
+      <ExportOverridesSection node={node} />
     </>
   );
 }

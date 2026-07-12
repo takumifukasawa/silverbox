@@ -817,6 +817,33 @@ button:disabled {
   color: #aaa;
 }
 
+.export-override-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  color: #ccc;
+  margin-top: 6px;
+}
+
+.export-override-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.export-override-value {
+  width: 90px;
+  background: #222;
+  color: #eee;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+
 /* ---- mask editing overlay ---- */
 
 .mask-overlay {
@@ -1753,6 +1780,14 @@ button:disabled {
 .export-dialog-header h3 {
   margin: 0;
   font-size: 14px;
+}
+
+.export-dialog-defaults-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #888;
+  margin-top: 2px;
 }
 
 .export-dialog-body {

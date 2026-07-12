@@ -343,7 +343,76 @@ try {
   check("the two outputs' pixels differ (the second bypasses Develop)", Math.abs(meanMain - meanWeb) > 0.01, { meanMain, meanWeb });
 
   // =========================================================================
-  console.log('verify-cli (5. windowless: completes cleanly, no window ever shown):');
+  console.log('verify-cli (5. per-output export overrides: sidecar `export` on an output node wins over CLI flags, field by field):');
+  // Same two-output shape as check 4 (main via Develop ev=1, web bypassing
+  // it), but 'web' additionally carries an `export` override (q60/1024px) —
+  // the exact wire shape graphDoc.ts's serializeGraphDoc writes (see that
+  // file's KNOWN_NODE_KEYS/sanitizeExportOverrides).
+  const arwOverride = link('exportoverride.ARW');
+  writeSidecar(arwOverride, { develop: { basic: { ev: 1 } } });
+  {
+    const sidecarPath = arwOverride + '.silverbox.json';
+    const doc = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    doc.graph.nodes.push({
+      id: 'out2',
+      type: 'output',
+      position: { x: 420, y: 160 },
+      name: 'web',
+      export: { quality: 60, maxDim: 1024 },
+    });
+    doc.graph.edges.push({ id: 'e2', from: 'in', to: 'out2' });
+    writeFileSync(sidecarPath, JSON.stringify(doc, null, 2) + '\n');
+  }
+  // --quality 90 --max-dim 2000 is the CLI's fallback for whichever output
+  // does NOT override a field; 'web' overrides both, 'main' overrides neither.
+  const rOvr = runCli(['--out', outDir, '--output', 'all', '--quality', '90', '--max-dim', '2000', arwOverride]);
+  check('--output all with a per-output export override exits 0', rOvr.status === 0, { status: rOvr.status, stderr: rOvr.stderr });
+  const outOvrMain = join(outDir, 'exportoverride-main.jpg');
+  const outOvrWeb = join(outDir, 'exportoverride-web.jpg');
+  check('both suffixed files land', existsSync(outOvrMain) && existsSync(outOvrWeb), {
+    main: existsSync(outOvrMain),
+    web: existsSync(outOvrWeb),
+  });
+  const metaOvrMain = await sharp(outOvrMain).metadata();
+  const metaOvrWeb = await sharp(outOvrWeb).metadata();
+  check(
+    "main (no override) honors the CLI's --max-dim 2000 fallback",
+    Math.max(metaOvrMain.width, metaOvrMain.height) === 2000,
+    metaOvrMain
+  );
+  check(
+    "web's own export.maxDim:1024 override wins over --max-dim 2000",
+    Math.max(metaOvrWeb.width, metaOvrWeb.height) === 1024,
+    metaOvrWeb
+  );
+
+  // Isolate the QUALITY half of the override at matching dims: a baseline
+  // sidecar with the identical graph but NO export override on 'web', run
+  // with the same --quality 90 --max-dim 1024 (so both land at 1024px,
+  // removing the dims confound) — web's override (q60) must be a smaller
+  // file than the CLI's own --quality 90 fallback at the same resolution.
+  const arwOverrideBaseline = link('exportoverride-baseline.ARW');
+  writeSidecar(arwOverrideBaseline, { develop: { basic: { ev: 1 } } });
+  {
+    const sidecarPath = arwOverrideBaseline + '.silverbox.json';
+    const doc = JSON.parse(readFileSync(sidecarPath, 'utf8'));
+    doc.graph.nodes.push({ id: 'out2', type: 'output', position: { x: 420, y: 160 }, name: 'web' });
+    doc.graph.edges.push({ id: 'e2', from: 'in', to: 'out2' });
+    writeFileSync(sidecarPath, JSON.stringify(doc, null, 2) + '\n');
+  }
+  const rBaseline = runCli(['--out', outDir, '--output', 'all', '--quality', '90', '--max-dim', '1024', arwOverrideBaseline]);
+  check('baseline (no override) run exits 0', rBaseline.status === 0, { status: rBaseline.status, stderr: rBaseline.stderr });
+  const outBaselineWeb = join(outDir, 'exportoverride-baseline-web.jpg');
+  const sizeOverrideQ60 = statSync(outOvrWeb).size;
+  const sizeBaselineQ90 = statSync(outBaselineWeb).size;
+  check(
+    "web's override quality:60 is a smaller file than the CLI's --quality 90 fallback at the SAME 1024px dims",
+    sizeOverrideQ60 < sizeBaselineQ90,
+    { sizeOverrideQ60, sizeBaselineQ90 }
+  );
+
+  // =========================================================================
+  console.log('verify-cli (6. windowless: completes cleanly, no window ever shown):');
   // There is no way to assert invisibility from an external script (this
   // process never gets a handle on the child's window at all) — main/index.ts
   // forces `show:false` for `isCliRenderMode` unconditionally (the exact same

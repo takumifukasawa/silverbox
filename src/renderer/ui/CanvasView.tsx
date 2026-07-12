@@ -17,6 +17,7 @@ import {
   isIdentityGeometry,
   orientedDims,
   planHasCpuReference,
+  type ExportOverrides,
   type GeometryParams,
   type GraphDoc,
   type LensParams,
@@ -170,6 +171,8 @@ declare global {
       maskState(nodeId?: string): MaskParams | null;
       /** Replace shapes[0] of a mask node — one undo entry (verify-only convenience; the UI drag handles use the store action directly). */
       setMaskShape(nodeId: string, shape: MaskShape): void;
+      /** Per-output export setting overrides (per-output export settings design note) — one undo entry (verify-only convenience; mirrors setMaskShape's pattern). `{}` clears every override back to "inherit". */
+      setExportOverrides(nodeId: string, overrides: ExportOverrides): void;
       /** Spots node params (spot removal, task #50); `nodeId` defaults to the currently selected node. Null when that node isn't kind 'spots'. */
       spotsState(nodeId?: string): SpotsParams | null;
       /** Wholesale-replace a spots node's list — one undo entry (verify-only convenience; mirrors setMaskShape's pattern). */
@@ -845,6 +848,9 @@ export function CanvasView() {
       },
       setMaskShape(nodeId, shape) {
         useAppStore.getState().setMaskShape(nodeId, shape, null);
+      },
+      setExportOverrides(nodeId, overrides) {
+        useAppStore.getState().setExportOverrides(nodeId, overrides, null);
       },
       spotsState(nodeId) {
         const s = useAppStore.getState();

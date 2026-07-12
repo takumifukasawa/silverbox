@@ -20,6 +20,7 @@ import { sanitizeCurvePoints } from '../color/toneCurve';
 import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform, sanitizeMaskParams, type MaskParams, type MaskShape } from './maskNode';
 import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams, type Spot } from './spotsNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
+import type { ExportColorSpace, ExportMetadataPolicy } from '../../../../shared/ipc';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -53,6 +54,15 @@ export interface GraphNode {
   spots?: SpotsParams;
   /** Display name; only meaningful for kind 'output' (default 'main' — see outputName()). */
   name?: string;
+  /**
+   * Per-output export setting overrides (per-output export settings design
+   * note); only meaningful for kind 'output'. All fields optional — an
+   * ABSENT field inherits the export dialog's/CLI's value at export time
+   * (see resolveExportSettings, the one place effective settings are
+   * computed). Never present with zero keys on a parsed doc — parseGraphDoc
+   * normalizes an all-absent payload back to `undefined`, same as `name`.
+   */
+  export?: ExportOverrides;
 }
 
 export interface GraphEdge {
@@ -81,6 +91,105 @@ export type AddableKind = OpKind | typeof CUSTOM_KIND | typeof BLEND_KIND | type
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
 export function outputName(node: GraphNode): string {
   return node.name?.trim() || 'main';
+}
+
+// --- Export overrides: per-output export settings ---------------------------
+//
+// A "main" full-res output and a "web" 2048px/q80 output are often the SAME
+// doc — this lets each output node carry its own export quality/maxDim/
+// metadata/colorSpace, with the export dialog's/CLI's own controls as the
+// fallback for whatever a given output doesn't override. Node-resident (not
+// a dialog-side map keyed by output id) because the sidecar IS the document:
+// "this output is the 2048px web export" is intent that should travel with
+// the doc through git, presets, and the CLI.
+
+/**
+ * All fields optional; an ABSENT key means "inherit the dialog's/CLI's
+ * value". `maxDim`'s own explicit `null` (force full resolution) IS a real
+ * override and must be distinguished from the key being absent — see
+ * resolveExportSettings, which checks presence rather than using `??`
+ * (which would treat both as nullish and silently discard the override).
+ */
+export interface ExportOverrides {
+  quality?: number;
+  maxDim?: number | null;
+  metadata?: ExportMetadataPolicy;
+  colorSpace?: ExportColorSpace;
+}
+
+/**
+ * Effective export settings for one output node: each field of `node.export`
+ * wins when PRESENT (independently — quality can be overridden while maxDim/
+ * metadata/colorSpace still inherit); otherwise `fallbacks` (the export
+ * dialog's controls, or the CLI's --quality/--max-dim/--metadata/--colorspace)
+ * applies. This is the ONE place effective settings are computed — appStore's
+ * exportOnePath calls it, which every export path (UI's exportImage/
+ * exportSelectedOutputs, and the headless CLI's runCliRender) funnels through.
+ */
+export function resolveExportSettings(node: GraphNode | undefined, fallbacks: ExportOverrides): ExportOverrides {
+  const ov = node?.export;
+  const has = (key: keyof ExportOverrides) => !!ov && Object.prototype.hasOwnProperty.call(ov, key);
+  return {
+    quality: has('quality') ? ov!.quality : fallbacks.quality,
+    maxDim: has('maxDim') ? ov!.maxDim : fallbacks.maxDim,
+    metadata: has('metadata') ? ov!.metadata : fallbacks.metadata,
+    colorSpace: has('colorSpace') ? ov!.colorSpace : fallbacks.colorSpace,
+  };
+}
+
+/**
+ * Compact badge text for the export dialog's output-selector rows (e.g.
+ * "q80 · 2048px"); null when the node carries no overrides at all. Only the
+ * fields actually overridden appear, in a fixed order.
+ */
+export function describeExportOverrides(node: GraphNode | undefined): string | null {
+  const e = node?.export;
+  if (!e) return null;
+  const parts: string[] = [];
+  if (e.quality !== undefined) parts.push(`q${e.quality}`);
+  if ('maxDim' in e) parts.push(e.maxDim === null ? 'full-res' : `${e.maxDim}px`);
+  if (e.metadata !== undefined) parts.push(`exif:${e.metadata}`);
+  if (e.colorSpace !== undefined) parts.push(e.colorSpace);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+/**
+ * Normalize an untrusted export-overrides payload; absent/empty → `{}` (the
+ * caller — parseGraphDoc — normalizes an all-empty result back to `undefined`
+ * on the node, same as `name`). Throws on structural garbage, sanitizeLens
+ * style. `maxDim` alone distinguishes "absent" (`in`) from `null` (explicit
+ * full-res override) — see ExportOverrides's doc comment.
+ */
+export function sanitizeExportOverrides(raw: unknown, nodeId: string): ExportOverrides {
+  if (raw === undefined) return {};
+  if (typeof raw !== 'object' || raw === null) throw new Error(`${nodeId}.export must be an object`);
+  const src = raw as Record<string, unknown>;
+  const out: ExportOverrides = {};
+  if (src.quality !== undefined) {
+    const q = src.quality;
+    if (typeof q !== 'number' || !Number.isFinite(q)) throw new Error(`${nodeId}.export.quality must be a finite number`);
+    out.quality = Math.min(100, Math.max(1, Math.round(q)));
+  }
+  if ('maxDim' in src && src.maxDim !== undefined) {
+    const m = src.maxDim;
+    if (m !== null && (typeof m !== 'number' || !Number.isFinite(m) || m <= 0)) {
+      throw new Error(`${nodeId}.export.maxDim must be null or a positive finite number`);
+    }
+    out.maxDim = m as number | null;
+  }
+  if (src.metadata !== undefined) {
+    if (src.metadata !== 'all' && src.metadata !== 'minimal' && src.metadata !== 'none') {
+      throw new Error(`${nodeId}.export.metadata must be all|minimal|none`);
+    }
+    out.metadata = src.metadata;
+  }
+  if (src.colorSpace !== undefined) {
+    if (src.colorSpace !== 'srgb' && src.colorSpace !== 'p3') {
+      throw new Error(`${nodeId}.export.colorSpace must be srgb|p3`);
+    }
+    out.colorSpace = src.colorSpace;
+  }
+  return out;
 }
 
 export function defaultParams(
@@ -391,6 +500,7 @@ const KNOWN_NODE_KEYS = new Set([
   'mask',
   'spots',
   'name',
+  'export',
 ]);
 /** Edge-level keys the schema knows about; anything else round-trips verbatim per edge. */
 const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
@@ -439,6 +549,7 @@ export function serializeGraphDoc(
           ...(n.mask ? { mask: n.mask } : {}),
           ...(n.spots ? { spots: n.spots } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
+          ...(n.export ? { export: n.export } : {}),
         };
       }),
       edges: doc.edges.map((e) => {
@@ -563,6 +674,8 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
+      const exportOverrides = sanitizeExportOverrides(n.export, n.id);
+      n.export = Object.keys(exportOverrides).length > 0 ? exportOverrides : undefined;
     }
   });
   for (const e of doc.edges) {
