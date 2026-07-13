@@ -42,3 +42,14 @@ Items 1+2 are small (one day-agent together). Item 3 medium. Item 4
 touches graphDoc (sanitizers + spec) — medium, do with the sidecar-spec
 doc task. Post-Thursday queue; UI-shell reorg stays deferred, but this
 pack is editor-local and independent of the shell decision.
+
+## PRIORITY DOWNGRADED (user, 2026-07-13)
+
+The editor's role was clarified as escape hatch + AI-structure review
+surface, not a daily driver (DESIGN.md principle 4, procedural
+addendum). Do items 1+2 only (frame-all + marquee survive any future
+form); HOLD items 3+4 until the presentation-form question (free
+canvas vs structured auto-laid-out flow, Houdini-style) is decided —
+gesture polish invested in the free canvas may be thrown away by a
+move to auto-layout. If the structured-flow idea firms up, THAT
+becomes the pack instead.

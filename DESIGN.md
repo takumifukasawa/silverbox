@@ -89,6 +89,27 @@ compositor and especially Unreal's material editor get right (user,
 those editors, and graph-editor idioms (marquee select, frame-all,
 drag-from-port add) are adopted rather than invented.
 
+The underlying mental model is **procedural** (user, 2026-07-13): a
+Silverbox document is a recipe that COMPUTES the photograph — Houdini/
+UE-material thinking, not a stack of opaque adjustments. Three
+consequences:
+
+- The node editor is one PROJECTION of the recipe, not the recipe
+  itself; its concrete form (today's free canvas vs a structured,
+  auto-laid-out top-down flow, Houdini-style) is an open presentation
+  question, decidable later without touching the data model —
+  especially since the UI machine-builds almost every graph, so free
+  placement is a freedom nobody is exercising. Legibility of the
+  procedure is the criterion.
+- A pure layer stack is REJECTED as the primary structure view:
+  layers hide exactly what the graph exists to show (branches, shared
+  upstream, second image sources, multiple outputs). A simplified
+  layer-like listing may serve mask-heavy workflows as sugar.
+- The editor is an escape hatch and a review surface (how a human
+  audits structure an AI or script wrote), not a daily driver —
+  invest in it to "never frustrating when needed", not to primary-
+  surface polish.
+
 Lightroom-style controls (the inspector, "+ Local Adjustment", crop mode)
 are conveniences that build or edit graph structure the user could have
 wired by hand. Consequences:
