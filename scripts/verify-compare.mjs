@@ -75,6 +75,27 @@ try {
   const paneDisplayAfter = await page.locator('[data-testid="compare-pane"]').evaluate((el) => getComputedStyle(el).display);
   check('compare pane becomes visible', paneDisplayAfter !== 'none', paneDisplayAfter);
 
+  // Round-9 fix pack item 2 (LR convention: Before left, Current right) —
+  // DOM order is unchanged (main pane still mounts first, see CanvasView.tsx's
+  // doc comment on transferControlToOffscreen not being idempotent), only the
+  // visual (flex `order`) position flips while compareMode is active. Prove
+  // it on-screen via boundingBox x-coordinates, not DOM order.
+  const mainPaneBox = await page.locator('.canvas-viewport').boundingBox();
+  const comparePaneBox = await page.locator('[data-testid="compare-pane"]').boundingBox();
+  check('compare (Before) pane sits LEFT of the main (Current) pane on screen', comparePaneBox.x < mainPaneBox.x, {
+    comparePaneX: comparePaneBox.x,
+    mainPaneX: mainPaneBox.x,
+  });
+  check(
+    "the badges follow their panes: 'Before' badge is left of 'Current' badge",
+    (await page.locator('[data-testid="compare-pane-badge"]').boundingBox()).x <
+      (await page.locator('[data-testid="compare-pane-badge-main"]').boundingBox()).x,
+    {
+      beforeBadgeX: (await page.locator('[data-testid="compare-pane-badge"]').boundingBox()).x,
+      currentBadgeX: (await page.locator('[data-testid="compare-pane-badge-main"]').boundingBox()).x,
+    }
+  );
+
   // pan one (drag on the MAIN container) — both canvases' transforms must move identically
   const box = await page.locator('.canvas-viewport').boundingBox();
   const beforeMainT = await page.locator('[data-testid="canvas-view-canvas"]').evaluate((el) => el.style.transform);

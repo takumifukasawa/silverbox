@@ -3,7 +3,7 @@ import { IPC, type CliJob, type SilverboxApi } from '../../shared/ipc';
 
 const api: SilverboxApi = {
   ping: () => ipcRenderer.invoke(IPC.ping),
-  openImageDialog: () => ipcRenderer.invoke(IPC.openImageDialog),
+  openImageDialog: (scope) => ipcRenderer.invoke(IPC.openImageDialog, scope),
   openFolderDialog: () => ipcRenderer.invoke(IPC.openFolderDialog),
   listImages: (dir) => ipcRenderer.invoke(IPC.listImages, dir),
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),

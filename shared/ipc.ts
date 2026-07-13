@@ -108,8 +108,20 @@ export interface FolderImageEntry {
 
 export interface SilverboxApi {
   ping(): Promise<PingResult>;
-  /** Show the native open dialog filtered to supported image types. */
-  openImageDialog(): Promise<OpenImageDialogResult>;
+  /**
+   * Show the native open dialog filtered to supported image types. The main
+   * photo-open path (Toolbar's "Open…", openImageViaDialog) always calls
+   * this with no argument and MUST keep seeing exactly IMAGE_EXTENSIONS
+   * (RAW + JPEG) — unchanged since before the Image node existed. Pass
+   * `scope: 'imageNode'` ONLY from the Image node's own "Choose…" picker
+   * (round-9 fix pack item 4, "maskはpngも許容でいい気がする"): it reuses
+   * this same channel but additionally offers PNG, since the Image node's
+   * decode path (decodeWorker.ts's prepareJpeg) already handles PNG natively
+   * via createImageBitmap — RAW isn't a sensible reference/mask file, but
+   * nothing stops IMAGE_EXTENSIONS' RAW kinds from still being offered here
+   * too (the filter is additive, not a narrowing).
+   */
+  openImageDialog(scope?: 'imageNode'): Promise<OpenImageDialogResult>;
   /** Show the native folder-picker dialog (folder filmstrip, ROADMAP "nice to have"). */
   openFolderDialog(): Promise<OpenImageDialogResult>;
   /**

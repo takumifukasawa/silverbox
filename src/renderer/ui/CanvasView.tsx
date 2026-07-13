@@ -1598,7 +1598,7 @@ export function CanvasView() {
       <div className="canvas-panes">
         <div
           ref={containerRef}
-          className="canvas-viewport"
+          className={`canvas-viewport${compareMode ? ' canvas-viewport--compare-swap' : ''}`}
           style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
         >
           <canvas
@@ -1668,10 +1668,16 @@ export function CanvasView() {
             the canvas element. It does NOT bind its own pan/zoom listeners —
             useCanvasViewport only ever attaches to `containerRef` above — this
             pane's canvas just gets the exact same `view` transform applied to
-            it, "shared viewport, events bind once" per the brief. */}
+            it, "shared viewport, events bind once" per the brief.
+            Round-9 fix pack item 2 (LR convention: Before left, Current
+            right): DOM order here is UNCHANGED for exactly the reason
+            above — only flex `order` (canvas-viewport--compare-swap /
+            canvas-compare-pane--compare-swap, styles.css) flips which pane
+            renders on which side while compareMode is active. Each badge is
+            a child of its own pane, so it moves with it for free. */}
         {image && (
           <div
-            className={`canvas-compare-pane${compareMode ? '' : ' canvas-compare-pane--hidden'}`}
+            className={`canvas-compare-pane${compareMode ? ' canvas-compare-pane--compare-swap' : ' canvas-compare-pane--hidden'}`}
             data-testid="compare-pane"
           >
             <canvas

@@ -212,8 +212,29 @@ try {
     { histBefore, histAfterRatingEdits }
   );
 
-  // set to 3 for the next sections
-  await page.keyboard.press('3');
+  // === 2b. Clicking the toolbar stars (round-9 fix pack item 3 — RatingStars
+  // was display-only, a visible-path violation per DESIGN.md) ===
+  console.log('verify-ratings (2b. clicking a toolbar star sets the rating; clicking it again clears to 0):');
+  const histBeforeStarClick = await historyState();
+  await page.locator('[data-testid="toolbar-star-3"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 3, { timeout: 5_000 });
+  check('clicking star 3 sets rating to 3', (await rating()) === 3, await rating());
+  check('toolbar reflects 3 after the click', (await toolbarRatingAttr()) === '3' && (await toolbarFilledStars()) === 3, {
+    attr: await toolbarRatingAttr(),
+    filled: await toolbarFilledStars(),
+  });
+  await page.locator('[data-testid="toolbar-star-3"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 0, { timeout: 5_000 });
+  check('clicking star 3 again (== current rating) clears it to 0 (LR-style toggle)', (await rating()) === 0, await rating());
+  const histAfterStarClick = await historyState();
+  check(
+    'star clicks push no history entry either (same metadata-not-a-look-edit semantics as the 1-5/0 keys)',
+    histAfterStarClick.past === histBeforeStarClick.past && histAfterStarClick.future === histBeforeStarClick.future,
+    { histBeforeStarClick, histAfterStarClick }
+  );
+
+  // set to 3 for the next sections (via a star click — keeps both input paths exercised across the file)
+  await page.locator('[data-testid="toolbar-star-3"]').click();
   await page.waitForFunction(() => window.__debug.sidecarState().rating === 3, { timeout: 5_000 });
 
   // === 3. isTextEntry guard ===

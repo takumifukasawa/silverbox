@@ -75,7 +75,7 @@ function NodeThumb({
         <button
           type="button"
           className={`op-node-bypass${disabled ? ' op-node-bypass--active' : ''}`}
-          title={disabled ? 'Re-enable this node (⌘D)' : 'Bypass this node (⌘D)'}
+          title={disabled ? 'Re-enable this node (M or ⌘D)' : 'Bypass this node (M or ⌘D)'}
           data-testid={`node-bypass-${id}`}
           onClick={(ev) => {
             ev.stopPropagation();

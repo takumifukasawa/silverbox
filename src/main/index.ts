@@ -36,6 +36,9 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const IMAGE_EXTENSIONS = ['arw', 'cr2', 'cr3', 'nef', 'nrw', 'raf', 'orf', 'rw2', 'dng', 'pef', 'srw', 'x3f', 'jpg', 'jpeg'];
 
+/** Round-9 fix pack item 4: the Image node's own "Choose…" picker additionally offers PNG (createImageBitmap already decodes it — see decodeWorker.ts's prepareJpeg); the MAIN photo-open dialog below stays on IMAGE_EXTENSIONS unchanged. */
+const IMAGE_NODE_EXTENSIONS = [...IMAGE_EXTENSIONS, 'png'];
+
 /**
  * Headless CLI renderer: `electron . --render <args>` (see bin/silverbox-render
  * and the "render" npm script) — everything after `--render` is the CLI's
@@ -147,10 +150,20 @@ function registerIpc(): void {
     };
   });
 
-  ipcMain.handle(IPC.openImageDialog, async (): Promise<OpenImageDialogResult> => {
+  ipcMain.handle(IPC.openImageDialog, async (_ev, scope: unknown): Promise<OpenImageDialogResult> => {
+    // scope === 'imageNode': the Image node's own "Choose…" picker (round-9
+    // fix pack item 4) — additionally offers PNG. Anything else (including
+    // no argument at all, the main "Open…" toolbar action's call shape)
+    // keeps the original RAW/JPEG-only filter untouched.
+    const imageNodeScope = scope === 'imageNode';
     const result = await dialog.showOpenDialog({
       properties: ['openFile'],
-      filters: [{ name: 'Images (RAW / JPEG)', extensions: IMAGE_EXTENSIONS }],
+      filters: [
+        {
+          name: imageNodeScope ? 'Images (RAW / JPEG / PNG)' : 'Images (RAW / JPEG)',
+          extensions: imageNodeScope ? IMAGE_NODE_EXTENSIONS : IMAGE_EXTENSIONS,
+        },
+      ],
     });
     const path = result.filePaths[0];
     if (result.canceled || !path) return { canceled: true };

@@ -19,11 +19,19 @@
  *     image node (and the blend compositing it) in `skipped`.
  *  6. Render-worker cache: two consecutive renders of the same doc don't
  *     re-decode the referenced file (imageNodeDecodeCount() debug hook).
+ *  7. PNG reference (round-9 fix pack item 4, "maskはpngも許容でいい気がする"):
+ *     a PNG fixture (generated in-script via sharp, no committed binary)
+ *     decodes and renders through the SAME 'jpg'-kind ingest path JPEG uses
+ *     (decodeWorker.ts's prepareJpeg / createImageBitmap already handles PNG
+ *     natively) — the image node reports it as non-missing and the render
+ *     changes to reflect its content, exactly like the JPG case in section 1.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import sharp from 'sharp';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -33,6 +41,10 @@ const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 const SIDECAR = ARW_PATH + '.silverbox.json';
 const TIGHT_TOLERANCE = 1e-6;
+// PNG fixture (section 7) — generated fresh each run, never committed: a
+// small solid-gradient raster (distinct from the JPG fixture's content) is
+// plenty to prove the decode path, no need for a real photograph.
+const PNG_PATH = join(projectRoot, 'test-artifacts', 'imagenode-fixture.png');
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -52,6 +64,21 @@ const check = (name, cond, actual) => {
 const meansMatch = (a, b, tol) => a && b && Math.abs(a.r - b.r) < tol && Math.abs(a.g - b.g) < tol && Math.abs(a.b - b.b) < tol;
 
 if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
+
+mkdirSync(join(projectRoot, 'test-artifacts'), { recursive: true });
+// A tiny solid-gradient PNG (128x96, RGB ramp) — real PNG bytes/signature,
+// not a renamed JPEG, so this genuinely exercises the PNG magic-byte sniff
+// (decodeWorker.ts's sniffMimeType) rather than the browser's own leniency.
+const gradient = Buffer.alloc(128 * 96 * 3);
+for (let y = 0; y < 96; y++) {
+  for (let x = 0; x < 128; x++) {
+    const i = (y * 128 + x) * 3;
+    gradient[i] = Math.round((x / 127) * 255); // R ramps left->right
+    gradient[i + 1] = Math.round((y / 95) * 255); // G ramps top->bottom
+    gradient[i + 2] = 128;
+  }
+}
+await sharp(gradient, { raw: { width: 128, height: 96, channels: 3 } }).png().toFile(PNG_PATH);
 
 const app = await electron.launch({ args: [projectRoot] });
 const pageErrors = [];
@@ -238,10 +265,26 @@ try {
     after: await decodeCount(),
   });
 
+  // ---------------------------------------------------------------------
+  console.log('verify-imagenode (7. PNG reference decodes and renders through the same ingest as JPEG):');
+  const meanBeforePng = await gpuMean();
+  const countBeforePng = await decodeCount();
+  await setImagePath(imageNodeId, PNG_PATH);
+  check('setImagePath wrote the PNG fixture\'s absolute path', (await imageNodeState(imageNodeId))?.path === PNG_PATH, await imageNodeState(imageNodeId));
+  await page.waitForFunction((n) => window.__debug.imageNodeDecodeCount() > n, countBeforePng, { timeout: 30_000 });
+  await page.waitForTimeout(300);
+  check('the PNG fixture decoded without becoming "missing"', (await imageNodeState(imageNodeId))?.missing === false, await imageNodeState(imageNodeId));
+  const meanWithPng = await gpuMean();
+  check("compositing with the PNG reference changes the render (its gradient content actually reads back)", !meansMatch(meanWithPng, meanBeforePng, TIGHT_TOLERANCE), {
+    meanBeforePng,
+    meanWithPng,
+  });
+
   check('no page errors across the image-node verify checks', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
+  if (existsSync(PNG_PATH)) unlinkSync(PNG_PATH);
 }
 
 if (failures > 0) {

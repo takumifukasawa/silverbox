@@ -125,6 +125,20 @@ export function App() {
         const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
         if (node && isBypassableNodeKind(node.kind)) s.toggleNodeDisabled(node.id);
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'm') {
+        // Round-9 fix pack item 1 ("ミュートは m の方がいい気がする"): plain
+        // `m` is a second accelerator for the exact same store action ⌘D
+        // drives (Resolve calls this "mute") — both stay bound, this is
+        // purely additive. No unconditional preventDefault like ⌘D above:
+        // bare `m` has no browser-native meaning to race, so the ordinary
+        // isTextEntry-first guard (same shape as every other plain-key
+        // shortcut in this handler) is enough.
+        if (isTextEntry(ev.target)) return;
+        ev.preventDefault();
+        const s = useAppStore.getState();
+        const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
+        if (node && isBypassableNodeKind(node.kind)) s.toggleNodeDisabled(node.id);
+      }
       if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'c' || ev.key === 'C')) {
         if (isTextEntry(ev.target)) return;
         ev.preventDefault();

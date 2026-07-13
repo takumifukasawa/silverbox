@@ -994,17 +994,21 @@ function OutputInspector({ node }: { node: GraphNode }) {
 /**
  * Image node (composite/mask-by-another-file feature): path + a "Choose…"
  * button (main-process open dialog, images filter — reuses openImageDialog,
- * the same one the main "Open…" toolbar action uses) + the filename, plus a
- * graphBroken-style notice (not a hard error) when the referenced file
- * failed to decode. v1 only ever WRITES an absolute path here; a relative
- * one is merely ACCEPTED on parse (see imageNode.ts's resolveImagePath).
+ * the same channel the main "Open…" toolbar action uses, but with
+ * `scope: 'imageNode'` so PNG is additionally offered — round-9 fix pack
+ * item 4, "maskはpngも許容でいい気がする"; the decode path already handles
+ * PNG natively via createImageBitmap, see decodeWorker.ts's prepareJpeg) +
+ * the filename, plus a graphBroken-style notice (not a hard error) when the
+ * referenced file failed to decode. v1 only ever WRITES an absolute path
+ * here; a relative one is merely ACCEPTED on parse (see imageNode.ts's
+ * resolveImagePath).
  */
 function ImageInspector({ node }: { node: GraphNode }) {
   const setImagePath = useAppStore((s) => s.setImagePath);
   const missing = useAppStore((s) => s.imageNodeMissing[node.id] === true);
   const path = node.image?.path ?? '';
   const choose = async () => {
-    const result = await window.silverbox.openImageDialog();
+    const result = await window.silverbox.openImageDialog('imageNode');
     if (result.canceled) return;
     setImagePath(node.id, result.path, null);
   };

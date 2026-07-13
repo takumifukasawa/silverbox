@@ -78,11 +78,28 @@ button:disabled {
   color: #999;
 }
 
-/* Star-rating display (ratings pack) in the toolbar's info strip — read-only,
-   see Toolbar.tsx's RatingStars doc comment for why (1-5/0 keys are the
-   actual editing surface). */
+/* Star-rating control (ratings pack; round-9 fix pack item 3 made it
+   clickable) in the toolbar's info strip — see Toolbar.tsx's RatingStars doc
+   comment. Each star is a <button>, styled to keep the original read-only
+   look (no border/background, no layout shift) plus a subtle hover
+   affordance so the new clickable path is discoverable. */
 .toolbar-rating {
   letter-spacing: 1px;
+}
+
+.toolbar-rating .star-button {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  letter-spacing: inherit;
+  cursor: pointer;
+}
+
+.toolbar-rating .star-button:hover {
+  color: #f0d060;
+  opacity: 0.85;
 }
 
 .toolbar-rating .star--filled {
@@ -477,6 +494,21 @@ button:disabled {
 
 .canvas-viewport:active {
   cursor: grabbing;
+}
+
+/* Round-9 fix pack item 2 ("beforeが左、afterが右な気がする" — LR convention:
+   Before on the LEFT, Current on the RIGHT). DOM order is UNCHANGED (main
+   pane still mounts first, compare pane second — see the transferControlTo-
+   OffscreenCanvas-is-not-idempotent constraint on .canvas-compare-pane
+   above), only the VISUAL order flips, via flex `order` applied while
+   compareMode is active. Badges are children of their own pane, so they
+   follow automatically — no separate badge-position rule needed. */
+.canvas-viewport--compare-swap {
+  order: 2;
+}
+
+.canvas-compare-pane--compare-swap {
+  order: 1;
 }
 
 /* Compare pane (compare pack): a second box in .canvas-panes, always mounted

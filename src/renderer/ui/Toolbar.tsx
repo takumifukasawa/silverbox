@@ -157,20 +157,35 @@ function CompareStrip() {
 }
 
 /**
- * Star-rating display (ratings pack): read-only in the toolbar — 1-5/0 keys
- * (App.tsx) are the actual editing surface, exactly like `\`/`showBefore`
- * having no toolbar button of its own either. Always 5 glyphs (filled up to
- * `rating`, empty past it) rather than hiding at 0, so "this photo is
- * unrated" is visible at a glance, not just absence-of-something.
+ * Star-rating control (ratings pack; round-9 fix pack item 3: the stars were
+ * display-only, a visible-path violation per DESIGN.md — 1-5/0 keys worked
+ * but clicking did nothing). Each star is now its own clickable button:
+ * clicking star N sets the rating to N (the same `setRating` the 1-5 keys
+ * call); clicking the star that already equals the current rating clears it
+ * to 0 (LR's own click-the-current-star-to-clear convention), matching the
+ * '0' key's behavior. Still always renders 5 glyphs (filled up to `rating`,
+ * empty past it) so "unrated" reads as visible absence, not a missing
+ * control — only the interactivity is new.
  */
 function RatingStars({ rating }: { rating: number }) {
+  const setRating = useAppStore((s) => s.setRating);
   return (
-    <span className="toolbar-rating" data-testid="toolbar-rating" data-rating={rating} title={`Rating: ${rating}/5 (keys 1-5, 0 clears)`}>
-      {Array.from({ length: 5 }, (_, i) => (
-        <span key={i} className={i < rating ? 'star star--filled' : 'star star--empty'}>
-          ★
-        </span>
-      ))}
+    <span className="toolbar-rating" data-testid="toolbar-rating" data-rating={rating} title={`Rating: ${rating}/5 (click a star, or keys 1-5, 0 clears)`}>
+      {Array.from({ length: 5 }, (_, i) => {
+        const n = i + 1;
+        return (
+          <button
+            key={i}
+            type="button"
+            className={`star star-button${i < rating ? ' star--filled' : ' star--empty'}`}
+            data-testid={`toolbar-star-${n}`}
+            title={`Rate ${n}/5${n === rating ? ' (click again to clear)' : ''}`}
+            onClick={() => setRating(n === rating ? 0 : n)}
+          >
+            ★
+          </button>
+        );
+      })}
     </span>
   );
 }

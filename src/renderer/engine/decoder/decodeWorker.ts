@@ -188,10 +188,29 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
   };
 }
 
+/** PNG's fixed 8-byte magic (spec-defined, never varies) — see sniffMimeType. */
+const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
+/**
+ * Round-9 fix pack item 4 ("maskはpngも許容でいい気がする" — the Image node
+ * should accept PNG, not just JPEG): this 'jpg'-kind path is really "any
+ * browser-decodable raster", already true of createImageBitmap itself — the
+ * one thing that was actually JPEG-specific was hardcoding the Blob's MIME
+ * type, which matters for engines that trust the declared type over
+ * sniffing the bytes. Detect PNG by its fixed magic (no decoding library
+ * needed, exactly per the brief) and label the Blob correctly; anything else
+ * keeps the original 'image/jpeg' label unchanged.
+ */
+function sniffMimeType(bytes: ArrayBuffer): string {
+  const head = new Uint8Array(bytes, 0, Math.min(8, bytes.byteLength));
+  if (head.length === 8 && PNG_SIGNATURE.every((b, i) => head[i] === b)) return 'image/png';
+  return 'image/jpeg';
+}
+
 async function prepareJpeg(bytes: ArrayBuffer, previewLongEdge: number): Promise<PreparedImage> {
   const t0 = performance.now();
   // imageOrientation:'from-image' applies EXIF orientation during decode.
-  const bitmap = await createImageBitmap(new Blob([bytes], { type: 'image/jpeg' }), {
+  const bitmap = await createImageBitmap(new Blob([bytes], { type: sniffMimeType(bytes) }), {
     imageOrientation: 'from-image',
   });
   const { width, height } = bitmap;
