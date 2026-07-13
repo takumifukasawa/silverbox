@@ -11,8 +11,11 @@ verify script.
 Adjacent sidecars (`<image>.silverbox.json` next to the photo) are
 RETIRED as the write target. User's reason, which is product-correct:
 "知らない間に写真置き場にいろんなファイルが増えてる" — an app that
-silently litters photo folders is bad etiquette (autosave-ON made it
-worse: opening a RAW wrote a file). LRC itself proves the muscle
+silently litters photo folders is bad etiquette. (Double-check
+2026-07-13: merely OPENING a RAW does NOT write — fresh opens commit
+`graphDirty: false` and the autosave subscriber requires dirty
+(appStore.ts) — but the FIRST slider touch writes a file next to the
+photo, which is still the complaint.) LRC itself proves the muscle
 memory: XMP sidecar writing is OFF by default there.
 
 One storage model. No dual mode — the complexity tax of two look-
@@ -31,7 +34,11 @@ MyProject/
 
 - `project.silverbox`: schemaVersion, name, photo list (paths —
   relative preferred, absolute allowed for out-of-tree photos).
-  Double-clicking it opens the app on that project (file association).
+  Double-clicking it opens the app on that project (file association —
+  NOTE: electron-builder `fileAssociations` in the PACKAGED app only
+  (`npm run package` exists); dev-mode `electron .` never gets
+  double-click. In-app "Open project…" + drag-drop must work
+  regardless, association is sugar on top).
 - `looks/<basename>.json`: byte-format identical to today's sidecar
   (wrapper + graph). Adds `photo` (path relative to the project) and
   `fingerprint` (cheap content hash of the photo file) fields for
@@ -87,8 +94,8 @@ gray+badge missing state.
    artifacts live inside the project; visual diff reads looks/ paths.
 3. **Relink + fingerprint + import-sidecars + save-as-move.**
 
-**Verify-suite impact (the heavy lift, plan first):** ~all 52 scripts
-assume adjacent sidecar paths. Add a central test-harness helper
+**Verify-suite impact (the heavy lift, plan first):** 48 of the 52
+scripts reference adjacent sidecar paths (counted 2026-07-13). Add a central test-harness helper
 (project dir under the scratch area, SILVERBOX_TEST_PROJECT env) and
 migrate scripts through it — prefer ONE shared helper edit over 52
 hand-edits. Budget a dedicated agent-day for the suite alone.
