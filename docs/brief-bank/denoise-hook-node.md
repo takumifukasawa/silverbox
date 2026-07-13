@@ -1,7 +1,13 @@
 # Brief: external-tool hook node (denoise v1)
 
-Status: ready to dispatch (Sonnet; the caching/pipe plumbing is fiddly —
-consider Opus if budget allows). Prereq reading:
+Status: v1 LANDED (10c42de graph node + c50c406 compare-pane reach;
+verify-external.mjs green with the fixture command). REMAINING: (a)
+user-side hand-test with a REAL tool — install one (e.g. `brew install
+gmic`) and run e.g. `gmic {in} -denoise_patchpca 5 -o {out}` through
+the node, including the fresh-open disabled/confirm flow; never done
+with anything but the fixture. (b) v2 bundled NAFNet/ONNX — still
+deferred per the research doc. Original dispatch notes kept below.
+Prereq reading:
 docs/research/denoise.md (the decided architecture + G'MIC findings),
 spotsNode/custom-shader node shapes, exportOnePath's decode flow,
 DESIGN.md non-goals (no bundled ML runtime in v1).
