@@ -5,7 +5,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
@@ -83,7 +83,7 @@ try {
   );
 
   const toolbarText = await page.locator('.toolbar-info').textContent();
-  check('toolbar shows file name', toolbarText?.includes('DSC02993.ARW'), toolbarText);
+  check('toolbar shows file name', toolbarText?.includes(basename(ARW_PATH)), toolbarText);
   check('toolbar shows camera model', toolbarText?.includes('ILCE-7CM2'), toolbarText);
   check('toolbar shows ISO', toolbarText?.includes('ISO 5000'), toolbarText);
 

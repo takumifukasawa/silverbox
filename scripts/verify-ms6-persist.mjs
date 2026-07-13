@@ -7,7 +7,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
 
@@ -85,7 +85,7 @@ try {
     // number a *save* stamps on disk changed.
     'sidecar is schemaVersion 4 with source block and the edited ev',
     saved.schemaVersion === 4 &&
-      saved.source?.fileName === 'DSC02993.ARW' &&
+      saved.source?.fileName === basename(ARW_PATH) &&
       saved.source?.kind === 'raw' &&
       typeof saved.createdAt === 'string' &&
       saved.graph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.5,
