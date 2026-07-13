@@ -20,18 +20,16 @@ Alternative considered: rating 0 as implicit reject — rejected ≠
 unrated (LR distinguishes them for good reason; culling means marking
 BAD, not just not-yet-rated).
 
-## 2. Folders from elsewhere (the catalog-boundary edge)
+## 2. Folders from elsewhere — ANSWERED (2026-07-13)
 
-Adding arbitrary other folders into one filmstrip session = a virtual
-collection — the first step toward the collections engine the catalog
-slope guard in DESIGN.md refuses ("views may help you browse — they
-will never own your photos"). Current position: one folder at a time; opening another
-folder replaces the strip. If a real workflow need appears (e.g.
-compare picks across two shoots), the boundary-respecting shape would
-be a SAVED-NOWHERE session view (drag several folders in, never
-persisted, nothing written except sidecars) — acceptable because no
-state outlives the window. Do NOT build until the user brings a
-concrete workflow; record the shape so the discussion starts here.
+Superseded by the project-storage decision
+(docs/brief-bank/project-storage.md): a project's playlist references
+photos from ANYWHERE, the way a playlist references songs — no
+collections engine, nothing owned. The filmstrip becomes playlist-fed;
+"add photos from another shoot" is just appending playlist rows. The
+earlier saved-nowhere-session idea in this section is obsolete. The
+reject flag (§1) is unaffected — it moves into the look wrapper the
+same way rating does.
 
 ## Related
 

@@ -47,7 +47,9 @@ If a feature cannot express its edit as reviewable data, its design is wrong.
 
 ### 2. The document is git-native — and therefore AI-native
 
-The sidecar (`<image>.silverbox.json`) is pretty-printed, stably ordered,
+The look document (one JSON per photo, inside a project — see "Where
+documents live" below; historically an adjacent `<image>.silverbox.json`
+sidecar, still readable forever) is pretty-printed, stably ordered,
 schema-versioned JSON. It diffs, branches, merges and reviews like source
 code. This is not just a storage choice: a text document with documented
 semantics is also an **API surface**. The planned path for AI-assisted
@@ -202,13 +204,15 @@ only jobs are the UI and the document.
 ## Non-goals (deliberate, revisitable)
 
 - **No catalog/DAM** — with the word used precisely. Multi-photo WORK is
-  core: browse a folder, rate, select many, sync a look across them,
+  core: browse, rate, select many, sync a look across them,
   batch-develop from the shell. What is refused is the *database that
-  owns photos* — the import ceremony, the central library file, the
-  collections engine. Everything multi-photo acts statelessly on the
-  folder the user opened and writes nothing but sidecars: folders are
-  the library, git is the history, the sidecar is the single source of
-  truth. (Enforcement details: "The catalog line" below.)
+  owns photos* — the import ceremony, the opaque library, the
+  collections engine. Photos stay where the user keeps them; the app
+  writes only plain per-photo text documents inside a user-visible
+  project folder; git is the history; the look document is the single
+  source of truth. A project's playlist references photos the way a
+  playlist references songs — it never owns them. (Enforcement
+  details: "The catalog line" and "Where documents live" below.)
 - **No built-in chat UI or assistant.** AI integration goes through the
   document (see principle 2); at most the app hosts the user's own terminal.
 - **No raster mask data** in the sidecar. Vector strokes only, when brush
@@ -250,6 +254,30 @@ investment; collapse under "advanced" at the next UI pass); the custom
 WGSL node is load-bearing for the looks-as-code thesis but
 expansion-frozen (expert feature); when the wipe compare lands, one
 compare mechanism becomes primary rather than accreting two.
+
+## Where documents live — the project (decided 2026-07-13)
+
+One storage model, no dual mode (docs/brief-bank/project-storage.md
+has the full design; implementation staged for the golden window):
+
+- A **project** is a user-visible folder: `project.silverbox` (entry
+  point — manifest + playlist of photo paths; double-clickable) plus
+  `looks/` with ONE JSON per photo, byte-format identical to the
+  historical sidecar plus a photo path + content fingerprint for
+  relinking. Ratings stay in the look's wrapper.
+- **The app never writes into photo folders.** The adjacent-sidecar
+  placement is retired as a write target (user, 2026-07-13: silent
+  files appearing next to photos is bad etiquette — LRC's XMP-off
+  default is the precedent). Old adjacent sidecars stay readable
+  forever (principle 9) and importable.
+- No-ceremony opens land in the **Quick project** at a fixed visible
+  location (`~/Silverbox/Quick/` by default) — a real folder the user
+  can open and git, deliberately NOT an app-internal cache/userData
+  area (that would be the hidden-central-library failure mode; edits
+  are never cache). The title bar always names the active project.
+  "Save as project…" MOVES Quick's entries into the new project.
+- Missing photos: placeholder + Relink (fingerprint-verified), never a
+  silent drop.
 
 ## The catalog line (explicit slope guard)
 
