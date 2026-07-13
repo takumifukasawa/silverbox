@@ -170,9 +170,14 @@ only jobs are the UI and the document.
 
 ## Non-goals (deliberate, revisitable)
 
-- **No catalog/DAM** for now. Silverbox develops one image at a time;
-  becoming a library manager is a different product with different gravity.
-  Revisit only after the developing experience is complete.
+- **No catalog/DAM** — with the word used precisely. Multi-photo WORK is
+  core: browse a folder, rate, select many, sync a look across them,
+  batch-develop from the shell. What is refused is the *database that
+  owns photos* — the import ceremony, the central library file, the
+  collections engine. Everything multi-photo acts statelessly on the
+  folder the user opened and writes nothing but sidecars: folders are
+  the library, git is the history, the sidecar is the single source of
+  truth. (Enforcement details: "The catalog line" below.)
 - **No built-in chat UI or assistant.** AI integration goes through the
   document (see principle 2); at most the app hosts the user's own terminal.
 - **No raster mask data** in the sidecar. Vector strokes only, when brush
