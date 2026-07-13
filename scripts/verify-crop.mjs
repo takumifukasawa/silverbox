@@ -209,6 +209,23 @@ try {
   const cropRectCursor = await page.locator('[data-testid="crop-rect"]').evaluate((el) => getComputedStyle(el).cursor);
   check('crop-rect body cursor is move', cropRectCursor === 'move', cropRectCursor);
 
+  console.log('verify-crop (round-10 fix pack item 6: rotate glyph bumped to 32px+; plain cursor over the canvas in crop mode):');
+  const rotateGlyphSize10 = await page
+    .locator('[data-testid="crop-rotate-glyph"]')
+    .first()
+    .evaluate((el) => ({ width: Number(el.getAttribute('width')), height: Number(el.getAttribute('height')) }));
+  check(
+    'rotate glyph visual size is >=32px (round-10 bump)',
+    rotateGlyphSize10.width >= 32 && rotateGlyphSize10.height >= 32,
+    rotateGlyphSize10
+  );
+  const viewportCursorInCropMode = await page.locator('.canvas-viewport').evaluate((el) => getComputedStyle(el).cursor);
+  check(
+    'the canvas viewport does NOT show the pan "grab" cursor while crop mode is active (competes with crop affordances)',
+    viewportCursorInCropMode !== 'grab',
+    viewportCursorInCropMode
+  );
+
   const draggedW = Math.round(baselineDims.width * geomAfterDrag.crop.w);
   const draggedH = Math.round(baselineDims.height * geomAfterDrag.crop.h);
   await page.locator('[data-testid="crop-done"]').click();
@@ -227,6 +244,18 @@ try {
     dimsAfterUndo.width === baselineDims.width && dimsAfterUndo.height === baselineDims.height,
     { baselineDims, dimsAfterUndo }
   );
+
+  console.log('verify-crop (round-10 fix pack item 2: plain `r` toggles crop mode, LR convention):');
+  // Crop mode is off here (crop-done above committed and exited it). Focus
+  // the canvas area (not a text field) then press bare `r` — same isTextEntry-
+  // guarded shape as the plain-`c` compare toggle in App.tsx.
+  await page.locator('[data-testid="crop-toggle"]').evaluate((el) => el.blur());
+  await page.keyboard.press('r');
+  await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
+  check('plain `r` enters crop mode', true, null);
+  await page.keyboard.press('r');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="crop-overlay"]'), { timeout: 5_000 });
+  check('plain `r` again exits crop mode', true, null);
 
   console.log('verify-crop (LR-style rotate: auto-zoom, no void, screen-constant, reversible):');
   // Plain-JS mirror of RESAMPLE_SHADER's rotate + its inverse map, so the
@@ -570,8 +599,9 @@ try {
     'verify-crop (round-7: overlap investigation — SE corner handle vs SE rotate zone at the MIN-size crop rect):'
   );
   // GEOMETRY_MIN_CROP_SIZE (graphDoc.ts) is 0.05 — the smallest legal crop,
-  // and where the round-7 handle/rotate-zone size bumps are most likely to
-  // collide on screen. The DOM elements' own boxes (handle 20px, zone 32px,
+  // and where the round-7/round-10 handle/rotate-zone size bumps are most
+  // likely to collide on screen. The DOM elements' own boxes (handle 20px,
+  // zone 36px (round-10, up from 32px — see styles.css's .crop-rotate-zone),
   // both anchored on the SAME corner point) DO overlap here by design — the
   // rotate zone renders first (underneath) and the resize handle on top (see
   // CropOverlay.tsx's paint-order comment), so overlap is resolved by

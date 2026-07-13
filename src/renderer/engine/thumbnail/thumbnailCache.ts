@@ -9,11 +9,18 @@
  * Two decode strategies, picked by file kind:
  *  - Sony RAW: reuse extractSonyEmbeddedPreview (sonyLensProfile.ts) with
  *    `{ prefer: 'smallest-above' }` — the a7C II's own 160×120 IFD1 thumb is
- *    already thumbnail-sized, so the embedded bytes go straight into a Blob:
- *    URL with no further decode/resize.
+ *    already thumbnail-sized, so when `flip === 0` the embedded bytes go
+ *    straight into a Blob: URL with no further decode/resize. When the
+ *    preview carries a rotation (portrait ARW — round-10 fix: the sliced
+ *    JPEG stream has no EXIF of its own, see EmbeddedPreview.flip's doc
+ *    comment), it's decoded and re-encoded through an OffscreenCanvas that
+ *    applies the rotation (and swaps width/height for the ±90° cases) so the
+ *    cached blob is upright pixels, not just an upright <img> box — the
+ *    filmstrip grid sizes cells from the bitmap's own aspect ratio.
  *  - JPEG (and any RAW without a Sony embedded thumb): createImageBitmap
- *    with `resizeWidth` does the decode-time downscale cheaply, then a small
- *    canvas re-encodes it to a JPEG Blob for the `<img>` src.
+ *    with `resizeWidth` does the decode-time downscale cheaply (honoring the
+ *    source's own EXIF orientation via `imageOrientation: 'from-image'`),
+ *    then a small canvas re-encodes it to a JPEG Blob for the `<img>` src.
  *
  * Loading is triggered lazily (Filmstrip.tsx's IntersectionObserver, one per
  * cell) and funneled through a small concurrency-limited queue so a
@@ -71,15 +78,49 @@ function releaseSlot(): void {
   }
 }
 
-/** JPEG (or non-Sony-RAW) thumbnail: decode-scale via createImageBitmap, re-encode via an OffscreenCanvas. */
+/** JPEG (or non-Sony-RAW) thumbnail: decode-scale via createImageBitmap, re-encode via an OffscreenCanvas. `imageOrientation: 'from-image'` makes the decode itself honor the source's EXIF orientation, so `bitmap.width`/`height` are already the upright dimensions. */
 async function decodeResizedThumbBlob(bytes: ArrayBuffer): Promise<string | null> {
   const blob = new Blob([bytes], { type: 'image/jpeg' });
-  const bitmap = await createImageBitmap(blob, { resizeWidth: THUMBNAIL_LONG_EDGE, resizeQuality: 'medium' });
+  const bitmap = await createImageBitmap(blob, {
+    resizeWidth: THUMBNAIL_LONG_EDGE,
+    resizeQuality: 'medium',
+    imageOrientation: 'from-image',
+  });
   try {
     const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
     ctx.drawImage(bitmap, 0, 0);
+    const outBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+    return URL.createObjectURL(outBlob);
+  } finally {
+    bitmap.close();
+  }
+}
+
+/**
+ * Sony RAW embedded-preview thumbnail whose preview needs rotating (round-10
+ * fix — see the file-header doc comment and EmbeddedPreview.flip's doc
+ * comment for why the bare sliced JPEG has no orientation of its own). Same
+ * RawDecoder rotation code space as everywhere else in this app: 0=none,
+ * 3=180°, 5=90°CCW, 6=90°CW. Decodes the preview bytes as-is (already
+ * thumbnail-sized — no resizeWidth needed), rotates onto an OffscreenCanvas
+ * sized to the POST-rotation box (width/height swapped for the ±90° cases,
+ * matching CanvasView.tsx's opening-preview-overlay swap logic), then
+ * re-encodes so the cached blob's own pixels are upright.
+ */
+async function decodeRotatedThumbBlob(bytes: ArrayBuffer, flip: number): Promise<string | null> {
+  const blob = new Blob([bytes], { type: 'image/jpeg' });
+  const bitmap = await createImageBitmap(blob);
+  try {
+    const swapped = flip === 5 || flip === 6;
+    const canvas = new OffscreenCanvas(swapped ? bitmap.height : bitmap.width, swapped ? bitmap.width : bitmap.height);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const degrees = flip === 6 ? 90 : flip === 5 ? -90 : flip === 3 ? 180 : 0;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate((degrees * Math.PI) / 180);
+    ctx.drawImage(bitmap, -bitmap.width / 2, -bitmap.height / 2);
     const outBlob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
     return URL.createObjectURL(outBlob);
   } finally {
@@ -108,7 +149,12 @@ export function getThumbnail(path: string): Promise<string | null> {
       let url: string | null = null;
       if (isRawFileName(fileName)) {
         const preview = extractSonyEmbeddedPreview(bytes, { prefer: 'smallest-above', minLongEdge: THUMBNAIL_LONG_EDGE });
-        if (preview) url = URL.createObjectURL(new Blob([preview.bytes], { type: 'image/jpeg' }));
+        if (preview) {
+          url =
+            preview.flip === 0
+              ? URL.createObjectURL(new Blob([preview.bytes], { type: 'image/jpeg' }))
+              : await decodeRotatedThumbBlob(preview.bytes, preview.flip);
+        }
       } else {
         url = await decodeResizedThumbBlob(bytes);
       }

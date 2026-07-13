@@ -594,18 +594,24 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
                   geometry as the zone's own custom cursor image (styles.css)
                   for visual consistency; pointer-events:none so the zone div
                   keeps handling the drag, not the svg. */}
+              {/* Round-10 fix pack item 6a: 26px -> 34px (still hard to see on
+                  this user's machine at 26px) plus the item-5 two-tone
+                  convention made explicit — #000 stroke pinned to 0.6 opacity
+                  (was 0.55) and the idle GROUP opacity raised in CSS (below)
+                  so the pairing actually reads at rest instead of only on
+                  hover. */}
               <svg
                 className="crop-rotate-glyph"
                 data-testid="crop-rotate-glyph"
-                width="26"
-                height="26"
+                width="34"
+                height="34"
                 viewBox="0 0 22 22"
                 aria-hidden="true"
                 focusable="false"
               >
-                <path d="M11 3a8 8 0 1 1-6.5 3.3" fill="none" stroke="#000" strokeOpacity="0.55" strokeWidth="2.6" strokeLinecap="round" />
+                <path d="M11 3a8 8 0 1 1-6.5 3.3" fill="none" stroke="#000" strokeOpacity="0.6" strokeWidth="2.6" strokeLinecap="round" />
                 <path d="M11 3a8 8 0 1 1-6.5 3.3" fill="none" stroke="#fff" strokeWidth="1.3" strokeLinecap="round" />
-                <path d="M2.5 4.5l1.7 2.3 2.3-1" fill="none" stroke="#000" strokeOpacity="0.55" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M2.5 4.5l1.7 2.3 2.3-1" fill="none" stroke="#000" strokeOpacity="0.6" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                 <path d="M2.5 4.5l1.7 2.3 2.3-1" fill="none" stroke="#fff" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </div>

@@ -449,6 +449,83 @@ try {
   );
 
   // ---------------------------------------------------------------------
+  console.log(
+    'verify-spots (round-10 fix pack item 7: `[`/`]` alias the wheel; transient near-cursor readout; a placed spot gets the adjusted radius):'
+  );
+  // Clear selection first — brackets mirror the wheel's own selected-vs-
+  // brush-radius branch (same appStore setSpotBrushRadius/updateSpot paths
+  // the wheel already exercises above), so this section only needs to prove
+  // the KEY path reaches those same actions, shows the readout, and that a
+  // spot placed afterward actually picks up the adjusted radius.
+  await setSpotModeUi(false);
+  await setSpotModeUi(true);
+  check('no selection heading into the bracket-key check', (await spotState()).selectedIndex === null, (await spotState()).selectedIndex);
+  // Cursor must be over the canvas for the readout to have a position to
+  // anchor on (spotCursorRef, CanvasView.tsx) — same "move back over the
+  // viewport first" note the wheel section above already needed.
+  await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
+  const brushRadiusBeforeBracket = (await spotState()).brushRadius;
+  const pastBeforeBracket = await historyPast();
+  await page.keyboard.press(']');
+  await page.keyboard.press(']');
+  await page.waitForTimeout(50);
+  const brushRadiusAfterBracket = (await spotState()).brushRadius;
+  check('`]` increased spotState().brushRadius', brushRadiusAfterBracket > brushRadiusBeforeBracket, {
+    before: brushRadiusBeforeBracket,
+    after: brushRadiusAfterBracket,
+  });
+  check(
+    'bracket-key brush-radius changes do not touch undo history (brushRadius is UI state, not a graph edit)',
+    (await historyPast()) === pastBeforeBracket,
+    { before: pastBeforeBracket, after: await historyPast() }
+  );
+  const readoutCount = await page.locator('[data-testid="spot-radius-readout"]').count();
+  check('the transient radius readout appears after a bracket-key change', readoutCount === 1, readoutCount);
+  const readoutText = await page.locator('[data-testid="spot-radius-readout"]').innerText();
+  check(
+    'readout text matches the new brush radius (X.X% format — reuses SpotOverlay\'s own readout convention)',
+    readoutText === `${(brushRadiusAfterBracket * 100).toFixed(1)}%`,
+    readoutText
+  );
+
+  await page.keyboard.press('[');
+  await page.waitForTimeout(50);
+  const brushRadiusAfterDecrease = (await spotState()).brushRadius;
+  check('`[` decreased spotState().brushRadius back down', brushRadiusAfterDecrease < brushRadiusAfterBracket, {
+    before: brushRadiusAfterBracket,
+    after: brushRadiusAfterDecrease,
+  });
+
+  // A plain click (no drag, well away from any existing handle) after the
+  // adjustment commits a spot at the CURRENT brush radius
+  // (handleSpotPointerDown's clickOnly branch, CanvasView.tsx) — proves the
+  // bracket-adjusted radius actually reaches a placed spot, not just the
+  // transient UI readout.
+  const spotsBeforePlace = (await spotsState(spotsNodeId)).spots.length;
+  const placeX = dhwBox.x + dhwBox.width / 2 + 140;
+  const placeY = dhwBox.y + dhwBox.height / 2 + 60;
+  await page.mouse.move(placeX, placeY);
+  await page.mouse.down();
+  await page.mouse.up();
+  const spotsAfterPlace = await spotsState(spotsNodeId);
+  check('the click placed exactly one new spot', spotsAfterPlace.spots.length === spotsBeforePlace + 1, {
+    before: spotsBeforePlace,
+    after: spotsAfterPlace.spots.length,
+  });
+  const placedSpot = spotsAfterPlace.spots[spotsAfterPlace.spots.length - 1];
+  check(
+    "the newly placed spot's radius matches the bracket-adjusted brush radius (identity geometry here ⇒ anchor space == output space)",
+    Math.abs(placedSpot.radius - brushRadiusAfterDecrease) < 0.005,
+    { placedRadius: placedSpot.radius, expected: brushRadiusAfterDecrease }
+  );
+  // Truncate back to just the original spot 0 (setSpots bypasses the UI, no
+  // undo entry) — section 5 right below assumes a single-spot list going
+  // into its "Backspace empties the list" check, and this section's own spot
+  // was only ever needed to prove the radius reached a placed spot.
+  await setSpots(spotsNodeId, spotsAfterPlace.spots.slice(0, spotsBeforePlace));
+  check('scratch spot removed, back to the pre-section spot count', (await spotsState(spotsNodeId)).spots.length === spotsBeforePlace, await spotsState(spotsNodeId));
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (5. delete selected spot via Backspace; clear-all via the inspector):');
   // Click (no drag) selects the spot without mutating the graph.
   const dstHandleForSelect = page.locator('[data-testid="spot-handle-dst-0"]');

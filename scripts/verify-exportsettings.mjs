@@ -359,6 +359,83 @@ try {
   await page.waitForFunction(() => document.querySelector('[data-testid="settings-dialog"]') === null, { timeout: 5_000 });
 
   // ---------------------------------------------------------------------
+  console.log(
+    'verify-exportsettings (7. baselineExposureEV reaches the OPEN image live, round-10 fix pack item 3 — "変えたけど反映されてないかも？"):'
+  );
+  // Deliberately reuse whatever image/graph state section "2"'s edits left
+  // behind (dev.basic.ev = 0.5, autosaved, not dirty) rather than forcing a
+  // clean re-open here: a clean re-open would run under this suite's
+  // isTest-suppressed seedDefaultLook (no base curve/profile/sharpen — see
+  // appStore.ts's seedDefaultLook doc comment), leaving the Develop node
+  // truly at identity and silently breaking section 6 below (whose "main
+  // differs from the Develop-bypassing second output" check relies on SOME
+  // upstream section having left a non-identity edit on 'dev'). This is also
+  // more faithful to the real scenario item 3 fixes: a user with edits
+  // already made changes a setting — those edits must survive untouched.
+  const beforeReload = await page.evaluate(() => ({
+    graph: window.__debug.graphState(),
+    history: window.__debug.historyState(),
+    dirty: window.__debug.graphDirty(),
+    baselineExposureEV: window.__debug.settingsState().baselineExposureEV,
+  }));
+  const meanBeforeReload = await page.evaluate(() => window.__debug.readbackMean());
+
+  await page.locator('[data-testid="settings-button"]').click();
+  await page.waitForSelector('[data-testid="settings-dialog"]', { timeout: 5_000 });
+  const baselineInput = page.locator('[data-testid="settings-baseline-ev"]');
+  check(
+    'settings dialog shows the current baselineExposureEV before editing',
+    Number(await baselineInput.inputValue()) === beforeReload.baselineExposureEV,
+    { fieldValue: await baselineInput.inputValue(), storeValue: beforeReload.baselineExposureEV }
+  );
+  await baselineInput.fill(String(beforeReload.baselineExposureEV + 1));
+  await page.keyboard.press('Escape'); // closes the dialog; the change itself already committed on input
+  await page.waitForFunction(() => document.querySelector('[data-testid="settings-dialog"]') === null, {
+    timeout: 5_000,
+  });
+
+  // The re-decode is async (readFile IPC + worker decode) — unlike a plain
+  // updateNodeParam, readbackMean() right after resolving updateSettings()
+  // isn't guaranteed to have observed the swapped `image` yet (React's own
+  // effect that pushes it to the render worker hasn't necessarily committed
+  // by then), so poll instead of a single read. A manual loop, not
+  // page.waitForFunction(async (...) => ...) — Playwright's polling checks
+  // the RETURNED PROMISE for truthiness on some versions/paths, not its
+  // resolved value, which would pass on the very first tick regardless of
+  // whether the mean actually changed.
+  let meanAfterReload = meanBeforeReload;
+  const reloadDeadline = Date.now() + 20_000;
+  while (Date.now() < reloadDeadline) {
+    meanAfterReload = await page.evaluate(() => window.__debug.readbackMean());
+    if (meanAfterReload && Math.abs(meanAfterReload.g - meanBeforeReload.g) > 0.02) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check('+1 EV baseline exposure brightens the ALREADY-OPEN image, with no reopen', meanAfterReload.g > meanBeforeReload.g + 0.02, {
+    meanBeforeReload,
+    meanAfterReload,
+  });
+  const afterReload = await page.evaluate(() => ({
+    graph: window.__debug.graphState(),
+    history: window.__debug.historyState(),
+    dirty: window.__debug.graphDirty(),
+  }));
+  check('graph is untouched by the live re-decode', JSON.stringify(afterReload.graph) === JSON.stringify(beforeReload.graph), {
+    before: beforeReload.graph,
+    after: afterReload.graph,
+  });
+  check(
+    'undo history is untouched by the live re-decode',
+    JSON.stringify(afterReload.history) === JSON.stringify(beforeReload.history),
+    { before: beforeReload.history, after: afterReload.history }
+  );
+  check('graphDirty is untouched by the live re-decode', afterReload.dirty === beforeReload.dirty, {
+    before: beforeReload.dirty,
+    after: afterReload.dirty,
+  });
+  // restore the default for the rest of the run
+  await page.evaluate((v) => window.__debug.updateSettings({ baselineExposureEV: v }), beforeReload.baselineExposureEV);
+
+  // ---------------------------------------------------------------------
   console.log('verify-exportsettings (6. All outputs: two named outputs, both files written with the output-name suffix):');
   await page.locator('[data-testid="add-node-button"]').click();
   await page.locator('[data-testid="add-node-output"]').click();

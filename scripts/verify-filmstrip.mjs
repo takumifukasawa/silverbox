@@ -276,6 +276,49 @@ try {
   }));
   check('folder context cleared on a standalone single-file open', afterSingle.folder.dir === null, afterSingle.folder);
   check('no strip element in the DOM', afterSingle.stripPresent === false, afterSingle);
+
+  // === 7. Portrait ARW thumbnail renders portrait, not landscape (round-10
+  // fix pack item 1) — same fixture convention verify-preview.mjs uses for
+  // its portrait overlay checks: an env-overridable path, loud SKIP if the
+  // fixture file isn't present on this machine. thumbnailCache.ts's Sony RAW
+  // path now bakes extractSonyEmbeddedPreview's `flip` into the cached blob's
+  // own pixels (via an OffscreenCanvas rotate), so the <img>'s natural size
+  // should already be upright — no CSS rotation involved here, unlike the
+  // opening-preview overlay. ===
+  const PORTRAIT_ARW =
+    process.env.SILVERBOX_TEST_PORTRAIT_ARW ?? 'test-assets/italy/DSC06787.ARW';
+  if (!existsSync(PORTRAIT_ARW)) {
+    console.log(`  SKIP  portrait thumbnail orientation check (fixture missing: ${PORTRAIT_ARW})`);
+  } else {
+    console.log('verify-filmstrip (portrait ARW filmstrip thumbnail renders portrait):');
+    const folderC = mkdtempSync(join(tmpdir(), 'silverbox-filmstrip-portrait-'));
+    const gDsc7 = join(folderC, 'g_DSC7.ARW');
+    linkSync(PORTRAIT_ARW, gDsc7);
+    try {
+      await openFolderFireAndForget(folderC);
+      await waitReadyOrError();
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 1, {
+        timeout: 15_000,
+      });
+      // Wait for the <img> itself to finish decoding (blob: URLs resolve
+      // async relative to the src assignment) so naturalWidth/Height are real.
+      await page.waitForFunction(() => {
+        const img = document.querySelector('[data-testid="filmstrip-thumb"]');
+        return !!img && img.complete && img.naturalWidth > 0;
+      }, { timeout: 15_000 });
+      const thumbSize = await page.$eval('[data-testid="filmstrip-thumb"]', (img) => ({
+        naturalWidth: img.naturalWidth,
+        naturalHeight: img.naturalHeight,
+      }));
+      check(
+        'portrait ARW thumbnail is taller than wide (not the landscape raw bytes)',
+        thumbSize.naturalHeight > thumbSize.naturalWidth,
+        thumbSize
+      );
+    } finally {
+      rmSync(folderC, { recursive: true, force: true });
+    }
+  }
 } finally {
   await app.close();
 }

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
 import { thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
@@ -54,6 +54,7 @@ import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
+import { isTextEntry } from './textEntry';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
 declare global {
@@ -487,8 +488,9 @@ export function CanvasView() {
     return () => useAppStore.getState().setViewportFitAnimated(null);
   }, [fitAnimated]);
 
-  // Spot mode (task #50): the plain wheel gesture adjusts the brush radius
-  // instead of zooming (useCanvasViewport's own onWheel opts out via
+  // Spot mode (task #50; round-10 fix pack item 7 adds the `[`/`]` alias +
+  // the transient readout below): the plain wheel gesture adjusts the brush
+  // radius instead of zooming (useCanvasViewport's own onWheel opts out via
   // suppressWheelZoom above — both listeners sit on the SAME container
   // element, so no propagation trickery is needed, just checking spotMode
   // fresh from the store on every event so this effect never needs to
@@ -496,28 +498,45 @@ export function CanvasView() {
   //
   // Round-5 finding: mirrors SpotOverlay's slider rule — with a spot
   // SELECTED, the wheel resizes THAT spot (LR behavior) instead of the
-  // next-spot brush radius. This effect has empty deps (registered once), so
-  // geometry/image can't be closed-over safely — both are re-read fresh from
-  // the store on every tick instead. A continuous scroll burst coalesces into
-  // ONE undo entry via an idle-timeout session (no pointerdown/up to bracket
-  // it, unlike the slider): the session key stays fixed until 500ms of wheel
-  // silence, then resets so the next scroll burst is its own undo entry.
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    let wheelSpotSession: number | null = null;
-    let wheelSpotTimer: number | undefined;
-    const onWheel = (ev: WheelEvent) => {
+  // next-spot brush radius. `adjustSpotRadius` (below) is the ONE
+  // implementation of that branch, shared with the `[`/`]` keys — both are
+  // "the same kind of edit" at different input granularities, so they also
+  // share ONE undo-coalescing session (`spotRadiusSessionRef`/
+  // `spotRadiusTimerRef`): a burst that mixes wheel scrolls and bracket
+  // presses still lands as a single undo entry, same idle-timeout shape the
+  // wheel-only version already had (500ms of silence resets it).
+  const spotRadiusSessionRef = useRef<number | null>(null);
+  const spotRadiusTimerRef = useRef<number | undefined>(undefined);
+  // Last pointer position seen over the canvas WHILE in spot mode (client
+  // coords) — purely so the `[`/`]` keys (no coordinates of their own, unlike
+  // a WheelEvent) can still show the transient readout near the cursor.
+  // Ref, not state: updated on every pointermove, and a re-render on every
+  // mouse move in spot mode would be wasteful.
+  const spotCursorRef = useRef<{ x: number; y: number } | null>(null);
+  // Transient "radius changed" readout (round-10 item 7): shown near the
+  // cursor for ~900ms after a wheel/bracket change, then auto-hidden — same
+  // idle-timeout shape as the undo-session coalescing above, just for the UI
+  // instead of history. Reuses SpotOverlay's own `(radius*100).toFixed(1)%`
+  // formatting (the existing readout pattern next to the brush-radius
+  // slider) rather than inventing a new unit.
+  const [spotRadiusReadout, setSpotRadiusReadout] = useState<{ x: number; y: number; text: string } | null>(null);
+  const spotRadiusReadoutTimerRef = useRef<number | undefined>(undefined);
+  // useCallback([]) — not just an inline closure — because BOTH consumers
+  // below (the wheel effect and the `[`/`]` keydown effect) register with
+  // empty deps arrays themselves (so they never re-subscribe as spot state
+  // changes, matching the pre-existing wheel effect's own convention); a
+  // stable identity here means there's no stale-closure surprise even though
+  // it's never actually re-invoked with a different closure in practice
+  // (everything inside reads fresh via useAppStore.getState() or a ref).
+  const showSpotRadiusReadout = useCallback((x: number, y: number, outputRadius: number) => {
+    setSpotRadiusReadout({ x, y, text: `${(outputRadius * 100).toFixed(1)}%` });
+    clearTimeout(spotRadiusReadoutTimerRef.current);
+    spotRadiusReadoutTimerRef.current = window.setTimeout(() => setSpotRadiusReadout(null), 900);
+  }, []);
+
+  const adjustSpotRadius = useCallback(
+    (factor: number, clientX: number, clientY: number) => {
       const s = useAppStore.getState();
-      if (!s.spotMode) return;
-      // Trackpad pinch (ctrlKey wheel, round-6): let it fall through to
-      // useCanvasViewport's own listener on the SAME container instead —
-      // don't preventDefault here (that listener already does), and don't
-      // touch the brush radius, or pinch would stop zooming the moment spot
-      // mode repurposes the plain wheel.
-      if (ev.ctrlKey) return;
-      ev.preventDefault();
-      const factor = Math.exp(-ev.deltaY * 0.0015);
       if (s.selectedSpotIndex !== null) {
         const spotsNodeId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
         const spotsNode = spotsNodeId ? s.graph.nodes.find((n) => n.id === spotsNodeId) : undefined;
@@ -529,28 +548,83 @@ export function CanvasView() {
           const outRadius = anchorRadiusToOutput(spot.radius, geom, dims.width, dims.height);
           const nextOutRadius = Math.max(0.005, outRadius * factor);
           const nextRadius = outputRadiusToAnchor(nextOutRadius, geom, dims.width, dims.height);
-          wheelSpotSession ??= Date.now();
-          clearTimeout(wheelSpotTimer);
-          wheelSpotTimer = window.setTimeout(() => {
-            wheelSpotSession = null;
+          spotRadiusSessionRef.current ??= Date.now();
+          clearTimeout(spotRadiusTimerRef.current);
+          spotRadiusTimerRef.current = window.setTimeout(() => {
+            spotRadiusSessionRef.current = null;
           }, 500);
           s.updateSpot(
             spotsNode.id,
             s.selectedSpotIndex,
             { radius: nextRadius },
-            `spot-radius-wheel:${spotsNode.id}:${s.selectedSpotIndex}:${wheelSpotSession}`
+            `spot-radius-wheel:${spotsNode.id}:${s.selectedSpotIndex}:${spotRadiusSessionRef.current}`
           );
+          showSpotRadiusReadout(clientX, clientY, nextOutRadius);
           return;
         }
       }
-      s.setSpotBrushRadius(s.spotBrushRadius * factor);
+      const next = Math.min(0.5, Math.max(0.002, s.spotBrushRadius * factor));
+      s.setSpotBrushRadius(next);
+      showSpotRadiusReadout(clientX, clientY, next);
+    },
+    [showSpotRadiusReadout]
+  );
+
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const onWheel = (ev: WheelEvent) => {
+      const s = useAppStore.getState();
+      if (!s.spotMode) return;
+      // Trackpad pinch (ctrlKey wheel, round-6): let it fall through to
+      // useCanvasViewport's own listener on the SAME container instead —
+      // don't preventDefault here (that listener already does), and don't
+      // touch the brush radius, or pinch would stop zooming the moment spot
+      // mode repurposes the plain wheel.
+      if (ev.ctrlKey) return;
+      ev.preventDefault();
+      adjustSpotRadius(Math.exp(-ev.deltaY * 0.0015), ev.clientX, ev.clientY);
+    };
+    // Cheap continuous tracker (no state, no re-render) purely so the `[`/`]`
+    // keydown handler below has a recent cursor position to anchor its own
+    // readout on.
+    const onPointerMove = (ev: PointerEvent) => {
+      if (!useAppStore.getState().spotMode) return;
+      spotCursorRef.current = { x: ev.clientX, y: ev.clientY };
     };
     container.addEventListener('wheel', onWheel, { passive: false });
+    container.addEventListener('pointermove', onPointerMove);
     return () => {
-      clearTimeout(wheelSpotTimer);
+      clearTimeout(spotRadiusTimerRef.current);
+      clearTimeout(spotRadiusReadoutTimerRef.current);
       container.removeEventListener('wheel', onWheel);
+      container.removeEventListener('pointermove', onPointerMove);
     };
-  }, []);
+  }, [adjustSpotRadius]);
+
+  // `[`/`]` brush-radius aliases (round-10 fix pack item 7, LR convention) —
+  // window-scoped (not the container) so they fire regardless of which
+  // element inside the canvas currently has focus, same reach as App.tsx's
+  // own shortcut chain; lives here rather than in App.tsx because it needs
+  // the same image/geometry context adjustSpotRadius above already has in
+  // scope. isTextEntry-guarded like every other plain-key shortcut.
+  useEffect(() => {
+    const onKeyDown = (ev: KeyboardEvent) => {
+      if (ev.key !== '[' && ev.key !== ']') return;
+      if (!useAppStore.getState().spotMode) return;
+      if (isTextEntry(ev.target)) return;
+      ev.preventDefault();
+      const factor = ev.key === ']' ? 1.1 : 1 / 1.1;
+      const cursor = spotCursorRef.current;
+      const container = containerRef.current;
+      const fallback = container?.getBoundingClientRect();
+      const x = cursor?.x ?? (fallback ? fallback.left + fallback.width / 2 : 0);
+      const y = cursor?.y ?? (fallback ? fallback.top + fallback.height / 2 : 0);
+      adjustSpotRadius(factor, x, y);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [adjustSpotRadius]);
 
   // Keep the canvas element's own LAYOUT size in sync with outputDims
   // SYNCHRONOUSLY (before paint) — decoupled from the GPU renderer's async
@@ -1454,12 +1528,17 @@ export function CanvasView() {
   const spotDraftCleanupRef = useRef<(() => void) | null>(null);
 
   // Escape (App.tsx) flips spotMode to false directly — tear down any
-  // in-flight drag the same way the mask-draw gesture does above.
+  // in-flight drag the same way the mask-draw gesture does above. Also drops
+  // the round-10 brush-radius readout (item 7) — it has its own 900ms
+  // auto-hide timer, but leaving spot mode should clear it immediately
+  // rather than let it linger over whatever tool comes next.
   useEffect(() => {
     if (!spotMode) {
       spotDraftCleanupRef.current?.();
       spotDraftCleanupRef.current = null;
       setSpotDraft(null);
+      clearTimeout(spotRadiusReadoutTimerRef.current);
+      setSpotRadiusReadout(null);
     }
   }, [spotMode]);
 
@@ -1598,7 +1677,7 @@ export function CanvasView() {
       <div className="canvas-panes">
         <div
           ref={containerRef}
-          className={`canvas-viewport${compareMode ? ' canvas-viewport--compare-swap' : ''}`}
+          className={`canvas-viewport${compareMode ? ' canvas-viewport--compare-swap' : ''}${cropMode ? ' canvas-viewport--crop-mode' : ''}`}
           style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
         >
           <canvas
@@ -1715,6 +1794,20 @@ export function CanvasView() {
           setViewFree={setViewFree}
         />
       )}
+      {/* Spot-mode brush-radius transient readout (round-10 fix pack item 7):
+          `position: fixed` at the last known cursor's CLIENT coords (set by
+          the wheel/`[`/`]` handlers above) — deliberately NOT inside the
+          pan/zoom-transformed .canvas-viewport, since this is a screen-space
+          tooltip, not an image-space overlay like CropOverlay/MaskOverlay. */}
+      {spotRadiusReadout && (
+        <div
+          className="spot-radius-readout"
+          data-testid="spot-radius-readout"
+          style={{ left: spotRadiusReadout.x, top: spotRadiusReadout.y }}
+        >
+          {spotRadiusReadout.text}
+        </div>
+      )}
       {!overlayVisible && <HistogramPanel />}
       {!overlayVisible && showBefore && (
         <div className="before-badge" data-testid="before-badge">
@@ -1799,7 +1892,20 @@ export function CanvasView() {
           ) : (
             <>
               {imageStatus === 'idle' && <span>Open a RAW or JPEG file to start (⌘O / Open button)</span>}
-              {imageStatus === 'loading' && <span>Decoding…</span>}
+              {imageStatus === 'loading' && (
+                // Round-10 fix pack item 4 ("decode… is easy to miss"): a
+                // pill with a spinner, not a bare word lost in the empty
+                // canvas. The ~150ms fade-in (CSS animation-delay below,
+                // styles.css) means a fast JPEG open that never spends 150ms
+                // in 'loading' never shows this at all — no flicker, no
+                // layout shift (this chip sits inside the already-absolute
+                // .canvas-overlay, so its opacity animating in reserves no
+                // space of its own).
+                <div className="canvas-loading-chip" data-testid="canvas-loading-chip">
+                  <span className="canvas-loading-spinner" aria-hidden="true" />
+                  {fileName && isRawFileName(fileName) ? 'Decoding RAW…' : 'Loading…'}
+                </div>
+              )}
               {imageStatus === 'error' && <span style={{ color: '#e06c75' }}>Decode failed: {imageError}</span>}
             </>
           )}

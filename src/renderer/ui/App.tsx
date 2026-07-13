@@ -10,6 +10,12 @@ import { SidecarDiffDialog } from './SidecarDiffDialog';
 import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { isBypassableNodeKind } from '../engine/graph/graphDoc';
+import { isTextEntry } from './textEntry';
+
+// Re-exported for back-compat — isTextEntry used to be defined here; it moved
+// to its own module (round-10) so CanvasView.tsx could import it too without
+// a circular import (App.tsx imports CanvasView).
+export { isTextEntry };
 
 declare global {
   interface Window {
@@ -23,34 +29,6 @@ declare global {
 /** Prefer a RAW-named file; else take the first (multi-file drops open one). */
 export function pickDropFile(files: File[]): File | null {
   return files.find((f) => isRawFileName(f.name)) ?? files[0] ?? null;
-}
-
-/** <input> types that actually accept free text/numeric entry — everything
- *  else (range, checkbox, radio, color, button…) is a plain control and must
- *  NOT block window-level shortcuts just because it happens to hold focus. */
-const TEXT_ENTRY_INPUT_TYPES = new Set(['text', 'number', 'search', 'email', 'password', 'tel', 'url']);
-
-/**
- * Single source of truth for "is the keydown target a text-entry surface" —
- * used to guard every window-level shortcut below. Previously each handler
- * inlined its own `tagName === 'INPUT'` check, which blocked shortcuts for
- * ANY input (including the crop angle range slider and checkboxes) rather
- * than just genuine text entry — that's why ⌘Z/O "sometimes" didn't fire: it
- * depended on which control last held focus, not on whether the user was
- * actually typing (#46/undo-focus).
- */
-export function isTextEntry(target: EventTarget | null): boolean {
-  const el = target as HTMLElement | null;
-  if (!el) return false;
-  if (el.isContentEditable) return true;
-  if (el.tagName === 'TEXTAREA') return true;
-  if (el.tagName === 'INPUT') {
-    const type = (el as HTMLInputElement).type || 'text';
-    return TEXT_ENTRY_INPUT_TYPES.has(type);
-  }
-  // Monaco renders into plain <div>/<textarea> nodes inside .shader-editor —
-  // its own undo stack and keybindings must own the keystroke, not ours.
-  return !!el.closest?.('.shader-editor');
 }
 
 export function App() {
@@ -92,6 +70,16 @@ export function App() {
         ev.preventDefault();
         const s = useAppStore.getState();
         s.setCompareMode(!s.compareMode);
+      }
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'r') {
+        // Crop mode (round-10 fix pack item 2, LR convention: 'r' = crop &
+        // straighten). Plain `r` was unbound (⌘⇧R is resetAllEdits, which
+        // requires `cmd` — the two checks never collide). Same shape as the
+        // plain-`c` compare toggle just above.
+        if (isTextEntry(ev.target)) return;
+        if (useAppStore.getState().imageStatus !== 'ready') return;
+        ev.preventDefault();
+        useAppStore.getState().toggleCropMode();
       }
       if (!cmd && !ev.altKey && !ev.shiftKey && /^[0-5]$/.test(ev.key)) {
         // Ratings pack: 1-5 sets the star rating, 0 clears it. Deliberately

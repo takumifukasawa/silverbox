@@ -34,7 +34,7 @@ export function SettingsDialog() {
             />
             Autosave sidecar
           </label>
-          <label className="export-dialog-row" title="Baseline exposure applied to RAW decodes (EV) — the linear first stage of the default look; the per-camera base curve is the second. Applies on the NEXT open; will be calibrated against Lightroom.">
+          <label className="export-dialog-row" title="Baseline exposure applied to RAW decodes (EV) — the linear first stage of the default look; the per-camera base curve is the second. Re-decodes the open image immediately (round-10 fix); will be calibrated against Lightroom.">
             Baseline exposure (EV)
             <input
               type="number"
@@ -47,8 +47,8 @@ export function SettingsDialog() {
               }}
             />
           </label>
-          <span className="toolbar-dim">applies on next open; will be calibrated against Lightroom</span>
-          <label className="export-dialog-row" title="Long-edge cap (px) for the interactive decode preview. Applies on the next open; export always decodes full-res.">
+          <span className="toolbar-dim">applies immediately to the open image; will be calibrated against Lightroom</span>
+          <label className="export-dialog-row" title="Long-edge cap (px) for the interactive decode preview. Applies from the next open; export always decodes full-res.">
             Preview long edge (px)
             <input
               type="number"
@@ -62,6 +62,7 @@ export function SettingsDialog() {
               }}
             />
           </label>
+          <span className="toolbar-dim">applies from the next open</span>
         </div>
         <div className="export-dialog-footer">
           <div className="export-dialog-footer-buttons">

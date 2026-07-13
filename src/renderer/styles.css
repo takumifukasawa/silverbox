@@ -496,6 +496,24 @@ button:disabled {
   cursor: grabbing;
 }
 
+/* Round-10 fix pack item 6b: crop mode is modal (deactivateOtherTools) and
+   already covers the frame with its own affordances (.crop-rect's own
+   `cursor: move`, the resize handles, the rotate zones) — the ever-present
+   "grab" hand from the plain pan gesture (useCanvasViewport's pointerdown,
+   still live over the dimmed outside-crop area so you can still pan while
+   cropping) visually competed with them. Plain cursor at rest; the pan
+   gesture itself is unchanged, so `:active` (the instant a pan drag actually
+   starts) still shows `grabbing` — "grab only once a pan is actually
+   engaged," not as a standing hint. Higher specificity than
+   .canvas-viewport/.canvas-viewport:active above, so no !important needed. */
+.canvas-viewport--crop-mode {
+  cursor: default;
+}
+
+.canvas-viewport--crop-mode:active {
+  cursor: grabbing;
+}
+
 /* Round-9 fix pack item 2 ("beforeが左、afterが右な気がする" — LR convention:
    Before on the LEFT, Current on the RIGHT). DOM order is UNCHANGED (main
    pane still mounts first, compare pane second — see the transferControlTo-
@@ -653,18 +671,65 @@ button:disabled {
 
 /* Distinct color from .before-badge (amber) — this is the camera's own JPEG
    rendering, not a Silverbox before/after state, and the two looks are
-   expected to differ. */
+   expected to differ. Round-10 fix pack item 4: bumped from a 1px/72%-alpha
+   pill to a higher-contrast one (thicker border, darker fill, bold text) —
+   the original read as barely-there against a bright embedded preview. */
 .preview-badge {
   position: absolute;
   top: 10px;
   left: 10px;
-  padding: 3px 10px;
-  background: rgba(20, 20, 20, 0.72);
-  border: 1px solid #7ec8e3;
+  padding: 4px 11px;
+  background: rgba(12, 12, 12, 0.88);
+  border: 2px solid #7ec8e3;
   border-radius: 4px;
-  color: #7ec8e3;
+  color: #cdeeff;
   font-size: 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
   pointer-events: none;
+}
+
+/* Loading chip (round-10 fix pack item 4): a translucent dark pill + spinner
+   inside .canvas-overlay's own centered flex box, so it needs no positioning
+   of its own. Hidden for the first 150ms via animation-delay (no JS timer) —
+   a JPEG open that never spends 150ms in 'loading' finishes and unmounts
+   this element before the animation's delay elapses, so it's never seen. */
+.canvas-loading-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(18, 18, 18, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  color: #eee;
+  font-size: 13px;
+  opacity: 0;
+  animation: canvas-loading-chip-in 150ms ease 150ms forwards;
+}
+
+.canvas-loading-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: #eee;
+  border-radius: 50%;
+  animation: canvas-loading-spin 0.8s linear infinite;
+}
+
+@keyframes canvas-loading-chip-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes canvas-loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .canvas-zoom-readout {
@@ -695,6 +760,13 @@ button:disabled {
   position: absolute;
   box-sizing: border-box;
   border: 1px solid #fff;
+  /* Round-10 fix pack item 5 ("写真やマスクの色との被り方次第では全く見えなくなる"):
+     a plain white 1px border vanishes against a bright/white part of the
+     photo — pair it with a dark ring just outside it (box-shadow, not a
+     second border, so the rect's own box-sizing/geometry is untouched), same
+     two-tone idea MaskShapePreview's under-stroke already uses for SVG
+     outlines. */
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
   cursor: move;
   touch-action: none;
 }
@@ -740,8 +812,15 @@ button:disabled {
   height: 20px;
   margin: -10px;
   background: #fff;
-  border: 1px solid #333;
+  /* Round-10 fix pack item 5: opaque #333 read fine on a bright image but
+     under-contrasted on a dark one — rgba(0,0,0,0.6) + a drop shadow is the
+     "white primary, dark two-tone outline" DCC-standard pairing, visible
+     against ANY photo content regardless of luminance. Size/hit-area (the
+     20px box + the ::after padding below) is unchanged — see item 6 for the
+     separate rotate-glyph size bump. */
+  border: 1px solid rgba(0, 0, 0, 0.6);
   border-radius: 2px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   touch-action: none;
   transition:
     transform 0.08s ease-out,
@@ -836,12 +915,17 @@ button:disabled {
    Round-7: grown from 20x20/24px-offset to 32x32/36px-offset alongside the
    bigger glyph (below) and the bigger .crop-handle hitbox (now 36px, half
    18px) — 36 - 16(zone half) - 18(handle half) = 2px clearance, same
-   just-clear-it design as before, recomputed for the new sizes. */
+   just-clear-it design as before, recomputed for the new sizes.
+   Round-10 (fix pack item 6a): the glyph itself grew again (34px, see
+   CropOverlay.tsx) — the zone must stay >= the glyph (verify-crop.mjs
+   asserts this) so the visible icon never pokes outside its own hover/hit
+   area. Grown to 36x36/38px-offset: 38 - 18(zone half) - 18(handle half) =
+   2px clearance, same formula as round-7. */
 .crop-rotate-zone {
   position: absolute;
-  width: 32px;
-  height: 32px;
-  margin: -16px;
+  width: 36px;
+  height: 36px;
+  margin: -18px;
   touch-action: none;
   cursor:
     url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='black' stroke-width='2.6'/><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='white' stroke-width='1.3'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='black' stroke-width='2.2'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='white' stroke-width='1.1'/></svg>")
@@ -852,25 +936,25 @@ button:disabled {
 .crop-rotate-zone-nw {
   left: 0;
   top: 0;
-  transform: translate(-36px, -36px);
+  transform: translate(-38px, -38px);
 }
 
 .crop-rotate-zone-ne {
   left: 100%;
   top: 0;
-  transform: translate(36px, -36px);
+  transform: translate(38px, -38px);
 }
 
 .crop-rotate-zone-se {
   left: 100%;
   top: 100%;
-  transform: translate(36px, 36px);
+  transform: translate(38px, 38px);
 }
 
 .crop-rotate-zone-sw {
   left: 0;
   top: 100%;
-  transform: translate(-36px, 36px);
+  transform: translate(-38px, 38px);
 }
 
 /* Round-6: the rotate zones above have no visible affordance at rest — this
@@ -887,7 +971,13 @@ button:disabled {
   inset: 0;
   margin: auto;
   pointer-events: none;
-  opacity: 0.45;
+  /* Round-10 fix pack item 6a: 0.45 -> 0.7 at rest — the paired dark/white
+     strokes (CropOverlay.tsx) are already two-tone, but the old idle GROUP
+     opacity washed them both out before they had a chance to read. A drop
+     shadow on top gives the glyph the same "subtle shadow" treatment as
+     item 5's handles. */
+  opacity: 0.7;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
   transition: opacity 0.1s ease-out;
 }
 
@@ -1051,16 +1141,23 @@ button:disabled {
   inset: -8px;
 }
 
+/* Round-10 fix pack item 5 ("写真やマスクの色との被り方次第では全く見えなくなる"): all
+   three mask-handle variants used to color-code their fill (blue center,
+   amber endpoint) — exactly the colors that vanish against a blue sky or
+   warm skin tones, which is what the user hit. Position + cursor already
+   disambiguate center/rim/endpoint (they never overlap on screen), so
+   visibility wins: white fill + a dark ~60%-opacity outline + a drop shadow,
+   same treatment as .crop-handle, on every variant. Size/hit-area
+   (::after above) is unchanged. */
 .mask-handle-center {
   width: 20px;
   height: 20px;
   margin: -10px;
   border-radius: 50%;
-  background: #8ab4f8;
-  border: 1px solid #1c2733;
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.6);
   cursor: move;
-  /* subtle idle ring: reads as a GRABBABLE dot, not flat decoration */
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 .mask-handle-rim {
@@ -1069,9 +1166,9 @@ button:disabled {
   margin: -10px;
   border-radius: 50%;
   background: #fff;
-  border: 1px solid #333;
+  border: 1px solid rgba(0, 0, 0, 0.6);
   cursor: ew-resize;
-  box-shadow: 0 0 0 2px rgba(138, 180, 248, 0.35);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
 }
 
 .mask-handle-endpoint {
@@ -1079,9 +1176,9 @@ button:disabled {
   height: 20px;
   margin: -10px;
   border-radius: 50%;
-  background: #f0c674;
-  border: 1px solid #333;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.25);
+  background: #fff;
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   cursor: move;
 }
 
@@ -1227,15 +1324,25 @@ button:disabled {
     border-width 0.08s ease-out;
 }
 
+/* Round-10 fix pack item 5: unlike the plain grab-dots below, dst/src's
+   border color is semantically load-bearing (blue = destination, amber
+   dashed = source — see the doc comment below), so it stays; instead of
+   flattening it to white, a two-tone halo (dark ring right outside the
+   colored stroke, a lighter ring outside THAT) is layered on via box-shadow
+   so the circle still reads against a same-hued sky or skin tone, same idea
+   as MaskShapePreview's dark-under-stroke pairing generalized to a colored
+   primary stroke. */
 .spot-handle-dst {
   background: rgba(138, 180, 248, 0.18);
   border: 1.5px solid #8ab4f8;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 0 0 3px rgba(255, 255, 255, 0.35);
   cursor: move;
 }
 
 .spot-handle-src {
   background: rgba(240, 198, 116, 0.12);
   border: 1.5px dashed #f0c674;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 0 0 3px rgba(255, 255, 255, 0.35);
   cursor: move;
 }
 
@@ -1283,7 +1390,11 @@ button:disabled {
   height: 20px;
   margin: -10px;
   background: #fff;
-  border: 1px solid #333;
+  /* Round-10 fix pack item 5: same white-fill + dark-outline + drop-shadow
+     treatment as .crop-handle/.mask-handle — this is a plain grab-dot, not a
+     semantically-colored circle like .spot-handle-dst/src above. */
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
   cursor: ew-resize;
   transition: transform 0.08s ease-out, box-shadow 0.08s ease-out, background 0.08s ease-out, border-color 0.08s ease-out;
 }
@@ -1341,6 +1452,26 @@ button:disabled {
   color: #ddd;
   min-width: 40px;
   text-align: right;
+}
+
+/* Round-10 fix pack item 7: transient "brush radius changed" readout near the
+   cursor while the wheel or `[`/`]` adjust it (CanvasView.tsx) — position:
+   fixed at raw client coords (set by those handlers), a small offset down-
+   right of the cursor so it never sits directly under it. Same two-tone-
+   adjacent dark pill as .preview-badge/.canvas-loading-chip for consistency,
+   not the accent-bordered look — this is a value readout, not a mode badge. */
+.spot-radius-readout {
+  position: fixed;
+  transform: translate(14px, 14px);
+  padding: 3px 8px;
+  background: rgba(18, 18, 18, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  color: #eee;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  z-index: 8;
 }
 
 /* Live preview while dragging a NEW spot (create-by-drag) — same

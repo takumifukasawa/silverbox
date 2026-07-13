@@ -87,6 +87,12 @@ try {
               height: p.height,
               overlayPresent: !!document.querySelector('[data-testid="opening-preview-overlay"]'),
               badgePresent: !!document.querySelector('[data-testid="preview-badge"]'),
+              // Round-10 fix pack item 4: the loading chip is IN the DOM the
+              // whole time imageStatus === 'loading' — its ~150ms fade-in is
+              // a pure CSS opacity animation-delay (no JS timer, no
+              // mount/unmount), so presence here is a reliable proxy even
+              // though this poller can't observe computed opacity mid-decode.
+              loadingChipPresent: !!document.querySelector('[data-testid="canvas-loading-chip"]'),
             };
           }
         }
@@ -111,6 +117,11 @@ try {
   check('overlay carries a blob: src', typeof capture1.url === 'string' && capture1.url.startsWith('blob:'), capture1);
   check('overlay <img> was actually in the DOM while loading', capture1.overlayPresent === true, capture1);
   check('preview badge was present while loading', capture1.badgePresent === true, capture1);
+  check(
+    'loading chip (round-10 fix pack item 4) was present while loading',
+    capture1.loadingChipPresent === true,
+    capture1
+  );
   const aspectPreview = capture1.width / capture1.height;
   const aspectFinal = state1.fullWidth / state1.fullHeight;
   check(
@@ -125,10 +136,12 @@ try {
     openingPreview: window.__debug.openingPreviewState(),
     overlayPresent: !!document.querySelector('[data-testid="opening-preview-overlay"]'),
     badgePresent: !!document.querySelector('[data-testid="preview-badge"]'),
+    loadingChipPresent: !!document.querySelector('[data-testid="canvas-loading-chip"]'),
   }));
   check('openingPreview state cleared on ready', afterReady.openingPreview === null, afterReady);
   check('overlay <img> gone from the DOM on ready', afterReady.overlayPresent === false, afterReady);
   check('preview badge gone from the DOM on ready', afterReady.badgePresent === false, afterReady);
+  check('loading chip gone from the DOM on ready', afterReady.loadingChipPresent === false, afterReady);
   const readbackMean1 = await page.evaluate(() => window.__debug.readbackMean());
   check('canvas shows the real render (readbackMean non-null)', readbackMean1 !== null, readbackMean1);
 

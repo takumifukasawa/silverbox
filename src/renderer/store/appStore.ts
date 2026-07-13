@@ -649,6 +649,19 @@ interface AppState {
   settings: Settings;
   /** Merge `partial` into the persisted settings via IPC; updates local state with the sanitized result. */
   updateSettings(partial: Partial<Settings>): Promise<void>;
+  /**
+   * Round-10 fix pack item 3 ("変えたけど反映されてないかも？" — baselineExposureEV
+   * silently did nothing until the NEXT open): re-decode the CURRENTLY open
+   * image at the interactive preview resolution with the live settings and
+   * swap in the result, WITHOUT touching graph/history/dirty/sidecar state —
+   * only `image` (and whatever CanvasView's own effect derives from it, i.e.
+   * the render worker's texture) changes. No-op if no image is open. Called
+   * by updateSettings when baselineExposureEV actually changes; exposed on
+   * the interface (rather than folded silently into updateSettings) so a
+   * genuine re-open racing it is easy to reason about via the same
+   * OpenSession epoch guard openImageByPath uses.
+   */
+  reloadImageForSettings(): Promise<void>;
 }
 
 // --- Sidecar autosave (settings.autosaveSidecar, default ON) ---------------
@@ -3114,10 +3127,46 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async updateSettings(partial) {
+    const before = get().settings;
     const settings = await window.silverbox.settingsUpdate(partial);
     set({ settings });
     // turning autosave off must not leave a stale timer to fire once more
     if (!settings.autosaveSidecar) cancelAutosaveTimer();
+    // Round-10 fix pack item 3: baselineExposureEV is the only setting an
+    // open image's DECODE depends on (previewLongEdge only affects the
+    // opening preview — see reloadImageForSettings' interface doc comment —
+    // and autosaveSidecar already applies live via the check above). Only
+    // re-decode when the value genuinely moved, so redundant updateSettings
+    // calls (e.g. the same number re-typed) don't churn the GPU texture.
+    if (partial.baselineExposureEV !== undefined && partial.baselineExposureEV !== before.baselineExposureEV) {
+      await get().reloadImageForSettings();
+    }
+  },
+
+  async reloadImageForSettings() {
+    const { imagePath, imageStatus, fileName } = get();
+    if (!imagePath || !fileName || imageStatus !== 'ready') return;
+    // Same epoch guard openImageByPath uses: a real open (or another reload)
+    // racing this one supersedes it cleanly — see openSession.ts's doc
+    // comment. No opts to pass; this session never sets an opening-preview
+    // URL, so its disposer ledger stays empty (nothing for a superseding
+    // session to tear down).
+    const session = new OpenSession(imagePath);
+    try {
+      const bytes = await session.guard(window.silverbox.readFile(imagePath));
+      const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
+      const image = await session.guard(
+        loadImage(bytes, kind, get().settings.previewLongEdge, get().settings.baselineExposureEV)
+      );
+      // Deliberately narrow: graph/history/dirty/sidecar/crop-mode/etc. are
+      // ALL left exactly as they are — this is a pixel refresh, not a
+      // re-open. CanvasView's own effect (watching `image` by reference)
+      // pushes the new texture to the render worker and re-renders.
+      set({ image });
+    } catch (err) {
+      if (err instanceof StaleOpenError || session.stale()) return;
+      console.warn(`reloadImageForSettings failed for ${imagePath}:`, err);
+    }
   },
   };
 });
