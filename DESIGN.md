@@ -87,7 +87,8 @@ is the data model's single source of truth, and it is how the user
 compositor and especially Unreal's material editor get right (user,
 2026-07-13). The node editor's interaction design should feel like
 those editors, and graph-editor idioms (marquee select, frame-all,
-drag-from-port add) are adopted rather than invented.
+drag-from-port add) are to be adopted rather than invented — queued in
+docs/brief-bank/node-editor-ux.md, not landed yet.
 
 The underlying mental model is **procedural** (user, 2026-07-13): a
 Silverbox document is a recipe that COMPUTES the photograph — Houdini/
@@ -97,10 +98,11 @@ consequences:
 - The node editor is one PROJECTION of the recipe, not the recipe
   itself; its concrete form (today's free canvas vs a structured,
   auto-laid-out top-down flow, Houdini-style) is an open presentation
-  question, decidable later without touching the data model —
-  especially since the UI machine-builds almost every graph, so free
-  placement is a freedom nobody is exercising. Legibility of the
-  procedure is the criterion.
+  question. Node positions are persisted document data (graphDoc.ts)
+  and users CAN arrange nodes — but the UI machine-builds and
+  auto-places almost every graph, so a structured view would simply
+  ignore stored positions (they'd remain in the doc for the free
+  view). Legibility of the procedure is the criterion.
 - A pure layer stack is REJECTED as the primary structure view:
   layers hide exactly what the graph exists to show (branches, shared
   upstream, second image sources, multiple outputs). A simplified

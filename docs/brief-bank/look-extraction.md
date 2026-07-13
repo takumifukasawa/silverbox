@@ -16,9 +16,15 @@ photos toward one look; distill the SHARED parameters.
   default, threshold configurable).
 - Tone curves: average in point space after resampling to a common x
   grid (PCHIP-evaluate each, mean the y's, refit ~8 control points).
-- Geometry/spots/masks: NEVER part of a look (captureLook's existing
-  contract). Node-graph topology beyond the Develop node: v1 extracts
-  the Develop consensus only; report non-Develop nodes as skipped.
+- Geometry: never part of a look (captureLook strips input geometry —
+  appStore.ts captureLook). NOTE (double-check 2026-07-13): captureLook
+  does NOT strip mask/spots/blend nodes — today's presets DO carry
+  them; whether they should is an open product question (a pasted
+  look carrying another photo's spot circles is dubious — fold into
+  the preset-scoping design, docs/brief-bank/
+  preset-scoping-and-export-overrides.md). Extraction v1 is stricter
+  than captureLook regardless: extract the Develop consensus only;
+  report non-Develop nodes as skipped.
 - Output: a preset file + a fit report (per-param spread table).
 
 ### Mode 2 — from REFERENCE IMAGES (statistical look solve)
