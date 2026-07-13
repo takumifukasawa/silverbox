@@ -6,7 +6,7 @@
  * node editor + inspector UI drive the same parameters.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
@@ -16,10 +16,12 @@ process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
+const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
 const { rmSync: rmSidecarSync } = await import('node:fs');
 rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
 
 // rgba16float chain passes + 8-bit readback quantization; means stay well
 // inside 1/255 per channel (see verify-ms3).
@@ -127,6 +129,56 @@ try {
     'inspector number input shows the updated value',
     (await basicSection.locator('.param-row').nth(2).locator('input[type="number"]').inputValue()) === '0.01',
     await basicSection.locator('.param-row').nth(2).locator('input[type="number"]').inputValue()
+  );
+
+  console.log('verify-ms4 (item 1, round-12 fix pack — fitView reframes on image switch):');
+  // "開くRAWによってはノードが何も表示されない？" — a sidecar whose nodes sit at
+  // coordinates far from whatever pan/zoom the PREVIOUS photo's graph left
+  // behind renders with every node off-screen, because NodeEditorPanel never
+  // remounts across image switches and React Flow's `fitView` prop only
+  // frames the graph once, at mount. Seed a fixture sidecar for a SECOND
+  // file (JPG_PATH) with nodes positioned far outside the default viewport
+  // established by ARW_PATH above, open it, and assert every node DOM
+  // element ends up back inside the editor pane — proving the imagePath-
+  // change effect actually re-fit the view.
+  const nowIso = new Date().toISOString();
+  const farAwayDoc = {
+    schemaVersion: 4,
+    createdAt: nowIso,
+    updatedAt: nowIso,
+    graph: {
+      nodes: [
+        { id: 'in', type: 'input', position: { x: 3000, y: 3000 } },
+        { id: 'dev', type: 'Develop', position: { x: 3300, y: 3000 } },
+        { id: 'out', type: 'output', position: { x: 3600, y: 3000 } },
+      ],
+      edges: [
+        { id: 'e1', from: 'in', to: 'dev' },
+        { id: 'e2', from: 'dev', to: 'out' },
+      ],
+    },
+  };
+  writeFileSync(JPG_PATH + '.silverbox.json', JSON.stringify(farAwayDoc, null, 2) + '\n', 'utf8');
+
+  await page.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, JPG_PATH);
+  await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  // let the resync effect land the new nodes and the fitView-consuming
+  // effect run its requestAnimationFrame before measuring
+  await page.waitForTimeout(300);
+
+  const paneBox = await page.locator('.node-editor').boundingBox();
+  const nodeBoxes = [];
+  for (const loc of await page.locator('.react-flow__node').all()) {
+    nodeBoxes.push(await loc.boundingBox());
+  }
+  const intersects = (a, b) =>
+    a && b && a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+  check(
+    'far-away sidecar node positions are reframed inside the editor pane after switching images',
+    nodeBoxes.length === 3 && nodeBoxes.every((nb) => intersects(nb, paneBox)),
+    { paneBox, nodeBoxes }
   );
 
   console.log('screenshots: test-artifacts/ms4-exposure.png, ms4-grayscale.png');

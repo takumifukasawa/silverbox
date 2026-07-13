@@ -74,14 +74,14 @@ export function App() {
         const s = useAppStore.getState();
         s.setCompareMode(!s.compareMode);
       }
-      if (!cmd && !ev.altKey && !ev.shiftKey && (ev.key.toLowerCase() === 'r' || ev.key.toLowerCase() === 'c')) {
-        // Crop mode (round-10 fix pack item 2, LR convention: 'r' = crop &
-        // straighten). Round-11 fix pack item 3 adds plain `c` as a second,
-        // equally-bound alias ("user's instinct says C=crop") — freed up by
-        // moving compare off `c` onto `y` just above. Plain `r` was unbound
-        // (⌘⇧R is resetAllEdits, which requires `cmd` — the two checks never
-        // collide); same reasoning now covers `c` too, since compare no
-        // longer claims it.
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'c') {
+        // Crop mode. Round-10 fix pack item 2 bound this to 'r' (LR
+        // convention) and round-11 fix pack item 3 added plain `c` as a
+        // second, equally-bound alias. Round-12 fix pack item 2 ("クロップの
+        // Rはいらない気がする…ショートカットは2ついらない、って話でもあるな"):
+        // ONE accelerator per operation — 'r' is dropped, plain `c` is now
+        // the only crop binding (⌘⇧R is resetAllEdits, which requires `cmd`
+        // and was never actually sharing this key).
         if (isTextEntry(ev.target)) return;
         if (useAppStore.getState().imageStatus !== 'ready') return;
         ev.preventDefault();

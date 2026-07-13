@@ -394,6 +394,24 @@ try {
     timeout: 5_000,
   });
 
+  // Round-12 fix pack item 3 ("設定変更が反映されるまで無反応に見える"): the
+  // re-decode below is a real RAW read+decode (~1s) that used to have no
+  // feedback of its own. settingsReloading flips true synchronously with the
+  // reload's start (appStore.ts), so the chip's DOM element (data-testid)
+  // attaches immediately — poll tightly for it rather than a single
+  // waitForSelector, since it's also the FIRST thing that could plausibly
+  // race a very fast decode in a test environment.
+  let chipSeenDuringReload = false;
+  const chipDeadline = Date.now() + 2_000;
+  while (Date.now() < chipDeadline) {
+    if ((await page.locator('[data-testid="canvas-loading-chip"]').count()) > 0) {
+      chipSeenDuringReload = true;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  check('settings re-decode shows the canvas loading chip while it runs', chipSeenDuringReload, chipSeenDuringReload);
+
   // The re-decode is async (readFile IPC + worker decode) — unlike a plain
   // updateNodeParam, readbackMean() right after resolving updateSettings()
   // isn't guaranteed to have observed the swapped `image` yet (React's own
@@ -414,6 +432,11 @@ try {
     meanBeforeReload,
     meanAfterReload,
   });
+  check(
+    'the canvas loading chip is gone by the time the re-decode has settled',
+    (await page.locator('[data-testid="canvas-loading-chip"]').count()) === 0,
+    await page.locator('[data-testid="canvas-loading-chip"]').count()
+  );
   const afterReload = await page.evaluate(() => ({
     graph: window.__debug.graphState(),
     history: window.__debug.historyState(),

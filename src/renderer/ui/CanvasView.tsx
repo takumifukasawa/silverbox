@@ -53,6 +53,7 @@ import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
+import { SpotBrushCursor } from './SpotBrushCursor';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
 import { isTextEntry } from './textEntry';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
@@ -335,6 +336,11 @@ export function CanvasView() {
   const gpuError = useAppStore((s) => s.gpuError);
   const setGpuError = useAppStore((s) => s.setGpuError);
   const imageStatus = useAppStore((s) => s.imageStatus);
+  // Round-12 fix pack item 3: reloadImageForSettings' own re-decode feedback
+  // — see appStore.ts's settingsReloading doc comment for why this can't
+  // just reuse imageStatus==='loading' (that would hide the canvas via
+  // overlayVisible, which a settings re-decode must not do).
+  const settingsReloading = useAppStore((s) => s.settingsReloading);
   const image = useAppStore((s) => s.image);
   const openingPreview = useAppStore((s) => s.openingPreview);
   const imageError = useAppStore((s) => s.imageError);
@@ -1571,6 +1577,13 @@ export function CanvasView() {
     null
   );
   const spotDraftCleanupRef = useRef<(() => void) | null>(null);
+  // Round-12 fix pack item 5: LR-style brush-radius cursor (SpotBrushCursor)
+  // — the pointer's CURRENT output-frame position while hovering the canvas
+  // in spot mode with no drag in progress. Plain React state (not a ref like
+  // spotCursorRef above, which deliberately avoids re-renders for the
+  // wheel/bracket readout's positioning) because this one must actually
+  // re-render on every move to follow the cursor.
+  const [spotHoverPos, setSpotHoverPos] = useState<{ x: number; y: number } | null>(null);
 
   // Escape (App.tsx) flips spotMode to false directly — tear down any
   // in-flight drag the same way the mask-draw gesture does above. Also drops
@@ -1584,8 +1597,25 @@ export function CanvasView() {
       setSpotDraft(null);
       clearTimeout(spotRadiusReadoutTimerRef.current);
       setSpotRadiusReadout(null);
+      setSpotHoverPos(null);
     }
   }, [spotMode]);
+
+  // Plain inline handlers (not an effect-owned listener like the wheel
+  // tracker above) so they always close over the CURRENT render's `view` /
+  // `outputDims` / imagePointFromClient — no stale-closure risk from a
+  // dependency array that would otherwise need to include the viewport
+  // state, which changes on every pan/zoom.
+  const handleSpotPointerMove = (ev: React.PointerEvent<HTMLCanvasElement>) => {
+    if (!spotMode || spotDraft) {
+      if (spotHoverPos !== null) setSpotHoverPos(null);
+      return;
+    }
+    setSpotHoverPos(imagePointFromClient(ev.clientX, ev.clientY));
+  };
+  const handleSpotPointerLeave = () => {
+    if (spotHoverPos !== null) setSpotHoverPos(null);
+  };
 
   const handleSpotPointerDown = (ev: React.PointerEvent<HTMLCanvasElement>) => {
     if (!spotMode || !outputDims) return;
@@ -1722,7 +1752,7 @@ export function CanvasView() {
       <div className="canvas-panes">
         <div
           ref={containerRef}
-          className={`canvas-viewport${compareMode ? ' canvas-viewport--compare-swap' : ''}${cropMode ? ' canvas-viewport--crop-mode' : ''}`}
+          className={`canvas-viewport${compareMode ? ' canvas-viewport--compare-swap' : ''}`}
           style={{ visibility: overlayVisible ? 'hidden' : 'visible' }}
         >
           <canvas
@@ -1731,6 +1761,8 @@ export function CanvasView() {
             style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
             onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
             onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : spotMode ? handleSpotPointerDown : undefined}
+            onPointerMove={spotMode ? handleSpotPointerMove : undefined}
+            onPointerLeave={spotMode ? handleSpotPointerLeave : undefined}
             data-testid="canvas-view-canvas"
           />
           {!overlayVisible && drawGesture && outputDims && (
@@ -1771,6 +1803,19 @@ export function CanvasView() {
             <SpotDrawOverlay
               dst={spotDraft.dst}
               src={spotDraft.src}
+              radius={spotBrushRadius}
+              view={view}
+              canvasWidth={outputDims.width}
+              canvasHeight={outputDims.height}
+            />
+          )}
+          {/* Round-12 fix pack item 5: pre-placement brush-radius cursor —
+              only while spot mode is active, the pointer is actually over the
+              canvas (spotHoverPos), and no drag is in progress (spotDraft is
+              null; SpotDrawOverlay above takes over once one starts). */}
+          {!overlayVisible && spotMode && !spotDraft && spotHoverPos && outputDims && (
+            <SpotBrushCursor
+              pos={spotHoverPos}
               radius={spotBrushRadius}
               view={view}
               canvasWidth={outputDims.width}
@@ -1954,6 +1999,22 @@ export function CanvasView() {
               {imageStatus === 'error' && <span style={{ color: '#e06c75' }}>Decode failed: {imageError}</span>}
             </>
           )}
+        </div>
+      )}
+      {/* Round-12 fix pack item 3: same chip as above, but OUTSIDE the
+          overlayVisible block — a settings re-decode keeps imageStatus at
+          'ready' the whole time (reloadImageForSettings is a pixel refresh,
+          not a re-open; overlayVisible must stay false so the canvas itself
+          stays visible/interactive), so this needs its own render path
+          rather than extending the 'loading' branch above. Same class names
+          (same 150ms CSS fade-in, same visual pill) — just a generic label,
+          per the brief, rather than the RAW/JPEG-specific text above. */}
+      {!overlayVisible && settingsReloading && (
+        <div className="canvas-overlay">
+          <div className="canvas-loading-chip" data-testid="canvas-loading-chip">
+            <span className="canvas-loading-spinner" aria-hidden="true" />
+            Decoding RAW…
+          </div>
         </div>
       )}
     </div>

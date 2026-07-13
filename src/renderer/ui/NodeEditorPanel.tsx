@@ -12,6 +12,7 @@ import {
   type Edge,
   type NodeMouseHandler,
   type OnNodeDrag,
+  type ReactFlowInstance,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import { useAppStore } from '../store/appStore';
@@ -241,6 +242,10 @@ function buildNodes(
  */
 export function NodeEditorPanel() {
   const fileName = useAppStore((s) => s.fileName);
+  const imagePath = useAppStore((s) => s.imagePath);
+  // Item 1's fitView trigger reads this too — see the doc comment below on
+  // why it keys off 'ready' rather than the raw imagePath change.
+  const imageStatus = useAppStore((s) => s.imageStatus);
   const graph = useAppStore((s) => s.graph);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const selectNode = useAppStore((s) => s.selectNode);
@@ -328,6 +333,59 @@ export function NodeEditorPanel() {
     imageNodeSourceThumbs,
   ]);
 
+  // Round-12 fix pack item 1 ("開くRAWによってはノードが何も表示されない？"): React
+  // Flow's `fitView` PROP (below) only frames the graph once, at this
+  // component's OWN mount — it is not reactive to prop changes. This panel
+  // itself never remounts across image switches (no `key`, unlike
+  // Filmstrip's `key={folderDir}` in App.tsx), so whatever pan/zoom the
+  // PREVIOUS photo left behind carries over. A sidecar whose nodes sit at
+  // coordinates far from that leftover viewport — e.g. one edited under an
+  // older layout, or machine-placed mask/blend/spots nodes — then renders
+  // with every node off-screen: the editor LOOKS empty, but the nodes are
+  // there. (CanvasView.tsx's `selectNode` debug hook already documents this
+  // exact limitation as the reason it exists — added as a verify-script
+  // workaround rather than a product fix.) Refit whenever the open image
+  // changes, and whenever the node count jumps by more than one (preset
+  // apply / reset / hot-reload can restructure the whole graph) — but NOT
+  // on an ordinary single-node add, which would yank the view away from
+  // whatever the user is doing mid-edit.
+  const rfInstanceRef = useRef<ReactFlowInstance | null>(null);
+  const onInit = useCallback((instance: ReactFlowInstance) => {
+    rfInstanceRef.current = instance;
+  }, []);
+  // NOT keyed directly off `imagePath`: openImageByPath sets imagePath
+  // synchronously at 'loading' time, well BEFORE the sidecar is parsed and
+  // `graph` is replaced (that lands together with imageStatus flipping to
+  // 'ready', in the SAME `set()` call — see appStore.ts's openImageByPath).
+  // Keying off imagePath directly races the resync effect above: this
+  // effect would fire early (imagePath changed, `graph` still the OLD
+  // image's), mark prevImagePathRef consumed, and the LATER commit where
+  // `graph` actually becomes the new image's would then see no imagePath
+  // delta and never re-arm pendingFitRef — the exact failure mode an
+  // earlier version of this fix had. Watching the 'ready' transition
+  // instead guarantees this effect's `graph` is already the new image's.
+  const prevReadyImagePathRef = useRef<string | null>(null);
+  const prevNodeCountRef = useRef(graph.nodes.length);
+  const pendingFitRef = useRef(false);
+  useEffect(() => {
+    const nodeCountJumped = Math.abs(graph.nodes.length - prevNodeCountRef.current) > 1;
+    prevNodeCountRef.current = graph.nodes.length;
+    const imageJustBecameReady = imageStatus === 'ready' && imagePath !== prevReadyImagePathRef.current;
+    if (imageStatus === 'ready') prevReadyImagePathRef.current = imagePath;
+    if (imageJustBecameReady || nodeCountJumped) pendingFitRef.current = true;
+  }, [imagePath, imageStatus, graph.nodes.length]);
+  // Consumed after `rfNodes` itself lands (not right when the trigger above
+  // fires): React Flow's internal store syncs from the `nodes` prop via its
+  // own child effect, which — effects fire children-first within a commit —
+  // has already run by the time this effect (declared in the PARENT
+  // component) executes, so fitView measures the NEW layout, not the stale
+  // one.
+  useEffect(() => {
+    if (!pendingFitRef.current) return;
+    pendingFitRef.current = false;
+    rfInstanceRef.current?.fitView({ padding: 0.2, maxZoom: 1 });
+  }, [rfNodes]);
+
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,
     source: e.source,
@@ -411,7 +469,8 @@ export function NodeEditorPanel() {
         nodeTypes={nodeTypes}
         colorMode="dark"
         fitView
-        fitViewOptions={{ maxZoom: 1 }}
+        fitViewOptions={{ maxZoom: 1, padding: 0.2 }}
+        onInit={onInit}
         proOptions={{ hideAttribution: true }}
         deleteKeyCode={['Backspace', 'Delete']}
         onNodeClick={onNodeClick}

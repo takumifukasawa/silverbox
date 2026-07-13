@@ -599,12 +599,14 @@ export function CropOverlay({ view, canvasWidth, canvasHeight, setViewFree }: Pr
                   convention made explicit — #000 stroke pinned to 0.6 opacity
                   (was 0.55) and the idle GROUP opacity raised in CSS (below)
                   so the pairing actually reads at rest instead of only on
-                  hover. */}
+                  hover. Round-12 fix pack item 4: 34px -> 40px (user:
+                  "まだ小さい気がしないでもない") — .crop-rotate-zone in styles.css
+                  grows to match, hitbox recomputed the same way round-10 did. */}
               <svg
                 className="crop-rotate-glyph"
                 data-testid="crop-rotate-glyph"
-                width="34"
-                height="34"
+                width="40"
+                height="40"
                 viewBox="0 0 22 22"
                 aria-hidden="true"
                 focusable="false"

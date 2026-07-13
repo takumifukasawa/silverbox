@@ -93,6 +93,20 @@ interface AppState {
   imagePath: string | null;
   imageError: string | null;
   /**
+   * Round-12 fix pack item 3 ("設定変更が反映されるまで無反応に見える"):
+   * reloadImageForSettings' own re-decode (~1s, a full RAW read+decode, not
+   * a cheap pixel tweak) has no feedback of its own — `imageStatus` stays
+   * 'ready' throughout (deliberately: it's a pixel refresh, not a re-open,
+   * so the canvas must stay visible and interactive, unlike a real open's
+   * `overlayVisible`-hiding 'loading' state). Set true at the start of
+   * reloadImageForSettings, cleared unconditionally in its `finally` —
+   * success, failure, AND superseded-by-a-newer-session all clear it, since
+   * `finally` runs on every one of those paths. CanvasView shows the same
+   * `.canvas-loading-chip` (round-10 fix pack item 4) keyed off this flag
+   * OUTSIDE the `overlayVisible` block that owns the 'loading' case.
+   */
+  settingsReloading: boolean;
+  /**
    * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
    * catalog): non-null while the open image came from an explicit folder
    * open (a folder drop or the toolbar's "Open Folder…"), holding that
@@ -1493,6 +1507,7 @@ export const useAppStore = create<AppState>((set, get) => {
   fileName: null,
   imagePath: null,
   imageError: null,
+  settingsReloading: false,
   folderDir: null,
   folderEntries: [],
   openingPreview: null,
@@ -1577,7 +1592,11 @@ export const useAppStore = create<AppState>((set, get) => {
     // Clearing it here, synchronously and unconditionally, is simpler and
     // safer than trying to reason about every call site that could leave a
     // preview active.
-    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null, previewLook: null });
+    // settingsReloading is reset here too (defensive): a genuinely different
+    // image opening must never inherit a stale "still decoding settings"
+    // chip left behind by an in-flight reloadImageForSettings its own
+    // `finally` hasn't run yet.
+    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null, previewLook: null, settingsReloading: false });
     try {
       const bytes = await session.guard(window.silverbox.readFile(path));
       // Embedded-preview-first opening: slice the camera JPEG OUT of `bytes`
@@ -3194,6 +3213,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // URL, so its disposer ledger stays empty (nothing for a superseding
     // session to tear down).
     const session = new OpenSession(imagePath);
+    set({ settingsReloading: true });
     try {
       const bytes = await session.guard(window.silverbox.readFile(imagePath));
       const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
@@ -3208,6 +3228,10 @@ export const useAppStore = create<AppState>((set, get) => {
     } catch (err) {
       if (err instanceof StaleOpenError || session.stale()) return;
       console.warn(`reloadImageForSettings failed for ${imagePath}:`, err);
+    } finally {
+      // Unconditional: success, genuine failure, AND superseded-by-a-newer-
+      // session all clear it (this method's interface doc comment).
+      set({ settingsReloading: false });
     }
   },
   };

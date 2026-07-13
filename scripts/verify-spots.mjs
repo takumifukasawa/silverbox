@@ -526,6 +526,78 @@ try {
   check('scratch spot removed, back to the pre-section spot count', (await spotsState(spotsNodeId)).spots.length === spotsBeforePlace, await spotsState(spotsNodeId));
 
   // ---------------------------------------------------------------------
+  console.log(
+    'verify-spots (round-12 fix pack item 5, "十字カーソルだとサイズが伝わらない": brush-radius circle follows the pointer pre-placement):'
+  );
+  // Cursor over the canvas, no drag in progress — SpotBrushCursor.tsx should
+  // be mounted (CanvasView.tsx gates it on spotMode && !spotDraft && a live
+  // hover position). A corner of the canvas well clear of spot 0's own
+  // handles (their radius has grown considerably from the slider/wheel/
+  // bracket sections above, and .spot-handle has pointer-events:auto — a
+  // point too close would swallow the pointermove before it reaches the
+  // canvas underneath, same hazard the overlap-investigation section
+  // elsewhere in this suite calls out explicitly).
+  const brushCursorProbe = { x: canvasBox.x + canvasBox.width * 0.92, y: canvasBox.y + canvasBox.height * 0.08 };
+  await page.mouse.move(brushCursorProbe.x, brushCursorProbe.y);
+  await page.waitForSelector('[data-testid="spot-brush-cursor"]', { timeout: 2_000 });
+  const brushCursorRing = page.locator('[data-testid="spot-brush-cursor"] .spot-brush-cursor-ring');
+  const ringBoxBefore = await brushCursorRing.boundingBox();
+  check(
+    'the brush-radius cursor circle is visible over the canvas in spot mode',
+    !!ringBoxBefore && ringBoxBefore.width > 0 && ringBoxBefore.height > 0,
+    ringBoxBefore
+  );
+
+  await page.keyboard.press(']');
+  await page.keyboard.press(']');
+  await page.keyboard.press(']');
+  await page.waitForTimeout(50);
+  const ringBoxAfterGrow = await brushCursorRing.boundingBox();
+  check("'`]` visibly grows the brush-cursor circle's rendered diameter", ringBoxAfterGrow.width > ringBoxBefore.width, {
+    before: ringBoxBefore.width,
+    after: ringBoxAfterGrow.width,
+  });
+
+  await page.keyboard.press('[');
+  await page.keyboard.press('[');
+  await page.keyboard.press('[');
+  await page.keyboard.press('[');
+  await page.waitForTimeout(50);
+  const ringBoxAfterShrink = await brushCursorRing.boundingBox();
+  check("'`[` visibly shrinks it back down", ringBoxAfterShrink.width < ringBoxAfterGrow.width, {
+    grown: ringBoxAfterGrow.width,
+    shrunk: ringBoxAfterShrink.width,
+  });
+
+  // A drag in progress hands off to SpotDrawOverlay (dst/src preview) — the
+  // brush cursor itself must step aside, not double up with it. Same
+  // handle-free probe point as above (a real drag here creates a brand new
+  // spot, not a move of the existing one).
+  await page.mouse.move(brushCursorProbe.x, brushCursorProbe.y);
+  await page.mouse.down();
+  await page.mouse.move(brushCursorProbe.x + 30, brushCursorProbe.y + 30, { steps: 3 });
+  check(
+    'the brush cursor is hidden once a drag actually starts (SpotDrawOverlay takes over)',
+    (await page.locator('[data-testid="spot-brush-cursor"]').count()) === 0,
+    await page.locator('[data-testid="spot-brush-cursor"]').count()
+  );
+  await page.mouse.up();
+  // That drag committed a spot (>=2px) — remove it, this section is about
+  // the cursor circle, not spot placement.
+  await setSpots(spotsNodeId, (await spotsState(spotsNodeId)).spots.slice(0, spotsBeforePlace));
+
+  // Moving off the canvas entirely (pointerleave) hides it too — no stale
+  // circle stuck over a stale position.
+  await page.mouse.move(10, 10);
+  await page.waitForTimeout(50);
+  check(
+    'the brush cursor disappears once the pointer leaves the canvas',
+    (await page.locator('[data-testid="spot-brush-cursor"]').count()) === 0,
+    await page.locator('[data-testid="spot-brush-cursor"]').count()
+  );
+  await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (5. delete selected spot via Backspace; clear-all via the inspector):');
   // Click (no drag) selects the spot without mutating the graph.
   const dstHandleForSelect = page.locator('[data-testid="spot-handle-dst-0"]');

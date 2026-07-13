@@ -484,33 +484,29 @@ button:disabled {
   display: flex;
 }
 
+/* Round-12 fix pack item 4 ("プレビューのデフォルトが手のアイコンなのが諸々の問題の原因
+   かもしれない？"): the resting cursor is `default` in EVERY mode, not just
+   crop mode (round-10 fix pack item 6b only fixed crop mode; this widens the
+   same reasoning to the whole canvas) — a standing "grab" hand read as an
+   affordance for something other than plain panning and visually competed
+   with every tool overlay's own cursor. `grabbing` only appears once a pan
+   drag is actually engaged (`:active`), never as a resting hint. Overlay
+   cursors (spot crosshair/brush circle, mask handles, crop's own `cursor:
+   move`/resize/rotate glyphs) sit on top in the DOM and win regardless,
+   since `:active` here only fires while the POINTER IS DOWN on this element
+   itself, not on a child overlay's own hit-target. This made the round-10
+   crop-mode-specific override (`.canvas-viewport--crop-mode`) dead — this
+   base rule now covers it — so that class/override is removed rather than
+   kept redundant. */
 .canvas-viewport {
   position: relative;
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  cursor: grab;
-}
-
-.canvas-viewport:active {
-  cursor: grabbing;
-}
-
-/* Round-10 fix pack item 6b: crop mode is modal (deactivateOtherTools) and
-   already covers the frame with its own affordances (.crop-rect's own
-   `cursor: move`, the resize handles, the rotate zones) — the ever-present
-   "grab" hand from the plain pan gesture (useCanvasViewport's pointerdown,
-   still live over the dimmed outside-crop area so you can still pan while
-   cropping) visually competed with them. Plain cursor at rest; the pan
-   gesture itself is unchanged, so `:active` (the instant a pan drag actually
-   starts) still shows `grabbing` — "grab only once a pan is actually
-   engaged," not as a standing hint. Higher specificity than
-   .canvas-viewport/.canvas-viewport:active above, so no !important needed. */
-.canvas-viewport--crop-mode {
   cursor: default;
 }
 
-.canvas-viewport--crop-mode:active {
+.canvas-viewport:active {
   cursor: grabbing;
 }
 
@@ -920,12 +916,16 @@ button:disabled {
    CropOverlay.tsx) — the zone must stay >= the glyph (verify-crop.mjs
    asserts this) so the visible icon never pokes outside its own hover/hit
    area. Grown to 36x36/38px-offset: 38 - 18(zone half) - 18(handle half) =
-   2px clearance, same formula as round-7. */
+   2px clearance, same formula as round-7.
+   Round-12 (fix pack item 4, "まだ小さい気がしないでもない"): glyph grew again
+   (40px, see CropOverlay.tsx) — zone grown to 42x42 (same "+2px over the
+   glyph" margin round-10 used) and the offset recomputed with the same
+   formula: 41 = 21(new zone half) + 18(handle half, unchanged) + 2(clearance). */
 .crop-rotate-zone {
   position: absolute;
-  width: 36px;
-  height: 36px;
-  margin: -18px;
+  width: 42px;
+  height: 42px;
+  margin: -21px;
   touch-action: none;
   cursor:
     url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='22' height='22' viewBox='0 0 22 22'><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='black' stroke-width='2.6'/><path d='M11 3a8 8 0 1 1-6.5 3.3' fill='none' stroke='white' stroke-width='1.3'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='black' stroke-width='2.2'/><path d='M2.5 4.5l1.7 2.3 2.3-1' fill='none' stroke='white' stroke-width='1.1'/></svg>")
@@ -936,25 +936,25 @@ button:disabled {
 .crop-rotate-zone-nw {
   left: 0;
   top: 0;
-  transform: translate(-38px, -38px);
+  transform: translate(-41px, -41px);
 }
 
 .crop-rotate-zone-ne {
   left: 100%;
   top: 0;
-  transform: translate(38px, -38px);
+  transform: translate(41px, -41px);
 }
 
 .crop-rotate-zone-se {
   left: 100%;
   top: 100%;
-  transform: translate(38px, 38px);
+  transform: translate(41px, 41px);
 }
 
 .crop-rotate-zone-sw {
   left: 0;
   top: 100%;
-  transform: translate(-38px, 38px);
+  transform: translate(-41px, 41px);
 }
 
 /* Round-6: the rotate zones above have no visible affordance at rest — this
@@ -1506,6 +1506,50 @@ button:disabled {
   stroke: #f0c674;
   stroke-width: 1.5;
   stroke-dasharray: 4 3;
+  vector-effect: non-scaling-stroke;
+}
+
+/* Round-12 fix pack item 5: LR-style brush-radius cursor for spot mode, live
+   between placements (SpotBrushCursor.tsx) — same sibling-of-<canvas>
+   transform as .spot-draw-overlay above. Two paired strokes per shape (dark
+   underneath, white on top, non-scaling so both stay crisp at any zoom) —
+   same double-stroke trick CropOverlay.tsx's rotate glyph uses, since an SVG
+   shape can't take a box-shadow the way .crop-rect's two-tone border does. */
+.spot-brush-cursor {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  z-index: 6;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.spot-brush-cursor-ring-under {
+  fill: none;
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-brush-cursor-ring {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.3;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-brush-cursor-cross-under {
+  stroke: rgba(0, 0, 0, 0.6);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.spot-brush-cursor-cross {
+  stroke: #fff;
+  stroke-width: 1.3;
+  stroke-linecap: round;
   vector-effect: non-scaling-stroke;
 }
 

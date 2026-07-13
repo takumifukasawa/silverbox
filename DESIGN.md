@@ -276,6 +276,8 @@ ACCELERATORS —
   adds, their clickable path, and which gestures are accelerators with
   what hint. A `?` shortcuts overlay is the eventual single
   discoverability net (docs/ui-architecture.md).
+- One accelerator per operation — aliases multiply the memory burden
+  without adding reachability (decided 2026-07-13).
 
 Audit at adoption: one violation existed — copy/paste develop settings
 was ⌘⇧C/V-only; fixed by adding Copy/Paste entries to the Presets menu

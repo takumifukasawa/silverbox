@@ -308,7 +308,7 @@ export function Toolbar() {
         disabled={imageStatus !== 'ready'}
         data-testid="crop-toggle"
         className={cropMode ? 'active' : undefined}
-        title="Crop & straighten (R or C)"
+        title="Crop & straighten (C)"
       >
         Crop
       </button>
