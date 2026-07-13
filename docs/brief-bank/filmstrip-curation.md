@@ -23,9 +23,9 @@ BAD, not just not-yet-rated).
 ## 2. Folders from elsewhere (the catalog-boundary edge)
 
 Adding arbitrary other folders into one filmstrip session = a virtual
-collection — the first step toward the collections engine MANIFESTO.md
-refuses ("views may help you browse — they will never own your
-photos"). Current position: one folder at a time; opening another
+collection — the first step toward the collections engine the catalog
+slope guard in DESIGN.md refuses ("views may help you browse — they
+will never own your photos"). Current position: one folder at a time; opening another
 folder replaces the strip. If a real workflow need appears (e.g.
 compare picks across two shoots), the boundary-respecting shape would
 be a SAVED-NOWHERE session view (drag several folders in, never
