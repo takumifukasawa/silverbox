@@ -38,7 +38,7 @@ export function SettingsDialog() {
             Baseline exposure (EV)
             <input
               type="number"
-              step={0.05}
+              step={0.25}
               value={settings.baselineExposureEV}
               data-testid="settings-baseline-ev"
               onChange={(ev) => {

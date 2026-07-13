@@ -367,8 +367,11 @@ try {
   });
 
   // ---------------------------------------------------------------------
-  console.log('verify-spots (UX pack D round-5: selected-spot WHEEL resize mirrors the slider rule):');
-  // Re-select spot 0 via a plain click (no drag) on its dst handle.
+  console.log('verify-spots (round-13 fix pack item 1: wheel ALWAYS resizes the brush, even with a spot selected — LR rule):');
+  // Re-select spot 0 via a plain click (no drag) on its dst handle. Round-13
+  // reverses round-5's "wheel mirrors the slider" behavior: LR splits
+  // transient gestures (wheel, brackets — always the next-spot brush) from
+  // labeled controls (the slider, the rim-handle drag — selection-aware).
   const dstHandleForWheel = page.locator('[data-testid="spot-handle-dst-0"]');
   const dhwBox = await dstHandleForWheel.boundingBox();
   await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
@@ -377,21 +380,29 @@ try {
   check('re-selected spot 0 via a plain click', (await spotState()).selectedIndex === 0, (await spotState()).selectedIndex);
 
   const anchorRadiusBeforeWheel = (await spotsState(spotsNodeId)).spots[0].radius;
+  const brushRadiusBeforeWheel = (await spotState()).brushRadius;
   const pastBeforeWheel = await historyPast();
   await page.mouse.wheel(0, -80);
   await page.mouse.wheel(0, -80);
   await page.waitForTimeout(50);
   const anchorRadiusAfterWheel = (await spotsState(spotsNodeId)).spots[0].radius;
-  check('wheel resized spots[0].radius while selected (mirrors the slider rule)', anchorRadiusAfterWheel !== anchorRadiusBeforeWheel, {
+  const brushRadiusAfterWheel = (await spotState()).brushRadius;
+  check('with a spot SELECTED, wheel still moves spotState().brushRadius (round-13 LR rule)', brushRadiusAfterWheel !== brushRadiusBeforeWheel, {
+    before: brushRadiusBeforeWheel,
+    after: brushRadiusAfterWheel,
+  });
+  check('spots[0].radius is untouched by the wheel while selected', anchorRadiusAfterWheel === anchorRadiusBeforeWheel, {
     before: anchorRadiusBeforeWheel,
     after: anchorRadiusAfterWheel,
   });
-  check('two quick wheel ticks coalesce into ONE undo entry (idle-timeout session)', (await historyPast()) === pastBeforeWheel + 1, {
-    before: pastBeforeWheel,
-    after: await historyPast(),
-  });
+  check(
+    'wheel brush-radius changes add NO undo entry while selected (brushRadius is UI state, not a graph edit)',
+    (await historyPast()) === pastBeforeWheel,
+    { before: pastBeforeWheel, after: await historyPast() }
+  );
 
-  // Clear the selection again and confirm the wheel reverts to brushRadius.
+  // Clear the selection and confirm the wheel behaves the same way — there is
+  // no selection-dependent branch left to diverge.
   // setSpotModeUi clicks the toolbar toggle, which leaves the mouse hovering
   // that button rather than the canvas — move it back over the canvas
   // viewport first, or the wheel event never reaches CanvasView's listener.
@@ -450,13 +461,43 @@ try {
 
   // ---------------------------------------------------------------------
   console.log(
+    'verify-spots (round-13 fix pack item 1: `]` also always resizes the brush, even with a spot selected):'
+  );
+  // Re-select spot 0 and confirm `]` takes the SAME always-brush path the
+  // wheel section above just proved, not a selected-spot branch (round-13
+  // removed that branch from adjustSpotRadius entirely — brackets and the
+  // wheel share the one implementation).
+  await page.mouse.move(dhwBox.x + dhwBox.width / 2, dhwBox.y + dhwBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  check(
+    're-selected spot 0 via a plain click, heading into the bracket-key selected check',
+    (await spotState()).selectedIndex === 0,
+    (await spotState()).selectedIndex
+  );
+  const anchorRadiusBeforeSelBracket = (await spotsState(spotsNodeId)).spots[0].radius;
+  const brushRadiusBeforeSelBracket = (await spotState()).brushRadius;
+  await page.keyboard.press(']');
+  await page.waitForTimeout(50);
+  const brushRadiusAfterSelBracket = (await spotState()).brushRadius;
+  const anchorRadiusAfterSelBracket = (await spotsState(spotsNodeId)).spots[0].radius;
+  check('with a spot SELECTED, `]` still moves spotState().brushRadius', brushRadiusAfterSelBracket !== brushRadiusBeforeSelBracket, {
+    before: brushRadiusBeforeSelBracket,
+    after: brushRadiusAfterSelBracket,
+  });
+  check('spots[0].radius is untouched by `]` while selected', anchorRadiusAfterSelBracket === anchorRadiusBeforeSelBracket, {
+    before: anchorRadiusBeforeSelBracket,
+    after: anchorRadiusAfterSelBracket,
+  });
+
+  // ---------------------------------------------------------------------
+  console.log(
     'verify-spots (round-10 fix pack item 7: `[`/`]` alias the wheel; transient near-cursor readout; a placed spot gets the adjusted radius):'
   );
-  // Clear selection first — brackets mirror the wheel's own selected-vs-
-  // brush-radius branch (same appStore setSpotBrushRadius/updateSpot paths
-  // the wheel already exercises above), so this section only needs to prove
-  // the KEY path reaches those same actions, shows the readout, and that a
-  // spot placed afterward actually picks up the adjusted radius.
+  // Clear selection — this section's remaining checks (readout, placed-spot
+  // radius) don't care about selection either way (brackets always hit the
+  // brush-radius path now), but a clean no-selection start keeps this
+  // section's assertions unambiguous and matches the wheel section's shape.
   await setSpotModeUi(false);
   await setSpotModeUi(true);
   check('no selection heading into the bracket-key check', (await spotState()).selectedIndex === null, (await spotState()).selectedIndex);

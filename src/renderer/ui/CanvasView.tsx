@@ -27,7 +27,6 @@ import {
   type LensParams,
 } from '../engine/graph/graphDoc';
 import {
-  anchorRadiusToOutput,
   maskShapeOutputToAnchor,
   outputRadiusToAnchor,
   outputToAnchor,
@@ -504,17 +503,13 @@ export function CanvasView() {
   // fresh from the store on every event so this effect never needs to
   // re-register when the mode flips).
   //
-  // Round-5 finding: mirrors SpotOverlay's slider rule — with a spot
-  // SELECTED, the wheel resizes THAT spot (LR behavior) instead of the
-  // next-spot brush radius. `adjustSpotRadius` (below) is the ONE
-  // implementation of that branch, shared with the `[`/`]` keys — both are
-  // "the same kind of edit" at different input granularities, so they also
-  // share ONE undo-coalescing session (`spotRadiusSessionRef`/
-  // `spotRadiusTimerRef`): a burst that mixes wheel scrolls and bracket
-  // presses still lands as a single undo entry, same idle-timeout shape the
-  // wheel-only version already had (500ms of silence resets it).
-  const spotRadiusSessionRef = useRef<number | null>(null);
-  const spotRadiusTimerRef = useRef<number | undefined>(undefined);
+  // Round-13 fix pack item 1 (reverses round-5): wheel and `[`/`]` ALWAYS
+  // adjust the next-spot BRUSH radius, regardless of selection — LR's own
+  // split. Resizing an already-placed spot is a SpotOverlay-only affordance
+  // (the rim-handle drag and the "Spot radius" slider), which stays
+  // selection-aware; these transient gestures never touch `spots[i].radius`,
+  // so there's no per-spot undo entry to coalesce here (brushRadius is UI
+  // state, not part of the graph).
   // Last pointer position seen over the canvas WHILE in spot mode (client
   // coords) — purely so the `[`/`]` keys (no coordinates of their own, unlike
   // a WheelEvent) can still show the transient readout near the cursor.
@@ -545,32 +540,6 @@ export function CanvasView() {
   const adjustSpotRadius = useCallback(
     (factor: number, clientX: number, clientY: number) => {
       const s = useAppStore.getState();
-      if (s.selectedSpotIndex !== null) {
-        const spotsNodeId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
-        const spotsNode = spotsNodeId ? s.graph.nodes.find((n) => n.id === spotsNodeId) : undefined;
-        const spot = spotsNode?.spots?.spots?.[s.selectedSpotIndex];
-        if (spotsNode && spot && s.image) {
-          const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
-          const geom = inputNode?.geometry ?? defaultGeometryParams();
-          const dims = orientedDims(s.image.width, s.image.height, geom.orientation ?? defaultGeometryOrientation());
-          const outRadius = anchorRadiusToOutput(spot.radius, geom, dims.width, dims.height);
-          const nextOutRadius = Math.max(0.005, outRadius * factor);
-          const nextRadius = outputRadiusToAnchor(nextOutRadius, geom, dims.width, dims.height);
-          spotRadiusSessionRef.current ??= Date.now();
-          clearTimeout(spotRadiusTimerRef.current);
-          spotRadiusTimerRef.current = window.setTimeout(() => {
-            spotRadiusSessionRef.current = null;
-          }, 500);
-          s.updateSpot(
-            spotsNode.id,
-            s.selectedSpotIndex,
-            { radius: nextRadius },
-            `spot-radius-wheel:${spotsNode.id}:${s.selectedSpotIndex}:${spotRadiusSessionRef.current}`
-          );
-          showSpotRadiusReadout(clientX, clientY, nextOutRadius);
-          return;
-        }
-      }
       const next = Math.min(0.5, Math.max(0.002, s.spotBrushRadius * factor));
       s.setSpotBrushRadius(next);
       showSpotRadiusReadout(clientX, clientY, next);
@@ -603,7 +572,6 @@ export function CanvasView() {
     container.addEventListener('wheel', onWheel, { passive: false });
     container.addEventListener('pointermove', onPointerMove);
     return () => {
-      clearTimeout(spotRadiusTimerRef.current);
       clearTimeout(spotRadiusReadoutTimerRef.current);
       container.removeEventListener('wheel', onWheel);
       container.removeEventListener('pointermove', onPointerMove);
@@ -614,8 +582,10 @@ export function CanvasView() {
   // window-scoped (not the container) so they fire regardless of which
   // element inside the canvas currently has focus, same reach as App.tsx's
   // own shortcut chain; lives here rather than in App.tsx because it needs
-  // the same image/geometry context adjustSpotRadius above already has in
-  // scope. isTextEntry-guarded like every other plain-key shortcut.
+  // spotCursorRef/containerRef above to anchor the transient readout near
+  // the cursor. isTextEntry-guarded like every other plain-key shortcut.
+  // Round-13 fix pack item 1: always the brush radius now (see
+  // adjustSpotRadius above) — no selected-spot branch to mirror any more.
   useEffect(() => {
     const onKeyDown = (ev: KeyboardEvent) => {
       if (ev.key !== '[' && ev.key !== ']') return;

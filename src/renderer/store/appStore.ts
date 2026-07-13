@@ -711,6 +711,40 @@ function cancelAutosaveTimer(): void {
   }
 }
 
+// --- Baseline-exposure re-decode debounce (round-13 fix pack item 2) -------
+//
+// baselineExposureEV is the only setting whose change re-decodes the open
+// image (~1s, a full RAW read+decode) — see reloadImageForSettings' own doc
+// comment. A spinner click or a keystroke mid-typing ("1" then "1.5") each
+// used to trigger one full re-decode; this collapses a burst into ONE
+// reloadImageForSettings call for the LAST value, 300ms after the burst goes
+// quiet. Only the re-decode is delayed — updateSettings persists the setting
+// (settingsUpdate + set({settings})) synchronously as before. All callers
+// awaiting the same debounce window share its single reload via
+// `waiters`, so `await updateSettings(...)` still resolves once the pixels
+// it asked for are actually on screen (or the reload was superseded/failed).
+let settingsReloadTimer: ReturnType<typeof setTimeout> | null = null;
+let settingsReloadWaiters: Array<() => void> = [];
+function scheduleSettingsReload(): Promise<void> {
+  if (settingsReloadTimer !== null) clearTimeout(settingsReloadTimer);
+  return new Promise((resolve) => {
+    settingsReloadWaiters.push(resolve);
+    settingsReloadTimer = setTimeout(() => {
+      settingsReloadTimer = null;
+      const waiters = settingsReloadWaiters;
+      settingsReloadWaiters = [];
+      // reloadImageForSettings early-returns if the image closed meanwhile
+      // (its own imagePath/imageStatus check) and carries its own
+      // OpenSession epoch guard against a real open racing it — nothing
+      // extra needed here for either case.
+      void useAppStore
+        .getState()
+        .reloadImageForSettings()
+        .finally(() => waiters.forEach((resolve) => resolve()));
+    }, 300);
+  });
+}
+
 // --- Embedded-preview-first opening (AppState.openingPreview) --------------
 //
 // Revoke the overlay's blob: URL and drop it — call sites: a new open
@@ -3199,8 +3233,10 @@ export const useAppStore = create<AppState>((set, get) => {
     // and autosaveSidecar already applies live via the check above). Only
     // re-decode when the value genuinely moved, so redundant updateSettings
     // calls (e.g. the same number re-typed) don't churn the GPU texture.
+    // Round-13 fix pack item 2: the re-decode itself is debounced (see
+    // scheduleSettingsReload above) so a burst of changes costs one decode.
     if (partial.baselineExposureEV !== undefined && partial.baselineExposureEV !== before.baselineExposureEV) {
-      await get().reloadImageForSettings();
+      await scheduleSettingsReload();
     }
   },
 
