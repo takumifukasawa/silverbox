@@ -75,7 +75,7 @@ function NodeThumb({
         <button
           type="button"
           className={`op-node-bypass${disabled ? ' op-node-bypass--active' : ''}`}
-          title={disabled ? 'Re-enable this node (M or ⌘D)' : 'Bypass this node (M or ⌘D)'}
+          title={disabled ? 'Re-enable this node (M)' : 'Bypass this node (M)'}
           data-testid={`node-bypass-${id}`}
           onClick={(ev) => {
             ev.stopPropagation();
@@ -176,7 +176,8 @@ function buildNodes(
   inspectNodeId: string | null,
   imageNodeMissing: Record<string, boolean>,
   externalNodeNeedsConfirm: Record<string, string>,
-  externalNodeErrors: Record<string, string>
+  externalNodeErrors: Record<string, string>,
+  imageNodeSourceThumbs: Record<string, string>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
@@ -202,7 +203,12 @@ function buildNodes(
         n.kind === 'input' ? 'input' : n.kind === 'output' ? 'output' : n.kind === BLEND_KIND ? 'blend' : n.kind === IMAGE_KIND ? 'image' : 'op',
       data: {
         label: nodeLabel(n, fileName),
-        thumbUrl: nodeThumbs[n.id],
+        // Round-11 fix pack item 4: nodeThumbs is buildPlan-derived (nodeSteps
+        // only covers nodes reachable from the resolved output) — a
+        // disconnected image node never gets one. Fall back to its own
+        // source-file thumbnail (CanvasView.tsx's imageNodeSourceThumbs
+        // effect) so choosing a file always shows SOMETHING, wired or not.
+        thumbUrl: nodeThumbs[n.id] ?? (n.kind === IMAGE_KIND ? imageNodeSourceThumbs[n.id] : undefined),
         inspecting: n.id === inspectNodeId,
         missing: n.kind === IMAGE_KIND ? imageNodeMissing[n.id] === true : undefined,
         badge,
@@ -256,6 +262,10 @@ export function NodeEditorPanel() {
   // Image node feature: missing-file badge state, resynced the same
   // debounced way nodeThumbs/inspectNodeId are (see below).
   const imageNodeMissing = useAppStore((s) => s.imageNodeMissing);
+  // Round-11 fix pack item 4: source-file thumbnail fallback for image nodes
+  // buildPlan never reaches (see buildNodes' thumbUrl comment above), resynced
+  // the same debounced way nodeThumbs/imageNodeMissing are.
+  const imageNodeSourceThumbs = useAppStore((s) => s.imageNodeSourceThumbs);
   // External-tool hook node (task #41): needs-confirm/error badge state,
   // resynced the same debounced way as imageNodeMissing above.
   const externalNodeNeedsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm);
@@ -275,7 +285,17 @@ export function NodeEditorPanel() {
   // below (they change at most every ~300ms, via CanvasView's debounce — far
   // below drag-lag territory, so no extra guard is needed for them).
   const [rfNodes, setRfNodes] = useState<Node[]>(() =>
-    buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors)
+    buildNodes(
+      graph,
+      fileName,
+      selectedNodeId,
+      nodeThumbs,
+      inspectNodeId,
+      imageNodeMissing,
+      externalNodeNeedsConfirm,
+      externalNodeErrors,
+      imageNodeSourceThumbs
+    )
   );
   // Suppressed while a drag is in flight: the store's node position is still
   // the PRE-drag value until drop, so resyncing from it mid-drag would fight
@@ -284,9 +304,29 @@ export function NodeEditorPanel() {
   useEffect(() => {
     if (draggingRef.current) return;
     setRfNodes(
-      buildNodes(graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors)
+      buildNodes(
+        graph,
+        fileName,
+        selectedNodeId,
+        nodeThumbs,
+        inspectNodeId,
+        imageNodeMissing,
+        externalNodeNeedsConfirm,
+        externalNodeErrors,
+        imageNodeSourceThumbs
+      )
     );
-  }, [graph, fileName, selectedNodeId, nodeThumbs, inspectNodeId, imageNodeMissing, externalNodeNeedsConfirm, externalNodeErrors]);
+  }, [
+    graph,
+    fileName,
+    selectedNodeId,
+    nodeThumbs,
+    inspectNodeId,
+    imageNodeMissing,
+    externalNodeNeedsConfirm,
+    externalNodeErrors,
+    imageNodeSourceThumbs,
+  ]);
 
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,

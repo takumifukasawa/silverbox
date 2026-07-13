@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
-import { thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
+import { getThumbnail, thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
 import { srgbDecode, srgbEncode } from '../engine/color/srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
@@ -47,7 +47,7 @@ import {
   type MaskShape,
 } from '../engine/graph/maskNode';
 import { defaultSpotsParams, SPOTS_KIND, type Spot, type SpotsParams } from '../engine/graph/spotsNode';
-import { dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
+import { dirnameOf, IMAGE_KIND, resolveImagePath } from '../engine/graph/imageNode';
 import { imageNodeDecodeCount, syncImageNodeSources } from '../engine/graph/imageNodeSource';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
@@ -77,6 +77,8 @@ declare global {
       nodeThumbsState(): Record<string, string>;
       /** Verify-only: every node-thumbnail blob: URL updateNodeThumbs has revoked so far, in order. */
       nodeThumbRevocations(): string[];
+      /** Round-11 fix pack item 4: nodeId → source-file thumbnail blob: URL, the fallback NodeEditorPanel reads when nodeThumbsState() has nothing for that node (a disconnected image node). */
+      imageNodeSourceThumbsState(): Record<string, string>;
       /** Per-node-preview pack, tier 2: the currently-inspected node id, or null. */
       inspectState(): string | null;
       rendererKind(): 'webgpu';
@@ -153,7 +155,7 @@ declare global {
        * select an ARBITRARY node deterministically).
        */
       selectNode(id: string | null): void;
-      /** Node bypass toggle (Resolve's Ctrl+D-equivalent) — verify-only convenience, drives the exact same store action as ⌘D/the node body's bypass button. */
+      /** Node bypass toggle (Resolve calls this "mute") — verify-only convenience, drives the exact same store action as plain `m`/the node body's bypass button. */
       toggleNodeDisabled(nodeId: string): void;
       /** Set once a exportSelectedOutputs batch completes — file count + the paths written. */
       exportBatchState(): { count: number; paths: string[] } | null;
@@ -894,6 +896,46 @@ export function CanvasView() {
     externalNodeRev,
   ]);
 
+  // Round-11 fix pack item 4 ("PNG chosen on an Image node showed no node
+  // thumbnail"): an image node not wired into the resolved output plan never
+  // gets a nodeSteps entry, so the render-worker thumbnail batch above never
+  // covers it — "unconnected nodes get no plan-derived thumb" is exactly the
+  // gap the brief flags. Independent, cheap fallback: decode each image
+  // node's OWN referenced file through the folder filmstrip's existing
+  // thumbnail machinery (thumbnailCache.ts — Sony RAW embedded previews,
+  // JPEG, and PNG all already work there) and stash it in
+  // imageNodeSourceThumbs, which NodeEditorPanel only reads when the sharper
+  // plan-derived nodeThumbs has nothing for that node id. Runs for EVERY
+  // image node with a path, connected or not — a connected node's fetch is a
+  // harmless cache hit whose result buildNodes ends up ignoring in favor of
+  // the plan-derived thumbnail. This effect re-runs on every graph change
+  // (not just image-node edits): each iteration is a path-keyed cache lookup
+  // (thumbnailCache.ts) plus a no-op store write when the URL hasn't changed
+  // (setImageNodeSourceThumb), so the extra churn is cheap rather than
+  // correctness-critical to avoid.
+  useEffect(() => {
+    let cancelled = false;
+    const dir = imagePath ? dirnameOf(imagePath) : null;
+    for (const n of graph.nodes) {
+      if (n.kind !== IMAGE_KIND) continue;
+      const path = n.image?.path ?? '';
+      if (!path) {
+        // No file chosen (or just cleared) — drop any stale entry rather
+        // than let a previous file's thumbnail linger.
+        useAppStore.getState().clearImageNodeSourceThumb(n.id);
+        continue;
+      }
+      const resolved = resolveImagePath(path, dir);
+      void getThumbnail(resolved).then((url) => {
+        if (cancelled || !url) return;
+        useAppStore.getState().setImageNodeSourceThumb(n.id, url);
+      });
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [graph, imagePath]);
+
   useEffect(() => {
     window.__debug = {
       imageState() {
@@ -931,6 +973,9 @@ export function CanvasView() {
       /** Verify-only: every node-thumbnail blob: URL updateNodeThumbs has revoked so far, in order (revocation audit, mirrors thumbnailRevocations()). */
       nodeThumbRevocations() {
         return [...nodeThumbRevocationLog()];
+      },
+      imageNodeSourceThumbsState() {
+        return useAppStore.getState().imageNodeSourceThumbs;
       },
       /** Per-node-preview pack, tier 2: the currently-inspected node id, or null — see appStore.ts's inspectNodeId. */
       inspectState() {

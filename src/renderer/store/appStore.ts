@@ -386,10 +386,10 @@ interface AppState {
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
   /**
-   * Node bypass toggle (Resolve's Ctrl+D-equivalent, ⌘D / the node body's
-   * bypass button): flips `disabled` on `nodeId`, one plain undo entry per
-   * toggle (unlike updateNodeParam's coalescing param-drag key — every ⌘D/
-   * click is its own discrete edit, not a continuous drag). No-op on a kind
+   * Node bypass toggle (Resolve calls this "mute"; plain `m` / the node
+   * body's bypass button): flips `disabled` on `nodeId`, one plain undo entry
+   * per toggle (unlike updateNodeParam's coalescing param-drag key — every
+   * keypress/click is its own discrete edit, not a continuous drag). No-op on a kind
    * the toggle doesn't apply to (isBypassableNodeKind — 'input'/'output'/
    * 'image' have nothing sensible to bypass to) or a missing nodeId.
    */
@@ -514,6 +514,24 @@ interface AppState {
    */
   imageNodeRev: number;
   bumpImageNodeRev(): void;
+  /**
+   * Round-11 fix pack item 4 ("PNG chosen on an Image node showed no node
+   * thumbnail"): nodeId → a SOURCE-FILE thumbnail blob: URL for image nodes,
+   * fetched via the folder filmstrip's own machinery (thumbnailCache.ts —
+   * CanvasView.tsx's own effect is the only writer). Purely a FALLBACK: an
+   * image node reachable from the resolved output already gets a sharper
+   * plan-derived thumbnail in `nodeThumbs` above, which NodeEditorPanel
+   * always prefers; this map only fills the gap for an image node that isn't
+   * wired to anything (nodeSteps, and therefore the render-worker thumbnail
+   * batch, never covers a disconnected node). Unlike nodeThumbs, these blob:
+   * URLs are owned/revoked by thumbnailCache.ts's own path-keyed cache
+   * (shared with the filmstrip), not by this store — dropping a node's entry
+   * here never revokes anything itself.
+   */
+  imageNodeSourceThumbs: Record<string, string>;
+  setImageNodeSourceThumb(nodeId: string, url: string): void;
+  /** Drop a node's source-file thumbnail entry (path cleared, or the node was removed) — no URL to revoke, see imageNodeSourceThumbs' doc comment. */
+  clearImageNodeSourceThumb(nodeId: string): void;
   // --- External-tool hook node (denoise v1, task #41) ------------------------
   /** Replace an external node's command template (Inspector's command input); `coalesceKey` null = its own undo entry, same convention as setImagePath. */
   setExternalCommand(nodeId: string, command: string, coalesceKey: string | null): void;
@@ -1683,6 +1701,14 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedNodeId: null,
         nodeThumbs: {},
         imageNodeMissing: {},
+        // Round-11 fix pack item 4: node ids are reused across different
+        // images (defaultGraphDoc()/a loaded sidecar both reuse 'in'/'dev'/
+        // 'out'…), so a stale source-file thumbnail keyed by THIS image's
+        // node ids must not survive into the next — same rule nodeThumbs
+        // just above already follows. No URL to revoke (see the field's own
+        // doc comment); the fresh doc's own image nodes get resynced by
+        // CanvasView's effect once it re-runs against the new `graph`.
+        imageNodeSourceThumbs: {},
         inspectNodeId: null,
         history: emptyHistory(),
         shaderErrors: {},
@@ -1982,6 +2008,9 @@ export const useAppStore = create<AppState>((set, get) => {
       // the same immediate way nodeThumbs is pruned above it, rather than
       // waiting for the next syncImageNodeSources pass to notice it's gone.
       const { [nodeId]: _pruned, ...imageNodeMissing } = s.imageNodeMissing;
+      // Round-11 fix pack item 4: same immediate prune for the source-file
+      // thumbnail fallback, in case a removed node was kind 'image'.
+      const { [nodeId]: _prunedThumb, ...imageNodeSourceThumbs } = s.imageNodeSourceThumbs;
       return {
         ...pushHistory(s, null),
         graph: scratch,
@@ -1989,6 +2018,7 @@ export const useAppStore = create<AppState>((set, get) => {
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
         nodeThumbs: pruneNodeThumb(s.nodeThumbs, nodeId),
         imageNodeMissing,
+        imageNodeSourceThumbs,
         inspectNodeId: s.inspectNodeId === nodeId ? null : s.inspectNodeId,
       };
     });
@@ -2295,6 +2325,18 @@ export const useAppStore = create<AppState>((set, get) => {
   imageNodeRev: 0,
   bumpImageNodeRev() {
     set((s) => ({ imageNodeRev: s.imageNodeRev + 1 }));
+  },
+
+  imageNodeSourceThumbs: {},
+  setImageNodeSourceThumb(nodeId, url) {
+    set((s) => (s.imageNodeSourceThumbs[nodeId] === url ? {} : { imageNodeSourceThumbs: { ...s.imageNodeSourceThumbs, [nodeId]: url } }));
+  },
+  clearImageNodeSourceThumb(nodeId) {
+    set((s) => {
+      if (!(nodeId in s.imageNodeSourceThumbs)) return {};
+      const { [nodeId]: _dropped, ...rest } = s.imageNodeSourceThumbs;
+      return { imageNodeSourceThumbs: rest };
+    });
   },
 
   setExternalCommand(nodeId, command, coalesceKey) {

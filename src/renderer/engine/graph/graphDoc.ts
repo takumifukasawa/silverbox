@@ -153,12 +153,12 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
 }
 
 /**
- * True for every node kind the bypass toggle (⌘D / the node body's bypass
- * button) may target — every 1-in/1-out chain kind plus blend. 'input',
+ * True for every node kind the bypass toggle (plain `m` / the node body's
+ * bypass button) may target — every 1-in/1-out chain kind plus blend. 'input',
  * 'output', and 'image' are the only exclusions: a source node has nothing
  * upstream to bypass TO (see GraphNode.disabled's doc comment). Shared by
  * appStore's toggleNodeDisabled (the single writer of `disabled`) and the
- * UI (App.tsx's ⌘D handler, NodeEditorPanel's bypass button) so both agree
+ * UI (App.tsx's `m` handler, NodeEditorPanel's bypass button) so both agree
  * on exactly the same set without duplicating the exclusion list.
  */
 export function isBypassableNodeKind(kind: GraphNodeKind): boolean {

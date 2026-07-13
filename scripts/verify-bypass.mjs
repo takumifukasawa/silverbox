@@ -1,8 +1,12 @@
 /**
- * Node bypass toggle verify (Resolve's Ctrl+D-equivalent for our graph,
+ * Node bypass toggle verify (Resolve's "mute" for our graph,
  * docs/feature-gap-analysis.md category B): `GraphNode.disabled` on every
  * 1-in/1-out chain kind (ops, custom, Develop, mask, spots, external) plus
- * blend, driven via ⌘D or the node body's bypass button.
+ * blend, driven via plain `m` or the node body's bypass button. Round-11 fix
+ * pack item 1 ("⌘Dはもはやいらなくない？（むしろUEだと複製のコマンドに見えるし）") removed
+ * ⌘D entirely — it now does nothing at all, left unbound (reserved; may
+ * later become duplicate-node) — `m` (round-9 fix pack item 1) is the only
+ * bypass accelerator left.
  *
  *  1. Op node bypass: the render is bit-comparable to the node never having
  *     existed; re-enabling restores the edited render; GPU==CPU parity holds
@@ -13,13 +17,14 @@
  *     produces the same rendered content as its upstream ancestor (proven via
  *     inspect mode, which resolves through the identical buildPlan/nodeSteps
  *     machinery the thumbnail batch does) — one undo entry per toggle either
- *     way (button or ⌘D).
- *  3. ⌘D toggles the selected node; non-bypassable kinds (input/output/image)
- *     never get the toggle — no button rendered, ⌘D is a no-op, and the store
- *     action itself guards against being called on them directly.
- *  3b. Plain `m` (round-9 fix pack item 1) is a second accelerator for the
- *     identical store action — same one-undo-entry toggle behavior as ⌘D,
- *     which stays bound alongside it.
+ *     way (button or `m`).
+ *  3. Plain `m` toggles the selected node; non-bypassable kinds (input/
+ *     output/image) never get the toggle — no button rendered, `m` is a
+ *     no-op, and the store action itself guards against being called on them
+ *     directly.
+ *  3b. ⌘D is UNBOUND (round-11 fix pack item 1): pressing it with any
+ *     bypassable node selected does nothing at all — no disabled flag, no
+ *     undo entry.
  *  4. Blend disabled resolves to its 'a' input — bit-exact match of the
  *     graph's ORIGINAL (pre-local-adjustment) render, regardless of what its
  *     'b'/mask branches are doing.
@@ -198,34 +203,7 @@ try {
   check('re-enabled via the button', !(await isNodeDisabled(brightId)), await graphState());
 
   // ---------------------------------------------------------------------
-  console.log('verify-bypass (3. ⌘D toggles the selection; non-bypassable kinds (input/output/image) are no-ops):');
-  await selectNode(brightId);
-  const pastBeforeCmdD = await historyPast();
-  await page.keyboard.press('Meta+d');
-  check('⌘D with a bypassable node selected sets disabled', await isNodeDisabled(brightId), await graphState());
-  check('⌘D is exactly one undo entry', (await historyPast()) === pastBeforeCmdD + 1, {
-    before: pastBeforeCmdD,
-    after: await historyPast(),
-  });
-  await page.keyboard.press('Meta+d');
-  check('⌘D again clears disabled', !(await isNodeDisabled(brightId)), await graphState());
-
-  await selectNode('in');
-  const pastBeforeInputCmdD = await historyPast();
-  await page.keyboard.press('Meta+d');
-  check("⌘D with the 'input' node selected is a no-op (still no disabled key, no history entry)", (await historyPast()) === pastBeforeInputCmdD, {
-    before: pastBeforeInputCmdD,
-    after: await historyPast(),
-  });
-  check("'input' node never gets a disabled key", (await graphState()).nodes.find((n) => n.id === 'in')?.disabled === undefined, await graphState());
-  check(
-    "the input node body renders no bypass button at all",
-    (await page.locator('.react-flow__node[data-id="in"] [data-testid="node-bypass-in"]').count()) === 0,
-    await page.locator('.react-flow__node[data-id="in"] [data-testid="node-bypass-in"]').count()
-  );
-
-  // ---------------------------------------------------------------------
-  console.log('verify-bypass (3b. plain `m` is a second accelerator for the identical store action):');
+  console.log('verify-bypass (3. plain `m` toggles the selection; non-bypassable kinds (input/output/image) are no-ops):');
   await selectNode(brightId);
   const pastBeforeM = await historyPast();
   await page.keyboard.press('m');
@@ -244,11 +222,28 @@ try {
     before: pastBeforeInputM,
     after: await historyPast(),
   });
+  check("'input' node never gets a disabled key", (await graphState()).nodes.find((n) => n.id === 'in')?.disabled === undefined, await graphState());
+  check(
+    "the input node body renders no bypass button at all",
+    (await page.locator('.react-flow__node[data-id="in"] [data-testid="node-bypass-in"]').count()) === 0,
+    await page.locator('.react-flow__node[data-id="in"] [data-testid="node-bypass-in"]').count()
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-bypass (3b. ⌘D is UNBOUND — round-11 fix pack item 1: pressing it does nothing at all):');
+  await selectNode(brightId);
+  const pastBeforeCmdD = await historyPast();
+  await page.keyboard.press('Meta+d');
+  check('⌘D with a bypassable node selected leaves disabled unset', !(await isNodeDisabled(brightId)), await graphState());
+  check('⌘D adds no undo entry (fully unbound, not just a no-op toggle)', (await historyPast()) === pastBeforeCmdD, {
+    before: pastBeforeCmdD,
+    after: await historyPast(),
+  });
 
   await selectNode('out');
   const pastBeforeOutputCmdD = await historyPast();
   await page.keyboard.press('Meta+d');
-  check("⌘D with the 'output' node selected is a no-op (still no disabled key, no history entry)", (await historyPast()) === pastBeforeOutputCmdD, {
+  check("⌘D with the 'output' node selected is (still) a no-op (unbound key + non-bypassable kind, both apply)", (await historyPast()) === pastBeforeOutputCmdD, {
     before: pastBeforeOutputCmdD,
     after: await historyPast(),
   });

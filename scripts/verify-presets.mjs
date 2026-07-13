@@ -442,13 +442,17 @@ try {
   });
 
   // ---------------------------------------------------------------------
-  // 11. "Reset all edits" (round-8 NG fix pack item 2) — the look-family
-  // home's own reset action, so it lives in this script rather than a new
-  // one. The reference graph is captured from a REAL fresh open in this
-  // same session (not hand-built) — under the flags THIS script runs
-  // under (no lensProfileAutoDefault/baseCurveDefault/forceDefaults opt-in),
-  // seedDefaultLook's only unconditional work is resolving the as-shot WB
-  // placeholder, so this is exactly "the plain doc" the brief describes.
+  // 11. "Reset all edits" (round-8 NG fix pack item 2; round-11 fix pack item
+  // 2 moved the button itself out of this Presets menu into the toolbar's
+  // whole-photo action group — "presetsの中にあるべきじゃない気がする" — but the
+  // underlying resetAllEdits action/behavior is unchanged and this is still
+  // the closest existing look-family script to exercise it from, rather than
+  // a whole new verify script for one toolbar button). The reference graph is
+  // captured from a REAL fresh open in this same session (not hand-built) —
+  // under the flags THIS script runs under (no lensProfileAutoDefault/
+  // baseCurveDefault/forceDefaults opt-in), seedDefaultLook's only
+  // unconditional work is resolving the as-shot WB placeholder, so this is
+  // exactly "the plain doc" the brief describes.
   console.log('verify-presets (11. Reset all edits: graph equals a fresh-open default, ONE undo entry, undo restores everything, rating preserved):');
   await closePresetsMenu(); // section 10's hover preview leaves it open
   await openAndWait(ARW_PATH); // fresh default graph, empty history, autosave off
@@ -473,8 +477,9 @@ try {
   const beforeResetAllMean = await gpuMean();
   const historyBeforeResetAll = await historyState();
 
-  await openPresetsMenu();
-  await page.locator('[data-testid="preset-reset-all"]').click();
+  // Round-11: the button now lives in the toolbar, not this menu — no
+  // openPresetsMenu() needed to reach it.
+  await page.locator('[data-testid="toolbar-reset-all"]').click();
   await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 3));
 
   const gAfterResetAll = await graphState();

@@ -233,6 +233,7 @@ export function Toolbar() {
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
+  const resetAllEdits = useAppStore((s) => s.resetAllEdits);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const cropMode = useAppStore((s) => s.cropMode);
   const toggleCropMode = useAppStore((s) => s.toggleCropMode);
@@ -289,12 +290,25 @@ export function Toolbar() {
       <button onClick={redo} disabled={history.future.length === 0} data-testid="redo-button" title="Redo (⌘⇧Z)">
         ↪︎
       </button>
+      {/* Round-11 fix pack item 2 ("presetsの中にあるべきじゃない気がする"): "reset all
+          edits" moved out of the Presets menu into the toolbar's whole-photo
+          action group (next to Save/undo/redo) — it isn't a preset-family
+          concept, it's a whole-photo action like undo/redo. Confirm-free:
+          undo (one entry) is still the safety net, same as before the move. */}
+      <button
+        onClick={resetAllEdits}
+        disabled={imageStatus !== 'ready'}
+        data-testid="toolbar-reset-all"
+        title="Reset all edits — back to a fresh open of this photo (one undo entry, ⇧⌘R)"
+      >
+        Reset
+      </button>
       <button
         onClick={toggleCropMode}
         disabled={imageStatus !== 'ready'}
         data-testid="crop-toggle"
         className={cropMode ? 'active' : undefined}
-        title="Crop & straighten (R)"
+        title="Crop & straighten (R or C)"
       >
         Crop
       </button>
@@ -312,7 +326,7 @@ export function Toolbar() {
         disabled={imageStatus !== 'ready'}
         data-testid="compare-toggle"
         className={compareMode ? 'active' : undefined}
-        title="Compare view: current vs before, or a second output (C); Escape exits"
+        title="Compare view: current vs before, or a second output (Y); Escape exits"
       >
         Compare
       </button>

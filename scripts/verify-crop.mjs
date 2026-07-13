@@ -248,7 +248,7 @@ try {
   console.log('verify-crop (round-10 fix pack item 2: plain `r` toggles crop mode, LR convention):');
   // Crop mode is off here (crop-done above committed and exited it). Focus
   // the canvas area (not a text field) then press bare `r` — same isTextEntry-
-  // guarded shape as the plain-`c` compare toggle in App.tsx.
+  // guarded shape as the plain-`y` compare toggle in App.tsx.
   await page.locator('[data-testid="crop-toggle"]').evaluate((el) => el.blur());
   await page.keyboard.press('r');
   await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
@@ -256,6 +256,23 @@ try {
   await page.keyboard.press('r');
   await page.waitForFunction(() => !document.querySelector('[data-testid="crop-overlay"]'), { timeout: 5_000 });
   check('plain `r` again exits crop mode', true, null);
+
+  console.log('verify-crop (round-11 fix pack item 3: plain `c` is an equally-bound crop-mode alias — "user\'s instinct says C=crop"):');
+  // `c` used to drive compare (App.tsx) — round-11 moved compare onto `y` and
+  // freed `c` up to become a second crop-mode accelerator alongside `r`, not
+  // a replacement for it (both stay bound). Same isTextEntry-guarded shape.
+  await page.keyboard.press('c');
+  await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
+  check('plain `c` also enters crop mode', true, null);
+  await page.keyboard.press('c');
+  await page.waitForFunction(() => !document.querySelector('[data-testid="crop-overlay"]'), { timeout: 5_000 });
+  check('plain `c` also exits crop mode', true, null);
+  // `r` still works after `c` has been exercised — the alias is additive.
+  await page.keyboard.press('r');
+  await page.waitForSelector('[data-testid="crop-overlay"]', { timeout: 5_000 });
+  await page.keyboard.press('c'); // mixed pair: enter with `r`, exit with `c`
+  await page.waitForFunction(() => !document.querySelector('[data-testid="crop-overlay"]'), { timeout: 5_000 });
+  check('`r` and `c` are interchangeable within the same session (enter with one, exit with the other)', true, null);
 
   console.log('verify-crop (LR-style rotate: auto-zoom, no void, screen-constant, reversible):');
   // Plain-JS mirror of RESAMPLE_SHADER's rotate + its inverse map, so the

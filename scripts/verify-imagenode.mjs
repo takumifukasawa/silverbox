@@ -25,6 +25,12 @@
  *     (decodeWorker.ts's prepareJpeg / createImageBitmap already handles PNG
  *     natively) — the image node reports it as non-missing and the render
  *     changes to reflect its content, exactly like the JPG case in section 1.
+ *  8. Unconnected image node still shows a node-editor thumbnail (round-11
+ *     fix pack item 4, "PNGを選んだIMAGEノードにサムネイルが出ない"): an image node
+ *     wired to NOTHING never gets a nodeSteps entry, so the plan-derived
+ *     nodeThumbs batch (per-node-preview pack) never covers it — CanvasView's
+ *     imageNodeSourceThumbs fallback (thumbnailCache.ts's own decode
+ *     machinery, keyed by the node's own path) is what fills the gap.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -279,6 +285,57 @@ try {
     meanBeforePng,
     meanWithPng,
   });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-imagenode (8. an unconnected image node still gets a node-editor thumbnail — round-11 fix pack item 4):');
+  const unconnectedImageNode = await addNode('image');
+  const unconnectedId = unconnectedImageNode.id;
+  const unconnectedThumb = page.locator(`[data-testid="node-thumb-${unconnectedId}"]`);
+  await unconnectedThumb.scrollIntoViewIfNeeded();
+  check(
+    'a freshly added, pathless image node shows the empty "=" placeholder (nothing to preview yet)',
+    await unconnectedThumb.evaluate((el) => el.classList.contains('op-node-thumb--empty')),
+    await unconnectedThumb.evaluate((el) => el.className)
+  );
+  const nodeThumbsBefore = await page.evaluate(() => window.__debug.nodeThumbsState());
+  check(
+    "an unconnected node never earns a plan-derived nodeThumbs entry (buildPlan's nodeSteps never reaches it)",
+    !(unconnectedId in nodeThumbsBefore),
+    nodeThumbsBefore
+  );
+
+  await setImagePath(unconnectedId, PNG_PATH);
+  // The source-file fallback (CanvasView.tsx's imageNodeSourceThumbs effect)
+  // decodes through thumbnailCache.ts directly — a separate path from
+  // imageNodeSource.ts's render-worker decode (which also runs here, since
+  // syncImageNodeSources scans every image node with a path regardless of
+  // wiring, same as every other section above), so this waits on the actual
+  // DOM rather than imageNodeDecodeCount().
+  await page.waitForFunction(
+    (id) => {
+      const el = document.querySelector(`[data-testid="node-thumb-${id}"]`);
+      return !!el && el.style.backgroundImage !== '';
+    },
+    unconnectedId,
+    { timeout: 15_000 }
+  );
+  check(
+    'the unconnected image node now shows a non-empty thumbnail (source-file fallback)',
+    !(await unconnectedThumb.evaluate((el) => el.classList.contains('op-node-thumb--empty'))),
+    await unconnectedThumb.evaluate((el) => ({ className: el.className, backgroundImage: el.style.backgroundImage }))
+  );
+  const nodeThumbsAfter = await page.evaluate(() => window.__debug.nodeThumbsState());
+  check(
+    'still no plan-derived nodeThumbs entry for it (the fallback is separate from the render-worker thumbnail batch)',
+    !(unconnectedId in nodeThumbsAfter),
+    nodeThumbsAfter
+  );
+  const sourceThumbUrl = await page.evaluate((id) => window.__debug.imageNodeSourceThumbsState()[id], unconnectedId);
+  check(
+    'the fallback thumbnail is tracked in imageNodeSourceThumbsState(), keyed by this node id',
+    typeof sourceThumbUrl === 'string' && sourceThumbUrl.length > 0,
+    await page.evaluate(() => window.__debug.imageNodeSourceThumbsState())
+  );
 
   check('no page errors across the image-node verify checks', pageErrors.length === 0, pageErrors);
 } finally {

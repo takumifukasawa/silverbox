@@ -61,21 +61,27 @@ export function App() {
         if (ev.key === '\\') useAppStore.getState().toggleBefore();
         else useAppStore.getState().toggleGrayscaleView();
       }
-      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'c') {
+      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'y') {
         // Compare view (compare pack): splits the canvas into two synced
-        // panes (current vs before, or two outputs). ⌘⇧C is copyDevelopSettings
-        // above — that check requires `cmd`, so the two never collide.
+        // panes (current vs before, or two outputs). Round-11 fix pack item 3
+        // ("compare offはCがいい"): moved off plain `c` onto plain `y` — LRC's
+        // own before/after key — freeing `c` to become a crop alias below.
+        // ⌘⇧C is copyDevelopSettings above — that check requires `cmd`, so
+        // the two never collide (and never did).
         if (isTextEntry(ev.target)) return;
         if (useAppStore.getState().imageStatus !== 'ready') return;
         ev.preventDefault();
         const s = useAppStore.getState();
         s.setCompareMode(!s.compareMode);
       }
-      if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'r') {
+      if (!cmd && !ev.altKey && !ev.shiftKey && (ev.key.toLowerCase() === 'r' || ev.key.toLowerCase() === 'c')) {
         // Crop mode (round-10 fix pack item 2, LR convention: 'r' = crop &
-        // straighten). Plain `r` was unbound (⌘⇧R is resetAllEdits, which
-        // requires `cmd` — the two checks never collide). Same shape as the
-        // plain-`c` compare toggle just above.
+        // straighten). Round-11 fix pack item 3 adds plain `c` as a second,
+        // equally-bound alias ("user's instinct says C=crop") — freed up by
+        // moving compare off `c` onto `y` just above. Plain `r` was unbound
+        // (⌘⇧R is resetAllEdits, which requires `cmd` — the two checks never
+        // collide); same reasoning now covers `c` too, since compare no
+        // longer claims it.
         if (isTextEntry(ev.target)) return;
         if (useAppStore.getState().imageStatus !== 'ready') return;
         ev.preventDefault();
@@ -101,26 +107,17 @@ export function App() {
         if (ev.shiftKey) useAppStore.getState().redo();
         else useAppStore.getState().undo();
       }
-      if (cmd && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'd') {
-        // Node bypass toggle (Resolve's Ctrl+D-equivalent): preventDefault
-        // UNCONDITIONALLY, before the isTextEntry check — unlike undo/redo
-        // (which defers to Monaco's own binding while typing), ⌘D has no
-        // legitimate text-entry meaning to defer to, so the browser's native
-        // "bookmark this page" must never surface here regardless of focus.
-        ev.preventDefault();
-        if (isTextEntry(ev.target)) return;
-        const s = useAppStore.getState();
-        const node = s.graph.nodes.find((n) => n.id === s.selectedNodeId);
-        if (node && isBypassableNodeKind(node.kind)) s.toggleNodeDisabled(node.id);
-      }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'm') {
-        // Round-9 fix pack item 1 ("ミュートは m の方がいい気がする"): plain
-        // `m` is a second accelerator for the exact same store action ⌘D
-        // drives (Resolve calls this "mute") — both stay bound, this is
-        // purely additive. No unconditional preventDefault like ⌘D above:
-        // bare `m` has no browser-native meaning to race, so the ordinary
-        // isTextEntry-first guard (same shape as every other plain-key
-        // shortcut in this handler) is enough.
+        // Node bypass toggle (Resolve calls this "mute"). Round-11 fix pack
+        // item 1 ("⌘Dはもはやいらなくない？（むしろUEだと複製のコマンドに見えるし）"):
+        // ⌘D used to be the primary accelerator here (round-9 added plain
+        // `m` alongside it); ⌘D is now REMOVED entirely and left unbound —
+        // it reads as "duplicate" in Unreal/other tools and may become that
+        // here later, so it must not keep meaning "bypass" in the meantime.
+        // Plain `m` is the only bypass accelerator now; no unconditional
+        // preventDefault is needed (bare `m` has no browser-native meaning to
+        // race), so the ordinary isTextEntry-first guard (same shape as every
+        // other plain-key shortcut in this handler) is enough.
         if (isTextEntry(ev.target)) return;
         ev.preventDefault();
         const s = useAppStore.getState();

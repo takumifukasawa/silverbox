@@ -2107,7 +2107,7 @@ button:disabled {
   border-color: #c299f0;
 }
 
-/* Bypassed node (node bypass feature, ⌘D): muted opacity + a struck-through
+/* Bypassed node (node bypass feature, plain `m`): muted opacity + a struck-through
    label — the thumbnail itself is left alone (it already shows the natural
    passthrough result via buildPlan's identity resolution, nothing to
    additionally mark there). */
@@ -2169,7 +2169,7 @@ button:disabled {
   color: #c299f0;
 }
 
-/* Bypass toggle (node bypass feature, ⌘D) — same footprint/corner treatment
+/* Bypass toggle (node bypass feature, plain `m`) — same footprint/corner treatment
    as .op-node-eye, mirrored to the opposite (bottom-left) corner so the two
    never overlap. */
 .op-node-bypass {

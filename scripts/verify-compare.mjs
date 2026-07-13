@@ -1,6 +1,8 @@
 /**
  * Compare view (compare pack, docs/brief-bank/compare-view-and-ratings.md):
- * a toolbar toggle (+ `C` shortcut) splits the canvas into two synced panes
+ * a toolbar toggle (+ `Y` shortcut — round-11 fix pack item 3 moved this off
+ * plain `C` onto plain `Y`, the LRC before/after key, freeing `C` to become a
+ * crop alias instead) splits the canvas into two synced panes
  * sharing ONE viewport (pan/zoom moves both). Mode A (default): CURRENT vs
  * BEFORE, reusing the exact "before" render showBefore drives. Mode B (2+
  * outputs): the active output vs a second output picked from the compare
@@ -215,22 +217,25 @@ try {
   await page.waitForTimeout(200);
 
   // -------------------------------------------------------------------
-  console.log("verify-compare (5. 'C' shortcut toggles, isTextEntry-guarded, Escape exits):");
+  console.log("verify-compare (5. 'Y' shortcut toggles, isTextEntry-guarded, Escape exits):");
+  // Round-11 fix pack item 3: compare moved off plain 'c' onto plain 'y'
+  // (LRC's own before/after key) — 'c' is now a crop alias instead (see
+  // verify-crop.mjs), so this section drives 'y', not 'c'.
   await page.locator('[data-testid="compare-toggle"]').click(); // off (from Mode B testing above)
   await page.waitForFunction(() => window.__debug.compareState().mode === false, { timeout: 5_000 });
-  await page.keyboard.press('c');
+  await page.keyboard.press('y');
   await page.waitForFunction(() => window.__debug.compareState().mode === true, { timeout: 5_000 });
-  check("'c' toggles compare mode ON", (await compareState()).mode, await compareState());
-  await page.keyboard.press('c');
+  check("'y' toggles compare mode ON", (await compareState()).mode, await compareState());
+  await page.keyboard.press('y');
   await page.waitForFunction(() => window.__debug.compareState().mode === false, { timeout: 5_000 });
-  check("'c' toggles compare mode OFF again", !(await compareState()).mode, await compareState());
+  check("'y' toggles compare mode OFF again", !(await compareState()).mode, await compareState());
 
-  // isTextEntry guard: typing 'c' into a genuine text field must not toggle
+  // isTextEntry guard: typing 'y' into a genuine text field must not toggle
   await page.evaluate(() => window.__debug.selectNode('out'));
   const outputNameInput = page.locator('[data-testid="output-name"]');
   await outputNameInput.click();
-  await outputNameInput.press('c');
-  check("'c' typed into a text field does not toggle compare (isTextEntry guard)", !(await compareState()).mode, await compareState());
+  await outputNameInput.press('y');
+  check("'y' typed into a text field does not toggle compare (isTextEntry guard)", !(await compareState()).mode, await compareState());
   await page.keyboard.press('Escape'); // drop focus/blur before continuing
   await page.evaluate(() => window.__debug.selectNode(null));
 
