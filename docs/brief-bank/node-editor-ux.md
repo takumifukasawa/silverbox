@@ -53,3 +53,14 @@ canvas vs structured auto-laid-out flow, Houdini-style) is decided —
 gesture polish invested in the free canvas may be thrown away by a
 move to auto-layout. If the structured-flow idea firms up, THAT
 becomes the pack instead.
+
+## Presentation form: decide by prototype (user + conductor, 2026-07-13)
+
+The free-canvas vs structured-auto-layout question will NOT be argued
+to a conclusion on paper. Agreed method: add a cheap **auto-layout
+toggle** to the existing free canvas (dagre or elkjs — new dependency,
+day-scale or less; layout is view-only, stored node positions in the
+doc are untouched), hand-test both projections on real machine-built
+graphs, then commit to a form. Post-Thursday queue, below the
+golden-window main line (project storage → LR calibration → feature
+queue). Items 3+4 above stay HELD until the toggle verdict.

@@ -24,9 +24,9 @@ Proposed shape (LR-style, save-time selection):
   existing captureLook contract — unchanged by this brief.
 - Hover preview must preview the MERGED result, not the raw preset.
 
-Open question for the user: save-time selection (LR-like, above) vs
-apply-time selection (checkboxes at apply). Save-time recommended —
-the preset then MEANS something stable, and apply stays one click.
+DECIDED (user, 2026-07-13): save-time selection (LR-like, above) —
+checkboxes in the save dialog, apply stays one click. Apply-time
+selection rejected. Ready to implement as specced.
 
 ## 2. Per-output export-override UX ("overrideしたのが export 設定側に
 反映されてないのはわかりづらい")
