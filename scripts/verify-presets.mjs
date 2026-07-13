@@ -132,6 +132,14 @@ try {
     }
   };
 
+  /** Close the menu via its own click-away backdrop (section 10's hover preview leaves it open — reset-all's setup below needs the toolbar's "Add node" button reachable). */
+  const closePresetsMenu = async () => {
+    if ((await page.locator('[data-testid="presets-menu"]').count()) > 0) {
+      await page.locator('.add-node-menu-backdrop').click();
+      await page.waitForSelector('[data-testid="presets-menu"]', { state: 'detached', timeout: 5_000 });
+    }
+  };
+
   /** Row locator by exact display name (rows replaced the native <select> — round-7 UX pack G §4). */
   const presetRow = (name) => page.locator('[data-testid="preset-row"]').filter({ hasText: name });
   /** Click (= select, same as choosing an <option> used to) the row with this display name. */
@@ -432,6 +440,88 @@ try {
     hoverMean,
     appliedAfterHoverMean,
   });
+
+  // ---------------------------------------------------------------------
+  // 11. "Reset all edits" (round-8 NG fix pack item 2) — the look-family
+  // home's own reset action, so it lives in this script rather than a new
+  // one. The reference graph is captured from a REAL fresh open in this
+  // same session (not hand-built) — under the flags THIS script runs
+  // under (no lensProfileAutoDefault/baseCurveDefault/forceDefaults opt-in),
+  // seedDefaultLook's only unconditional work is resolving the as-shot WB
+  // placeholder, so this is exactly "the plain doc" the brief describes.
+  console.log('verify-presets (11. Reset all edits: graph equals a fresh-open default, ONE undo entry, undo restores everything, rating preserved):');
+  await closePresetsMenu(); // section 10's hover preview leaves it open
+  await openAndWait(ARW_PATH); // fresh default graph, empty history, autosave off
+  const freshOpenReferenceGraph = await graphState();
+  check(
+    'fresh-open reference is the plain 3-node doc (no opt-in default-look flags under this suite)',
+    freshOpenReferenceGraph.nodes.length === 3,
+    freshOpenReferenceGraph.nodes.map((n) => n.kind)
+  );
+
+  // rating BEFORE editing — proves reset-all preserves it (metadata, not look)
+  await page.keyboard.press('4');
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 4, { timeout: 5_000 });
+
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.5));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.contrast', -15));
+  await page.locator('[data-testid="add-node-button"]').click();
+  await page.locator('[data-testid="add-node-exposure"]').click();
+  const gBeforeResetAll = await graphState();
+  const resetTestExtraNode = gBeforeResetAll.nodes.find((n) => n.kind === 'exposure');
+  check('setup: an extra op node landed before reset-all', !!resetTestExtraNode, gBeforeResetAll.nodes.map((n) => n.kind));
+  const beforeResetAllMean = await gpuMean();
+  const historyBeforeResetAll = await historyState();
+
+  await openPresetsMenu();
+  await page.locator('[data-testid="preset-reset-all"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 3));
+
+  const gAfterResetAll = await graphState();
+  check(
+    'reset-all reproduces the fresh-open reference graph exactly (dropped the extra node + edits)',
+    JSON.stringify(gAfterResetAll) === JSON.stringify(freshOpenReferenceGraph),
+    { gAfterResetAll, freshOpenReferenceGraph }
+  );
+  const historyAfterResetAll = await historyState();
+  check(
+    'reset-all is exactly ONE undo entry',
+    historyAfterResetAll.past === historyBeforeResetAll.past + 1 && historyAfterResetAll.future === 0,
+    { historyBeforeResetAll, historyAfterResetAll }
+  );
+  check(
+    'reset-all preserved the rating (metadata, not look)',
+    (await page.evaluate(() => window.__debug.sidecarState().rating)) === 4,
+    await page.evaluate(() => window.__debug.sidecarState())
+  );
+
+  await page.keyboard.press('Meta+z');
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 4));
+  const gAfterUndoResetAll = await graphState();
+  check(
+    '⌘Z after reset-all restores everything, including the added node',
+    JSON.stringify(gAfterUndoResetAll) === JSON.stringify(gBeforeResetAll),
+    { gAfterUndoResetAll, gBeforeResetAll }
+  );
+  const meanAfterUndoResetAll = await gpuMean();
+  check('⌘Z after reset-all restores the pre-reset render (within 1/255)', meansMatch(meanAfterUndoResetAll, beforeResetAllMean), {
+    meanAfterUndoResetAll,
+    beforeResetAllMean,
+  });
+
+  // redo back to the reset state, then prove the ⇧⌘R accelerator (App.tsx)
+  // fires the exact same action as the menu button
+  await page.keyboard.press('Meta+Shift+z');
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.length === 3));
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1.1));
+  await page.keyboard.press('Meta+Shift+r');
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0));
+  const gAfterShortcutReset = await graphState();
+  check(
+    '⇧⌘R reproduces the same fresh-open reference graph as the menu button',
+    JSON.stringify(gAfterShortcutReset) === JSON.stringify(freshOpenReferenceGraph),
+    { gAfterShortcutReset, freshOpenReferenceGraph }
+  );
 
   check('no page errors across the presets checks', pageErrors.length === 0, pageErrors);
 } finally {

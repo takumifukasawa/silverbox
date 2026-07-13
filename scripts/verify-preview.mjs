@@ -178,6 +178,78 @@ try {
   check('rapid-open sequence settles on ready with no stale preview state', afterRapidReady.openingPreview === null, afterRapidReady);
   check('rapid-open sequence leaves no overlay element in the DOM', afterRapidReady.overlayPresent === false, afterRapidReady);
   check('rapid-open sequence reaches ready', afterRapidReady.status === 'ready', afterRapidReady);
+
+  // === 6. Portrait ARW: overlay renders PORTRAIT immediately, no landscape
+  // flash (round-8 fix pack item 1) — same fixture convention as verify-ms2's
+  // portrait section. The bare embedded-preview JPEG bytes carry no EXIF
+  // orientation of their own (see sonyLensProfile.ts's EmbeddedPreview.flip
+  // doc comment), so before this fix CanvasView rendered them unrotated for
+  // ~1s until the real (already-rotated) decode replaced them. ===
+  const PORTRAIT_ARW =
+    process.env.SILVERBOX_TEST_PORTRAIT_ARW ?? 'test-assets/italy/DSC06787.ARW';
+  if (!existsSync(PORTRAIT_ARW)) {
+    console.log(`  SKIP  portrait overlay-orientation checks (fixture missing: ${PORTRAIT_ARW})`);
+  } else {
+    console.log('verify-preview (portrait ARW overlay renders portrait immediately):');
+    if (existsSync(PORTRAIT_ARW + '.silverbox.json')) unlinkSync(PORTRAIT_ARW + '.silverbox.json');
+    // Latches the FIRST 'loading'-phase openingPreviewState() PLUS the
+    // overlay <img>'s live rendered bounding box (post CSS-rotation) at that
+    // instant — same in-page-poller shape as armCapture above, plus the rect.
+    await page.evaluate(() => {
+      window.__portraitCapture = { seen: false };
+      const iv = setInterval(() => {
+        const s = window.__debug?.imageState();
+        if (!window.__portraitCapture.seen && s?.status === 'loading') {
+          const p = window.__debug.openingPreviewState();
+          const el = document.querySelector('[data-testid="opening-preview-overlay"]');
+          if (p && el) {
+            const rect = el.getBoundingClientRect();
+            window.__portraitCapture = {
+              seen: true,
+              previewWidth: p.width,
+              previewHeight: p.height,
+              flip: p.flip,
+              rectWidth: rect.width,
+              rectHeight: rect.height,
+            };
+          }
+        }
+        if (s?.status === 'ready' || s?.status === 'error') clearInterval(iv);
+      }, 5);
+    });
+    await openFireAndForget(PORTRAIT_ARW);
+    await waitReadyOrError();
+    const portraitCapture = await page.evaluate(() => window.__portraitCapture);
+    const portraitState = await page.evaluate(() => window.__debug.imageState());
+    check('portrait ARW reaches ready', portraitState.status === 'ready', portraitState);
+    check('portrait ARW reports a rotating EXIF flip (5 or 6)', portraitState.flip === 5 || portraitState.flip === 6, portraitState);
+    check('overlay was seen during loading', portraitCapture.seen === true, portraitCapture);
+    check(
+      "overlay's extracted flip matches the real decode's flip (both read the same EXIF tag)",
+      portraitCapture.flip === portraitState.flip,
+      portraitCapture
+    );
+    check(
+      'overlay RENDERED bounding box is portrait (taller than wide) WHILE LOADING',
+      portraitCapture.rectHeight > portraitCapture.rectWidth,
+      portraitCapture
+    );
+    // The bare preview JPEG bytes are UNROTATED (landscape raster) — swap its
+    // dims before comparing against the final (already-rotated) decode's
+    // aspect, same accounting the brief calls for.
+    const swappedPreviewAspect = portraitCapture.previewHeight / portraitCapture.previewWidth;
+    const finalAspect = portraitState.fullWidth / portraitState.fullHeight;
+    check(
+      'rotation-corrected overlay aspect matches the final render aspect within 2%',
+      Math.abs(swappedPreviewAspect / finalAspect - 1) < 0.02,
+      { swappedPreviewAspect, finalAspect }
+    );
+    const afterPortraitReady = await page.evaluate(() => ({
+      overlayPresent: !!document.querySelector('[data-testid="opening-preview-overlay"]'),
+    }));
+    check('portrait overlay gone once ready', afterPortraitReady.overlayPresent === false, afterPortraitReady);
+    if (existsSync(PORTRAIT_ARW + '.silverbox.json')) unlinkSync(PORTRAIT_ARW + '.silverbox.json');
+  }
 } finally {
   await app.close();
 }

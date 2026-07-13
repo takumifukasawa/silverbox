@@ -4,7 +4,7 @@
  * arrays exiftool reports for it, plus null on non-Sony/garbage inputs; then
  * checks the pure gain math against the documented anchor values.
  */
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   parseSonyLensProfile,
@@ -19,6 +19,10 @@ import {
 
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
+// Same fixture convention as verify-ms2/verify-preview's portrait section —
+// a personal reference photo present on the primary dev machine only.
+const PORTRAIT_ARW_PATH =
+  process.env.SILVERBOX_TEST_PORTRAIT_ARW ?? 'test-assets/italy/DSC06787.ARW';
 
 function bytesOf(path: string): ArrayBuffer {
   const buf = readFileSync(path);
@@ -103,6 +107,26 @@ describe('extractSonyEmbeddedPreview', () => {
     expect(bytes[bytes.length - 2]).toBe(0xff);
     expect(bytes[bytes.length - 1]).toBe(0xd9);
   });
+
+  it('reports flip 0 (unrotated) for a landscape shot (EXIF Orientation 1)', () => {
+    // Ground truth: `exiftool -Orientation -n` on the default ARW reports 1.
+    const preview = extractSonyEmbeddedPreview(bytesOf(ARW_PATH));
+    expect(preview).not.toBeNull();
+    expect(preview!.flip).toBe(0);
+  });
+
+  it.skipIf(!existsSync(PORTRAIT_ARW_PATH))(
+    'reports flip 5 (90° CCW) for a portrait shot (EXIF Orientation 8) — round-8 fix',
+    () => {
+      // Ground truth: `exiftool -Orientation -n` on this fixture reports 8
+      // (rotate 270 CW / 90 CCW to display upright), which RawDecoder's own
+      // flip code space maps to 5 — the same value LibRaw's decode reports
+      // for this file (verify-ms2's portrait section: flip === 5 || 6).
+      const preview = extractSonyEmbeddedPreview(bytesOf(PORTRAIT_ARW_PATH));
+      expect(preview).not.toBeNull();
+      expect(preview!.flip).toBe(5);
+    }
+  );
 
   it('returns a COPY, not a view into the source buffer', () => {
     const source = bytesOf(ARW_PATH);

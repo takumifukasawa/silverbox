@@ -135,6 +135,13 @@ export function App() {
         ev.preventDefault();
         useAppStore.getState().pasteDevelopSettings();
       }
+      if (cmd && ev.shiftKey && !ev.altKey && (ev.key === 'r' || ev.key === 'R')) {
+        // "Reset all edits" (round-8 NG fix pack item 2) — confirm-free, one
+        // undo entry (⌘Z covers it), same reasoning as ⌘⇧C/⌘⇧V above.
+        if (isTextEntry(ev.target)) return;
+        ev.preventDefault();
+        useAppStore.getState().resetAllEdits();
+      }
       if (ev.key === 'Escape' && useAppStore.getState().exportDialogOpen) {
         useAppStore.getState().setExportDialogOpen(false);
       }

@@ -1642,6 +1642,15 @@ button:disabled {
   min-height: 14px;
 }
 
+/* Discoverability hint (round-8 fix pack item 3) — same dim treatment as
+   .crop-hint (⌥ = resize from center): drag-out no longer deletes a point
+   (it clamps instead), so double-click needs its own callout. */
+.tonecurve-hint {
+  font-size: 12px;
+  color: #888;
+  white-space: nowrap;
+}
+
 .curve-preview {
   display: block;
   margin: 8px 14px 4px;

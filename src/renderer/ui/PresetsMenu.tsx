@@ -43,6 +43,7 @@ export function PresetsMenu() {
   const setPreviewLook = useAppStore((s) => s.setPreviewLook);
   const copyDevelopSettings = useAppStore((s) => s.copyDevelopSettings);
   const pasteDevelopSettings = useAppStore((s) => s.pasteDevelopSettings);
+  const resetAllEdits = useAppStore((s) => s.resetAllEdits);
   const hasClipboard = useAppStore((s) => s.developClipboard !== null);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState('');
@@ -241,6 +242,21 @@ export function PresetsMenu() {
                 title="Paste the copied develop settings onto this photo — one undo entry (⌘⇧V)"
               >
                 Paste
+              </button>
+            </div>
+            {/* Round-8 NG fix pack item 2: "reset all edits" back to exactly
+                what a fresh open of this same image would produce — the
+                look-family home, same as everything else in this menu.
+                Confirm-free: undo (one entry) is the safety net. */}
+            <div className="presets-menu-row">
+              <button
+                type="button"
+                data-testid="preset-reset-all"
+                disabled={!ready}
+                onClick={resetAllEdits}
+                title="Reset all edits — back to a fresh open of this photo (one undo entry, ⇧⌘R)"
+              >
+                Reset all edits
               </button>
             </div>
           </div>

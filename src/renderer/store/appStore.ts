@@ -128,8 +128,13 @@ interface AppState {
    * itself be the bottleneck) and non-Sony RAWs. Cleared (URL revoked — see
    * clearOpeningPreview) once the real image reaches 'ready', the open
    * fails, or another open starts.
+   *
+   * `flip`: the SAME rotation code space as PreparedImage.flip (0/3/5/6) —
+   * round-8 fix: unlike the real decode (LibRaw pre-rotates its output), this
+   * bare JPEG stream has no orientation baked in, so CanvasView's overlay
+   * must apply it itself (see extractSonyEmbeddedPreview's doc comment).
    */
-  openingPreview: { url: string; width: number; height: number } | null;
+  openingPreview: { url: string; width: number; height: number; flip: number } | null;
   graph: GraphDoc;
   /** Graph differs from what the sidecar holds (or would hold). */
   graphDirty: boolean;
@@ -313,6 +318,17 @@ interface AppState {
   developClipboard: GraphDoc | null;
   copyDevelopSettings(): void;
   pasteDevelopSettings(): void;
+  /**
+   * "Reset all edits" (round-8 NG fix pack item 2, Presets menu / ⇧⌘R): replaces
+   * the graph with exactly what a FRESH OPEN of this same image would produce —
+   * defaultGraphDoc() run through the same seedDefaultLook() call
+   * openImageByPath makes (same testFlags, `usedSidecar: false` so the default
+   * look seeds in), as ONE undo entry (⌘Z restores everything, including any
+   * added nodes). Confirm-free — undo is the safety net, same reasoning as
+   * every other one-undo-entry action here. No-op without a ready image.
+   * Rating is metadata on the sidecar wrapper, not `graph` — never touched.
+   */
+  resetAllEdits(): void;
   /** `<userData>/presets/*.json` summaries (task #37); refreshed after save/delete and once at boot. */
   presets: PresetSummary[];
   /**
@@ -1552,7 +1568,7 @@ export const useAppStore = create<AppState>((set, get) => {
           // instead of revoking it.
           set(clearOpeningPreview(get()));
           const url = URL.createObjectURL(new Blob([preview.bytes], { type: 'image/jpeg' }));
-          set({ openingPreview: { url, width: preview.width, height: preview.height } });
+          set({ openingPreview: { url, width: preview.width, height: preview.height, flip: preview.flip } });
           // Ledger registration: if THIS session gets superseded before
           // reaching ready/error, the NEXT session's constructor revokes
           // this URL for us — see the class doc comment.
@@ -2535,6 +2551,40 @@ export const useAppStore = create<AppState>((set, get) => {
     // node ids referenced by the pasted custom nodes need fresh compiled
     // artifacts in THIS session's cache (same as opening a doc with shaders)
     if (nextGraph) revalidateShaders(nextGraph);
+  },
+
+  resetAllEdits() {
+    const s = get();
+    if (s.imageStatus !== 'ready' || !s.image) return;
+    const kind = isRawFileName(s.fileName ?? '') ? 'raw' : 'jpg';
+    // The exact same two calls openImageByPath makes for a sidecar-less open
+    // of this image: defaultGraphDoc() (its own `!sidecar` branch) through
+    // seedDefaultLook with `usedSidecar: false` (its default-look gate) and
+    // the real testFlags — see openImageByPath's own call for the precedent
+    // this mirrors.
+    const { graph } = seedDefaultLook(defaultGraphDoc(), s.image, {
+      usedSidecar: false,
+      kind,
+      testFlags: window.silverbox.testFlags,
+    });
+    set((s2) => ({
+      ...pushHistory(s2, null),
+      graph,
+      graphDirty: true,
+      // Selection + modal tools, same fields deactivateOtherTools groups as
+      // "one canvas tool at a time" — all off, none excepted.
+      selectedNodeId: null,
+      selectedSpotIndex: null,
+      cropMode: false,
+      spotMode: false,
+      maskDrawMode: null,
+      wbPicking: false,
+      colorKeyPicking: false,
+      compareMode: false,
+      // rating (sidecarRating) is metadata about the PHOTO, not the look —
+      // deliberately untouched, same as setRating's own contract.
+    }));
+    revalidateShaders(graph);
   },
 
   presets: [],

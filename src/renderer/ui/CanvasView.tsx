@@ -60,8 +60,8 @@ declare global {
   interface Window {
     __debug?: {
       imageState(): { status: string; width?: number; height?: number; fullWidth?: number; fullHeight?: number; flip?: number };
-      /** Embedded-preview-first opening (Lightroom trick): the overlay's current state, or null once cleared. */
-      openingPreviewState(): { url: string; width: number; height: number } | null;
+      /** Embedded-preview-first opening (Lightroom trick): the overlay's current state, or null once cleared. `flip` is RawDecoder's rotation code space (round-8 fix — see appStore.ts's openingPreview doc comment). */
+      openingPreviewState(): { url: string; width: number; height: number; flip: number } | null;
       /** Verify-only: every blob: URL clearOpeningPreview has revoked so far, in order (proves a rapid second open doesn't leak the first's URL). */
       openingPreviewRevocations(): string[];
       /** Folder filmstrip (ROADMAP "nice to have") state: the open folder (if any) + its sorted listing + which path is current. */
@@ -1528,6 +1528,71 @@ export function CanvasView() {
     compareOutputId && compareOutputId !== compareResolvedActiveId
       ? compareOutputs.find((n) => n.id === compareOutputId)
       : undefined;
+
+  // Embedded-preview-first opening: rotate the overlay to match the bare
+  // JPEG's own EXIF orientation (round-8 fix — see appStore.ts's
+  // openingPreview.flip / sonyLensProfile.ts's EmbeddedPreview.flip doc
+  // comments for why the bytes need this at all). Same code space as
+  // RawDecoder's flip: 0=none, 3=180°, 5=90°CCW, 6=90°CW.
+  const previewRotateDeg =
+    openingPreview?.flip === 6 ? 90 : openingPreview?.flip === 5 ? -90 : openingPreview?.flip === 3 ? 180 : 0;
+  const previewSwap = previewRotateDeg === 90 || previewRotateDeg === -90;
+  // Only a ±90° rotation needs the FRAME's own pixel box (object-fit: contain
+  // math changes when content and container swap which axis is limiting —
+  // see the doc comment on previewImgStyle below); 0°/180° reuse the
+  // existing inset:0 sizing unchanged, so this stays null (and unobserved)
+  // for the overwhelmingly common unrotated case.
+  const [openingPreviewFrame, setOpeningPreviewFrame] = useState<{ width: number; height: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!(imageStatus === 'loading' && openingPreview && previewSwap)) {
+      setOpeningPreviewFrame(null);
+      return;
+    }
+    const container = containerRef.current;
+    if (!container) return;
+    const measure = () => {
+      const r = container.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0) setOpeningPreviewFrame({ width: r.width, height: r.height });
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [imageStatus, openingPreview, previewSwap]);
+  // The overlay <img>'s inline style override: for 0°, none (unchanged
+  // pre-round-8 behavior — className alone gives inset:0/100%/100%/contain).
+  // For 180°, just add the rotation in place (aspect is unchanged by a
+  // half-turn, so the existing inset:0 sizing/object-fit math still holds).
+  // For ±90°, object-fit: contain alone isn't enough: the <img>'s own box
+  // (not just its painted content) needs to be the TRANSPOSE of the frame,
+  // sized explicitly from the frame's real pixel box + the source aspect, so
+  // that after the rotate transform the element's rendered bounding box
+  // (what getBoundingClientRect reports, and what verify-preview's portrait
+  // check reads) is the correctly-oriented, tightly-fit rectangle rather
+  // than the frame's own (still-landscape-panel-shaped) box.
+  let previewImgStyle: React.CSSProperties | undefined;
+  if (previewRotateDeg === 180) {
+    previewImgStyle = { transform: 'rotate(180deg)' };
+  } else if (previewSwap && openingPreviewFrame && openingPreview) {
+    const correctedW = openingPreview.height;
+    const correctedH = openingPreview.width;
+    const scale = Math.min(openingPreviewFrame.width / correctedW, openingPreviewFrame.height / correctedH);
+    const renderW = correctedW * scale;
+    const renderH = correctedH * scale;
+    previewImgStyle = {
+      position: 'absolute',
+      top: '50%',
+      left: '50%',
+      width: `${renderH}px`,
+      height: `${renderW}px`,
+      transform: `translate(-50%, -50%) rotate(${previewRotateDeg}deg)`,
+    };
+  } else if (previewSwap) {
+    // Frame not measured yet (first paint before the layout effect above
+    // runs) — fall back to the unrotated sizing rather than distort; the
+    // layout effect resolves this before the browser actually paints.
+    previewImgStyle = undefined;
+  }
   return (
     <div className="canvas-view">
       <div className="canvas-panes">
@@ -1713,6 +1778,7 @@ export function CanvasView() {
           alt="Camera preview"
           className="opening-preview-overlay"
           data-testid="opening-preview-overlay"
+          style={previewImgStyle}
         />
       )}
       {imageStatus === 'loading' && openingPreview && (

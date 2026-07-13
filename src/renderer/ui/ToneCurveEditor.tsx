@@ -13,7 +13,6 @@ const CHANNELS = ['rgb', 'r', 'g', 'b'] as const;
 type Channel = (typeof CHANNELS)[number];
 const CHANNEL_COLOR: Record<Channel, string> = { rgb: '#e6e6e6', r: '#e57373', g: '#7fc97f', b: '#6ea8e5' };
 const HIT_PX = 10;
-const DELETE_PX = 40;
 const MIN_GAP = 1;
 const CURVE_SAMPLES = 128;
 
@@ -21,17 +20,24 @@ let dragSession = 0;
 
 /**
  * Point tone-curve editor (UI spec §8): channel tabs, an SVG plot in 0–255
- * display units with grid + identity diagonal, click-to-add / drag / drag-out
- * or double-click to delete points; endpoints are the black/white points
- * (movable on both axes, never deletable). All edits flow through
- * setToneCurvePoints — the GraphDoc stays the single source of truth, one
- * drag = one undo entry (session-keyed coalescing).
+ * display units with grid + identity diagonal, click-to-add / drag / double-
+ * click to delete points; endpoints are the black/white points (movable on
+ * both axes, never deletable). All edits flow through setToneCurvePoints —
+ * the GraphDoc stays the single source of truth, one drag = one undo entry
+ * (session-keyed coalescing).
+ *
+ * Round-8 NG fix pack item 3: dragging a point outside the plot used to
+ * DELETE it (re-inserting it if the drag re-entered the plot), which jumped
+ * the curve mid-drag and confused users. It now just CLAMPS the point to the
+ * plot bounds instead — no delete, no jump. Deletion stays double-click only
+ * (onDoubleClick below, unchanged), with a dim discoverability hint under the
+ * editor now that drag-out no longer doubles as a delete gesture.
  */
 export function ToneCurveEditor({ nodeId, params }: { nodeId: string; params: DevelopParams }) {
   const setToneCurvePoints = useAppStore((s) => s.setToneCurvePoints);
   const [channel, setChannel] = useState<Channel>('rgb');
   const svgRef = useRef<SVGSVGElement>(null);
-  const dragRef = useRef<{ index: number; session: number; removed: boolean } | null>(null);
+  const dragRef = useRef<{ index: number; session: number } | null>(null);
   const [readout, setReadout] = useState<string | null>(null);
 
   const points = params.toneCurve[channel];
@@ -76,7 +82,7 @@ export function ToneCurveEditor({ nodeId, params }: { nodeId: string; params: De
       index = next.findIndex((p) => p[0] === nx);
       commit(next, session);
     }
-    dragRef.current = { index, session, removed: false };
+    dragRef.current = { index, session };
     (ev.target as Element).setPointerCapture(ev.pointerId);
   };
 
@@ -86,36 +92,17 @@ export function ToneCurveEditor({ nodeId, params }: { nodeId: string; params: De
     const current = useAppStore.getState().graph.nodes.find((n) => n.id === nodeId)?.develop?.toneCurve[channel];
     if (!current) return;
     const { x, y } = toCurve(ev);
-    const rect = svgRef.current!.getBoundingClientRect();
-    const outside =
-      ev.clientX < rect.left - DELETE_PX ||
-      ev.clientX > rect.right + DELETE_PX ||
-      ev.clientY < rect.top - DELETE_PX ||
-      ev.clientY > rect.bottom + DELETE_PX;
-    const isEndpoint = drag.index === 0 || drag.index === current.length - 1;
-
-    if (outside && !isEndpoint && current.length > 2 && !drag.removed) {
-      // drag-out delete (re-inserting on re-entry keeps the same undo entry)
-      drag.removed = true;
-      commit(current.filter((_, i) => i !== drag.index), drag.session);
-      setReadout(null);
-      return;
-    }
-    if (drag.removed) {
-      if (outside) return;
-      // back inside: re-insert and continue the drag
-      const nx = Math.round(Math.min(CURVE_MAX, Math.max(0, x)));
-      const ny = Math.round(Math.min(CURVE_MAX, Math.max(0, y)));
-      const next = [...current, [nx, ny] as [number, number]].sort((a, b) => a[0] - b[0]);
-      drag.index = next.findIndex((p) => p[0] === nx && p[1] === ny);
-      drag.removed = false;
-      commit(next, drag.session);
-      return;
-    }
 
     const next = current.map((p) => [...p] as [number, number]);
     const p = next[drag.index]!;
-    // x clamps between the neighbours (endpoints keep their input range edge-free)
+    // x clamps between the neighbours (endpoints keep their input range
+    // edge-free); y clamps to the plot's 0..CURVE_MAX bounds. `x`/`y` above
+    // are unclamped (toCurve is a plain linear map from pointer position, so
+    // dragging past any edge of the SVG sends them negative or past
+    // CURVE_MAX) — clamping HERE, rather than deleting the point once the
+    // pointer clears some outside threshold, is the round-8 fix: the point
+    // just holds at the edge instead of vanishing and (on re-entry)
+    // reappearing at a new position, which read as a visible jump.
     const lo = drag.index === 0 ? 0 : next[drag.index - 1]![0] + MIN_GAP;
     const hi = drag.index === next.length - 1 ? CURVE_MAX : next[drag.index + 1]![0] - MIN_GAP;
     p[0] = Math.round(Math.min(hi, Math.max(lo, x)));
@@ -201,8 +188,13 @@ export function ToneCurveEditor({ nodeId, params }: { nodeId: string; params: De
           />
         ))}
       </svg>
-      <div className="tonecurve-readout">
-        {readout ?? 'click: add point · drag · double-click / drag out: delete'}
+      <div className="tonecurve-readout">{readout ?? 'click: add point · drag to edit'}</div>
+      {/* Discoverability hint (round-8 fix pack item 3): drag-out no longer
+          deletes a point (it clamps — see onPointerMove), so double-click is
+          now the ONLY way to remove one and needs its own callout, same dim
+          treatment as the crop strip's ⌥ hint (CropOverlay.tsx). */}
+      <div className="tonecurve-hint" data-testid="curve-delete-hint">
+        double-click a point to remove it
       </div>
     </div>
   );

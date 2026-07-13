@@ -49,6 +49,9 @@ const TAG_DISTORTION = 0x7037;
 const TAG_EXIF_IFD = 0x8769;
 const TAG_LENS_MODEL = 0xa434;
 const TAG_MAKE = 0x010f;
+/** Standard TIFF/EXIF Orientation tag, sitting right in IFD0 next to Make —
+ * see extractSonyEmbeddedPreview's `flip` field for why this is read too. */
+const TAG_ORIENTATION = 0x0112;
 /** JPEGInterchangeFormat / …Length — the standard TIFF/EXIF preview-JPEG
  * pointer pair (embedded-preview-first opening; see extractSonyEmbeddedPreview). */
 const TAG_JPEG_OFFSET = 0x0201;
@@ -297,7 +300,25 @@ export interface EmbeddedPreview {
   bytes: ArrayBuffer;
   width: number;
   height: number;
+  /**
+   * Rotation the bytes need to display upright, in the SAME code space as
+   * RawDecoder's `flip` (0=none, 3=180°, 5=90°CCW, 6=90°CW) — round-8 fix:
+   * unlike the main decode (LibRaw physically pre-rotates its mem-image
+   * output per EXIF, see decodeWorker.ts's NOTE), this is a bare JPEG stream
+   * sliced straight out of the file with no orientation of its own, so a
+   * portrait shot's overlay rendered unrotated for ~1s until the real decode
+   * replaced it. Read from IFD0's Orientation tag (0x0112) — the exact same
+   * IFD parseSonyLensProfile/parseSonyLensModel already walk. Mirror-orientations
+   * (EXIF 2/4/5/7) aren't produced by any Sony body seen so far and fall back
+   * to 0 (unrotated) rather than guess at a mirror the caller can't undo with
+   * a plain rotate.
+   */
+  flip: number;
 }
+
+/** EXIF Orientation tag values that are pure rotations (no mirroring), mapped
+ * to RawDecoder's flip code space. See EmbeddedPreview.flip's doc comment. */
+const EXIF_ORIENTATION_TO_FLIP: Record<number, number> = { 1: 0, 3: 3, 6: 6, 8: 5 };
 
 /**
  * Cheap JPEG dimension read: scans markers from SOI looking for a Start-Of-
@@ -446,6 +467,16 @@ export function extractSonyEmbeddedPreview(buffer: ArrayBuffer, opts?: ExtractPr
     const make = makeEntry ? readAscii(view, makeEntry.valueOffset, makeEntry.count) : null;
     if (!make || !make.toUpperCase().startsWith('SONY')) return null;
 
+    // EXIF Orientation (0x0112, inline SHORT) — see EmbeddedPreview.flip's doc
+    // comment. Missing/unrecognized (mirror orientations) ⇒ 0 (unrotated),
+    // same as a body that never reports one.
+    const orientationEntry = ifd0.find((e) => e.tag === TAG_ORIENTATION);
+    const orientationValue =
+      orientationEntry && orientationEntry.valueOffset + 2 <= view.byteLength
+        ? view.getUint16(orientationEntry.valueOffset, le)
+        : 1;
+    const flip = EXIF_ORIENTATION_TO_FLIP[orientationValue] ?? 0;
+
     const candidates = collectJpegCandidates(view, le, ifd0Off);
     const dimsCandidates: { offset: number; length: number; width: number; height: number }[] = [];
     for (const { offset, length } of candidates) {
@@ -465,7 +496,7 @@ export function extractSonyEmbeddedPreview(buffer: ArrayBuffer, opts?: ExtractPr
       const above = dimsCandidates.filter((c) => Math.max(c.width, c.height) >= minLongEdge);
       chosen = above.length > 0 ? above.reduce((best, c) => (c.width * c.height < best.width * best.height ? c : best)) : pickLargest();
     }
-    return { bytes: buffer.slice(chosen.offset, chosen.offset + chosen.length), width: chosen.width, height: chosen.height };
+    return { bytes: buffer.slice(chosen.offset, chosen.offset + chosen.length), width: chosen.width, height: chosen.height, flip };
   } catch {
     return null;
   }

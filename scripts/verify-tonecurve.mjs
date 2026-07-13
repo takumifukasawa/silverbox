@@ -98,6 +98,38 @@ try {
   check('⌘Z restores the identity render', meansMatch(afterUndo, neutral), { neutral, afterUndo });
   await page.keyboard.press('Meta+Shift+z');
 
+  console.log('verify-tonecurve (drag outside the plot CLAMPS, does not delete — round-8 fix):');
+  const beforeDragOut = await curveOf('rgb');
+  check('setup: the lifted midtone point from the earlier drag is still there', beforeDragOut.length === 3, beforeDragOut);
+  const midX = box.x + (beforeDragOut[1][0] / 255) * box.width;
+  const midY = box.y + (1 - beforeDragOut[1][1] / 255) * box.height;
+  const pastBeforeDragOut = await historyPast();
+  await page.mouse.move(midX, midY);
+  await page.mouse.down();
+  // drag WAY outside the plot's bounding box, in both x and y — this used to
+  // delete the point partway through the drag (re-inserting it at a new spot
+  // if the drag re-entered the plot), which read as the curve visibly
+  // jumping; it must now just hold the point at the plot's edge instead.
+  await page.mouse.move(box.x - 400, box.y - 400, { steps: 8 });
+  await page.mouse.up();
+  const afterDragOut = await curveOf('rgb');
+  check('point count is unchanged (no delete)', afterDragOut.length === 3, afterDragOut);
+  check(
+    'the dragged point is clamped to the plot edge (x at its neighbor-bound minimum, y at the top)',
+    afterDragOut[1][0] === 1 && afterDragOut[1][1] === 255,
+    afterDragOut
+  );
+  check('the whole out-of-bounds drag is exactly ONE undo entry', (await historyPast()) === pastBeforeDragOut + 1, {
+    before: pastBeforeDragOut,
+    after: await historyPast(),
+  });
+  await page.keyboard.press('Meta+z'); // back to the pre-drag-out lifted curve, for the sections below
+  const restoredAfterDragOutUndo = await curveOf('rgb');
+  check('⌘Z restores the pre-drag-out point (not just the point count)', JSON.stringify(restoredAfterDragOutUndo) === JSON.stringify(beforeDragOut), {
+    beforeDragOut,
+    restoredAfterDragOutUndo,
+  });
+
   console.log('verify-tonecurve (per-channel red curve):');
   await page.evaluate(() =>
     window.__debug.setToneCurvePoints('dev', 'r', [
