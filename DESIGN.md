@@ -81,6 +81,14 @@ enforced by machines:
 
 ### 4. The graph is the truth; the friendly UI is sugar
 
+The graph exists for TWO reasons, and the second is easy to forget: it
+is the data model's single source of truth, and it is how the user
+**sees the flow** — the legibility-of-process that Blender's
+compositor and especially Unreal's material editor get right (user,
+2026-07-13). The node editor's interaction design should feel like
+those editors, and graph-editor idioms (marquee select, frame-all,
+drag-from-port add) are adopted rather than invented.
+
 Lightroom-style controls (the inspector, "+ Local Adjustment", crop mode)
 are conveniences that build or edit graph structure the user could have
 wired by hand. Consequences:
