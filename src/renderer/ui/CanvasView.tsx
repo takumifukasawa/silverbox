@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
+import { buildSpotPreviewDoc, findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
 import { getThumbnail, thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
 import { srgbDecode, srgbEncode } from '../engine/color/srgb';
@@ -45,7 +45,14 @@ import {
   type MaskParams,
   type MaskShape,
 } from '../engine/graph/maskNode';
-import { defaultSpotsParams, SPOTS_KIND, type Spot, type SpotsParams } from '../engine/graph/spotsNode';
+import {
+  clampSpot,
+  DEFAULT_SPOT_FEATHER,
+  defaultSpotsParams,
+  SPOTS_KIND,
+  type Spot,
+  type SpotsParams,
+} from '../engine/graph/spotsNode';
 import { dirnameOf, IMAGE_KIND, resolveImagePath } from '../engine/graph/imageNode';
 import { imageNodeDecodeCount, syncImageNodeSources } from '../engine/graph/imageNodeSource';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
@@ -650,6 +657,59 @@ export function CanvasView() {
     });
   }, [scopeMode]);
 
+  // Round-14: live heal preview while DRAGGING to place a spot (requested
+  // twice). spotDraft is OUTPUT-frame normalized {dst, src} — same convention
+  // as SpotDrawOverlay's markers and handleSpotPointerDown's commit path
+  // further down (which still owns setting it on pointerdown/move/up).
+  // Declared HERE, ahead of the render effect below, rather than down next
+  // to its handlers (its original spot — see the "Spot removal" section
+  // comment further down) purely so the effect's dependency array can see it;
+  // JS temporal-dead-zone rules mean a `const` declared later in the
+  // component body can't be referenced by code above it.
+  const [spotDraft, setSpotDraft] = useState<{ dst: { x: number; y: number }; src: { x: number; y: number } } | null>(
+    null
+  );
+  // Real drag only: a sub-threshold draft (src≈dst, e.g. mid-click before
+  // the pointerup clickOnly branch decides the final src) heals nothing
+  // meaningful and would just flicker on a plain click — same >2px-of-output-
+  // pixels threshold handleSpotPointerDown's own pointerup handler uses to
+  // pick its clickOnly branch, so "is this a real drag" agrees everywhere.
+  const spotDraftDraggedPx =
+    spotDraft && outputDims
+      ? Math.hypot(
+          (spotDraft.src.x - spotDraft.dst.x) * outputDims.width,
+          (spotDraft.src.y - spotDraft.dst.y) * outputDims.height
+        )
+      : 0;
+  const spotDraftActive = spotMode && spotDraft !== null && anchorDims !== null && spotDraftDraggedPx >= 2;
+  // The doc actually handed to the MAIN client.render call below — planDoc,
+  // unless a real drag is in progress, in which case it's a CLONE with the
+  // draft spot appended via buildSpotPreviewDoc (appStore.ts): the exact same
+  // target-resolution commitSpot itself uses (existing active spots node, or
+  // auto-insert a fresh one right after input), so the live preview lands on
+  // the same node/position the eventual pointerup commit will. No store
+  // mutation, no history entry — this is purely a locally-derived doc for
+  // this render pass. Deliberately NOT substituted into planDoc itself: the
+  // compare pane (further down in the render effect) renders planDoc
+  // directly for its non-override case, and must keep showing the real,
+  // committed state throughout the drag, not the in-progress heal.
+  let spotPreviewDoc = planDoc;
+  if (spotDraftActive && spotDraft && anchorDims) {
+    const dstA = outputToAnchor(spotDraft.dst.x, spotDraft.dst.y, inputGeometry, anchorDims.width, anchorDims.height);
+    const srcA = outputToAnchor(spotDraft.src.x, spotDraft.src.y, inputGeometry, anchorDims.width, anchorDims.height);
+    const radiusA = outputRadiusToAnchor(spotBrushRadius, inputGeometry, anchorDims.width, anchorDims.height);
+    const draftSpot = clampSpot({
+      dx: dstA.x,
+      dy: dstA.y,
+      sx: srcA.x,
+      sy: srcA.y,
+      radius: radiusA,
+      feather: DEFAULT_SPOT_FEATHER,
+    });
+    const preview = buildSpotPreviewDoc(planDoc, activeOutputId, draftSpot);
+    if (preview) spotPreviewDoc = preview;
+  }
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !image) return;
@@ -747,7 +807,7 @@ export function CanvasView() {
       // graphRenderer.ts's render()), gated on BOTH the 'O' toggle and the
       // selection actually being a mask node.
       client.render({
-        doc: planDoc,
+        doc: spotPreviewDoc,
         renderScale,
         showBefore,
         outputId: activeOutputId ?? undefined,
@@ -853,6 +913,7 @@ export function CanvasView() {
   }, [
     image,
     planDoc,
+    spotPreviewDoc,
     shaderRev,
     wbModel,
     showBefore,
@@ -1543,9 +1604,9 @@ export function CanvasView() {
   // the user deliberately drags the src elsewhere — the brief's "visibly
   // does nothing" fallback), rather than reusing dst exactly (which some
   // future feature might special-case as "no spot").
-  const [spotDraft, setSpotDraft] = useState<{ dst: { x: number; y: number }; src: { x: number; y: number } } | null>(
-    null
-  );
+  //
+  // spotDraft itself is declared further up (before the render effect, round-
+  // 14) so that effect can react to it live — see the doc comment there.
   const spotDraftCleanupRef = useRef<(() => void) | null>(null);
   // Round-12 fix pack item 5: LR-style brush-radius cursor (SpotBrushCursor)
   // — the pointer's CURRENT output-frame position while hovering the canvas

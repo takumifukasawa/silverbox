@@ -680,6 +680,100 @@ try {
   });
 
   // ---------------------------------------------------------------------
+  console.log('verify-spots (round-14: live heal preview while DRAGGING, before pointerup commits):');
+  // Geometry is still identity here (the §1 anchor-rotate section runs
+  // LATER in this file) — output space == anchor space, so the dark/bright
+  // cell readback crops and pre-edit means from the grid scan up top stay
+  // valid untouched; the spots node from section 2 still exists but its list
+  // is empty (section 5's "Clear all", confirmed bit-exact just above), so
+  // this drag lands on that SAME existing node via the "existing node"
+  // branch of resolveSpotInsertion/buildSpotPreviewDoc (appStore.ts).
+  await setSpotModeUi(true);
+  await setSpotBrushRadius(0.12); // matches section 2's generous radius
+  const livePreviewCanvas = page.locator('.canvas-view-canvas');
+  await livePreviewCanvas.scrollIntoViewIfNeeded();
+  const livePreviewCanvasBox = await livePreviewCanvas.boundingBox();
+  const toLivePreviewScreen = (norm) => ({
+    x: livePreviewCanvasBox.x + norm.x * livePreviewCanvasBox.width,
+    y: livePreviewCanvasBox.y + norm.y * livePreviewCanvasBox.height,
+  });
+  const livePreviewDstScreen = toLivePreviewScreen(dstNorm);
+  const livePreviewSrcScreen = toLivePreviewScreen(srcNorm);
+  const nodesBeforeLivePreview = (await graphState()).nodes.length;
+  const pastBeforeLivePreview = await historyPast();
+
+  // Sub-threshold sub-check: derive the on-screen delta for exactly ~1
+  // OUTPUT pixel of movement from the CURRENT view.scale (imagePointFromClient,
+  // CanvasView.tsx: outputPx = screenPx / view.scale) rather than guessing a
+  // literal screen-pixel amount — the fit-to-view scale varies with window
+  // size/image dims, so a fixed screen-pixel nudge could land on either side
+  // of the real >2px-of-OUTPUT-pixels threshold depending on zoom. Computing
+  // it from view.scale keeps this deterministic instead of flaky.
+  const livePreviewView = await canvasView();
+  const subThresholdScreenDelta = Math.max(1, 1 * livePreviewView.scale); // ~1 output px ⇒ comfortably under the 2px threshold
+  await page.mouse.move(livePreviewDstScreen.x, livePreviewDstScreen.y);
+  await page.mouse.down();
+  await page.mouse.move(livePreviewDstScreen.x + subThresholdScreenDelta, livePreviewDstScreen.y, { steps: 1 });
+  await page.waitForTimeout(150);
+  const midClickDstMean = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  check(
+    'a sub-2px (output-space) move right after pointerdown never triggers the draft-doc render (dst region unchanged)',
+    Math.abs(midClickDstMean - preDstMean) < 0.01,
+    { preDstMean, midClickDstMean }
+  );
+
+  // Now drag well past the threshold, toward the bright cell — poll the dst
+  // region's readback WHILE THE BUTTON IS STILL DOWN until it moves toward
+  // the bright cell's PRE-EDIT mean (or time out ~5s).
+  await page.mouse.move(livePreviewSrcScreen.x, livePreviewSrcScreen.y, { steps: 8 });
+  const deadline = Date.now() + 5_000;
+  let midDragDstMean = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  while (Date.now() < deadline && !(Math.abs(midDragDstMean - preSrcMean) < Math.abs(preDstMean - preSrcMean))) {
+    await page.waitForTimeout(50);
+    midDragDstMean = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  }
+  check(
+    'WHILE the pointer is still down, the dst region already shows the live heal preview (mean moved toward the bright src)',
+    Math.abs(midDragDstMean - preSrcMean) < Math.abs(preDstMean - preSrcMean),
+    { preDstMean, preSrcMean, midDragDstMean }
+  );
+  check(
+    'the live preview has NOT committed anything to the graph/history yet (still mid-gesture)',
+    (await graphState()).nodes.length === nodesBeforeLivePreview && (await historyPast()) === pastBeforeLivePreview,
+    {
+      nodesBeforeLivePreview,
+      nodesNow: (await graphState()).nodes.length,
+      pastBeforeLivePreview,
+      pastNow: await historyPast(),
+    }
+  );
+
+  await page.mouse.up();
+  check('pointerup commits exactly one undo entry', (await historyPast()) === pastBeforeLivePreview + 1, {
+    before: pastBeforeLivePreview,
+    after: await historyPast(),
+  });
+  const postCommitDstMean = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  check(
+    'the just-committed render matches the live-preview render — no one-frame flash back to the pre-commit image',
+    Math.abs(postCommitDstMean - midDragDstMean) < 0.02,
+    { midDragDstMean, postCommitDstMean }
+  );
+  await page.waitForTimeout(100);
+  const postCommitDstMeanSettled = await regionMean(darkCell.x0, darkCell.y0, darkCell.w, darkCell.h);
+  check(
+    'the committed spot renders the region consistently after settling',
+    Math.abs(postCommitDstMeanSettled - postCommitDstMean) < 0.01,
+    { postCommitDstMean, postCommitDstMeanSettled }
+  );
+
+  // Cleanup: clear this section's own committed spot back to empty so the
+  // sections below (which re-seed their own spots via setSpots) start from
+  // the same known state section 8 above confirmed.
+  await setSpots(spotsNodeId, []);
+  check('cleanup: spots list cleared back to empty after the live-preview section', (await spotsState(spotsNodeId)).spots.length === 0, await spotsState(spotsNodeId));
+
+  // ---------------------------------------------------------------------
   console.log('verify-spots (round-7 hand-test fix — "spotの値調整ってできないんだっけ？": per-spot radius/feather editing in the Inspector):');
   await setSpots(spotsNodeId, [{ dx: 0.3, dy: 0.3, sx: 0.6, sy: 0.3, radius: 0.05, feather: 0.3 }]);
   // click-select spot 0 (no drag — same pattern section 5 above uses to select without mutating)

@@ -1041,6 +1041,86 @@ export function findActiveSpotsNodeId(graph: GraphDoc, activeOutputId: string | 
   return node?.id ?? null;
 }
 
+/** What resolveSpotInsertion produces on success — the resulting doc plus what commitSpot needs to select. */
+interface SpotInsertion {
+  graph: GraphDoc;
+  nodeId: string;
+  spotIndex: number;
+}
+
+/**
+ * Pure target resolution shared by commitSpot (below, which wraps this in
+ * set()/pushHistory/selection) and buildSpotPreviewDoc (round-14 live-drag
+ * preview, which just wants the resulting doc with no store side effects):
+ * append to the active chain's spots node, or auto-insert a fresh one RIGHT
+ * AFTER the input node when none exists yet (retouch before color — see
+ * spotsNode.ts's file doc comment), rewiring input→X to input→spots→X.
+ * Returns 'capped' when the active node already holds SPOTS_CAP spots, or
+ * null when there's no sane target (no output/input node, or no edge to
+ * splice into).
+ */
+function resolveSpotInsertion(
+  graph: GraphDoc,
+  activeOutputId: string | null,
+  spot: Spot
+): SpotInsertion | 'capped' | null {
+  const existingId = findActiveSpotsNodeId(graph, activeOutputId);
+  if (existingId) {
+    const node = graph.nodes.find((n) => n.id === existingId)!;
+    const list = node.spots?.spots ?? [];
+    if (list.length >= SPOTS_CAP) return 'capped';
+    return {
+      graph: {
+        ...graph,
+        nodes: graph.nodes.map((n) => (n.id === existingId ? { ...n, spots: { spots: [...list, spot] } } : n)),
+      },
+      nodeId: existingId,
+      spotIndex: list.length,
+    };
+  }
+  const out = activeOutputNode(graph, activeOutputId);
+  const inputNode = graph.nodes.find((n) => n.kind === 'input');
+  if (!out || !inputNode) return null;
+  const reach = reachableToOutput(graph, out.id);
+  const edge = graph.edges.find((e) => e.source === inputNode.id && reach.has(e.target));
+  if (!edge) return null;
+  const spotsId = nextId(graph, 'spots');
+  const spotsNode: GraphNode = {
+    id: spotsId,
+    kind: SPOTS_KIND,
+    position: { x: inputNode.position.x + 110, y: inputNode.position.y + 90 },
+    spots: { spots: [spot] },
+  };
+  let scratch: GraphDoc = {
+    ...graph,
+    nodes: [...graph.nodes, spotsNode],
+    edges: graph.edges.filter((e) => e.id !== edge.id),
+  };
+  const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+    const e = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+    scratch = { ...scratch, edges: [...scratch.edges, e] };
+  };
+  addEdge(inputNode.id, spotsId);
+  addEdge(spotsId, edge.target, edge.targetHandle);
+  return { graph: scratch, nodeId: spotsId, spotIndex: 0 };
+}
+
+/**
+ * Preview-only counterpart to commitSpot (round-14 live-drag preview): same
+ * target resolution as commitSpot (resolveSpotInsertion above), but returns
+ * the resulting doc directly with NO store side effects — no set(), no
+ * history entry, no selection change. CanvasView renders this doc while a
+ * real spot drag is in progress; the committed doc/history is untouched
+ * until pointer-up calls commitSpot as before. Returns null when there's
+ * nothing sane to preview against (at the spot cap, or no output/input node
+ * to splice into) — the caller falls back to rendering the doc unmodified
+ * for that frame.
+ */
+export function buildSpotPreviewDoc(graph: GraphDoc, activeOutputId: string | null, spot: Spot): GraphDoc | null {
+  const result = resolveSpotInsertion(graph, activeOutputId, spot);
+  return result === 'capped' || result === null ? null : result.graph;
+}
+
 /**
  * Sanitize to a filesystem/slug-safe token: letters/digits/underscore/hyphen
  * only, runs of anything else collapse to a single hyphen, and a result
@@ -2226,60 +2306,18 @@ export const useAppStore = create<AppState>((set, get) => {
     let capped = false;
     const spot = clampSpot({ dx: dst.x, dy: dst.y, sx: src.x, sy: src.y, radius, feather: 0.3 });
     set((s) => {
-      const existingId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
-      if (existingId) {
-        const node = s.graph.nodes.find((n) => n.id === existingId)!;
-        const list = node.spots?.spots ?? [];
-        if (list.length >= SPOTS_CAP) {
-          capped = true;
-          return {};
-        }
-        return {
-          ...pushHistory(s, null),
-          graph: {
-            ...s.graph,
-            nodes: s.graph.nodes.map((n) => (n.id === existingId ? { ...n, spots: { spots: [...list, spot] } } : n)),
-          },
-          graphDirty: true,
-          selectedNodeId: existingId,
-          selectedSpotIndex: list.length,
-        };
+      const result = resolveSpotInsertion(s.graph, s.activeOutputId, spot);
+      if (result === 'capped') {
+        capped = true;
+        return {};
       }
-      // No spots node anywhere in the active chain yet: auto-insert one
-      // RIGHT AFTER the input node (retouch before color — see spotsNode.ts's
-      // file doc comment), rewiring input→X to input→spots→X, combined with
-      // this first spot into ONE undo entry (buildLocalAdjustmentPatch's
-      // same one-entry-per-gesture rule).
-      const out = activeOutputNode(s.graph, s.activeOutputId);
-      const inputNode = s.graph.nodes.find((n) => n.kind === 'input');
-      if (!out || !inputNode) return {};
-      const reach = reachableToOutput(s.graph, out.id);
-      const edge = s.graph.edges.find((e) => e.source === inputNode.id && reach.has(e.target));
-      if (!edge) return {};
-      const spotsId = nextId(s.graph, 'spots');
-      const spotsNode: GraphNode = {
-        id: spotsId,
-        kind: SPOTS_KIND,
-        position: { x: inputNode.position.x + 110, y: inputNode.position.y + 90 },
-        spots: { spots: [spot] },
-      };
-      let scratch: GraphDoc = {
-        ...s.graph,
-        nodes: [...s.graph.nodes, spotsNode],
-        edges: s.graph.edges.filter((e) => e.id !== edge.id),
-      };
-      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
-        const e = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
-        scratch = { ...scratch, edges: [...scratch.edges, e] };
-      };
-      addEdge(inputNode.id, spotsId);
-      addEdge(spotsId, edge.target, edge.targetHandle);
+      if (result === null) return {};
       return {
         ...pushHistory(s, null),
-        graph: scratch,
+        graph: result.graph,
         graphDirty: true,
-        selectedNodeId: spotsId,
-        selectedSpotIndex: 0,
+        selectedNodeId: result.nodeId,
+        selectedSpotIndex: result.spotIndex,
       };
     });
     if (capped) {
