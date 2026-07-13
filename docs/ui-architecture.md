@@ -91,3 +91,11 @@ ANY later point in any order without breaking anything; defer them
 until the clutter actually hurts daily use. (The bypass toggle does NOT
 depend on Shell A — it lands fine in the current toolbar.) This doc's
 job is that the DECISIONS are already made when that day comes.
+
+## Addendum (2026-07-13, hand-testing feedback)
+
+- **Histogram placement**: user finds the current spot intrusive;
+  candidate = top of the right-hand inspector panel (the LR position).
+  Fold into Shell pack A when it runs. Counter-concern (user's own):
+  don't drift into being an LR clone for its own sake — decide by use,
+  not by resemblance.
