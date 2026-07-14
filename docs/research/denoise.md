@@ -122,13 +122,16 @@ command line: `nlmeans` (classic Buades non-local-means) [[docs]](https://gmic.e
 `denoise_cnn` (a bundled small neural denoiser — architecture, training
 data and license terms for its weights are **UNVERIFIED**, the reference
 page gives only the calling convention and default `patch_size=64`). A
-one-line invocation like `gmic input.tiff -denoise_cnn 0,64 -o output.tiff,uint8`
+one-line invocation like `gmic input.tiff -denoise_cnn 0,64 -cut 0,255 -o output.tiff,uint8`
 maps almost exactly onto the intended hook-node contract (file in, file
 out — the `,uint8` output-type suffix is REQUIRED for THIS project's hook
 node specifically: gmic's own bare `-o` defaults to a float TIFF, which
 this build's sharp/libvips cannot read pixels back out of, see
-src/main/externalTool.ts's doc comment; gmic itself is float-preserving
-internally regardless). **This is the strongest v1 default** — it needs no
+src/main/externalTool.ts's doc comment; and `-cut 0,255` must precede it,
+because gmic's uint8 cast WRAPS out-of-range values rather than clamping —
+denoisers over/undershoot per channel at hard edges, which wraps into
+colored speckles without the clamp (hand-test round 2 finding); gmic
+itself is float-preserving internally regardless). **This is the strongest v1 default** — it needs no
 sidecar-format gymnastics, and gives the user a choice between an
 instant classical mode and its bundled CNN, with the door open to point the
 same hook at literally any other command (including a user's own Python

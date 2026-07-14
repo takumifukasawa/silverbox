@@ -1074,7 +1074,7 @@ function ExternalInspector({ node }: { node: GraphNode }) {
         <input
           type="text"
           data-testid="external-node-command"
-          placeholder="gmic {in} -denoise_patchpca 5 -o {out},uint8"
+          placeholder="gmic {in} -denoise_patchpca 5 -cut 0,255 -o {out},uint8"
           value={params.command}
           onChange={(ev) => {
             sessionRef.current ??= Date.now();
@@ -1087,8 +1087,9 @@ function ExternalInspector({ node }: { node: GraphNode }) {
         <div className="inspector-hint">
           {'{in}'} / {'{out}'} are replaced with temp file paths; split on whitespace, no shell (double-quote a token to
           keep spaces in it, e.g. "my tool" {'{in}'} --out {'{out}'}). Runs an external command — expect seconds, not
-          milliseconds. The tool must write its result back as 8-BIT output (gmic needs the {'{out}'},uint8 suffix — this
-          build cannot read back 16-bit or float TIFF).
+          milliseconds. The tool must write its result back as 8-BIT output, CLAMPED to 0–255 (gmic needs -cut 0,255
+          before the {'{out}'},uint8 suffix — its cast wraps out-of-range values into colored speckles, and this build
+          cannot read back 16-bit or float TIFF).
         </div>
         <label className="param-row">
           <span className="param-label">Encoded (sRGB)</span>

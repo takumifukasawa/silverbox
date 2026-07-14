@@ -3,13 +3,16 @@
 Status: v1 LANDED (10c42de graph node + c50c406 compare-pane reach;
 verify-external.mjs green with the fixture command). REMAINING: (a)
 user-side hand-test with a REAL tool — install one (e.g. `brew install
-gmic`) and run e.g. `gmic {in} -denoise_patchpca 5 -o {out},uint8`
+gmic`) and run e.g. `gmic {in} -denoise_patchpca 5 -cut 0,255 -o {out},uint8`
 through the node (the `,uint8` suffix is REQUIRED — this build can only
 read 8-bit TIFF output back; gmic's own `-o {out}` default is a float
 TIFF, which reads as a uniform white frame, see src/main/externalTool.ts's
-doc comment), including the fresh-open disabled/confirm flow; first
-hand-test attempt (round with gmic 4.0.2) hit exactly that bug and is
-now fixed. (b) v2 bundled NAFNet/ONNX — still deferred per the research
+doc comment — and `-cut 0,255` is required WITH it: gmic's uint8 cast
+wraps out-of-range values instead of clamping, and patch-based denoisers
+over/undershoot per channel at hard edges, so without the clamp the
+result is sprinkled with colored speckles along edges), including the
+fresh-open disabled/confirm flow; the first two hand-test rounds
+(gmic 4.0.2) hit exactly these two bugs, both understood and fixed. (b) v2 bundled NAFNet/ONNX — still deferred per the research
 doc. Original dispatch notes kept below.
 Prereq reading:
 docs/research/denoise.md (the decided architecture + G'MIC findings),
@@ -21,8 +24,9 @@ DESIGN.md non-goals (no bundled ML runtime in v1).
 - New node kind `'external'`: one input, one output. Params:
   `external: { command: string, encoded: boolean, cacheKey?: never }` —
   `command` is a user template with `{in}`/`{out}` placeholders, e.g.
-  `gmic {in} -denoise_patchpca 5 -o {out},uint8` (the tool must write its
-  result back as 8-bit — see the Status note above). `encoded: true` (default)
+  `gmic {in} -denoise_patchpca 5 -cut 0,255 -o {out},uint8` (the tool must
+  write its result back as 8-bit, clamped — see the Status note above).
+  `encoded: true` (default)
   pipes sRGB-ENCODED 16-bit TIFF (most external denoisers expect
   display-referred input); false pipes linear Rec.2020 float TIFF for
   tools that can take it. Conversion sits at the node boundary, both
