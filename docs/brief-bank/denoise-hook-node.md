@@ -12,8 +12,16 @@ wraps out-of-range values instead of clamping, and patch-based denoisers
 over/undershoot per channel at hard edges, so without the clamp the
 result is sprinkled with colored speckles along edges), including the
 fresh-open disabled/confirm flow; the first two hand-test rounds
-(gmic 4.0.2) hit exactly these two bugs, both understood and fixed. (b) v2 bundled NAFNet/ONNX — still deferred per the research
-doc. Original dispatch notes kept below.
+(gmic 4.0.2) hit exactly these two bugs, both understood and fixed. (b) v2 bundled NAFNet/ONNX — NO LONGER just deferred: the
+hand-test proved v1's ceiling is the 8-bit + [0,1]-clamp external
+round-trip, which is present in BOTH encoded/linear modes and makes v1
+only clean as a DOWNSTREAM finishing step. "Denoise early near input"
+(the position that actually rivals LR's Bayer-domain AI Denoise) needs
+an in-engine, high-bit, no-external-round-trip denoiser. User endorsed
+v2 as NEEDED (2026-07-14, "v2が必要そう") — it is now a real queue item
+for the feature run, not an open-ended deferral. v1 remains the
+downstream finishing tool it already is; no further v1 work is planned
+beyond the shipped fixes. Original dispatch notes kept below.
 Prereq reading:
 docs/research/denoise.md (the decided architecture + G'MIC findings),
 spotsNode/custom-shader node shapes, exportOnePath's decode flow,
