@@ -178,19 +178,25 @@ function buildNodes(
   imageNodeMissing: Record<string, boolean>,
   externalNodeNeedsConfirm: Record<string, string>,
   externalNodeErrors: Record<string, string>,
+  externalNodeRunning: Record<string, boolean>,
   imageNodeSourceThumbs: Record<string, string>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
   const outputCount = graph.nodes.filter((n) => n.kind === 'output').length;
   return graph.nodes.map((n) => {
-    // External-tool hook node (task #41): error takes priority over
-    // needs-confirm (a node that just failed is more actionable to notice
-    // than one merely awaiting its first confirm) — see externalNodeRunner.ts.
+    // External-tool hook node (task #41): running (spinner) takes priority
+    // over error, which takes priority over needs-confirm — a run actually
+    // in flight is the most current thing to show, then a failure is more
+    // actionable to notice than one merely awaiting its first confirm — see
+    // externalNodeRunner.ts.
     let badge: string | undefined;
     let badgeTitle: string | undefined;
     if (n.kind === EXTERNAL_KIND) {
-      if (externalNodeErrors[n.id]) {
+      if (externalNodeRunning[n.id]) {
+        badge = '⟳';
+        badgeTitle = 'External tool running — expect seconds to minutes';
+      } else if (externalNodeErrors[n.id]) {
         badge = '⚠';
         badgeTitle = externalNodeErrors[n.id];
       } else if (externalNodeNeedsConfirm[n.id]) {
@@ -271,10 +277,11 @@ export function NodeEditorPanel() {
   // buildPlan never reaches (see buildNodes' thumbUrl comment above), resynced
   // the same debounced way nodeThumbs/imageNodeMissing are.
   const imageNodeSourceThumbs = useAppStore((s) => s.imageNodeSourceThumbs);
-  // External-tool hook node (task #41): needs-confirm/error badge state,
-  // resynced the same debounced way as imageNodeMissing above.
+  // External-tool hook node (task #41): needs-confirm/error/running badge
+  // state, resynced the same debounced way as imageNodeMissing above.
   const externalNodeNeedsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm);
   const externalNodeErrors = useAppStore((s) => s.externalNodeErrors);
+  const externalNodeRunning = useAppStore((s) => s.externalNodeRunning);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -299,6 +306,7 @@ export function NodeEditorPanel() {
       imageNodeMissing,
       externalNodeNeedsConfirm,
       externalNodeErrors,
+      externalNodeRunning,
       imageNodeSourceThumbs
     )
   );
@@ -318,6 +326,7 @@ export function NodeEditorPanel() {
         imageNodeMissing,
         externalNodeNeedsConfirm,
         externalNodeErrors,
+        externalNodeRunning,
         imageNodeSourceThumbs
       )
     );
@@ -330,6 +339,7 @@ export function NodeEditorPanel() {
     imageNodeMissing,
     externalNodeNeedsConfirm,
     externalNodeErrors,
+    externalNodeRunning,
     imageNodeSourceThumbs,
   ]);
 

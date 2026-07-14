@@ -33,12 +33,47 @@
  * verify fixture) — the GPU passes/cache/protocol already carry full
  * rgba16float precision right up to this boundary.
  *
+ * FOLLOW-UP FINDING (hand-test round with real gmic, task #41 remaining
+ * item): an external TOOL's *output* can still legitimately come back at a
+ * higher bit depth than the 8-bit input we sent it (gmic's `-o {out}`
+ * defaults to a FLOAT TIFF regardless of input depth). Empirically, in this
+ * build, reading pixels back out of such a file is simply broken, even
+ * though the file itself is fine: `sharp(out).stats()` reports correct
+ * min/max, but `sharp(out).raw({depth:'float'})` returns 255.0 for EVERY
+ * sample (a uniform-white image — this was the actual bug a user hit), and
+ * `sharp(out).raw({depth:'ushort'})` against a 16-bit TIFF returns all
+ * ZEROS. Only `sharp(out).raw()` against a genuine 8-bit ('uchar') TIFF
+ * round-trips correctly (proven the same way the file-level deviation above
+ * was — pixels 40-146 survive `-o out.tiff,uint8` exactly). So: the
+ * extraction layer, not the file, is what's broken for anything above 8-bit
+ * here. Rather than keep provably-garbage read paths around, this file now
+ * REJECTS any non-uchar tool output outright with an actionable reason
+ * (`meta.depth` other than 'uchar'/undefined) instead of silently reading
+ * zeros or a blown-out white frame — see the depth check in
+ * `runExternalTool` below and `fromRawChannels`' doc comment. The fix for
+ * gmic specifically is a `,uint8` suffix on its own `-o` target (see the
+ * inspector hint / recommended commands).
+ *
  * SECURITY: this module trusts its caller completely — it has no notion of
  * "confirmed" or "disabled" nodes. That gate lives ENTIRELY in the renderer
  * (externalNodeRunner.ts) and the CLI's own `--allow-external` flag; by the
  * time a request reaches here, running the command IS the decision already
  * made. Sub-processes: main process only, never a shell, cwd = a fresh
- * per-run scratch dir (always removed afterward), env reduced to just PATH.
+ * per-run scratch dir (always removed afterward), env reduced to just
+ * PATH/HOME/TMPDIR (each passed through only when actually set in
+ * process.env, never invented) — no other ambient environment variable
+ * reaches the tool.
+ *
+ * HOME (round-2 hand-test finding): real gmic run without $HOME logged
+ * `cimg::create_dir(): Failed to create directory '/gmic'` — with no HOME,
+ * G'MIC falls back to a bogus root-level resource dir for its own
+ * config/cache. Warning-level noise for a stateless filter like
+ * denoise_patchpca, but FATAL for `-denoise_cnn`, which downloads its CNN
+ * weights into that same resource dir on first use — no HOME, no writable
+ * dir, no weights, no denoise. TMPDIR is passed through for the same class
+ * of reason (a tool reaching for its OWN scratch space beyond the cwd we
+ * already give it); neither one broadens what the command can reach beyond
+ * what running it as this OS user already permits.
  *
  * On ANY failure (spawn error, non-zero exit, timeout, missing/malformed
  * output, dimension mismatch) this resolves `{ok:false,reason}` — it never
@@ -58,6 +93,21 @@ import { readExternalCache, writeExternalCache } from './externalCache';
 const EXTERNAL_TOOL_TIMEOUT_MS = 5 * 60 * 1000;
 /** Cap on captured stderr — a chatty tool must not balloon memory; only the tail matters for a badge/reason string anyway. */
 const STDERR_CAPTURE_BYTES = 64 * 1024;
+
+/**
+ * The external tool's child env — PATH always (empty string if somehow
+ * unset), HOME/TMPDIR passed through only when this process actually has
+ * them (never invented) — see this file's doc comment (HOME) for why: a
+ * tool that expects a real home directory for its own resource/config/model
+ * dirs (e.g. gmic's `-denoise_cnn` weight download) fails without one.
+ * Nothing else from process.env ever reaches the child.
+ */
+function childEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { PATH: process.env['PATH'] ?? '' };
+  if (process.env['HOME'] !== undefined) env['HOME'] = process.env['HOME'];
+  if (process.env['TMPDIR'] !== undefined) env['TMPDIR'] = process.env['TMPDIR'];
+  return env;
+}
 
 let spawnCount = 0;
 /** Verify-only: real subprocess spawn count this session (see shared/ipc.ts's externalToolSpawnCount channel). Cache hits never increment this. */
@@ -85,21 +135,30 @@ function toRawChannels(data: ArrayBuffer, width: number, height: number): Buffer
   return Buffer.from(out.buffer);
 }
 
-/** Inverse of toRawChannels: a decoded raw 3-channel 8-bit buffer → tightly packed RGBA float32 (alpha = 1), values back in [0,1]. Tolerates a tool handing back a different (even higher) depth by normalizing against that depth's own max. */
-function fromRawChannels(buf: Buffer, width: number, height: number, depth: string): Float32Array {
+/**
+ * Inverse of toRawChannels: a decoded raw 3-channel 8-bit ('uchar') buffer →
+ * tightly packed RGBA float32 (alpha = 1), values back in [0,1]. 8-bit ONLY
+ * — callers must reject any other `meta.depth` before reaching here (see
+ * runExternalTool's depth check). This used to also handle 'ushort'/'float'
+ * inputs, normalizing against each depth's own max; DELETED after hand-
+ * testing with real gmic output proved both paths read garbage in this
+ * build: a 'ushort' TIFF's raw({depth:'ushort'}) buffer came back all
+ * ZEROS, and a 'float' TIFF's raw({depth:'float'}) buffer came back all
+ * 255.0 (uniform white) — even though `sharp(...).stats()` reads the same
+ * files' real min/max correctly, so the file itself is fine and the bug is
+ * specifically in this build's typed raw-pixel extraction for non-8-bit
+ * TIFF. Keeping a "supported" path that silently returns wrong pixels is
+ * worse than the caller's existing "pass through + badge" failure contract,
+ * so those depths are now rejected before this function is ever called.
+ */
+function fromRawChannels(buf: Buffer, width: number, height: number): Float32Array {
   const n = width * height;
   const out = new Float32Array(n * 4);
-  const max = depth === 'ushort' ? 65535 : depth === 'float' ? 1 : 255;
-  const src =
-    depth === 'ushort'
-      ? new Uint16Array(buf.buffer, buf.byteOffset, n * 3)
-      : depth === 'float'
-        ? new Float32Array(buf.buffer, buf.byteOffset, n * 3)
-        : new Uint8Array(buf.buffer, buf.byteOffset, n * 3);
+  const src = new Uint8Array(buf.buffer, buf.byteOffset, n * 3);
   for (let i = 0; i < n; i++) {
-    out[i * 4] = src[i * 3]! / max;
-    out[i * 4 + 1] = src[i * 3 + 1]! / max;
-    out[i * 4 + 2] = src[i * 3 + 2]! / max;
+    out[i * 4] = src[i * 3]! / 255;
+    out[i * 4 + 1] = src[i * 3 + 1]! / 255;
+    out[i * 4 + 2] = src[i * 3 + 2]! / 255;
     out[i * 4 + 3] = 1;
   }
   return out;
@@ -137,8 +196,9 @@ export async function runExternalTool(req: ExternalToolRequest): Promise<Externa
         finalArgv.slice(1),
         // shell:false is execFile's own default (unlike exec/spawn's shell
         // option, execFile never goes through a shell at all) — cwd is a
-        // fresh per-run scratch dir, env is reduced to just PATH.
-        { cwd: scratchDir!, env: { PATH: process.env['PATH'] ?? '' }, timeout: EXTERNAL_TOOL_TIMEOUT_MS, windowsHide: true },
+        // fresh per-run scratch dir, env is reduced to PATH/HOME/TMPDIR (see
+        // childEnv's doc comment).
+        { cwd: scratchDir!, env: childEnv(), timeout: EXTERNAL_TOOL_TIMEOUT_MS, windowsHide: true },
         (error, _stdout, stderr) => {
           resolve({ stderr, error: (error as (Error & { killed?: boolean }) | null) ?? undefined });
         }
@@ -168,15 +228,22 @@ export async function runExternalTool(req: ExternalToolRequest): Promise<Externa
       };
     }
     const depth = meta.depth ?? 'uchar';
-    // Request the OUTPUT raw depth explicitly when the tool's own result
-    // claims to be higher than 8-bit (some tools may emit 16-bit output even
-    // though we only ever send 8-bit input, see this file's doc comment) —
-    // sharp's plain `.raw()` with no options otherwise collapses to 8-bit
-    // regardless of the source's real depth, which would desync fromRawChannels'
-    // byte-width assumption from what's actually in the buffer.
-    const outRaw = depth === 'ushort' || depth === 'float' ? sharp(outPath).raw({ depth }) : sharp(outPath).raw();
-    const outBuf = Buffer.from(await outRaw.toBuffer());
-    const rgba = fromRawChannels(outBuf, width, height, depth);
+    // 8-bit ('uchar') output only — see this file's doc comment for the
+    // empirical finding that this build's raw-pixel extraction is broken for
+    // anything else (ushort → all zeros, float → all 255s) even though the
+    // file itself decodes fine. A tool that wrote e.g. a float TIFF (gmic's
+    // default `-o` behavior) must be told to write 8-bit instead (gmic:
+    // `-o {out},uint8`) rather than have this silently hand back garbage
+    // pixels — this is the SAME "pass through + badge on any failure"
+    // contract every other failure mode here already uses.
+    if (depth !== 'uchar') {
+      return {
+        ok: false,
+        reason: `external tool wrote a ${depth} TIFF — this build can only read 8-bit output back; make the tool write 8-bit output (gmic: -o {out},uint8)`,
+      };
+    }
+    const outBuf = Buffer.from(await sharp(outPath).raw().toBuffer());
+    const rgba = fromRawChannels(outBuf, width, height);
     const outData = toArrayBuffer(rgba);
     await writeExternalCache(cacheKey, width, height, encoded, outData).catch(() => {});
     return { ok: true, width, height, data: outData };

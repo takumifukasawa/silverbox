@@ -343,6 +343,21 @@ interface AppState {
    * Rating is metadata on the sidecar wrapper, not `graph` — never touched.
    */
   resetAllEdits(): void;
+  /**
+   * "Reset Develop" (Develop inspector button, per-node — distinct from
+   * `resetAllEdits`'s whole-photo scope): writes the FRESH-OPEN seeded
+   * develop params onto ONE develop node (`nodeId`, the one the inspector is
+   * currently showing) — same seeded-defaults source as `resetAllEdits`
+   * (defaultGraphDoc() through seedDefaultLook with `usedSidecar: false`, so
+   * RAW vs JPEG still get their own real defaults — camera-matched base
+   * curve + LR-calibrated NR/sharpen seeds for RAW, flat for JPEG — never
+   * hand-copied constants), but ONLY that node's `develop` field is replaced:
+   * graph structure, edges, every other node (including a second develop
+   * node, if the doc has one) are untouched. One undo entry, same idiom as
+   * resetAllEdits. No-op without a ready image or if `nodeId` isn't a
+   * develop node.
+   */
+  resetDevelopNode(nodeId: string): void;
   /** `<userData>/presets/*.json` summaries (task #37); refreshed after save/delete and once at boot. */
   presets: PresetSummary[];
   /**
@@ -559,6 +574,9 @@ interface AppState {
   /** nodeId → the most recent round-trip failure reason (pass-through + badge on ANY failure) — absent = no error, or cleared by a subsequent success. */
   externalNodeErrors: Record<string, string>;
   setExternalNodeError(nodeId: string, error: string | null): void;
+  /** nodeId → true while its subprocess round trip is actually in flight (spinner badge) — set right before the IPC call, cleared on settle; see externalNodeRunner.ts's onStarted callback. Absent/false = not running. */
+  externalNodeRunning: Record<string, boolean>;
+  setExternalNodeRunning(nodeId: string, running: boolean): void;
   /** Bumped whenever an external-tool round trip settles (success or failure) or a cached result becomes ready with no run needed — mirrors imageNodeRev's role in re-running CanvasView's render effect. */
   externalNodeRev: number;
   bumpExternalNodeRev(): void;
@@ -2482,10 +2500,24 @@ export const useAppStore = create<AppState>((set, get) => {
     if (!renderer || !command) return;
     const docKey = imagePath ?? 'unsaved';
     set((s) => ({ externalNodeNeedsConfirm: { ...s.externalNodeNeedsConfirm, [nodeId]: undefined as unknown as string } }));
-    confirmAndRetry(nodeId, docKey, command, renderer, (settledNodeId, ok, error) => {
-      get().setExternalNodeError(settledNodeId, ok ? null : (error ?? 'unknown error'));
-      get().bumpExternalNodeRev();
-    });
+    confirmAndRetry(
+      nodeId,
+      docKey,
+      command,
+      renderer,
+      (startedNodeId) => {
+        // A confirm-triggered retry is a fresh run — drop any stale error
+        // badge from a PRIOR failed attempt so the spinner isn't fighting a
+        // leftover ⚠ for priority (see NodeEditorPanel's badge ordering).
+        get().setExternalNodeError(startedNodeId, null);
+        get().setExternalNodeRunning(startedNodeId, true);
+      },
+      (settledNodeId, ok, error) => {
+        get().setExternalNodeRunning(settledNodeId, false);
+        get().setExternalNodeError(settledNodeId, ok ? null : (error ?? 'unknown error'));
+        get().bumpExternalNodeRev();
+      }
+    );
   },
 
   externalNodeErrors: {},
@@ -2494,6 +2526,15 @@ export const useAppStore = create<AppState>((set, get) => {
       error === (s.externalNodeErrors[nodeId] ?? null)
         ? {}
         : { externalNodeErrors: { ...s.externalNodeErrors, [nodeId]: error ?? (undefined as unknown as string) } }
+    );
+  },
+
+  externalNodeRunning: {},
+  setExternalNodeRunning(nodeId, running) {
+    set((s) =>
+      running === (s.externalNodeRunning[nodeId] ?? false)
+        ? {}
+        : { externalNodeRunning: { ...s.externalNodeRunning, [nodeId]: running || (undefined as unknown as boolean) } }
     );
   },
 
@@ -2731,6 +2772,37 @@ export const useAppStore = create<AppState>((set, get) => {
       // deliberately untouched, same as setRating's own contract.
     }));
     revalidateShaders(graph);
+  },
+
+  resetDevelopNode(nodeId) {
+    const s = get();
+    if (s.imageStatus !== 'ready' || !s.image) return;
+    const target = s.graph.nodes.find((n) => n.id === nodeId);
+    if (!target || target.kind !== DEVELOP_KIND) return;
+    const kind = isRawFileName(s.fileName ?? '') ? 'raw' : 'jpg';
+    // Same seeded-defaults source as resetAllEdits above (a fresh
+    // defaultGraphDoc() through seedDefaultLook with usedSidecar:false, real
+    // testFlags) — but only THIS node's develop params get lifted out of the
+    // seeded graph and written onto the CURRENT graph's matching node; the
+    // rest of the seeded graph (its own single 'dev'/'in'/'out' skeleton) is
+    // discarded. If the doc has a second develop node, the seeded graph's
+    // (only) develop node is still the right reset target — "fresh-open
+    // defaults for a develop stage" doesn't depend on which node holds it.
+    const { graph: seededGraph } = seedDefaultLook(defaultGraphDoc(), s.image, {
+      usedSidecar: false,
+      kind,
+      testFlags: window.silverbox.testFlags,
+    });
+    const seededDevelop = seededGraph.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop;
+    if (!seededDevelop) return;
+    set((s2) => ({
+      ...pushHistory(s2, null),
+      graph: {
+        ...s2.graph,
+        nodes: s2.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop: structuredClone(seededDevelop) } : n)),
+      },
+      graphDirty: true,
+    }));
   },
 
   presets: [],

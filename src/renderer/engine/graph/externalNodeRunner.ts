@@ -72,13 +72,21 @@ export function pendingExternalRequest(nodeId: string): ExternalRunRequest | und
  * (IPC itself rejecting, vanishingly rare) is reported through the SAME
  * `onSettled`/`postExternalResult` path as an ordinary subprocess failure,
  * so the UI has exactly one failure shape to handle.
+ *
+ * `onStarted` (spinner badge, hand-test follow-up) fires exactly once per
+ * actual spawn — right before the IPC call, and only once the confirm gate
+ * has passed AND the node isn't already running (the `runningNodes` guard
+ * below governs both "spawn it" and "tell the UI it started" identically, so
+ * a burst of upstream edits never flashes the spinner more than once for a
+ * single in-flight run).
  */
 export async function handleExternalRunRequest(
   req: ExternalRunRequest,
   docKey: string,
   client: ExternalNodeClient,
   onNeedsConfirm: (nodeId: string, command: string) => void,
-  onSettled: (nodeId: string, ok: boolean, error?: string) => void
+  onSettled: (nodeId: string, ok: boolean, error?: string) => void,
+  onStarted?: (nodeId: string) => void
 ): Promise<void> {
   pendingByNode.set(req.nodeId, req);
   if (!isExternalConfirmed(docKey, req.command)) {
@@ -87,6 +95,7 @@ export async function handleExternalRunRequest(
   }
   if (runningNodes.has(req.nodeId)) return;
   runningNodes.add(req.nodeId);
+  onStarted?.(req.nodeId);
   try {
     const result = await window.silverbox.runExternalTool({
       command: req.command,
@@ -120,11 +129,12 @@ export function confirmAndRetry(
   docKey: string,
   command: string,
   client: ExternalNodeClient,
+  onStarted: (nodeId: string) => void,
   onSettled: (nodeId: string, ok: boolean, error?: string) => void
 ): void {
   confirmExternalCommand(docKey, command);
   const pending = pendingByNode.get(nodeId);
   if (pending && pending.command === command) {
-    void handleExternalRunRequest(pending, docKey, client, () => {}, onSettled);
+    void handleExternalRunRequest(pending, docKey, client, () => {}, onSettled, onStarted);
   }
 }

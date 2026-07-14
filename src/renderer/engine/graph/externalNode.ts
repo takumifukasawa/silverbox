@@ -8,7 +8,9 @@
  * graphRenderer.ts/externalNodeRunner.ts.
  *
  * `command` is a Makefile-rule-style template with `{in}`/`{out}` path
- * placeholders, e.g. `gmic {in} -denoise_patchpca 5 -o {out}` — split into an
+ * placeholders, e.g. `gmic {in} -denoise_patchpca 5 -o {out},uint8` (the
+ * `,uint8` suffix is required — this build can only read 8-bit tool output
+ * back, see externalTool.ts's doc comment) — split into an
  * argv array OURSELVES (never a shell) so quoting is the user's own explicit
  * responsibility, not a shell-injection surface: a command is spawned via
  * child_process.execFile with shell:false (see externalTool.ts), which never

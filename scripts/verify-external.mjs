@@ -19,16 +19,28 @@
  *     the subprocess (spawn counter unchanged); an upstream pixel edit DOES.
  *  3. A failing command (--fail) ⇒ pass-through + error badge, no crash, no
  *     cached result poisoning later checks.
- *  4. Sidecar round-trip preserves command/encoded.
- *  5. encoded vs linear modes produce DIFFERENT results for the identical
+ *  4. A tool that writes back a NON-8-bit TIFF (--write16 fixture mode,
+ *     simulating real gmic's own bare `-o` default) ⇒ pass-through + an
+ *     error whose reason mentions 8-bit — the hand-test round's actual bug
+ *     (a uniform-white render), now surfaced as a badge instead of silently
+ *     reading garbage pixels (see src/main/externalTool.ts's doc comment).
+ *  5. Sidecar round-trip preserves command/encoded.
+ *  6. encoded vs linear modes produce DIFFERENT results for the identical
  *     fixture/offset (encoded runs the offset through the sRGB curve+matrix
  *     round trip; linear does not).
- *  6. A brand-new app session (fresh confirm state — SECURITY: a doc never
+ *  7. A brand-new app session (fresh confirm state — SECURITY: a doc never
  *     auto-runs its external node) opening a doc with an already-configured
  *     external node starts DISABLED (needs-confirm, pass-through render)
  *     until the confirm button runs it.
- *  7. CLI: without --allow-external the node is bypassed (warning line, exit
+ *  8. CLI: without --allow-external the node is bypassed (warning line, exit
  *     0); with the flag it actually runs (output pixels change).
+ *
+ * NOT separately covered here: {in}/{out} argv substitution (whole-token AND
+ * glued-suffix forms like gmic's own `-o {out},uint8`) has its own focused
+ * unit tests in shared/externalTool.test.ts — faster and more precise than
+ * threading every substitution shape through a real Electron+Playwright
+ * round trip, and CMD_OK/CMD_FAIL/CMD_DEPTH below already exercise
+ * substituteArgv end-to-end for the whole-token case any real command uses.
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -42,10 +54,10 @@ import { _electron as electron } from 'playwright';
  * SILVERBOX_USER_DATA test hook — same isolation verify-cli.mjs relies on):
  * the on-disk cache tier is content-hash keyed, so re-using the OS-default
  * userData dir across repeated runs of THIS script (or across the two
- * separate sessions checks 1-5 vs 6 launch) would cross-contaminate — a
+ * separate sessions checks 1-6 vs 7 launch) would cross-contaminate — a
  * later run's identical (pixel hash, command, encoded, nodeId) tuple would
  * hit a PRIOR run's cached result and never actually spawn, which would
- * both mis-report "no re-spawn" as a false negative AND defeat check 6's
+ * both mis-report "no re-spawn" as a false negative AND defeat check 7's
  * whole point (a brand-new session must genuinely re-run once confirmed).
  */
 function freshUserDataDir() {
@@ -62,6 +74,7 @@ const NODE_BIN = process.execPath;
 const OFFSET = 0.1;
 const CMD_OK = `${NODE_BIN} ${FIXTURE} {in} {out} ${OFFSET}`;
 const CMD_FAIL = `${NODE_BIN} ${FIXTURE} {in} {out} --fail`;
+const CMD_DEPTH = `${NODE_BIN} ${FIXTURE} {in} {out} --write16`;
 const TIGHT_TOLERANCE = 1e-6;
 /** Linear-mean-delta tolerance: f16 GPU round trip + 8-bit TIFF quantization (see externalTool.ts's doc comment for the bit-depth deviation) both add noise on top of the fixture's exact +0.1. */
 const LINEAR_DELTA_TOLERANCE = 0.02;
@@ -105,7 +118,7 @@ async function pollUntil(fn, { timeoutMs = 20_000, intervalMs = 200, label = 'co
 if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 
 // ---------------------------------------------------------------------------
-// Interactive checks (1-6): drive the real app via Playwright.
+// Interactive checks (1-7): drive the real app via Playwright.
 // ---------------------------------------------------------------------------
 async function runInteractiveChecks() {
   const app = await electron.launch({ args: [projectRoot], env: { ...process.env, SILVERBOX_USER_DATA: freshUserDataDir() } });
@@ -281,7 +294,39 @@ async function runInteractiveChecks() {
     check('render recovers once the command is fixed again', (await externalNodeState(extId))?.error === null, await externalNodeState(extId));
 
     // -------------------------------------------------------------------
-    console.log('verify-external (4. sidecar round-trip preserves command/encoded):');
+    console.log('verify-external (4. a tool that writes back a non-8-bit TIFF passes through + reports an 8-bit-mentioning error):');
+    const meanBeforeDepthMismatch = await gpuMean();
+    await setExternalCommand(extId, CMD_DEPTH);
+    // Same confirm-key mechanics as check 3's CMD_FAIL swap: a new command
+    // string needs its own confirm.
+    await page.waitForFunction((id) => window.__debug.externalNodeState(id)?.needsConfirm !== null, extId, { timeout: 15_000 });
+    await confirmExternalNode(extId);
+    await page.waitForFunction((id) => window.__debug.externalNodeState(id)?.error !== null, extId, { timeout: 20_000 });
+    const depthMismatchState = await externalNodeState(extId);
+    check('a non-8-bit tool output records an error', true, depthMismatchState);
+    check(
+      "the error reason mentions 8-bit (actionable, not a silent garbage read — this is the hand-test round's actual bug)",
+      /8-bit/i.test(depthMismatchState?.error ?? ''),
+      depthMismatchState
+    );
+    const meanAfterDepthMismatch = await gpuMean();
+    check(
+      'render falls back to pass-through (identity — no cached result, same as any other failure)',
+      meansMatch(meanAfterDepthMismatch, baselineMean, TIGHT_TOLERANCE),
+      { baselineMean, meanBeforeDepthMismatch, meanAfterDepthMismatch }
+    );
+
+    // restore the working command for the rest of the checks
+    await setExternalCommand(extId, CMD_OK);
+    await waitForMeanChange(meanAfterDepthMismatch);
+    check(
+      'render recovers once the command is a working one again',
+      (await externalNodeState(extId))?.error === null,
+      await externalNodeState(extId)
+    );
+
+    // -------------------------------------------------------------------
+    console.log('verify-external (5. sidecar round-trip preserves command/encoded):');
     await page.keyboard.press('Meta+s');
     await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
     check('doc with the external node saved', existsSync(SIDECAR), SIDECAR);
@@ -294,7 +339,7 @@ async function runInteractiveChecks() {
     );
 
     // -------------------------------------------------------------------
-    console.log('verify-external (5. encoded vs linear modes produce DIFFERENT results for the identical fixture):');
+    console.log('verify-external (6. encoded vs linear modes produce DIFFERENT results for the identical fixture):');
     const meanLinear = await gpuMean();
     // Toggling `encoded` alone changes the content-hash cache key (it's part
     // of the hash — see checkExternalNodes) but NOT the confirm key (that's
@@ -317,7 +362,7 @@ async function runInteractiveChecks() {
   }
 
   // -------------------------------------------------------------------
-  console.log('verify-external (6. a brand-new session starts DISABLED; the confirm button runs it):');
+  console.log('verify-external (7. a brand-new session starts DISABLED; the confirm button runs it):');
   const app2 = await electron.launch({ args: [projectRoot], env: { ...process.env, SILVERBOX_USER_DATA: freshUserDataDir() } });
   try {
     const page2 = await app2.firstWindow();
@@ -367,9 +412,9 @@ await runInteractiveChecks();
 if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 
 // ---------------------------------------------------------------------------
-// CLI checks (7): the real headless `--render` path, no Playwright.
+// CLI checks (8): the real headless `--render` path, no Playwright.
 // ---------------------------------------------------------------------------
-console.log('verify-external (7. CLI: --allow-external gates whether the node actually runs):');
+console.log('verify-external (8. CLI: --allow-external gates whether the node actually runs):');
 {
   const workDir = mkdtempSync(join(tmpdir(), 'silverbox-external-cli-'));
   const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-external-cli-userdata-'));

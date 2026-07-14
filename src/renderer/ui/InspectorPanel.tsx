@@ -196,6 +196,8 @@ function DevelopInspector({ node }: { node: GraphNode }) {
   const wbModel = useAppStore((s) => s.wbModel);
   const wbPicking = useAppStore((s) => s.wbPicking);
   const setWbPicking = useAppStore((s) => s.setWbPicking);
+  const imageStatus = useAppStore((s) => s.imageStatus);
+  const resetDevelopNode = useAppStore((s) => s.resetDevelopNode);
   const params: DevelopParams = node.develop ?? defaultDevelopParams();
   const basic = params.basic as unknown as Record<string, number>;
   const wbDefs: OpParamDef[] = [
@@ -209,7 +211,19 @@ function DevelopInspector({ node }: { node: GraphNode }) {
   };
   return (
     <>
-      <div className="inspector-title">Develop</div>
+      <div className="inspector-title-row">
+        <div className="inspector-title">Develop</div>
+        <button
+          type="button"
+          className="inspector-title-action"
+          data-testid="develop-reset-button"
+          disabled={imageStatus !== 'ready'}
+          title="Reset this Develop node to the fresh-open defaults for this photo (one undo entry)"
+          onClick={() => resetDevelopNode(node.id)}
+        >
+          Reset Develop
+        </button>
+      </div>
       <Section title="Profile">
         <ParamSlider
           nodeId={node.id}
@@ -1049,6 +1063,7 @@ function ExternalInspector({ node }: { node: GraphNode }) {
   const setExternalEncoded = useAppStore((s) => s.setExternalEncoded);
   const needsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm[node.id]);
   const error = useAppStore((s) => s.externalNodeErrors[node.id]);
+  const running = useAppStore((s) => s.externalNodeRunning[node.id]);
   const confirmExternalNode = useAppStore((s) => s.confirmExternalNode);
   const params = node.external ?? defaultExternalParams();
   const sessionRef = useRef<number | null>(null);
@@ -1059,7 +1074,7 @@ function ExternalInspector({ node }: { node: GraphNode }) {
         <input
           type="text"
           data-testid="external-node-command"
-          placeholder="gmic {in} -denoise_patchpca 5 -o {out}"
+          placeholder="gmic {in} -denoise_patchpca 5 -o {out},uint8"
           value={params.command}
           onChange={(ev) => {
             sessionRef.current ??= Date.now();
@@ -1072,7 +1087,8 @@ function ExternalInspector({ node }: { node: GraphNode }) {
         <div className="inspector-hint">
           {'{in}'} / {'{out}'} are replaced with temp file paths; split on whitespace, no shell (double-quote a token to
           keep spaces in it, e.g. "my tool" {'{in}'} --out {'{out}'}). Runs an external command — expect seconds, not
-          milliseconds.
+          milliseconds. The tool must write its result back as 8-BIT output (gmic needs the {'{out}'},uint8 suffix — this
+          build cannot read back 16-bit or float TIFF).
         </div>
         <label className="param-row">
           <span className="param-label">Encoded (sRGB)</span>
@@ -1099,9 +1115,35 @@ function ExternalInspector({ node }: { node: GraphNode }) {
           </button>
         </Section>
       )}
+      {running && (
+        // Round trip is non-realtime (seconds to minutes) — this notice is
+        // the Inspector's own visible sign of activity, so a user watching
+        // this panel (rather than the node editor's ⟳ badge) still sees
+        // something is happening instead of a silent, seemingly-frozen wait.
+        <div className="inspector-notice" data-testid="external-node-running-notice">
+          Running external tool…
+        </div>
+      )}
       {error && (
-        <div className="inspector-notice" data-testid="external-node-error-notice" title={error}>
-          Failed — rendering pass-through until it succeeds: {error}
+        // Copyable (round-2 hand-test feedback: the user had to screenshot
+        // this instead of selecting the text) — .inspector-notice-text opts
+        // back into text selection against the app's global user-select:none
+        // (see styles.css), and the Copy button is a one-click alternative
+        // for the whole string (title={error} above already shows it in a
+        // native tooltip, but that isn't selectable either).
+        <div className="inspector-notice inspector-notice--row" data-testid="external-node-error-notice" title={error}>
+          <span className="inspector-notice-text">Failed — rendering pass-through until it succeeds: {error}</span>
+          <button
+            type="button"
+            className="inspector-notice-copy"
+            data-testid="external-node-error-copy"
+            title="Copy the full error text to the clipboard"
+            onClick={() => {
+              void navigator.clipboard.writeText(error);
+            }}
+          >
+            Copy
+          </button>
         </div>
       )}
     </>

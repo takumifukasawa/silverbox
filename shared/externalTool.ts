@@ -35,7 +35,18 @@ export function splitCommandTemplate(command: string): string[] {
   return out;
 }
 
-/** Substitute every `{in}`/`{out}` token (whole-token match, not substring — a path never needs to appear glued to other text) with the resolved temp file paths. */
+/**
+ * Substitute every `{in}`/`{out}` occurrence with the resolved temp file
+ * paths — SUBSTRING replacement within each token (not whole-token-only):
+ * gmic's own output-type suffix syntax glues a type name directly onto the
+ * placeholder (`-o {out},uint8`, see src/main/externalTool.ts's doc comment
+ * for why 8-bit output is required), so "a path never needs to appear glued
+ * to other text" turned out false in practice. Still injection-safe: no
+ * shell is ever involved (execFile, shell:false — see this file's own doc
+ * comment), so a substring replace here can't introduce any new
+ * interpretation of `;`, `&&`, `$()`, etc. — it only changes which bytes end
+ * up inside one argv element.
+ */
 export function substituteArgv(argv: string[], inPath: string, outPath: string): string[] {
-  return argv.map((tok) => (tok === '{in}' ? inPath : tok === '{out}' ? outPath : tok));
+  return argv.map((tok) => tok.replaceAll('{in}', inPath).replaceAll('{out}', outPath));
 }

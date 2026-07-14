@@ -737,8 +737,17 @@ export function CanvasView() {
             client,
             (nodeId, command) => useAppStore.getState().setExternalNodeNeedsConfirm(nodeId, command),
             (nodeId, ok, error) => {
+              useAppStore.getState().setExternalNodeRunning(nodeId, false);
               useAppStore.getState().setExternalNodeError(nodeId, ok ? null : (error ?? 'unknown error'));
               useAppStore.getState().bumpExternalNodeRev();
+            },
+            (nodeId) => {
+              // A fresh spawn starting is a fresh attempt — clear any stale
+              // error badge from a prior failure so the spinner (running)
+              // badge isn't shadowed by a leftover ⚠ (see NodeEditorPanel's
+              // badge priority ordering).
+              useAppStore.getState().setExternalNodeError(nodeId, null);
+              useAppStore.getState().setExternalNodeRunning(nodeId, true);
             }
           );
         });
@@ -1366,7 +1375,7 @@ export function CanvasView() {
       imageNodeDecodeCount() {
         return imageNodeDecodeCount();
       },
-      /** External-tool hook node (task #41): command/encoded + needs-confirm/error badge state for `nodeId` (defaults to the current selection); null when it isn't an external node. */
+      /** External-tool hook node (task #41): command/encoded + needs-confirm/error/running badge state for `nodeId` (defaults to the current selection); null when it isn't an external node. */
       externalNodeState(nodeId) {
         const s = useAppStore.getState();
         const id = nodeId ?? s.selectedNodeId;
@@ -1377,6 +1386,7 @@ export function CanvasView() {
           encoded: node.external?.encoded ?? true,
           needsConfirm: s.externalNodeNeedsConfirm[id!] ?? null,
           error: s.externalNodeErrors[id!] ?? null,
+          running: s.externalNodeRunning[id!] ?? false,
         };
       },
       setExternalCommand(nodeId, command) {

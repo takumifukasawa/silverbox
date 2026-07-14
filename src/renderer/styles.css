@@ -1598,6 +1598,32 @@ button:disabled {
   margin-bottom: 8px;
 }
 
+/* Develop inspector's "Reset Develop" button (per-node reset, distinct from
+   the toolbar's whole-photo ⇧⌘R): shares the title row instead of its own
+   section, so the divider/spacing lives on the ROW and .inspector-title
+   sheds its own (it would otherwise double up sitting inside a flex row). */
+.inspector-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 12px 14px 6px;
+  border-bottom: 1px solid #333;
+  margin-bottom: 8px;
+}
+
+.inspector-title-row .inspector-title {
+  padding: 0;
+  border-bottom: none;
+  margin-bottom: 0;
+}
+
+.inspector-title-action {
+  padding: 3px 10px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
 .inspector-param {
   display: block;
   padding: 6px 14px;
@@ -2074,6 +2100,26 @@ button:disabled {
   background: rgba(60, 50, 20, 0.92);
   border: 1px solid #f0c674;
   color: #f0c674;
+}
+
+/* External-tool hook node error notice (round-2 hand-test feedback): a Copy
+   button + selectable text, same "targeted exception to the global
+   user-select:none" pattern as .shader-error/.inspector-code above. */
+.inspector-notice--row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.inspector-notice-text {
+  user-select: text;
+}
+
+.inspector-notice-copy {
+  padding: 2px 8px;
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 .image-node-filename {
