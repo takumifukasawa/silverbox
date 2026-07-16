@@ -11,42 +11,33 @@
  * points show up in the tone-curve editor and Reset removes them.
  *
  * The points are percentile-matched pairs (our neutral encoded luma → the
- * reference's encoded luma) in the tone editor's 0..255 point space, so the
+ * camera JPEG's encoded luma) in the tone editor's 0..255 point space, so the
  * existing PCHIP evaluator (toneCurve.ts) reproduces the measured transfer
- * exactly. Refit with `npm run fit:basecurve` (round-3 default: a joint
- * multi-scene fit, see fit-base-curve.mjs) or `node scripts/fit-base-curve.mjs
- * <arw> <jpg> [...]` for a specific scene set; the LR calibration session
- * (see the Lightroom-reference memory note) may later replace them.
+ * exactly. Refit with `npm run fit:basecurve <arw> <jpg>`; the LR calibration
+ * session (see the Lightroom-reference memory note) may later replace them.
  */
 import type { CurvePoints } from '../graph/developNode';
 
 /**
- * Fitted JOINTLY across 14 scenes vs LIGHTROOM CLASSIC's default rendering
- * (Adobe Color, no edits, quality-100/95 sRGB exports) at baselineExposureEV
- * 0.5: the 3 round-1/2 calibration pairs (DSC02993 ISO-5000 indoor, DSC07349
- * Italy sunset, DSC03298 Italy architecture/blue-hour) PLUS 11 green-heavy
- * ref-green pairs added in round 3 (docs/brief-bank/lr-calibration-session.md;
- * the round-1 curve was fit to DSC02993 ALONE and rendered the Italy scenes
- * noticeably darker than LR — pooled |Δp50| across these 14 scenes was
- * 9.3/255 with the single-scene curve, 3.0/255 with this one). Each scene
- * contributes ONE percentile-matched control-point estimate per anchor
- * (equal PER-SCENE weight — one big or extreme scene can't dominate — see
- * fit-base-curve.mjs's multi-scene aggregation); pooled RMS 6.39/255 over the
- * dense per-scene transfers (the single-scene fit's RMS was ~1.1/255, but
- * only for the one scene it was fit to — not a like-for-like number). Refit:
- *   npm run fit:basecurve                          # round-3 default (14 scenes)
- *   node scripts/fit-base-curve.mjs <arw> <jpg>     # single scene
- *   node scripts/fit-base-curve.mjs <arw1> <jpg1> <arw2> <jpg2> ...  # custom joint set
+ * Fitted from DSC02993.ARW vs LIGHTROOM CLASSIC's default rendering of it
+ * (Adobe Color, no edits, quality-100 sRGB export) at baselineExposureEV
+ * 0.5 — the 2026-07-12 LR calibration session's user decision: match LR,
+ * not the in-camera JPEG (the previous fit; LR lifts the upper-mids
+ * further, e.g. 116→180 vs the camera's →163). PCHIP RMS 1.12 / 255 over
+ * the dense transfer. Refit command:
+ *   npm run fit:basecurve /path/to.ARW /path/to/reference.jpg
+ * (the reference JPEG can be a camera JPEG or any exported rendering —
+ * whatever the default look should match.)
  */
 export const A7C2_BASE_CURVE: CurvePoints = [
   [0, 0],
-  [13, 18],
-  [21, 32],
-  [33, 53],
-  [46, 77],
-  [61, 103],
-  [85, 139],
-  [125, 186],
+  [21, 27],
+  [29, 43],
+  [38, 58],
+  [55, 82],
+  [72, 110],
+  [93, 145],
+  [116, 180],
   [255, 255],
 ];
 

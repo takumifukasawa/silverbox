@@ -109,26 +109,16 @@ Lightroom's **2-stage** default look:
    every other piece of the default look.
 
 **Calibrated 2026-07-12 against Lightroom Classic** (the user's decision: LR's
-default rendering is the reference, not the in-camera JPEG), **rounds 1-2
-single-scene, round 3 multi-scene.** Round 1's curve was fit to DSC02993
-ALONE (RMS 1.12/255 on that one scene) and rendered other scenes — notably
-the Italy pairs — darker than LR. **Round 3** refits jointly across 14 scenes
-(the 3 round-1/2 calibration pairs + 11 green-heavy `ref-green` pairs, added
-because greens were also support-starved in the profile lattice below):
-pooled |Δp50| across those 14 scenes dropped from 9.3/255 (single-scene curve)
-to 3.0/255 (joint curve); pooled RMS over the dense per-scene transfers is
-6.39/255 (not comparable to the 1.12/255 single-scene number — that one only
-ever had to fit one scene). Each scene contributes ONE percentile-matched
-estimate per control point (equal PER-SCENE weight, so one big/bright/dark
-scene can't dominate). Still per camera model (`ILCE-7CM2` today; that curve
-doubles as the fallback for other bodies). Refit with `npm run fit:basecurve`
-(the round-3 joint default) or `node scripts/fit-base-curve.mjs <arw> <jpg>
-[...]` for a specific scene set. The Effects and sharpen slider scales were
-calibrated in round 1/2 (see the LR-calibration constants' doc comments in
-`developNode.ts`). KNOWN residual vs LR: Adobe Color's hue-dependent color
-character (cleaner neutrals, ~+5% chroma on colors) — not reachable with
-global sliders; the fitted "profile" 3D color transform below is the
-structural answer (round 3 also re-fit it with green-hue support).
+default rendering is the reference, not the in-camera JPEG). The shipped curve
+is the LR fit (RMS 1.12/255; luma matches LR within ±2/255 at every percentile
+band), per camera model (`ILCE-7CM2` today; that curve doubles as the fallback
+for other bodies). Refit with `npm run fit:basecurve <arw> <reference.jpg>` —
+the reference can be a camera JPEG or any exported rendering. The Effects and
+sharpen slider scales were calibrated in the same session (see the
+LR-calibration constants' doc comments in `developNode.ts`). KNOWN residual
+vs LR: Adobe Color's hue-dependent color character (cleaner neutrals, ~+5%
+chroma on colors) — not reachable with global sliders; the banked "profile
+fit" (a small fitted 3D color transform) is the structural answer.
 
 ## Migration plan
 
