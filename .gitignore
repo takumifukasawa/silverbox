@@ -6,3 +6,4 @@ release/
 .DS_Store
 test-artifacts/
 test-assets/
+.claude/worktrees/

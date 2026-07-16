@@ -11,6 +11,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -18,7 +19,8 @@ process.env.SILVERBOX_TEST = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {

@@ -9,6 +9,7 @@ import { mkdirSync, existsSync, statSync, unlinkSync, readFileSync } from 'node:
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -17,8 +18,8 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
 const OUT_JPG = join(projectRoot, 'test-artifacts', 'ms8-export.jpg');
 const OUT_PNG = join(projectRoot, 'test-artifacts', 'ms8-export.png');
 // JPEG quantization + preview-vs-full-res sampling differences

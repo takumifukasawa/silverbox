@@ -10,6 +10,9 @@ const api: SilverboxApi = {
   readSidecar: (path) => ipcRenderer.invoke(IPC.readSidecar, path),
   writeSidecar: (path, content) => ipcRenderer.invoke(IPC.writeSidecar, path, content),
   watchSidecar: (path) => ipcRenderer.invoke(IPC.watchSidecar, path),
+  readProjectManifest: (dir) => ipcRenderer.invoke(IPC.projectRead, dir),
+  writeProjectManifest: (dir, content) => ipcRenderer.invoke(IPC.projectWrite, dir, content),
+  projectPhotosStatus: (dir, photos) => ipcRenderer.invoke(IPC.projectPhotosStatus, dir, photos),
   onSidecarChanged: (callback) => {
     const listener = () => callback();
     ipcRenderer.on(IPC.sidecarChanged, listener);
@@ -34,6 +37,7 @@ const api: SilverboxApi = {
     lensProfileAutoDefault: process.env.SILVERBOX_TEST_LENS_PROFILE_DEFAULT === '1',
     baseCurveDefault: process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT === '1',
     forceDefaults: process.env.SILVERBOX_CLI_RENDER === '1',
+    projectDirOverride: process.env.SILVERBOX_TEST_PROJECT ?? null,
   },
   onCliRun: (callback) => {
     const listener = (_ev: IpcRendererEvent, job: CliJob) => callback(job);

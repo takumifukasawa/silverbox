@@ -26,13 +26,15 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
 import sharp from 'sharp';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-rmSync(ARW_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
 
 const ARTIFACTS = join(projectRoot, 'test-artifacts');
 const OUT_IDENTITY = join(ARTIFACTS, 'lut-identity');
@@ -322,7 +324,7 @@ try {
   await page.locator('[data-testid="export-close-button"]').click();
 } finally {
   await app.close();
-  rmSync(ARW_PATH + '.silverbox.json', { force: true });
+  rmLook(ARW_PATH);
 }
 
 if (failures > 0) {

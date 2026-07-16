@@ -41,12 +41,14 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');

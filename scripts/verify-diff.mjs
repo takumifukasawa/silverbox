@@ -37,12 +37,19 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+// Part 1 (in-app dialog) is an interactive open — its look lives in the
+// active test project's looks/, project-storage migration. Part 2 (the
+// CLI's own --diff sidecarA/sidecarB fixtures, below) are unrelated: they're
+// arbitrary files passed directly as CLI args, never resolved against any
+// project, so they stay untouched.
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');

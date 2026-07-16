@@ -17,6 +17,17 @@ export const IPC = {
   writeSidecar: 'sidecar:write',
   watchSidecar: 'sidecar:watch',
   sidecarChanged: 'sidecar:changed',
+  // Project storage (docs/brief-bank/project-storage.md, stage 1): the
+  // project.silverbox manifest lives OUTSIDE looks/, so it gets its own
+  // read/write pair rather than reusing readSidecar/writeSidecar (those are
+  // now validated to only ever touch a look file or a legacy adjacent
+  // sidecar — see main/index.ts's assertSidecarPath).
+  projectRead: 'project:read',
+  projectWrite: 'project:write',
+  // Cheap per-photo status join for the filmstrip (hasLook/rating/missing),
+  // given the project's already-resolved photo list — see FolderImageEntry's
+  // doc comment and main/index.ts's handler.
+  projectPhotosStatus: 'project:photosStatus',
   exportImageDialog: 'dialog:exportImage',
   exportEncode: 'export:encode',
   exportLutDialog: 'dialog:exportLut',
@@ -52,8 +63,18 @@ export const IPC = {
   externalToolSpawnCount: 'external:spawnCount',
 } as const;
 
-/** Suffix of the GraphDoc sidecar written next to the image file. */
+/** Suffix of the GraphDoc sidecar written next to the image file. Retired as a WRITE target by the project-storage migration (stage 1) — still READ forever (principle 9) for legacy adjacent sidecars and CLI import. */
 export const SIDECAR_SUFFIX = '.silverbox.json';
+
+/**
+ * Filename of a project's manifest (docs/brief-bank/project-storage.md):
+ * `<projectDir>/project.silverbox` — JSON, schemaVersion + name + playlist
+ * (see engine/graph/projectDoc.ts). Double-clicking one in Finder opens the
+ * app on that project once electron-builder's fileAssociations ship
+ * (packaged app only, stage 2+); drag-drop and "Open project…" work
+ * regardless (see App.tsx / window.__openProjectByPath).
+ */
+export const PROJECT_MANIFEST_NAME = 'project.silverbox';
 
 /**
  * Suffix of the golden reference render written next to the image file
@@ -80,30 +101,41 @@ export interface PingResult {
 export type OpenImageDialogResult = { canceled: true } | { canceled: false; path: string; fileName: string };
 
 /**
- * One entry in a folder-filmstrip listing (ROADMAP "Folder filmstrip" —
- * browse a folder, NOT a catalog: nothing here is written anywhere, it's
- * recomputed from disk every time a folder is opened). `hasSidecar` and
- * `mtimeMs` are read once at listing time by main (src/main/index.ts's
- * listImages handler) — the renderer never polls the filesystem itself.
+ * One entry in the filmstrip (ROADMAP "Folder filmstrip" — nothing here is
+ * written anywhere, it's recomputed every time the strip refreshes).
+ * Post-project-storage-migration (stage 1), the strip renders the ACTIVE
+ * PROJECT's playlist, not a raw directory listing: `main/index.ts`'s
+ * `listImages` handler still enumerates a folder's images (used to discover
+ * what to ADD to the playlist — see appStore.ts's openFolder), but
+ * `hasLook`/`rating`/`missing` below come from the project's own
+ * `projectPhotosStatus` handler instead (a photo's look lives in
+ * `<projectDir>/looks/`, never next to the photo — see docs/brief-bank/
+ * project-storage.md). The renderer never polls the filesystem itself.
  */
 export interface FolderImageEntry {
   /** Basename (e.g. "DSC02993.ARW") — the cell's hover title. */
   name: string;
   /** Absolute path — what openImageByPath / the thumbnail cache key off of. */
   path: string;
-  /** A `<path>.silverbox.json` sidecar exists next to this file (the filmstrip's "edited" dot). */
-  hasSidecar: boolean;
-  /** mtime in ms. Not used for sorting today (filename order is — see listImages's doc comment), kept for a possible future "sort by date". */
+  /** A look exists for this photo in the active project's `looks/` (renamed from `hasSidecar` — project-storage migration; the filmstrip's "edited" dot). */
+  hasLook: boolean;
+  /** mtime in ms; 0 when `missing` (nothing to stat). Not used for sorting today (filename order is — see listImages's doc comment), kept for a possible future "sort by date". */
   mtimeMs: number;
   /**
-   * Star rating 0..5 (ratings pack), read cheaply off the sidecar's wrapper
-   * (main's listImages handler JSON.parses just this one key — never the
-   * full GraphDoc schema, and never throws on a malformed sidecar; see
-   * extractSidecarRating in src/main/index.ts). 0 for both "no sidecar" and
-   * "sidecar has no/invalid rating" — the filmstrip cell and the ★n+ filter
-   * treat those identically (unrated).
+   * Star rating 0..5 (ratings pack), read cheaply off the look's wrapper
+   * (never the full GraphDoc schema, and never throws on a malformed look
+   * file; see extractSidecarRating in src/main/index.ts). 0 for both "no
+   * look yet" and "look has no/invalid rating" — the filmstrip cell and the
+   * ★n+ filter treat those identically (unrated).
    */
   rating: number;
+  /**
+   * This playlist entry's photo path did not resolve to a readable file
+   * (moved/deleted since it was added) — shown as a placeholder cell, never
+   * silently dropped (project-storage migration §"Missing photos"). Full
+   * relink UI is stage 3; here it's display-only.
+   */
+  missing: boolean;
 }
 
 export interface SilverboxApi {
@@ -134,10 +166,39 @@ export interface SilverboxApi {
   listImages(dir: string): Promise<FolderImageEntry[]>;
   /** Read a file's bytes (used after dialog / drag-and-drop resolves a path). */
   readFile(path: string): Promise<ArrayBuffer>;
-  /** Read a `.silverbox.json` sidecar; null if it does not exist. */
+  /**
+   * Read a look/sidecar file; null if it does not exist. Accepts a legacy
+   * adjacent `<image>.silverbox.json` path OR a project look path
+   * (`<projectDir>/looks/<name>.json`) — see main/index.ts's assertSidecarPath.
+   */
   readSidecar(path: string): Promise<string | null>;
-  /** Write a `.silverbox.json` sidecar (main rejects other paths). */
+  /**
+   * Write a look file. Main accepts ONLY a path inside some project's
+   * `looks/` directory (project-storage migration's absolute etiquette
+   * rule: the app never writes into a photo folder — see
+   * assertSidecarPath's write-mode check); anything else throws.
+   */
   writeSidecar(path: string, content: string): Promise<void>;
+  /** Read `<dir>/project.silverbox`'s raw text; null if it does not exist (including when `dir` itself isn't a directory yet). */
+  readProjectManifest(dir: string): Promise<string | null>;
+  /**
+   * Atomically write `<dir>/project.silverbox` (mkdtemp+rename, same
+   * discipline as writeSidecar/settings.ts); also ensures `dir` and
+   * `dir/looks` exist first (mkdir recursive), so this ONE call is what lets
+   * the quick-project flow "create dir + manifest if missing" — an
+   * already-existing project directory is a harmless no-op.
+   */
+  writeProjectManifest(dir: string, content: string): Promise<void>;
+  /**
+   * Cheap per-photo status for the filmstrip: `photos` is the project's
+   * playlist with each `path` ALREADY RESOLVED to absolute (see
+   * engine/graph/projectDoc.ts's resolveProjectPath) — main stays
+   * project-path-agnostic, just stats each resolved path (existence →
+   * `missing`) and reads `<dir>/looks/<look>` cheaply for `hasLook`/`rating`
+   * (extractSidecarRating — never the full GraphDoc schema, never throws on
+   * a malformed look file).
+   */
+  projectPhotosStatus(dir: string, photos: { path: string; look: string }[]): Promise<FolderImageEntry[]>;
   /**
    * Arm the main-process sidecar watcher for `path` (sidecar hot-reload —
    * the AI-editing loop). Re-armed on every image open; each call tears down
@@ -191,8 +252,18 @@ export interface SilverboxApi {
    * on regardless of `isTest`, because the CLI must match a fresh open's
    * real look (base curve + lens profile) even when verify-cli.mjs itself
    * runs under SILVERBOX_TEST=1 for its own windowless/userData isolation.
+   * `projectDirOverride` mirrors SILVERBOX_TEST_PROJECT (project-storage
+   * migration's verify-suite lever): when set, it WINS over the
+   * `quickProjectDir` setting as the quick-project directory, used EXACTLY
+   * as given (no subdir) — null in normal use, where the setting applies.
    */
-  testFlags: { isTest: boolean; lensProfileAutoDefault: boolean; baseCurveDefault: boolean; forceDefaults: boolean };
+  testFlags: {
+    isTest: boolean;
+    lensProfileAutoDefault: boolean;
+    baseCurveDefault: boolean;
+    forceDefaults: boolean;
+    projectDirOverride: string | null;
+  };
   /**
    * Subscribe to main's ONE-TIME `--render`/`--check` job push (headless CLI
    * mode only — see main/index.ts). `job.mode` selects which of
@@ -493,6 +564,21 @@ export interface Settings {
   baselineExposureEV: number;
   export: ExportSettingsShape;
   exportPresets: ExportPreset[];
+  /**
+   * Quick-project directory (project-storage migration, stage 1): where a
+   * photo lands when no project is active yet — a real, VISIBLE folder the
+   * user can open/inspect/git, NOT an app-internal cache (the hidden-
+   * central-library failure mode docs/brief-bank/project-storage.md
+   * explicitly rejects). Empty string here means "not yet resolved" — this
+   * file (shared/ipc.ts) is isomorphic (renderer + preload + main) and can't
+   * call `os.homedir()`; main's sanitizeSettings (src/main/settings.ts)
+   * computes the real default (`join(homedir(), 'Silverbox', 'Quick')`)
+   * whenever this field is absent/blank, so by the time settingsGet()
+   * resolves in the renderer it's always a real path. `SILVERBOX_TEST_PROJECT`
+   * overrides this at the testFlags level (see its own doc comment) for the
+   * verify suite.
+   */
+  quickProjectDir: string;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -503,6 +589,7 @@ export const DEFAULT_SETTINGS: Settings = {
   baselineExposureEV: 0.5,
   export: { quality: 90, maxDim: null, metadata: 'all', colorSpace: 'srgb' },
   exportPresets: [],
+  quickProjectDir: '',
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

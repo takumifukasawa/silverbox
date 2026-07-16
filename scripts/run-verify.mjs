@@ -20,6 +20,12 @@
  *  - userData (settings.json, autosave, export presets): each script gets
  *    its own fresh temp userData dir via SILVERBOX_USER_DATA (see
  *    testUserData handling in src/main/index.ts).
+ *  - Project storage (docs/brief-bank/project-storage.md): each script gets
+ *    its own fresh temp PROJECT dir via SILVERBOX_TEST_PROJECT — a sibling
+ *    of workDir/userDataDir, never shared across pooled scripts, so looks/
+ *    autosaves and project.silverbox playlist edits from one script's run
+ *    never bleed into another's (see scripts/lib/testProject.mjs, the
+ *    scripts-side counterpart of this lever).
  *
  * ms14 (electron-builder packaging, mutates dist/) is NOT poolable — it runs
  * SERIALLY after the pool, once nothing else is touching the build output.
@@ -99,6 +105,7 @@ const ALL_SCRIPTS = [
   { name: 'imagenode', file: 'verify-imagenode.mjs' },
   { name: 'external', file: 'verify-external.mjs' },
   { name: 'bypass', file: 'verify-bypass.mjs' },
+  { name: 'project', file: 'verify-project.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 
@@ -119,6 +126,12 @@ function fmtSeconds(ms) {
 function setupIsolation(name) {
   const workDir = mkdtempSync(join(tmpdir(), `silverbox-verify-${name}-`));
   const userDataDir = mkdtempSync(join(tmpdir(), `silverbox-userdata-${name}-`));
+  // Project storage: a sibling scratch dir per script, never shared — the
+  // renderer's ensureActiveProject uses this EXACTLY (no subdir) as the
+  // quick-project directory (see testFlags.projectDirOverride). mkdir'd here
+  // (not just minted) so a script that reads it before ever opening an image
+  // (e.g. checking "no project.silverbox yet") sees a real, empty directory.
+  const projectDir = mkdtempSync(join(tmpdir(), `silverbox-project-${name}-`));
   const arwLink = join(workDir, basename(SRC_ARW));
   const jpgLink = join(workDir, basename(SRC_JPG));
   linkSync(SRC_ARW, arwLink);
@@ -131,6 +144,7 @@ function setupIsolation(name) {
   return {
     workDir,
     userDataDir,
+    projectDir,
     env: {
       ...process.env,
       SILVERBOX_TEST: '1',
@@ -138,10 +152,12 @@ function setupIsolation(name) {
       SILVERBOX_TEST_ARW: arwLink,
       SILVERBOX_TEST_JPG: jpgLink,
       SILVERBOX_USER_DATA: userDataDir,
+      SILVERBOX_TEST_PROJECT: projectDir,
     },
     cleanup() {
       rmSync(workDir, { recursive: true, force: true });
       rmSync(userDataDir, { recursive: true, force: true });
+      rmSync(projectDir, { recursive: true, force: true });
     },
   };
 }

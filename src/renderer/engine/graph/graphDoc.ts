@@ -312,6 +312,16 @@ export interface SidecarDoc {
    * keep an unrated sidecar's JSON exactly as before this pack existed.
    */
   rating: number;
+  /**
+   * Photo path relative to the PROJECT dir (absolute if out-of-tree) —
+   * project-storage migration (stage 1, docs/brief-bank/project-storage.md):
+   * a look file knows which photo it belongs to, since it no longer lives
+   * next to it. Absent on legacy adjacent sidecars (they parse forever —
+   * principle 9 — just without this field) and on presets/captureLook
+   * output (a preset is a look, not a per-photo document — presetDoc.ts's
+   * captureLook never passes one to serializeGraphDoc).
+   */
+  photo?: string;
   /** Unrecognized wrapper-level keys (DESIGN §9 passthrough) — round-tripped verbatim by serializeGraphDoc. */
   unknown?: Record<string, unknown>;
 }
@@ -589,7 +599,7 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
 }
 
 /** Wrapper-level keys `serializeGraphDoc`/`parseGraphDoc` know about; anything else round-trips verbatim (DESIGN §9). */
-const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'graph']);
+const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'photo', 'graph']);
 /** Node-level keys the schema knows about; anything else round-trips verbatim per node. */
 const KNOWN_NODE_KEYS = new Set([
   'id',
@@ -628,13 +638,20 @@ const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
  * (same "identity ⇒ not emitted" convention `name`/`export`/`mask`/`spots`
  * already follow on nodes). presetDoc.ts's captureLook round-trip calls this
  * with no `rating` arg at all — a preset is a look, not a per-photo rating.
+ *
+ * `photo` (project-storage migration, stage 1) is the look file's own
+ * `photo` wrapper field — omitted when absent (legacy adjacent-sidecar
+ * writes don't exist anymore post-migration, but presetDoc.ts's captureLook
+ * round-trip still calls this with no `photo` arg, same reasoning as
+ * `rating` above).
  */
 export function serializeGraphDoc(
   doc: GraphDoc,
   source: SidecarSource | null,
   createdAt: string | null,
   unknownWrapperFields?: Record<string, unknown>,
-  rating = 0
+  rating = 0,
+  photo?: string
 ): string {
   const now = new Date().toISOString();
   const wrapper = {
@@ -643,6 +660,7 @@ export function serializeGraphDoc(
     ...(source ? { source } : {}),
     createdAt: createdAt ?? now,
     ...(rating > 0 ? { rating: sanitizeRating(rating) } : {}),
+    ...(photo !== undefined ? { photo } : {}),
     updatedAt: now,
     graph: {
       nodes: doc.nodes.map((n) => {
@@ -718,6 +736,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     source?: SidecarSource;
     createdAt?: unknown;
     rating?: unknown;
+    photo?: unknown;
     graph?: { nodes?: unknown; edges?: unknown };
   };
   const version = wrapper.schemaVersion;
@@ -844,6 +863,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     ...(wrapper.source ? { source: wrapper.source } : {}),
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
     rating: sanitizeRating(wrapper.rating),
+    ...(typeof wrapper.photo === 'string' ? { photo: wrapper.photo } : {}),
     ...(Object.keys(unknownWrapper).length > 0 ? { unknown: unknownWrapper } : {}),
   };
 }

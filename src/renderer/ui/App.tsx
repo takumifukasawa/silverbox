@@ -11,6 +11,7 @@ import { useAppStore } from '../store/appStore';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { isBypassableNodeKind } from '../engine/graph/graphDoc';
 import { isTextEntry } from './textEntry';
+import { PROJECT_MANIFEST_NAME } from '../../../shared/ipc';
 
 // Re-exported for back-compat — isTextEntry used to be defined here; it moved
 // to its own module (round-10) so CanvasView.tsx could import it too without
@@ -23,6 +24,8 @@ declare global {
     __openImageByPath: (path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) => Promise<void>;
     /** Verify-harness hook: open a folder (filmstrip) bypassing the native directory dialog. */
     __openFolderByPath: (path: string) => Promise<void>;
+    /** Verify-harness hook: open a project (a directory containing project.silverbox) bypassing drag-drop. */
+    __openProjectByPath: (dir: string) => Promise<void>;
   }
 }
 
@@ -37,6 +40,7 @@ export function App() {
   useEffect(() => {
     window.__openImageByPath = (path, opts) => useAppStore.getState().openImageByPath(path, opts);
     window.__openFolderByPath = (path: string) => useAppStore.getState().openFolder(path).then(() => undefined);
+    window.__openProjectByPath = (dir: string) => useAppStore.getState().openProjectByPath(dir).then(() => undefined);
     const onKeyDown = (ev: KeyboardEvent) => {
       const cmd = ev.metaKey || ev.ctrlKey;
       if (cmd && !ev.altKey && !ev.shiftKey && ev.key === 'o') {
@@ -324,16 +328,27 @@ export function App() {
       setDropActive(false);
       const files = [...(ev.dataTransfer?.files ?? [])];
       // A dropped FOLDER also arrives as a single File entry (the OS gives
-      // no other signal), so a lone drop is ambiguous — try it as a folder
-      // first (folder filmstrip, ROADMAP "nice to have"): openFolder's own
-      // listImages call throws for anything that isn't a readable
+      // no other signal), so a lone drop is ambiguous — try it as a PROJECT
+      // first (project.silverbox itself, or a directory containing one —
+      // project-storage migration), then a plain photo folder (openFolder's
+      // own listImages call throws for anything that isn't a readable
       // directory, which is exactly the "actually just a file" signal this
-      // needs. A multi-file drop is unambiguous (never a folder) and keeps
-      // today's exact pickDropFile behavior untouched.
+      // needs), then a standalone image file. A multi-file drop is
+      // unambiguous (never a folder/project) and keeps today's exact
+      // pickDropFile behavior untouched.
       if (files.length === 1) {
         const path = window.silverbox.getPathForFile(files[0]!);
         if (path) {
           void (async () => {
+            // Dropping project.silverbox itself resolves to its containing
+            // directory; a directory drop is handed to openProjectByPath
+            // as-is (it checks for a manifest inside and returns false if
+            // there isn't one, same "touch nothing, let the caller fall
+            // through" contract openFolder's own false return already has).
+            const projectDir =
+              path.split('/').pop() === PROJECT_MANIFEST_NAME ? path.slice(0, -(PROJECT_MANIFEST_NAME.length + 1)) : path;
+            const openedAsProject = await useAppStore.getState().openProjectByPath(projectDir);
+            if (openedAsProject) return;
             const openedAsFolder = await useAppStore.getState().openFolder(path);
             // Not a folder after all — a standalone single-file drop.
             // openImageByPath itself exits folder-browsing by default (see

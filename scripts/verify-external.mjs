@@ -48,6 +48,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unl
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 /**
  * Fresh `<userData>/external-cache` per Electron launch (main/index.ts's
@@ -68,7 +69,12 @@ process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+// Interactive sessions (`app`/`app2` below) — look lives in the active test
+// project's looks/, project-storage migration. The CLI-only section further
+// down (`cliArw`/`cliSidecar`) stays on the LEGACY adjacent path — untouched
+// (CLI project-aware resolution is a stage-2 item).
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const FIXTURE = join(projectRoot, 'scripts', 'fixtures', 'external-transform.mjs');
 const NODE_BIN = process.execPath;
 const OFFSET = 0.1;

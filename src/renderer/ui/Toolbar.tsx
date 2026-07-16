@@ -230,6 +230,9 @@ export function Toolbar() {
   const sidecarRating = useAppStore((s) => s.sidecarRating);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
   const showSidecarDiff = useAppStore((s) => s.showSidecarDiff);
+  const legacySidecarImportNotice = useAppStore((s) => s.legacySidecarImportNotice);
+  const importLegacySidecar = useAppStore((s) => s.importLegacySidecar);
+  const projectNotice = useAppStore((s) => s.projectNotice);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
@@ -417,6 +420,29 @@ export function Toolbar() {
                 </button>
               </>
             )}
+          </span>
+        )}
+        {legacySidecarImportNotice && (
+          // Project-storage migration, coupling point 7: this photo has no
+          // look yet in the active project, but an old adjacent sidecar
+          // sits next to it — never read silently as live state (one
+          // source of truth per photo), offered as a one-click import
+          // instead. Same "button as a sibling of the ellipsis span, not
+          // nested inside it" layout as the hot-reload notice above (its
+          // own doc comment explains why: a clipped ancestor swallows
+          // pointer events).
+          <span className="toolbar-hotreload-notice">
+            <span className="toolbar-warn" data-testid="legacy-sidecar-notice" title="An old adjacent sidecar exists for this photo but is not the active project's look">
+              legacy sidecar found — not applied
+            </span>
+            <button onClick={() => void importLegacySidecar()} data-testid="import-legacy-sidecar-button">
+              Import sidecar
+            </button>
+          </span>
+        )}
+        {projectNotice && (
+          <span className="toolbar-warn" data-testid="project-notice" title={projectNotice}>
+            {projectNotice}
           </span>
         )}
         {sidecarNotice && (

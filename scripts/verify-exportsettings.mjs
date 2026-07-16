@@ -26,6 +26,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 import sharp from 'sharp';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
@@ -33,7 +34,8 @@ process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const OUT_ALL = join(projectRoot, 'test-artifacts', 'exportsettings-metadata-all.jpg');
 const OUT_NONE = join(projectRoot, 'test-artifacts', 'exportsettings-metadata-none.jpg');
 const OUT_SRGB = join(projectRoot, 'test-artifacts', 'exportsettings-srgb.jpg');

@@ -63,6 +63,16 @@ export function SettingsDialog() {
             />
           </label>
           <span className="toolbar-dim">applies from the next open</span>
+          <label className="export-dialog-row" title="Where a photo lands when no project is active yet — a real, visible folder you can open in Finder/git, never a hidden app cache. Only takes effect for a NEW quick project (an already-active one doesn't move — 'Save as project…' is planned separately).">
+            Quick project folder
+            <input
+              type="text"
+              value={settings.quickProjectDir}
+              data-testid="settings-quick-project-dir"
+              onChange={(ev) => void updateSettings({ quickProjectDir: ev.target.value })}
+            />
+          </label>
+          <span className="toolbar-dim">only affects a NEW quick project, not the one already active</span>
         </div>
         <div className="export-dialog-footer">
           <div className="export-dialog-footer-buttons">

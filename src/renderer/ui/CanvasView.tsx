@@ -75,9 +75,15 @@ declare global {
       /** Folder filmstrip (ROADMAP "nice to have") state: the open folder (if any) + its sorted listing + which path is current. */
       folderState(): {
         dir: string | null;
-        entries: { name: string; path: string; hasSidecar: boolean; mtimeMs: number; rating: number }[];
+        entries: { name: string; path: string; hasLook: boolean; mtimeMs: number; rating: number; missing: boolean }[];
         currentPath: string | null;
       };
+      /**
+       * Project storage (stage 1): the active project's identity + playlist
+       * size, and the CURRENT photo's resolved look/sidecar path — scripts
+       * read/delete/write look files through `currentLookPath` directly.
+       */
+      projectState(): { dir: string | null; name: string | null; photoCount: number; currentLookPath: string | null };
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
       thumbnailRevocations(): string[];
       /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
@@ -1005,8 +1011,24 @@ export function CanvasView() {
         const s = useAppStore.getState();
         return {
           dir: s.folderDir,
-          entries: s.folderEntries.map((e) => ({ name: e.name, path: e.path, hasSidecar: e.hasSidecar, mtimeMs: e.mtimeMs, rating: e.rating })),
+          entries: s.folderEntries.map((e) => ({
+            name: e.name,
+            path: e.path,
+            hasLook: e.hasLook,
+            mtimeMs: e.mtimeMs,
+            rating: e.rating,
+            missing: e.missing,
+          })),
           currentPath: s.imagePath,
+        };
+      },
+      projectState() {
+        const s = useAppStore.getState();
+        return {
+          dir: s.project?.dir ?? null,
+          name: s.project?.name ?? null,
+          photoCount: s.project?.photos.length ?? 0,
+          currentLookPath: s.currentLookPath,
         };
       },
       thumbnailRevocations() {

@@ -27,16 +27,18 @@
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync, unlinkSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-for (const p of [ARW_PATH + '.silverbox.json', JPG_PATH + '.silverbox.json']) {
-  if (existsSync(p)) unlinkSync(p); // autosave isolation, same as verify-ms2
+ensureTestProjectEnv();
+for (const p of [ARW_PATH, JPG_PATH]) {
+  rmLook(p); // autosave isolation, same as verify-ms2
 }
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
@@ -204,7 +206,7 @@ try {
     console.log(`  SKIP  portrait overlay-orientation checks (fixture missing: ${PORTRAIT_ARW})`);
   } else {
     console.log('verify-preview (portrait ARW overlay renders portrait immediately):');
-    if (existsSync(PORTRAIT_ARW + '.silverbox.json')) unlinkSync(PORTRAIT_ARW + '.silverbox.json');
+    rmLook(PORTRAIT_ARW);
     // Latches the FIRST 'loading'-phase openingPreviewState() PLUS the
     // overlay <img>'s live rendered bounding box (post CSS-rotation) at that
     // instant — same in-page-poller shape as armCapture above, plus the rect.
@@ -261,14 +263,14 @@ try {
       overlayPresent: !!document.querySelector('[data-testid="opening-preview-overlay"]'),
     }));
     check('portrait overlay gone once ready', afterPortraitReady.overlayPresent === false, afterPortraitReady);
-    if (existsSync(PORTRAIT_ARW + '.silverbox.json')) unlinkSync(PORTRAIT_ARW + '.silverbox.json');
+    rmLook(PORTRAIT_ARW);
   }
 } finally {
   await app.close();
 }
 
-for (const p of [ARW_PATH + '.silverbox.json', JPG_PATH + '.silverbox.json']) {
-  if (existsSync(p)) unlinkSync(p);
+for (const p of [ARW_PATH, JPG_PATH]) {
+  rmLook(p);
 }
 
 if (failures > 0) {

@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -23,9 +24,9 @@ const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
-rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
+rmLook(JPG_PATH);
 const GPU_TOLERANCE = 1 / 255;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {

@@ -8,6 +8,7 @@ import { mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -16,10 +17,10 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
+rmLook(JPG_PATH);
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -134,7 +135,7 @@ try {
     console.log(`  SKIP  portrait-orientation checks (fixture missing: ${PORTRAIT_ARW})`);
   } else {
     console.log('verify-ms2 (portrait ARW decodes portrait — no double rotation):');
-    rmSidecarSync(PORTRAIT_ARW + '.silverbox.json', { force: true });
+    rmLook(PORTRAIT_ARW);
     await page.evaluate((p) => {
       void window.__openImageByPath(p);
     }, PORTRAIT_ARW);
@@ -143,7 +144,7 @@ try {
     check('portrait ARW reports a rotating EXIF flip (5 or 6)', portrait.flip === 5 || portrait.flip === 6, portrait);
     check('preview dims are PORTRAIT (height > width)', portrait.height > portrait.width, portrait);
     check('full dims are PORTRAIT too', portrait.fullHeight > portrait.fullWidth, portrait);
-    rmSidecarSync(PORTRAIT_ARW + '.silverbox.json', { force: true });
+    rmLook(PORTRAIT_ARW);
   }
 } finally {
   await app.close();

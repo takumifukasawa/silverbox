@@ -21,6 +21,7 @@ import { fileURLToPath } from 'node:url';
 import { existsSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 // Re-enable the fresh-open default INSIDE the suite for this script only.
@@ -32,7 +33,8 @@ const sharp = require('sharp');
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 const EXPECTED_DISTORTION = [0, -11, -41, -91, -162, -249, -355, -476, -611, -759, -918];

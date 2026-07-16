@@ -19,6 +19,7 @@ import { mkdtempSync, rmSync as rmSyncFs, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -28,9 +29,9 @@ const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
-rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
+rmLook(JPG_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 // baseline-exposure check (5) calls settingsUpdate — isolate settings.json

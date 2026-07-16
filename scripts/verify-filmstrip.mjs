@@ -1,14 +1,17 @@
 /**
  * Folder filmstrip verify (ROADMAP "nice to have" — browse a folder, NOT a
  * catalog): open a folder → a thumbnail strip appears below the canvas →
- * click a cell (or ←/→) to switch images. No database, nothing persisted
- * anywhere except the sidecars that already exist.
+ * click a cell (or ←/→) to switch images. Post-project-storage-migration
+ * (stage 1), the strip renders the active PROJECT's whole PLAYLIST, which
+ * ACCUMULATES across folder opens within one session (a playlist doesn't
+ * own photos — filmstrip-curation.md) — every count/order assertion below
+ * accounts for that running total instead of assuming "just this folder".
  *
  * Fixture: a temp folder with 3 hardlinked ARW copies under distinct names
  * (a_DSC1/b_DSC2/c_DSC3 — sorted order matters) + 1 hardlinked JPG
  * (d_DSC4), plus a second temp folder (e_DSC5/f_DSC6) for the folder-switch
  * check. Hardlinks are the suite's own isolation trick (see run-verify.mjs).
- * One file (b_DSC2.ARW) gets a real sidecar, written by opening it and
+ * One file (b_DSC2.ARW) gets a real look, written by opening it and
  * clicking Save (not hand-authored JSON — same as an ordinary session).
  *
  * Checks:
@@ -22,23 +25,26 @@
  *     cell (the current image) is highlighted.
  *  4. Clicking cell 3 (c_DSC3) opens it and moves the highlight; ←/→ then
  *     step next/prev; arrow keys do nothing while a text input is focused.
- *  5. Switching to a SECOND folder re-renders the strip and revokes every
- *     blob: URL the first folder's thumbnails had allocated.
+ *  5. Switching to a SECOND folder EXTENDS the playlist (project-storage
+ *     migration): the strip now shows all 6 accumulated cells (folder A's 4
+ *     + folder B's 2), and folder B's own first (sorted) image opens.
  *  6. A single-file open (the same debug hook every other script uses)
  *     shows no strip at all — folder context is cleared.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync, linkSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, linkSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
+ensureTestProjectEnv();
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -71,8 +77,6 @@ linkSync(ARW_PATH, eDsc5);
 linkSync(ARW_PATH, fDsc6);
 
 function cleanup() {
-  const sidecar = bDsc2 + '.silverbox.json';
-  if (existsSync(sidecar)) unlinkSync(sidecar);
   rmSync(folderA, { recursive: true, force: true });
   rmSync(folderB, { recursive: true, force: true });
 }
@@ -91,28 +95,17 @@ try {
       { timeout: 120_000 }
     );
 
-  const openImageFireAndForget = (path) =>
-    page.evaluate((p) => {
-      void window.__openImageByPath(p);
-    }, path);
+  const openImageFireAndForget = (path, opts) =>
+    page.evaluate(
+      ({ p, o }) => {
+        void window.__openImageByPath(p, o);
+      },
+      { p: path, o: opts }
+    );
   const openFolderFireAndForget = (dir) =>
     page.evaluate((d) => {
       void window.__openFolderByPath(d);
     }, dir);
-
-  // === Fixture setup: a real sidecar for b_DSC2.ARW only (open it, Save) ===
-  console.log('verify-filmstrip (fixture setup — one sidecar\'d file):');
-  await openImageFireAndForget(bDsc2);
-  await waitReadyOrError();
-  await page.click('[data-testid="save-button"]');
-  // A fresh open is ALREADY graphDirty === false, so waiting on that (as this
-  // fixture originally did) resolves instantly and races the async sidecar
-  // write — under parallel-suite contention the existsSync below lost that
-  // race. Wait for the FILE, the thing the fixture actually needs.
-  for (let i = 0; i < 100 && !existsSync(bDsc2 + '.silverbox.json'); i++) {
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  check('sidecar written for b_DSC2.ARW', existsSync(bDsc2 + '.silverbox.json'), null);
 
   // === 1. Open the folder — 4 cells, sorted, first image open ===
   console.log('verify-filmstrip (open a folder shows the strip, sorted, first image open):');
@@ -133,7 +126,7 @@ try {
   const cellsAfterOpen = await page.$$eval('[data-testid="filmstrip-cell"]', (els) => els.map((e) => e.dataset.path));
   check('4 cells appear', cellsAfterOpen.length === 4, cellsAfterOpen);
   check(
-    'cells are sorted by filename',
+    'cells are sorted by filename (nothing accumulated yet — this is the FIRST open of the session)',
     JSON.stringify(cellsAfterOpen) === JSON.stringify([aDsc1, bDsc2, cDsc3, dDsc4]),
     cellsAfterOpen
   );
@@ -144,6 +137,43 @@ try {
   check('first (sorted) image is open', stateAfterOpen.folder.currentPath === aDsc1, stateAfterOpen.folder);
   check('image reaches ready', stateAfterOpen.image.status === 'ready', stateAfterOpen.image);
 
+  // === Fixture setup: a real look for b_DSC2.ARW only (open it, Save) ===
+  //
+  // Project-storage migration: this now happens INSIDE folder A's context
+  // (keepFolderContext:true) so the playlist's own ORDER is established
+  // purely by the folder scan above (nothing individually opened before
+  // it) — then aDsc1 is reopened so "current" is back where checks 2-3
+  // expect it.
+  console.log("verify-filmstrip (fixture setup — one look'd file):");
+  await openImageFireAndForget(bDsc2, { keepFolderContext: true });
+  await waitReadyOrError();
+  await page.click('[data-testid="save-button"]');
+  // A fresh open is ALREADY graphDirty === false, so waiting on that (as this
+  // fixture originally did) resolves instantly and races the async look
+  // write — under parallel-suite contention the existsSync below lost that
+  // race. Wait for the FILE, the thing the fixture actually needs.
+  const bDsc2Look = lookPathFor(bDsc2);
+  for (let i = 0; i < 100 && !existsSync(bDsc2Look); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check('look written for b_DSC2.ARW (in the active project, not next to the photo)', existsSync(bDsc2Look), bDsc2Look);
+  check('etiquette rule: nothing new appears next to b_DSC2.ARW', !existsSync(bDsc2 + '.silverbox.json'), bDsc2 + '.silverbox.json');
+
+  // folderEntries (hasLook/rating included) is a point-in-time snapshot,
+  // rebuilt on openFolder — NOT live-reactive to a save that just happened
+  // elsewhere in the same session. Re-opening the SAME folder is cheap and
+  // forces a fresh buildPlaylistEntries pass (nothing new to ADD to the
+  // playlist — every path here is already on it), which also re-opens
+  // aDsc1 (the first sorted entry), putting "current" back where checks 2-3
+  // expect it.
+  await openFolderFireAndForget(folderA);
+  await waitReadyOrError();
+  await page.waitForFunction(
+    (p) => window.__debug.folderState().currentPath === p && window.__debug.imageState().status === 'ready',
+    aDsc1,
+    { timeout: 120_000 }
+  );
+
   // === 2. Thumbnails materialize for visible cells ===
   console.log('verify-filmstrip (thumbnails materialize lazily for visible cells):');
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 4, {
@@ -153,7 +183,7 @@ try {
   check('all 4 cells loaded a blob: thumbnail', thumbSrcs.every((s) => s.startsWith('blob:')), thumbSrcs);
 
   // === 3. Edited dot + current highlight ===
-  console.log('verify-filmstrip (edited dot on the sidecar\'d file, highlight on the current file):');
+  console.log("verify-filmstrip (edited dot on the look'd file, highlight on the current file):");
   const dotState = await page.evaluate(() =>
     [...document.querySelectorAll('[data-testid="filmstrip-cell"]')].map((c) => ({
       path: c.dataset.path,
@@ -242,25 +272,33 @@ try {
   check('ArrowRight is ignored while a text input is focused', afterTextFocusRight === cDsc3, afterTextFocusRight);
   await page.evaluate(() => document.querySelector('[data-testid="filmstrip-verify-text-probe"]')?.remove());
 
-  // === 5. Switch to a SECOND folder: strip re-renders, old thumbnails revoked ===
-  console.log("verify-filmstrip (switching folders re-renders the strip, revokes folder A's thumbnail URLs):");
+  // === 5. Switch to a SECOND folder: the playlist EXTENDS (project-storage
+  // migration — a playlist doesn't own photos, folder-open just adds
+  // whatever's new), the strip re-renders, and folder A's thumbnail blob:
+  // URLs still get revoked (the `key={dir}` remount happens regardless of
+  // the playlist's own accumulation — see Filmstrip.tsx's doc comment). ===
+  console.log("verify-filmstrip (switching folders extends the playlist, re-renders the strip, revokes folder A's thumbnail URLs):");
   const priorThumbUrls = await page.$$eval('[data-testid="filmstrip-thumb"]', (els) => els.map((e) => e.src));
   const revocationsBefore = await page.evaluate(() => window.__debug.thumbnailRevocations().length);
   await openFolderFireAndForget(folderB);
   await waitReadyOrError();
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length === 2, {
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length === 6, {
     timeout: 15_000,
   });
   const cellsB = await page.$$eval('[data-testid="filmstrip-cell"]', (els) => els.map((e) => e.dataset.path));
-  check('folder B strip shows its own 2 cells', JSON.stringify(cellsB) === JSON.stringify([eDsc5, fDsc6]), cellsB);
+  check(
+    'the strip now shows all 6 accumulated cells (folder A\'s 4 + folder B\'s 2, in playlist order)',
+    JSON.stringify(cellsB) === JSON.stringify([aDsc1, bDsc2, cDsc3, dDsc4, eDsc5, fDsc6]),
+    cellsB
+  );
   const stateB = await page.evaluate(() => window.__debug.folderState());
-  check('folder B opens its own first image', stateB.currentPath === eDsc5, stateB);
-  await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 2, {
+  check("folder B's own first (sorted) image opens", stateB.currentPath === eDsc5, stateB);
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 6, {
     timeout: 15_000,
   });
   const revocationsAfter = await page.evaluate(() => window.__debug.thumbnailRevocations());
   const allPriorRevoked = priorThumbUrls.every((u) => revocationsAfter.includes(u));
-  check("every one of folder A's thumbnail URLs got revoked", allPriorRevoked, { priorThumbUrls, revocationsAfter });
+  check("every one of folder A's thumbnail URLs got revoked (the strip remounted)", allPriorRevoked, { priorThumbUrls, revocationsAfter });
   check('at least one revocation happened across the switch', revocationsAfter.length > revocationsBefore, {
     revocationsBefore,
     revocationsAfterLength: revocationsAfter.length,
@@ -284,7 +322,9 @@ try {
   // path now bakes extractSonyEmbeddedPreview's `flip` into the cached blob's
   // own pixels (via an OffscreenCanvas rotate), so the <img>'s natural size
   // should already be upright — no CSS rotation involved here, unlike the
-  // opening-preview overlay. ===
+  // opening-preview overlay. The playlist has accumulated 6 entries by now
+  // (checks 1-5 above), so this looks up the NEW cell by its own path rather
+  // than assuming it's the only cell/thumbnail on the strip. ===
   const PORTRAIT_ARW =
     process.env.SILVERBOX_TEST_PORTRAIT_ARW ?? 'test-assets/italy/DSC06787.ARW';
   if (!existsSync(PORTRAIT_ARW)) {
@@ -297,19 +337,25 @@ try {
     try {
       await openFolderFireAndForget(folderC);
       await waitReadyOrError();
-      await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 1, {
-        timeout: 15_000,
-      });
+      await page.waitForFunction(
+        (p) => document.querySelector(`[data-testid="filmstrip-cell"][data-path="${p}"] [data-testid="filmstrip-thumb"]`) !== null,
+        gDsc7,
+        { timeout: 15_000 }
+      );
       // Wait for the <img> itself to finish decoding (blob: URLs resolve
       // async relative to the src assignment) so naturalWidth/Height are real.
-      await page.waitForFunction(() => {
-        const img = document.querySelector('[data-testid="filmstrip-thumb"]');
-        return !!img && img.complete && img.naturalWidth > 0;
-      }, { timeout: 15_000 });
-      const thumbSize = await page.$eval('[data-testid="filmstrip-thumb"]', (img) => ({
-        naturalWidth: img.naturalWidth,
-        naturalHeight: img.naturalHeight,
-      }));
+      await page.waitForFunction(
+        (p) => {
+          const img = document.querySelector(`[data-testid="filmstrip-cell"][data-path="${p}"] [data-testid="filmstrip-thumb"]`);
+          return !!img && img.complete && img.naturalWidth > 0;
+        },
+        gDsc7,
+        { timeout: 15_000 }
+      );
+      const thumbSize = await page.$eval(
+        `[data-testid="filmstrip-cell"][data-path="${gDsc7}"] [data-testid="filmstrip-thumb"]`,
+        (img) => ({ naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight })
+      );
       check(
         'portrait ARW thumbnail is taller than wide (not the landscape raw bytes)',
         thumbSize.naturalHeight > thumbSize.naturalWidth,

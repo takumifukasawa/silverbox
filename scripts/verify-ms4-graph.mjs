@@ -6,10 +6,11 @@
  * node editor + inspector UI drive the same parameters.
  */
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook, writeLookFixture } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -18,10 +19,10 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 
-// autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
-rmSidecarSync(JPG_PATH + '.silverbox.json', { force: true });
+// autosave (default on) persists looks across suite scripts — isolate
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
+rmLook(JPG_PATH);
 
 // rgba16float chain passes + 8-bit readback quantization; means stay well
 // inside 1/255 per channel (see verify-ms3).
@@ -132,12 +133,12 @@ try {
   );
 
   console.log('verify-ms4 (item 1, round-12 fix pack — fitView reframes on image switch):');
-  // "開くRAWによってはノードが何も表示されない？" — a sidecar whose nodes sit at
+  // "開くRAWによってはノードが何も表示されない？" — a look whose nodes sit at
   // coordinates far from whatever pan/zoom the PREVIOUS photo's graph left
   // behind renders with every node off-screen, because NodeEditorPanel never
   // remounts across image switches and React Flow's `fitView` prop only
-  // frames the graph once, at mount. Seed a fixture sidecar for a SECOND
-  // file (JPG_PATH) with nodes positioned far outside the default viewport
+  // frames the graph once, at mount. Seed a fixture look for a SECOND file
+  // (JPG_PATH) with nodes positioned far outside the default viewport
   // established by ARW_PATH above, open it, and assert every node DOM
   // element ends up back inside the editor pane — proving the imagePath-
   // change effect actually re-fit the view.
@@ -158,7 +159,10 @@ try {
       ],
     },
   };
-  writeFileSync(JPG_PATH + '.silverbox.json', JSON.stringify(farAwayDoc, null, 2) + '\n', 'utf8');
+  // Interactive open: this fixture must land in the active project's
+  // looks/, not next to JPG_PATH — writeLookFixture is the project-model
+  // equivalent of the old writeFileSync(JPG_PATH + '.silverbox.json', …).
+  writeLookFixture(JPG_PATH, farAwayDoc);
 
   await page.evaluate((p) => {
     void window.__openImageByPath(p);

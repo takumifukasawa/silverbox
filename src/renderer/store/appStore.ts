@@ -28,6 +28,16 @@ import {
   type LensParams,
   type SidecarDoc,
 } from '../engine/graph/graphDoc';
+import {
+  defaultProjectManifest,
+  deriveLookName,
+  parseProjectManifest,
+  relativizeProjectPath,
+  resolveProjectPath,
+  serializeProjectManifest,
+  type ProjectManifest,
+  type ProjectPhoto,
+} from '../engine/graph/projectDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
@@ -86,6 +96,21 @@ const HISTORY_LIMIT = 100;
 
 const emptyHistory = (): GraphHistory => ({ past: [], future: [], lastCoalesceKey: null });
 
+/**
+ * The active project's in-memory bookkeeping (project-storage migration,
+ * stage 1 — docs/brief-bank/project-storage.md): a thin mirror of
+ * project.silverbox's own shape (ProjectManifest) plus the resolved `dir` it
+ * lives in. `unknown` carries unrecognized manifest wrapper keys (DESIGN §9
+ * passthrough) so a rewrite (the debounced playlist-save subscriber near the
+ * bottom of this file) never drops a newer Silverbox's fields.
+ */
+interface ActiveProject {
+  dir: string;
+  name: string;
+  photos: ProjectPhoto[];
+  unknown: Record<string, unknown> | null;
+}
+
 interface AppState {
   imageStatus: ImageStatus;
   image: PreparedImage | null;
@@ -107,28 +132,101 @@ interface AppState {
    */
   settingsReloading: boolean;
   /**
+   * The active PROJECT (project-storage migration, stage 1 — see
+   * docs/brief-bank/project-storage.md): every interactive photo open
+   * belongs to one, activating the quick project on demand if none is open
+   * yet (see ensureActiveProject in this store's body). null for a
+   * CLI-headless session — runCliRender/runCliCheck/runCliDiff open images
+   * via `legacySidecarOnly`, bypassing the whole project system entirely
+   * (stage 2 note, see openImageByPath's own doc comment) — or before the
+   * very first photo of an interactive session has been opened.
+   */
+  project: ActiveProject | null;
+  /**
+   * Open the project at `dir` (a directory containing project.silverbox):
+   * activates it, loads its playlist into the filmstrip, and opens the
+   * first playlist photo whose path still resolves (or leaves the empty
+   * state if none do). Returns false — touching nothing — when `dir` has no
+   * readable/valid project.silverbox: the drag-drop handler's own
+   * file-vs-folder-vs-project disambiguation relies on that (App.tsx),
+   * exactly the same shape openFolder's own false return has for "not
+   * actually a directory". The verify harness's `__openProjectByPath` debug
+   * hook (App.tsx) is the other caller.
+   */
+  openProjectByPath(dir: string): Promise<boolean>;
+  /**
+   * Toolbar banner for a FAILED openProjectByPath (unreadable directory or a
+   * project.silverbox that doesn't parse) — "fail soft, never crash": the
+   * app just doesn't switch projects, but the user gets told why instead of
+   * silent nothing. Cleared at the START of every openProjectByPath attempt
+   * (a fresh try — including a fixed/retried one — deserves a clean slate).
+   */
+  projectNotice: string | null;
+  /**
+   * Absolute path of the CURRENT photo's look/sidecar file — inside the
+   * active project's `looks/` for an ordinary interactive open, or the
+   * legacy adjacent `<image>.silverbox.json` for a `legacySidecarOnly` CLI
+   * open (`project` stays null there — see its own doc comment). Every
+   * read/write/watch of "the current sidecar" (saveGraph, the hot-reload
+   * trio, watchSidecar) goes through this ONE field rather than
+   * recomputing the path per call site. null before any image has been
+   * opened.
+   */
+  currentLookPath: string | null;
+  /**
+   * Legacy-adjacent-sidecar import offer (project-storage migration,
+   * coupling point 7): set when the just-opened photo has no look yet in
+   * the active project but an old `<image>.silverbox.json` sits next to it
+   * on disk — the app opens with defaults rather than silently treating
+   * that file as live state (one source of truth per photo), and offers
+   * this one-click import instead. Cleared on every image open and once
+   * imported.
+   */
+  legacySidecarImportNotice: { imagePath: string; sidecarPath: string; lookPath: string } | null;
+  /**
+   * The toolbar's "Import sidecar" button: copies the offered legacy
+   * sidecar into the active project's `looks/` (adding `photo`) and
+   * re-opens the image so it picks it up through the normal path. No-op if
+   * the offer is stale (a different image is open now) or the file
+   * vanished meanwhile.
+   */
+  importLegacySidecar(): Promise<void>;
+  /**
    * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
-   * catalog): non-null while the open image came from an explicit folder
-   * open (a folder drop or the toolbar's "Open Folder…"), holding that
-   * folder's sorted image listing. null for a standalone single-file open
-   * (Open… dialog, or dropping one file) — the filmstrip renders nothing at
-   * all while this is null, so a single-file open keeps today's exact
-   * experience (see openImageViaDialog / App.tsx's drop handler, which both
-   * clear this before opening).
+   * catalog): non-null while the open image came from an explicit folder OR
+   * project open (a folder/project.silverbox drop, the toolbar's "Open
+   * Folder…", or __openProjectByPath), holding that open's directory (its
+   * only remaining job is the `key={dir}` remount trick — see Filmstrip.tsx;
+   * the CELLS shown are the active project's whole playlist, not this one
+   * directory's raw listing — see `folderEntries`). null for a standalone
+   * single-file open (Open… dialog, or dropping one file) — the filmstrip
+   * renders nothing at all while this is null, so a single-file open keeps
+   * today's exact experience (see openImageViaDialog / App.tsx's drop
+   * handler, which both clear this before opening).
    */
   folderDir: string | null;
-  /** The current folder's sorted image listing (see shared/ipc.ts's FolderImageEntry); empty when folderDir is null. */
+  /**
+   * The active project's WHOLE playlist, joined with cheap per-photo status
+   * (see shared/ipc.ts's FolderImageEntry and appStore.ts's
+   * buildPlaylistEntries) — empty when folderDir is null. Project-storage
+   * migration (stage 1): no longer one folder's raw directory listing (a
+   * playlist doesn't own photos, they can come from anywhere).
+   */
   folderEntries: FolderImageEntry[];
   /**
-   * Open every image in `dir` (no recursion — see main's listImages) and
-   * show the filmstrip, opening the FIRST (sorted) entry. The drop handler
-   * (App.tsx), the toolbar's "Open Folder…" dialog action, and the verify
-   * harness's `__openFolderByPath` debug hook (dialogs are untestable) all
-   * funnel through this one action. Returns false (and touches nothing) if
-   * `dir` can't be listed as a directory — callers that need to distinguish
-   * "this wasn't actually a folder" (the drop handler's file-vs-folder
+   * List every image in `dir` (no recursion — see main's listImages),
+   * EXTEND the active project's playlist with whichever of them aren't on
+   * it yet (creating/activating the quick project first if none is active —
+   * project-storage migration, stage 1), show the filmstrip (now the whole
+   * playlist, not just this folder — see `folderEntries`), and open the
+   * FIRST (sorted) entry from `dir`. The drop handler (App.tsx), the
+   * toolbar's "Open Folder…" dialog action, and the verify harness's
+   * `__openFolderByPath` debug hook (dialogs are untestable) all funnel
+   * through this one action. Returns false (and touches nothing) if `dir`
+   * can't be listed as a directory — callers that need to distinguish "this
+   * wasn't actually a folder" (the drop handler's file-vs-folder-vs-project
    * ambiguity) branch on that; a real folder with zero images still returns
-   * true (the strip just renders empty).
+   * true (the strip just renders whatever the playlist already had).
    */
   openFolder(dir: string): Promise<boolean>;
   /** ←/→ filmstrip navigation (folder context only): steps to the prev/next sorted entry, clamped at the ends (no wraparound). No-op without a folder context, with no entries, or while an image is already loading. */
@@ -409,8 +507,19 @@ interface AppState {
    * no strip. The 3 call sites that must NOT do that — a filmstrip cell
    * click, ←/→ (stepFilmstrip), and openFolder's own "open the first entry"
    * — pass `true` here.
+   *
+   * `opts.legacySidecarOnly` (headless CLI ONLY — runCliRender/runCliCheck/
+   * runCliDiff's own internal calls): bypasses the project system entirely
+   * and reads/watches the LEGACY adjacent `<image>.silverbox.json` exactly
+   * as before the project-storage migration — no project is resolved/
+   * created, nothing is added to any playlist. Project-aware CLI resolution
+   * is a stage-2 item (docs/brief-bank/project-storage.md); until then the
+   * CLI's behavior must not change at all. Never set by interactive UI code.
    */
-  openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }): Promise<void>;
+  openImageByPath(
+    path: string,
+    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean }
+  ): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
@@ -1255,10 +1364,13 @@ function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: Gr
  * both need (the automatic push handler and the dirty-session "Reload"
  * button), so it lives once here instead of twice inline. `image` supplies
  * the anchor-space migration dims exactly like openImageByPath's own
- * parseGraphDoc call.
+ * parseGraphDoc call. `sidecarPath` is the resolved path to read (project
+ * look or legacy adjacent sidecar — see AppState.currentLookPath's doc
+ * comment); this function itself stays project-agnostic, same division of
+ * labor as before the project-storage migration.
  */
 async function readAndParseSidecar(
-  imagePath: string,
+  sidecarPath: string,
   image: { width: number; height: number }
 ): Promise<{ ok: true; text: string; parsed: SidecarDoc } | { ok: false; notice: string }> {
   const unreadable = (detail: string): { ok: false; notice: string } => ({
@@ -1267,7 +1379,7 @@ async function readAndParseSidecar(
   });
   let text: string | null;
   try {
-    text = await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
+    text = await window.silverbox.readSidecar(sidecarPath);
   } catch (err) {
     return unreadable(err instanceof Error ? err.message : String(err));
   }
@@ -1633,6 +1745,85 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   };
 
+  // --- Project storage (stage 1, docs/brief-bank/project-storage.md) --------
+
+  /**
+   * Resolve the ACTIVE project, activating the quick project on demand if
+   * none is open yet: `SILVERBOX_TEST_PROJECT` (testFlags.projectDirOverride
+   * — the verify-suite lever) wins over the `quickProjectDir` setting,
+   * used EXACTLY as given. Reads/parses an existing manifest at that
+   * directory if one exists; starts a fresh empty one otherwise (nothing is
+   * written to disk here — the FIRST playlist mutation is what schedules
+   * the debounced project.silverbox write, see this file's bottom-of-file
+   * subscriber; writeSidecar itself also mkdir's the looks/ dir just-in-
+   * time, so there is no race between "photo added" and "look saved" even
+   * before that first manifest write lands).
+   */
+  const ensureActiveProject = async (): Promise<ActiveProject> => {
+    const existing = get().project;
+    if (existing) return existing;
+    const dir = window.silverbox.testFlags.projectDirOverride ?? get().settings.quickProjectDir;
+    if (!dir) throw new Error('quick project directory is not yet known (settings still loading)');
+    let manifest: ProjectManifest;
+    try {
+      const text = await window.silverbox.readProjectManifest(dir);
+      manifest = text !== null ? parseProjectManifest(text) : defaultProjectManifest('Quick');
+    } catch (err) {
+      console.warn(`could not read/parse the quick project manifest at ${dir}, starting fresh:`, err);
+      manifest = defaultProjectManifest('Quick');
+    }
+    const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
+    set({ project });
+    return project;
+  };
+
+  /**
+   * Find `photoPath`'s existing playlist row, if any. Two arms, because
+   * `path` can be stored in two different valid shapes (ProjectPhoto's own
+   * doc comment): an EXACT match handles both a hand-authored/imported
+   * absolute `path` (stored verbatim — resolveProjectPath would just return
+   * it unchanged anyway) AND, defensively, a `photoPath` that isn't actually
+   * absolute (a standalone verify script's bare `SILVERBOX_TEST_ARW`
+   * fallback, e.g. `'test-assets/test.ARW'`, reused identically on every
+   * open — real callers never do this, dialogs/drag-drop/filmstrip cells
+   * always hand this an absolute path); a RESOLVED match handles the normal
+   * case, a relative-to-project-dir `path` (relativizeProjectPath's usual
+   * output for an absolute `photoPath`) resolving back to it.
+   */
+  const findPlaylistPhoto = (project: ActiveProject, photoPath: string): ProjectPhoto | undefined =>
+    project.photos.find((p) => p.path === photoPath || resolveProjectPath(project.dir, p.path) === photoPath);
+
+  /**
+   * Ensure `photoPath` has a playlist row in the active project — creating/
+   * activating that project first if none is active — and return its look
+   * filename. A photo already on the playlist just returns its existing
+   * look (never re-derives a name for it — see findPlaylistPhoto); a new
+   * photo is appended with a freshly derived one (deriveLookName's
+   * collision suffixing, keyed off every OTHER row resolved to absolute).
+   */
+  const ensureProjectAndAddPhoto = async (photoPath: string): Promise<{ project: ActiveProject; look: string }> => {
+    const project = await ensureActiveProject();
+    const existing = findPlaylistPhoto(project, photoPath);
+    if (existing) return { project, look: existing.look };
+    const byAbsPath = new Map(project.photos.map((p) => [resolveProjectPath(project.dir, p.path), p.look]));
+    const look = deriveLookName(photoPath, byAbsPath);
+    const photos: ProjectPhoto[] = [...project.photos, { path: relativizeProjectPath(project.dir, photoPath), look }];
+    const updated: ActiveProject = { ...project, photos };
+    set({ project: updated });
+    return { project: updated, look };
+  };
+
+  /**
+   * The filmstrip's per-cell status for `project`'s WHOLE playlist (not
+   * scoped to any one folder — "a playlist doesn't own photos", filmstrip-
+   * curation.md) via one projectPhotosStatus IPC round trip: resolves every
+   * row to absolute first (main stays project-path-agnostic).
+   */
+  const buildPlaylistEntries = async (project: ActiveProject): Promise<FolderImageEntry[]> => {
+    const photos = project.photos.map((p) => ({ path: resolveProjectPath(project.dir, p.path), look: p.look }));
+    return window.silverbox.projectPhotosStatus(project.dir, photos);
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -1640,6 +1831,10 @@ export const useAppStore = create<AppState>((set, get) => {
   imagePath: null,
   imageError: null,
   settingsReloading: false,
+  project: null,
+  projectNotice: null,
+  currentLookPath: null,
+  legacySidecarImportNotice: null,
   folderDir: null,
   folderEntries: [],
   openingPreview: null,
@@ -1690,7 +1885,10 @@ export const useAppStore = create<AppState>((set, get) => {
   spotsCapNotice: null,
   gpuError: null,
 
-  async openImageByPath(path: string, opts?: { skipSidecar?: boolean; keepFolderContext?: boolean }) {
+  async openImageByPath(
+    path: string,
+    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean }
+  ) {
     // Newest-open-wins epoch guard + cleanup ledger (OpenSession extraction —
     // architecture-audit risk #1) — see openSession.ts's doc comment for the
     // race this guards (the filmstrip's arrow-key switching resolving
@@ -1776,13 +1974,42 @@ export const useAppStore = create<AppState>((set, get) => {
       // text IS what's on disk, so a future external change compares against
       // it too, not against nothing.
       let sidecarRawText: string | null = null;
+      // Project-storage migration (stage 1): every interactive open resolves
+      // to a project (activating/creating the quick project on demand) and
+      // reads/writes that project's own looks/ — see AppState.currentLookPath
+      // and AppState.project's own doc comments. `legacySidecarOnly` (CLI
+      // internal calls only) bypasses all of this, keeping today's exact
+      // adjacent-sidecar behavior (stage 2 note — see openImageByPath's own
+      // doc comment on that option).
+      let projectPatch: ActiveProject | null = null;
+      let watchPath = path + SIDECAR_SUFFIX;
+      let legacySidecarImportNotice: AppState['legacySidecarImportNotice'] = null;
       try {
         // skipSidecar (headless CLI's --preset path): behave as if nothing
         // were on disk at all, even when a sidecar genuinely exists — see
         // AppState.openImageByPath's doc comment.
-        const sidecar = opts?.skipSidecar
-          ? null
-          : await session.guard(window.silverbox.readSidecar(path + SIDECAR_SUFFIX));
+        let sidecar: string | null;
+        if (opts?.skipSidecar) {
+          sidecar = null;
+        } else if (opts?.legacySidecarOnly) {
+          sidecar = await session.guard(window.silverbox.readSidecar(watchPath));
+        } else {
+          const { project, look } = await session.guard(ensureProjectAndAddPhoto(path));
+          projectPatch = project;
+          watchPath = `${project.dir}/looks/${look}`;
+          sidecar = await session.guard(window.silverbox.readSidecar(watchPath));
+          if (sidecar === null) {
+            // No look for this photo yet in the active project — offer the
+            // adjacent legacy sidecar (if any) as a one-click import rather
+            // than silently reading it as live state (one source of truth
+            // per photo — coupling point 7, project-storage.md's migration
+            // section).
+            const legacy = await session.guard(window.silverbox.readSidecar(path + SIDECAR_SUFFIX));
+            if (legacy !== null) {
+              legacySidecarImportNotice = { imagePath: path, sidecarPath: path + SIDECAR_SUFFIX, lookPath: watchPath };
+            }
+          }
+        }
         sidecarRawText = sidecar;
         if (sidecar !== null) {
           // the sidecar file EXISTS — a parse failure here (unlike readSidecar
@@ -1849,6 +2076,9 @@ export const useAppStore = create<AppState>((set, get) => {
         image,
         graph,
         graphDirty: false,
+        ...(projectPatch ? { project: projectPatch } : {}),
+        currentLookPath: watchPath,
+        legacySidecarImportNotice,
         selectedNodeId: null,
         nodeThumbs: {},
         imageNodeMissing: {},
@@ -1885,10 +2115,11 @@ export const useAppStore = create<AppState>((set, get) => {
         compareDocOverride: null,
       });
       revalidateShaders(graph);
-      // Arm (re-arm) the main-process sidecar watcher for THIS image — see
-      // shared/ipc.ts's watchSidecar doc comment. Fire-and-forget: a failure
-      // here just means no hot-reload push for this image, not a broken open.
-      void window.silverbox.watchSidecar(path + SIDECAR_SUFFIX);
+      // Arm (re-arm) the main-process sidecar watcher for THIS image's
+      // resolved look/sidecar path — see shared/ipc.ts's watchSidecar doc
+      // comment. Fire-and-forget: a failure here just means no hot-reload
+      // push for this image, not a broken open.
+      void window.silverbox.watchSidecar(watchPath);
     } catch (err) {
       // A stale open's failure — including StaleOpenError from
       // session.guard(), which by construction only throws once
@@ -1914,9 +2145,14 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async openFolder(dir: string) {
-    let entries: FolderImageEntry[];
+    // Project-storage migration (stage 1): "open a folder" now means EXTEND
+    // the active project's playlist with this folder's images (create/
+    // activate the quick project first if none) — listImages stays pure
+    // enumeration (see its own doc comment), never itself the filmstrip's
+    // data source anymore.
+    let listed: FolderImageEntry[];
     try {
-      entries = await window.silverbox.listImages(dir);
+      listed = await window.silverbox.listImages(dir);
     } catch (err) {
       // Not a (readable) directory — the drop handler's own fallback treats
       // this as "not actually a folder drop" and opens it as a single file
@@ -1925,8 +2161,60 @@ export const useAppStore = create<AppState>((set, get) => {
       console.warn(`openFolder: could not list ${dir}:`, err);
       return false;
     }
+    const project = await ensureActiveProject();
+    // Same identity rule as ensureProjectAndAddPhoto (see findPlaylistPhoto)
+    // — never re-add/re-derive a photo already on the playlist.
+    const byAbsPath = new Map(project.photos.map((p) => [resolveProjectPath(project.dir, p.path), p.look]));
+    let photos = project.photos;
+    for (const entry of listed) {
+      if (findPlaylistPhoto({ ...project, photos }, entry.path)) continue;
+      const look = deriveLookName(entry.path, byAbsPath);
+      byAbsPath.set(resolveProjectPath(project.dir, entry.path), look);
+      photos = [...photos, { path: relativizeProjectPath(project.dir, entry.path), look }];
+    }
+    if (photos !== project.photos) set({ project: { ...project, photos } });
+    // The filmstrip renders the project's WHOLE playlist (photos "from
+    // anywhere" — filmstrip-curation.md), not just this folder's subset.
+    const current = get().project ?? project;
+    const entries = await buildPlaylistEntries(current);
+    // A slower buildPlaylistEntries resolving after the project changed
+    // again (or a newer openFolder/openProjectByPath call) meanwhile must
+    // not clobber it.
+    if (get().project !== current) return true;
     set({ folderDir: dir, folderEntries: entries });
-    if (entries.length > 0) await get().openImageByPath(entries[0]!.path, { keepFolderContext: true });
+    if (listed.length > 0) await get().openImageByPath(listed[0]!.path, { keepFolderContext: true });
+    return true;
+  },
+
+  async openProjectByPath(dir: string) {
+    set({ projectNotice: null }); // a fresh attempt (including a retry) starts clean
+    let text: string | null;
+    try {
+      text = await window.silverbox.readProjectManifest(dir);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`openProjectByPath: could not read a project manifest at ${dir}:`, err);
+      set({ projectNotice: `could not open project at ${dir}: ${message}` });
+      return false;
+    }
+    if (text === null) return false;
+    let manifest: ProjectManifest;
+    try {
+      manifest = parseProjectManifest(text);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`openProjectByPath: ignoring a malformed project manifest at ${dir}:`, err);
+      set({ projectNotice: `project.silverbox at ${dir} is corrupt, not opened: ${message}` });
+      return false;
+    }
+    cancelAutosaveTimer();
+    const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
+    set({ project, folderDir: dir, folderEntries: [] });
+    const entries = await buildPlaylistEntries(project);
+    if (get().project !== project) return true; // superseded by a newer project/folder open meanwhile
+    set({ folderEntries: entries });
+    const first = entries.find((e) => !e.missing);
+    if (first) await get().openImageByPath(first.path, { keepFolderContext: true });
     return true;
   },
 
@@ -3018,7 +3306,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // superseded a moment later when applyLook replaces the nodes/edges
         // wholesale with the preset's own, so only the identity geometry
         // survives into the final render.
-        await get().openImageByPath(input, { skipSidecar: job.preset !== null });
+        await get().openImageByPath(input, { skipSidecar: job.preset !== null, legacySidecarOnly: true });
         if (get().imageStatus !== 'ready') {
           throw new Error(get().imageError ?? `failed to open ${input}`);
         }
@@ -3089,7 +3377,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // No `skipSidecar`/preset here (unlike runCliRender) — a golden
         // always represents the image's own sidecar-or-default look, the
         // same defaults rule `--render` uses without `--preset`.
-        await get().openImageByPath(input);
+        await get().openImageByPath(input, { legacySidecarOnly: true });
         if (get().imageStatus !== 'ready') {
           throw new Error(get().imageError ?? `failed to open ${input}`);
         }
@@ -3128,7 +3416,7 @@ export const useAppStore = create<AppState>((set, get) => {
       // sidecarB are parsed and rendered as two INDEPENDENT docs, same
       // "supply my own graph, ignore whatever's open" shape exportOnePath
       // already uses for ordinary exports.
-      await get().openImageByPath(job.image);
+      await get().openImageByPath(job.image, { legacySidecarOnly: true });
       if (get().imageStatus !== 'ready') {
         throw new Error(get().imageError ?? `failed to open ${job.image}`);
       }
@@ -3229,23 +3517,75 @@ export const useAppStore = create<AppState>((set, get) => {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
     cancelAutosaveTimer();
-    const { imagePath, fileName, image, graph, sidecarCreatedAt, sidecarRating, sidecarUnreadable, sidecarUnknownFields } =
-      get();
-    if (!imagePath || !fileName || sidecarUnreadable) return;
+    const {
+      imagePath,
+      fileName,
+      image,
+      graph,
+      sidecarCreatedAt,
+      sidecarRating,
+      sidecarUnreadable,
+      sidecarUnknownFields,
+      project,
+      currentLookPath,
+    } = get();
+    if (!imagePath || !fileName || sidecarUnreadable || !currentLookPath) return;
     const source = {
       fileName,
       ...(image?.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
       kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
     };
     const createdAt = sidecarCreatedAt ?? new Date().toISOString();
-    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined, sidecarRating);
-    await window.silverbox.writeSidecar(imagePath + SIDECAR_SUFFIX, content);
+    // `photo` (project-storage migration): only meaningful inside a project
+    // — a `legacySidecarOnly` CLI session (project stays null there) writes
+    // the SAME bytes as before the migration, no `photo` field at all.
+    const photo = project ? relativizeProjectPath(project.dir, imagePath) : undefined;
+    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined, sidecarRating, photo);
+    await window.silverbox.writeSidecar(currentLookPath, content);
     // Record exactly what we just wrote (hot-reload's self-write-suppression
     // baseline) and clear any hot-reload notice: our edits just overwrote
     // disk, resolving whatever pending/malformed conflict was showing (see
     // AppState.sidecarHotReloadNotice's doc comment). The fs-watch echo of
     // THIS write will read back identical text and be ignored silently.
     set({ graphDirty: false, sidecarCreatedAt: createdAt, lastSidecarText: content, sidecarHotReloadNotice: null });
+  },
+
+  async importLegacySidecar() {
+    const { legacySidecarImportNotice, imagePath, image, project } = get();
+    if (!legacySidecarImportNotice || !imagePath || !image || !project) return;
+    if (legacySidecarImportNotice.imagePath !== imagePath) return; // stale offer — a different image is open now
+    let text: string | null;
+    try {
+      text = await window.silverbox.readSidecar(legacySidecarImportNotice.sidecarPath);
+    } catch (err) {
+      set({ sidecarNotice: `could not import legacy sidecar: ${err instanceof Error ? err.message : String(err)}` });
+      return;
+    }
+    if (text === null) {
+      // vanished since the offer was made — nothing to import anymore
+      set({ legacySidecarImportNotice: null });
+      return;
+    }
+    try {
+      const parsed = parseGraphDoc(text, { width: image.width, height: image.height });
+      const photo = relativizeProjectPath(project.dir, imagePath);
+      const content = serializeGraphDoc(
+        parsed.graph,
+        parsed.source ?? null,
+        parsed.createdAt ?? null,
+        parsed.unknown,
+        parsed.rating,
+        photo
+      );
+      await window.silverbox.writeSidecar(legacySidecarImportNotice.lookPath, content);
+      set({ legacySidecarImportNotice: null });
+      // Re-open exactly like any other open: the just-written look is now
+      // there to be found, so this reuses the normal read path (and its
+      // usedSidecar/seedDefaultLook semantics) instead of duplicating it.
+      await get().openImageByPath(imagePath, { keepFolderContext: true });
+    } catch (err) {
+      set({ sidecarNotice: `legacy sidecar is unreadable, nothing imported: ${err instanceof Error ? err.message : String(err)}` });
+    }
   },
 
   // Sidecar hot-reload (the AI-editing loop): handleExternalSidecarChange is
@@ -3255,9 +3595,9 @@ export const useAppStore = create<AppState>((set, get) => {
   // applyExternalGraph above.
 
   async handleExternalSidecarChange() {
-    const { imagePath, image } = get();
-    if (!imagePath || !image) return;
-    const result = await readAndParseSidecar(imagePath, image);
+    const { imagePath, image, currentLookPath } = get();
+    if (!imagePath || !image || !currentLookPath) return;
+    const result = await readAndParseSidecar(currentLookPath, image);
     // a slow read can resolve after a DIFFERENT image was opened meanwhile
     if (get().imagePath !== imagePath) return;
     if (!result.ok) {
@@ -3292,9 +3632,9 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async reloadSidecarNow() {
-    const { imagePath, image } = get();
-    if (!imagePath || !image) return;
-    const result = await readAndParseSidecar(imagePath, image);
+    const { imagePath, image, currentLookPath } = get();
+    if (!imagePath || !image || !currentLookPath) return;
+    const result = await readAndParseSidecar(currentLookPath, image);
     if (get().imagePath !== imagePath) return;
     if (!result.ok) {
       set({ sidecarHotReloadNotice: { kind: 'malformed', message: result.notice } });
@@ -3310,9 +3650,9 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async showSidecarDiff() {
-    const { imagePath, image, graph, sidecarRating } = get();
-    if (!imagePath || !image) return;
-    const result = await readAndParseSidecar(imagePath, image);
+    const { imagePath, image, graph, sidecarRating, currentLookPath } = get();
+    if (!imagePath || !image || !currentLookPath) return;
+    const result = await readAndParseSidecar(currentLookPath, image);
     // a slow read can resolve after a DIFFERENT image was opened meanwhile,
     // or after the user already moved on (undo, another edit) — either way
     // `imagePath` no longer names what this read was about.
@@ -3402,6 +3742,57 @@ if (typeof window !== 'undefined' && window.silverbox) {
     void useAppStore.getState().handleExternalSidecarChange();
   });
 }
+
+// Project manifest autosave (project-storage migration, stage 1): any
+// PLAYLIST change (`project.photos` replaced by reference — ensureActiveProject/
+// ensureProjectAndAddPhoto/openFolder are the only writers) reschedules a
+// 300ms debounce that writes project.silverbox once edits settle — the SAME
+// debounce shape as sidecar autosave below, but keyed on the project's own
+// dirty surface (the playlist), not `graphDirty`/`graph`: an ordinary
+// per-photo LOOK autosave never touches `project.photos` at all, so it can
+// never accidentally trigger a manifest rewrite (see docs/brief-bank/
+// project-storage.md's "don't rewrite it on every look autosave").
+let projectSaveTimer: ReturnType<typeof setTimeout> | null = null;
+let lastSavedPhotos: ProjectPhoto[] | null = null;
+useAppStore.subscribe((state) => {
+  const project = state.project;
+  if (!project || project.photos === lastSavedPhotos) return;
+  lastSavedPhotos = project.photos;
+  if (projectSaveTimer !== null) clearTimeout(projectSaveTimer);
+  projectSaveTimer = setTimeout(() => {
+    projectSaveTimer = null;
+    // Read fresh state at fire time (not a closed-over `project`) — same
+    // "no stale reference" discipline saveGraph's own autosave timer below
+    // follows via useAppStore.getState().
+    const p = useAppStore.getState().project;
+    if (!p) return;
+    const manifest: ProjectManifest = {
+      schemaVersion: 1,
+      name: p.name,
+      photos: p.photos,
+      ...(p.unknown ? { unknown: p.unknown } : {}),
+    };
+    void window.silverbox.writeProjectManifest(p.dir, serializeProjectManifest(manifest));
+  }, 300);
+});
+
+// Title bar (project-storage migration): keeps document.title in sync with
+// the active project's name + the current photo — "Silverbox — <Project> —
+// <photo.ARW>" (subsets gracefully when either half is absent) — so the
+// active project is always visible, never "behind the user's back" (see
+// docs/brief-bank/project-storage.md's quick-project rationale). Guarded for
+// the vitest unit tier (environment: 'node' — no DOM, see vitest.config.ts).
+let lastTitleProject: string | null = null;
+let lastTitleFileName: string | null = null;
+useAppStore.subscribe((state) => {
+  const projectName = state.project?.name ?? null;
+  const fileName = state.fileName;
+  if (projectName === lastTitleProject && fileName === lastTitleFileName) return;
+  lastTitleProject = projectName;
+  lastTitleFileName = fileName;
+  if (typeof document === 'undefined') return;
+  document.title = ['Silverbox', ...(projectName ? [projectName] : []), ...(fileName ? [fileName] : [])].join(' — ');
+});
 
 // Sidecar autosave (settings.autosaveSidecar, default ON): any graph mutation
 // (graph replaced by reference + graphDirty:true) reschedules a 1000ms

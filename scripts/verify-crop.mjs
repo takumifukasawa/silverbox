@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { existsSync, unlinkSync, mkdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -23,7 +24,8 @@ const sharp = require('sharp');
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const OUT_JPG = join(projectRoot, 'test-artifacts', 'crop-export.jpg');
 const GPU_CPU_TOLERANCE = 1 / 255;
 

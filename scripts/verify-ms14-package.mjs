@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { arch, tmpdir } from 'node:os';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, rmLook } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -18,8 +19,8 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 
 // autosave (default on) persists sidecars across suite scripts — isolate
-const { rmSync: rmSidecarSync } = await import('node:fs');
-rmSidecarSync(ARW_PATH + '.silverbox.json', { force: true });
+ensureTestProjectEnv();
+rmLook(ARW_PATH);
 const APP_DIR = join(projectRoot, 'dist', arch() === 'arm64' ? 'mac-arm64' : 'mac');
 const EXECUTABLE = join(APP_DIR, 'Silverbox.app', 'Contents', 'MacOS', 'Silverbox');
 const GPU_CPU_TOLERANCE = 1 / 255;

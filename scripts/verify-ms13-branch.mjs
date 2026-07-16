@@ -9,13 +9,15 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { mkdirSync, existsSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {

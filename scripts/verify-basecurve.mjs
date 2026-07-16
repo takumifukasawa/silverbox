@@ -26,6 +26,7 @@ import { fileURLToPath } from 'node:url';
 import { readFileSync, existsSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 // Re-enable the fresh-ARW base-curve default INSIDE the suite for this script.
@@ -34,7 +35,8 @@ process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 
 // The shipped points are the source of truth — read the a7C II curve straight
 // from baseCurve.ts so a refit that changes the constant never has to touch

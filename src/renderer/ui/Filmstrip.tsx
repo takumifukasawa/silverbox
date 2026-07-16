@@ -19,7 +19,7 @@ function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: b
 
   useEffect(() => {
     const el = cellRef.current;
-    if (!el) return;
+    if (!el || entry.missing) return; // nothing to decode for a photo that doesn't resolve — see the `missing` placeholder styling below
     let cancelled = false;
     const observer = new IntersectionObserver(
       (observed) => {
@@ -36,21 +36,29 @@ function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: b
       cancelled = true;
       observer.disconnect();
     };
-  }, [entry.path]);
+  }, [entry.path, entry.missing]);
 
   return (
     <button
       ref={cellRef}
       type="button"
-      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}`}
+      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}${entry.missing ? ' filmstrip-cell--missing' : ''}`}
       data-testid="filmstrip-cell"
       data-path={entry.path}
-      title={entry.name}
-      onClick={() => void openImageByPath(entry.path, { keepFolderContext: true })}
+      title={entry.missing ? `${entry.name} — file not found` : entry.name}
+      disabled={entry.missing}
+      onClick={() => {
+        if (!entry.missing) void openImageByPath(entry.path, { keepFolderContext: true });
+      }}
     >
       {url && <img src={url} alt="" className="filmstrip-thumb" data-testid="filmstrip-thumb" />}
-      {entry.hasSidecar && (
-        <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved sidecar" />
+      {entry.missing && (
+        <span className="filmstrip-missing-badge" data-testid="filmstrip-missing-badge">
+          ?
+        </span>
+      )}
+      {entry.hasLook && (
+        <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved look" />
       )}
       {entry.rating > 0 && (
         // Tiny rating indicator (ratings pack) — read cheaply off the
@@ -100,12 +108,17 @@ function RatingFilter({ value, onChange }: { value: number; onChange: (rating: n
 /**
  * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
  * catalog): a horizontal, lazily-thumbnailed strip below the canvas,
- * rendered only while a folder context exists (appStore.ts's folderDir) —
- * a single-file open shows none of this, exactly today's experience.
- * `key={dir}` at the mount site forces a full remount on every folder
- * switch, which is what actually drives the thumbnail-cache cleanup: this
- * component's unmount effect below runs for the OLD folder before the new
- * one's instance mounts fresh (see App.tsx).
+ * rendered only while a folder/project context exists (appStore.ts's
+ * folderDir) — a single-file open shows none of this, exactly today's
+ * experience. Post-project-storage-migration (stage 1), the cells are the
+ * active PROJECT's whole playlist (appStore.ts's folderEntries, rebuilt from
+ * `project.photos` — see buildPlaylistEntries), not one folder's raw
+ * listing — a playlist doesn't own photos, they can come from anywhere (see
+ * FolderImageEntry's own doc comment). `key={dir}` at the mount site forces
+ * a full remount on every folder/project switch, which is what actually
+ * drives the thumbnail-cache cleanup: this component's unmount effect below
+ * runs for the OLD folder before the new one's instance mounts fresh (see
+ * App.tsx).
  */
 export function Filmstrip() {
   const folderEntries = useAppStore((s) => s.folderEntries);

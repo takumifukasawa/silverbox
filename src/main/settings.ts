@@ -11,6 +11,7 @@
  */
 import { app } from 'electron';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
   DEFAULT_SETTINGS,
@@ -87,6 +88,16 @@ export function sanitizeSettings(raw: unknown): Settings {
       : DEFAULT_SETTINGS.baselineExposureEV;
   result.export = sanitizeExportSettings(src.export);
   result.exportPresets = sanitizeExportPresets(src.exportPresets);
+  // Quick-project directory (project-storage migration): shared/ipc.ts's
+  // DEFAULT_SETTINGS can't compute a real path (it's isomorphic, no
+  // node:os) — this is the one place the actual default gets resolved, a
+  // real VISIBLE folder under the user's home, never an app-internal cache
+  // (see Settings.quickProjectDir's doc comment for the hidden-library
+  // failure mode this avoids).
+  result.quickProjectDir =
+    typeof src.quickProjectDir === 'string' && src.quickProjectDir.trim() !== ''
+      ? src.quickProjectDir
+      : join(homedir(), 'Silverbox', 'Quick');
   return result as unknown as Settings;
 }
 

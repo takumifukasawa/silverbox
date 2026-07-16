@@ -37,6 +37,7 @@ import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, unlinkSync } from 'node:fs';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 import sharp from 'sharp';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
@@ -45,7 +46,8 @@ process.env.SILVERBOX_TEST = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const TIGHT_TOLERANCE = 1e-6;
 // PNG fixture (section 7) — generated fresh each run, never committed: a
 // small solid-gradient raster (distinct from the JPG fixture's content) is

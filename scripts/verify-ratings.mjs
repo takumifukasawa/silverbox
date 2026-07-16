@@ -44,11 +44,13 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor, resetTestProject, writeLookFixture } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
+ensureTestProjectEnv();
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -68,7 +70,11 @@ const check = (name, cond, actual) => {
 const workDir = mkdtempSync(join(tmpdir(), 'silverbox-ratings-'));
 const arwMain = join(workDir, 'rating-main.ARW');
 linkSync(ARW_PATH, arwMain);
-const sidecarMain = arwMain + '.silverbox.json';
+// project-storage migration: an interactive open's rating lives in the
+// active test project's looks/, not next to the photo — see
+// scripts/lib/testProject.mjs's doc comment for the no-collision assumption
+// this basename-keyed path relies on (arwMain's basename is unique here).
+const sidecarMain = lookPathFor(arwMain);
 
 /** Atomic external rewrite (verify-hotreload.mjs's own atomicWrite pattern) — simulates an AI/editor touching the sidecar out from under the running app. */
 function atomicWrite(path, content) {
@@ -111,9 +117,9 @@ async function waitForDiskRating(expected, timeoutMs = 10_000) {
 }
 
 /** schemaVersion-4 wire wrapper carrying a `rating` — the exact shape serializeGraphDoc writes (graphDoc.ts). */
-function writeRatingSidecar(path, rating) {
+function ratingWrapper(rating) {
   const nowIso = new Date().toISOString();
-  const wrapper = {
+  return {
     schemaVersion: 4,
     createdAt: nowIso,
     updatedAt: nowIso,
@@ -130,7 +136,22 @@ function writeRatingSidecar(path, rating) {
       ],
     },
   };
-  writeFileSync(path + '.silverbox.json', JSON.stringify(wrapper, null, 2) + '\n');
+}
+
+/**
+ * CLI fixture (section 7 ONLY): the headless `--render --min-rating` CLI
+ * still reads the LEGACY adjacent sidecar (`legacySidecarOnly` in
+ * appStore.ts's openImageByPath — project-aware CLI resolution is a stage-2
+ * item, docs/brief-bank/project-storage.md), so this fixture must STAY next
+ * to the image, unlike every interactive-open fixture in this file.
+ */
+function writeRatingSidecar(path, rating) {
+  writeFileSync(path + '.silverbox.json', JSON.stringify(ratingWrapper(rating), null, 2) + '\n');
+}
+
+/** Interactive-open fixture (section 6, the filmstrip/folder test): lands in the active project's looks/, matching what a real folder-open + look read actually does. */
+function writeRatingLook(path, rating) {
+  writeLookFixture(path, ratingWrapper(rating));
 }
 
 function cleanupMain() {
@@ -158,10 +179,6 @@ try {
     page.evaluate((p) => {
       void window.__openImageByPath(p);
     }, path);
-  const openFolderFireAndForget = (dir) =>
-    page.evaluate((d) => {
-      void window.__openFolderByPath(d);
-    }, dir);
 
   const rating = () => page.evaluate(() => window.__debug.sidecarState().rating);
   const dirty = () => page.evaluate(() => window.__debug.graphDirty());
@@ -282,21 +299,44 @@ try {
   );
 
   check('no page errors across the app-driven sections', pageErrors.length === 0, pageErrors);
+} finally {
+  await app.close();
+}
 
-  // === 6. Filmstrip: tiny stars per cell + the local ★n+ filter ===
-  console.log('verify-ratings (6. filmstrip: per-cell rating stars + the ★n+ filter):');
-  folderDir = mkdtempSync(join(tmpdir(), 'silverbox-ratings-folder-'));
-  const cellUnrated = join(folderDir, 'a_unrated.ARW'); // no sidecar at all
-  const cellTwo = join(folderDir, 'b_two.ARW');
-  const cellFour = join(folderDir, 'c_four.ARW');
-  const cellFive = join(folderDir, 'd_five.ARW');
-  linkSync(ARW_PATH, cellUnrated);
-  linkSync(ARW_PATH, cellTwo);
-  linkSync(ARW_PATH, cellFour);
-  linkSync(ARW_PATH, cellFive);
-  writeRatingSidecar(cellTwo, 2);
-  writeRatingSidecar(cellFour, 4);
-  writeRatingSidecar(cellFive, 5);
+cleanupMain();
+
+// === 6. Filmstrip: tiny stars per cell + the local ★n+ filter ===
+//
+// Project-storage migration: the playlist now ACCUMULATES across opens
+// within one session (folder-open EXTENDS it, it doesn't replace it) —
+// unlike the old per-folder folderEntries, arwMain's entry from sections
+// 1-5 above would still be sitting in the SAME project's playlist here,
+// throwing off every exact-cell-count assertion below. Fresh app + a
+// resetTestProject() wipe (looks/ + the manifest) gives this section its
+// own clean playlist, exactly like "a folder just opened" should look.
+console.log('verify-ratings (6. filmstrip: per-cell rating stars + the ★n+ filter):');
+resetTestProject();
+folderDir = mkdtempSync(join(tmpdir(), 'silverbox-ratings-folder-'));
+const cellUnrated = join(folderDir, 'a_unrated.ARW'); // no look at all
+const cellTwo = join(folderDir, 'b_two.ARW');
+const cellFour = join(folderDir, 'c_four.ARW');
+const cellFive = join(folderDir, 'd_five.ARW');
+linkSync(ARW_PATH, cellUnrated);
+linkSync(ARW_PATH, cellTwo);
+linkSync(ARW_PATH, cellFour);
+linkSync(ARW_PATH, cellFive);
+writeRatingLook(cellTwo, 2);
+writeRatingLook(cellFour, 4);
+writeRatingLook(cellFive, 5);
+
+const folderApp = await electron.launch({ args: [projectRoot] });
+try {
+  const page = await folderApp.firstWindow();
+  await page.waitForSelector('.app-layout', { timeout: 15_000 });
+  const openFolderFireAndForget = (dir) =>
+    page.evaluate((d) => {
+      void window.__openFolderByPath(d);
+    }, dir);
 
   await openFolderFireAndForget(folderDir);
   await page.waitForFunction(
@@ -312,7 +352,7 @@ try {
     window.__debug.folderState().entries.map((e) => ({ path: e.path, rating: e.rating }))
   );
   check(
-    "listImages' cheap per-file read reports the right rating for each entry (unrated = 0)",
+    "the project's per-photo look read reports the right rating for each entry (unrated = 0)",
     folderRatings.find((e) => e.path === cellUnrated)?.rating === 0 &&
       folderRatings.find((e) => e.path === cellTwo)?.rating === 2 &&
       folderRatings.find((e) => e.path === cellFour)?.rating === 4 &&
@@ -360,11 +400,11 @@ try {
   });
   check('back to "All" shows every cell again', true, null);
 } finally {
-  await app.close();
+  await folderApp.close();
 }
 
-cleanupMain();
 if (folderDir) rmSync(folderDir, { recursive: true, force: true });
+resetTestProject();
 
 // === 7. Headless CLI --min-rating: skips low/absent ratings, never as a failure ===
 console.log('verify-ratings (7. CLI --min-rating skips low/absent-rated inputs without failing the batch):');

@@ -1,10 +1,11 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { watch, type FSWatcher } from 'node:fs';
-import { mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename, extname } from 'node:path';
 import {
   IPC,
+  PROJECT_MANIFEST_NAME,
   SIDECAR_SUFFIX,
   type CliCheckImageRequest,
   type CliCheckOutcome,
@@ -72,9 +73,34 @@ function extractSidecarRating(raw: string): number {
   }
 }
 
-function assertSidecarPath(path: unknown): string {
-  if (typeof path !== 'string' || !path.endsWith(SIDECAR_SUFFIX)) {
-    throw new Error(`sidecar path must end with ${SIDECAR_SUFFIX}`);
+/** True when `path`'s containing directory is literally named `looks` — the one shape a project look file ever has (`<projectDir>/looks/<name>.json`). */
+function isProjectLookPath(path: string): boolean {
+  return path.endsWith('.json') && basename(dirname(path)) === 'looks';
+}
+
+/**
+ * Validate a path handed to readSidecar/writeSidecar (project-storage
+ * migration, stage 1). READS accept either shape: a legacy adjacent sidecar
+ * (`<image>.silverbox.json`, kept readable forever — principle 9 — for old
+ * documents and the CLI's stage-2-pending import path) or a project look
+ * file. WRITES accept ONLY a project look path — this is the one place the
+ * migration's absolute etiquette rule ("the app never writes into a photo
+ * folder") is structurally enforced rather than merely a convention callers
+ * are expected to honor: a caller cannot write an adjacent sidecar through
+ * this handler even by mistake.
+ */
+function assertSidecarPath(path: unknown, mode: 'read' | 'write'): string {
+  if (typeof path !== 'string' || !path.endsWith('.json')) {
+    throw new Error('sidecar/look path must end with .json');
+  }
+  if (mode === 'write') {
+    if (!isProjectLookPath(path)) {
+      throw new Error("writes are only allowed inside a project's looks/ directory — the app never writes into photo folders");
+    }
+    return path;
+  }
+  if (!path.endsWith(SIDECAR_SUFFIX) && !isProjectLookPath(path)) {
+    throw new Error(`sidecar path must end with ${SIDECAR_SUFFIX} or be inside a project's looks/ directory`);
   }
   return path;
 }
@@ -183,6 +209,14 @@ function registerIpc(): void {
     // throws ENOTDIR/ENOENT for anything that isn't a readable directory,
     // which the renderer's drop handler relies on to tell "dropped a folder"
     // from "dropped a file" (see App.tsx).
+    //
+    // Project-storage migration (stage 1): this handler is now PURE
+    // enumeration — appStore.ts's openFolder uses it only to discover which
+    // files to ADD to the active project's playlist. hasLook/rating/missing
+    // are meaningless here (a look lives in a PROJECT's looks/, not next to
+    // the photo) and always come back false/0/false; the filmstrip's real
+    // per-cell status is a separate join against the playlist afterward (see
+    // IPC.projectPhotosStatus).
     const dirents = await readdir(dir, { withFileTypes: true });
     const entries: FolderImageEntry[] = [];
     for (const dirent of dirents) {
@@ -191,21 +225,7 @@ function registerIpc(): void {
       if (!IMAGE_EXTENSIONS.includes(ext)) continue;
       const path = join(dir, dirent.name);
       const st = await stat(path);
-      // Read the sidecar's content (not just check existence) so the rating
-      // star (ratings pack) is available for free — hasSidecar and rating
-      // both fall out of the same read, so the previous access()-only check
-      // costs no more than a plain existence probe would have.
-      let hasSidecar = false;
-      let rating = 0;
-      try {
-        const sidecarText = await readFile(path + SIDECAR_SUFFIX, 'utf8');
-        hasSidecar = true;
-        rating = extractSidecarRating(sidecarText);
-      } catch {
-        // ENOENT (no sidecar) or any other read failure: same "not edited,
-        // not rated" fallback listImages has always used for hasSidecar.
-      }
-      entries.push({ name: dirent.name, path, hasSidecar, mtimeMs: st.mtimeMs, rating });
+      entries.push({ name: dirent.name, path, hasLook: false, mtimeMs: st.mtimeMs, rating: 0, missing: false });
     }
     // Filename order, not mtime: hardlinked test fixtures (the verify suite's
     // own isolation trick — see run-verify.mjs) share one inode and so an
@@ -224,7 +244,7 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.readSidecar, async (_ev, path: unknown): Promise<string | null> => {
     try {
-      return await readFile(assertSidecarPath(path), 'utf8');
+      return await readFile(assertSidecarPath(path, 'read'), 'utf8');
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
       throw err;
@@ -233,7 +253,14 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.writeSidecar, async (_ev, path: unknown, content: unknown): Promise<void> => {
     if (typeof content !== 'string') throw new Error('writeSidecar: content must be a string');
-    const target = assertSidecarPath(path);
+    const target = assertSidecarPath(path, 'write');
+    // A brand-new project's looks/ directory may not exist yet by the time
+    // its first look is saved (the manifest write that normally creates it —
+    // IPC.projectWrite, driven by appStore.ts's debounced playlist save — is
+    // not synchronized with this call, e.g. an immediate ⌘S right after a
+    // fresh quick-project photo's first edit) — ensure it here rather than
+    // race that.
+    await mkdir(dirname(target), { recursive: true });
     // Atomic write: a crash mid-save must not leave a truncated sidecar. The
     // temp dir lives next to the target so rename() stays on one filesystem.
     const tmpDir = await mkdtemp(join(dirname(target), '.silverbox-save-'));
@@ -247,8 +274,78 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.watchSidecar, async (_ev, path: unknown): Promise<void> => {
-    armSidecarWatch(assertSidecarPath(path));
+    armSidecarWatch(assertSidecarPath(path, 'read'));
   });
+
+  ipcMain.handle(IPC.projectRead, async (_ev, dir: unknown): Promise<string | null> => {
+    if (typeof dir !== 'string') throw new Error('readProjectManifest: dir must be a string');
+    try {
+      return await readFile(join(dir, PROJECT_MANIFEST_NAME), 'utf8');
+    } catch (err) {
+      // ENOENT: no manifest there yet. ENOTDIR: `dir` isn't even a
+      // directory (e.g. a single image file was handed to this by the
+      // drag-drop project/folder disambiguation) — both mean "no project
+      // here", not a real failure.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') return null;
+      throw err;
+    }
+  });
+
+  ipcMain.handle(IPC.projectWrite, async (_ev, dir: unknown, content: unknown): Promise<void> => {
+    if (typeof dir !== 'string') throw new Error('writeProjectManifest: dir must be a string');
+    if (typeof content !== 'string') throw new Error('writeProjectManifest: content must be a string');
+    // Ensure the project's own shape exists before writing — this is what
+    // lets the renderer's quick-project flow "create dir + manifest if
+    // missing" in one round trip; an already-existing project is a harmless
+    // no-op (mkdir recursive). looks/ is created eagerly too so the
+    // sidecar-watch/writeSidecar paths never race an empty project dir.
+    await mkdir(join(dir, 'looks'), { recursive: true });
+    const target = join(dir, PROJECT_MANIFEST_NAME);
+    const tmpDir = await mkdtemp(join(dir, '.silverbox-save-'));
+    const tmpFile = join(tmpDir, PROJECT_MANIFEST_NAME);
+    try {
+      await writeFile(tmpFile, content, 'utf8');
+      await rename(tmpFile, target);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  ipcMain.handle(
+    IPC.projectPhotosStatus,
+    async (_ev, dir: unknown, photos: unknown): Promise<FolderImageEntry[]> => {
+      if (typeof dir !== 'string') throw new Error('projectPhotosStatus: dir must be a string');
+      if (!Array.isArray(photos)) throw new Error('projectPhotosStatus: photos must be an array');
+      const out: FolderImageEntry[] = [];
+      for (const p of photos as Array<{ path?: unknown; look?: unknown }>) {
+        if (typeof p.path !== 'string' || typeof p.look !== 'string') continue;
+        // `p.path` is already resolved absolute by the renderer (see
+        // engine/graph/projectDoc.ts's resolveProjectPath) — this handler
+        // stays project-path-agnostic, same division of labor as
+        // imageNodeSource.ts's own path resolution.
+        let mtimeMs = 0;
+        let missing = false;
+        try {
+          mtimeMs = (await stat(p.path)).mtimeMs;
+        } catch {
+          missing = true;
+        }
+        let hasLook = false;
+        let rating = 0;
+        try {
+          const text = await readFile(join(dir, 'looks', p.look), 'utf8');
+          hasLook = true;
+          rating = extractSidecarRating(text);
+        } catch {
+          // no look yet, or unreadable — same "not edited, not rated"
+          // fallback the pre-migration listImages handler used to compute.
+        }
+        out.push({ name: basename(p.path), path: p.path, hasLook, mtimeMs, rating, missing });
+      }
+      return out;
+    }
+  );
 
   ipcMain.handle(IPC.exportImageDialog, async (_ev, defaultPath: unknown): Promise<OpenImageDialogResult> => {
     const result = await dialog.showSaveDialog({

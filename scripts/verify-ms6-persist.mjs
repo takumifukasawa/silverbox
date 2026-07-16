@@ -1,15 +1,18 @@
 /**
- * Milestone 6 verify: GraphDoc sidecar persistence. Edits the graph, saves
- * with ⌘S, checks the JSON on disk, confirms the graph is per-image (a
- * sidecar-less image resets to the default doc), restores the saved graph on
+ * Milestone 6 verify: GraphDoc look persistence. Edits the graph, saves with
+ * ⌘S, checks the JSON on disk (now inside the active test PROJECT's
+ * looks/ — project-storage migration — NOT next to the photo; see the
+ * etiquette-rule check below), confirms the graph is per-image (a
+ * look-less image resets to the default doc), restores the saved graph on
  * reopen with a render matching the CPU reference, and falls back to the
- * default doc when the sidecar is corrupt.
+ * default doc when the look is corrupt.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
+import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -17,7 +20,8 @@ process.env.SILVERBOX_TEST = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const SIDECAR = ARW_PATH + '.silverbox.json';
+ensureTestProjectEnv();
+const SIDECAR = lookPathFor(ARW_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
@@ -76,14 +80,23 @@ try {
     (await page.locator('[data-testid="dirty-indicator"]').count()) === 0,
     await page.locator('[data-testid="dirty-indicator"]').count()
   );
-  check('sidecar file exists next to the image', existsSync(SIDECAR), SIDECAR);
+  check('look file exists in the active project (looks/<basename>.json)', existsSync(SIDECAR), SIDECAR);
+  // Etiquette rule as a suite-level assertion (project-storage migration —
+  // the app must NEVER write into a photo folder): this INVERTS the old
+  // "sidecar file exists next to the image" check above — cheap and
+  // valuable to assert both directions in one script.
+  check(
+    'etiquette rule: nothing new appears next to the photo',
+    !existsSync(ARW_PATH + '.silverbox.json'),
+    ARW_PATH + '.silverbox.json'
+  );
   const saved = JSON.parse(readFileSync(SIDECAR, 'utf8'));
   check(
     // schemaVersion 4 (anchor-space masks/spots, UX pack C §1): the version
     // this build always writes now; a v2/v3 sidecar still LOADS (see
     // scripts/verify-masks.mjs's inline v2/v3 fixture checks) — only the
     // number a *save* stamps on disk changed.
-    'sidecar is schemaVersion 4 with source block and the edited ev',
+    'look is schemaVersion 4 with source block and the edited ev',
     saved.schemaVersion === 4 &&
       saved.source?.fileName === basename(ARW_PATH) &&
       saved.source?.kind === 'raw' &&
@@ -91,7 +104,12 @@ try {
       saved.graph.nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.5,
     saved
   );
-  check('sidecar is pretty-printed and newline-terminated',
+  check(
+    'look carries the photo field (project-storage migration)',
+    typeof saved.photo === 'string' && saved.photo.length > 0,
+    saved.photo
+  );
+  check('look is pretty-printed and newline-terminated',
     readFileSync(SIDECAR, 'utf8').includes('\n    "nodes"') && readFileSync(SIDECAR, 'utf8').endsWith('\n'), null);
 
   console.log('verify-ms6 (graph is per-image):');
