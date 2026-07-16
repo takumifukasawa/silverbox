@@ -26,9 +26,22 @@
  * tiles are fine for v2.0"). Revisit if a real preview render is ever found
  * to visibly stall OTHER main-process IPC traffic during inference.
  *
- * EP SELECTION: try CoreML first (darwin arm64's accelerated path per the
- * onnxruntime-node README), fall back to CPU on any CoreML init failure.
- * Attempted as two SEPARATE session-creation calls (not one array letting
+ * EP SELECTION: CPU by default — CoreML is QUARANTINED behind
+ * SILVERBOX_DENOISE_EP=coreml after real-model testing (2026-07-16,
+ * conductor E2E): on the actual NAFNet-SIDD-width32 fp32 model, CoreML's
+ * session CREATES fine (it accepts 1239 of the graph's 1603 nodes, split
+ * across 77 partitions) but the Electron main process CRASHES outright
+ * mid-`session.run` ("Context leak detected, msgtracer returned -1", app
+ * gone) — while the 409-byte verify fixture runs CoreML without issue, so
+ * the failure is model-scale-dependent and the verify suite alone can never
+ * catch it. CPU EP denoises the full 2560-long-edge preview in ~10s wall
+ * (measured same session) — comfortably usable for a non-realtime node, and
+ * 77 partition boundaries mean CoreML's ceiling here was low anyway. Revisit
+ * via the env opt-in (try MLProgram format / newer ORT) before ever making
+ * an accelerated EP the default again.
+ *
+ * When the opt-in IS set, CoreML is attempted first with CPU as init-failure
+ * fallback — two SEPARATE session-creation calls (not one array letting
  * ORT silently fall back per-op) specifically so `ep` below is an honest,
  * observable answer to "which EP actually initialized" — see
  * DenoiseRunResult.ep's doc comment (reproducibility-stamp material, never
@@ -59,15 +72,19 @@ interface SessionHandle {
 const sessionCache = new Map<string, Promise<SessionHandle>>();
 
 async function createSession(modelPath: string): Promise<SessionHandle> {
-  try {
-    const session = await ort.InferenceSession.create(modelPath, { executionProviders: ['coreml'] });
-    return { session, ep: 'coreml' };
-  } catch {
-    // CoreML unavailable/unsupported on this platform (or this ORT build) —
-    // CPU EP always works, everywhere onnxruntime-node ships a binding.
-    const session = await ort.InferenceSession.create(modelPath, { executionProviders: ['cpu'] });
-    return { session, ep: 'cpu' };
+  // CoreML crashes the main process on the real model — see this file's EP
+  // SELECTION doc comment. CPU is the only default until that's understood.
+  if (process.env['SILVERBOX_DENOISE_EP'] === 'coreml') {
+    try {
+      const session = await ort.InferenceSession.create(modelPath, { executionProviders: ['coreml'] });
+      return { session, ep: 'coreml' };
+    } catch {
+      // CoreML unavailable/unsupported on this platform (or this ORT build) —
+      // CPU EP always works, everywhere onnxruntime-node ships a binding.
+    }
   }
+  const session = await ort.InferenceSession.create(modelPath, { executionProviders: ['cpu'] });
+  return { session, ep: 'cpu' };
 }
 
 function getSession(modelPath: string): Promise<SessionHandle> {
