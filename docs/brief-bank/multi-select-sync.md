@@ -42,12 +42,19 @@ checkbox mechanism this feature REUSES), docs/sidecar-spec.md.
   code), write the look back (photo/fingerprint fields preserved per
   sidecar-spec). Targets are NOT opened; the canvas photo re-renders
   only if it was itself a sync target (it isn't — it's the source).
-- **Undo**: NOT undoable in v1. The confirm dialog says exactly what
-  will happen ("Write <checked families> from DSC001.ARW to N other
-  looks — this cannot be undone from the app"). Rationale: our history
-  is per-open-document; cross-look batch undo is a real feature, not a
-  checkbox. The git-native answer (user diffs/reverts look files) is
-  the documented mitigation. Revisit only if hand-testing shows pain.
+- **Undo (user feedback 2026-07-17 — "感覚的にはundoできてないとおかしい")**:
+  NOT ⌘Z (per-open-document in-memory history can't span N on-disk
+  looks without a semantic collision: what would ⌘Z right after a sync
+  mean?), but the completion notice carries an **Undo button**: the
+  sync captures each target look's pre-write file content in memory
+  (session-scoped journal, one entry — a newer sync replaces it) and
+  the button restores them wholesale. Per-target conflict guard: if a
+  target's look changed on disk since the sync wrote it (compare
+  against what the sync wrote), that target is SKIPPED with a counted
+  warning, never clobbered. The journal invalidates on project switch
+  and session end; the confirm dialog wording becomes "Write <families>
+  from X to N looks (undo available until your next change)". Full
+  ⌘Z-integrated cross-look history stays explicitly deferred.
 - **Rating/flag keys act on the whole selection** when 2+ selected
   (1-5, 0, and the reject/pick keys once that feature lands): write
   each selected look's wrapper field directly. This IS cheap and ships
