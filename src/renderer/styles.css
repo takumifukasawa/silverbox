@@ -2109,6 +2109,33 @@ button:disabled {
   color: #ff7a76;
 }
 
+/* Auto-layout toggle (presentation-form prototype): same floating overlay
+   cluster idiom as .canvas-controls, bottom-right so it never contests the
+   full-width banners above (.node-editor-banner). */
+.node-editor-controls {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  z-index: 5;
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  background: rgba(30, 30, 30, 0.85);
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 4px 8px;
+}
+
+.node-editor-controls button {
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.node-editor-controls button.active {
+  background: #4a6b9a;
+  border-color: #6a9fe8;
+}
+
 /* Image node (composite/mask-by-another-file feature): Inspector's
    graphBroken-style missing-file notice — same palette as node-editor-banner. */
 .inspector-notice {
