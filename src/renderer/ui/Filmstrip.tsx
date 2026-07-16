@@ -109,7 +109,19 @@ function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEn
       title={entry.name}
       onClick={() => void openImageByPath(entry.path, { keepFolderContext: true })}
     >
-      {url && <img src={url} alt="" className="filmstrip-thumb" data-testid="filmstrip-thumb" />}
+      {url && (
+        // Rejected cells dim the THUMBNAIL only (reject-flag pack,
+        // docs/brief-bank/reject-flag.md — "≈45% opacity on the thumbnail,
+        // not the border"): the cell's own hover/current border rings stay
+        // at full opacity, so a rejected cell is still legible as a real
+        // clickable cell, just visually de-emphasized.
+        <img
+          src={url}
+          alt=""
+          className={`filmstrip-thumb${entry.flag === 'reject' ? ' filmstrip-thumb--rejected' : ''}`}
+          data-testid="filmstrip-thumb"
+        />
+      )}
       {entry.hasLook && (
         <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved look" />
       )}
@@ -124,6 +136,20 @@ function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEn
           title={`${entry.rating} star${entry.rating === 1 ? '' : 's'}`}
         >
           {'★'.repeat(entry.rating)}
+        </span>
+      )}
+      {entry.flag && (
+        // Pick/reject glyph (reject-flag pack) — same "read cheaply off the
+        // wrapper, don't re-parse here" pattern as the rating span above.
+        // Bottom-right so it never collides with the edited-dot (top-right)
+        // or the rating stars (bottom-left).
+        <span
+          className={`filmstrip-flag filmstrip-flag--${entry.flag}`}
+          data-testid="filmstrip-flag"
+          data-flag={entry.flag}
+          title={entry.flag === 'pick' ? 'Pick' : 'Reject'}
+        >
+          {entry.flag === 'pick' ? '⚑' : '⨯'}
         </span>
       )}
     </button>
@@ -158,6 +184,33 @@ function RatingFilter({ value, onChange }: { value: number; onChange: (rating: n
   );
 }
 
+/** Session-only flag filter values (reject-flag pack) — the second segment alongside the ★n+ filter, composed with it by AND. */
+type FlagFilterValue = 'all' | 'hideRejected' | 'picksOnly';
+
+/**
+ * Pick/reject view-only filter (reject-flag pack, docs/brief-bank/reject-
+ * flag.md): "All" / "Hide rejected" / "Picks only" — same purely client-side,
+ * never-persisted, `key={dir}`-resets-it-to-"All" shape as RatingFilter
+ * above (this is deliberately a SEPARATE control, not folded into the same
+ * `<select>`, since the two filters compose by AND rather than being
+ * mutually exclusive options of one axis).
+ */
+function FlagFilter({ value, onChange }: { value: FlagFilterValue; onChange: (value: FlagFilterValue) => void }) {
+  return (
+    <label className="filmstrip-flag-filter" title="Show only picked/non-rejected images (view only — not saved)">
+      <select
+        data-testid="filmstrip-flag-filter"
+        value={value}
+        onChange={(ev) => onChange(ev.target.value as FlagFilterValue)}
+      >
+        <option value="all">All</option>
+        <option value="hideRejected">Hide rejected</option>
+        <option value="picksOnly">Picks only</option>
+      </select>
+    </label>
+  );
+}
+
 /**
  * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
  * catalog): a horizontal, lazily-thumbnailed strip below the canvas,
@@ -180,6 +233,10 @@ export function Filmstrip() {
   // time this component remounts (a fresh folder — see the doc comment
   // above on `key={dir}`), never persisted.
   const [minRating, setMinRating] = useState(0);
+  // Pick/reject filter (reject-flag pack): same reset-on-remount, session-
+  // only state, composed with the ★n+ filter above by AND (a photo must
+  // satisfy BOTH to stay visible).
+  const [flagFilter, setFlagFilter] = useState<FlagFilterValue>('all');
 
   // Folder-switch cleanup: this instance is remounted (key={dir} at the
   // mount site — see App.tsx) whenever the folder changes, so this cleanup
@@ -194,14 +251,21 @@ export function Filmstrip() {
   // ★n+ filter below must not renumber it.
   const indexedEntries = useMemo(() => folderEntries.map((entry, playlistIndex) => ({ entry, playlistIndex })), [folderEntries]);
   const visibleEntries = useMemo(
-    () => (minRating === 0 ? indexedEntries : indexedEntries.filter(({ entry }) => entry.rating >= minRating)),
-    [indexedEntries, minRating]
+    () =>
+      indexedEntries.filter(({ entry }) => {
+        if (minRating > 0 && entry.rating < minRating) return false;
+        if (flagFilter === 'hideRejected' && entry.flag === 'reject') return false;
+        if (flagFilter === 'picksOnly' && entry.flag !== 'pick') return false;
+        return true;
+      }),
+    [indexedEntries, minRating, flagFilter]
   );
 
   return (
     <div className="filmstrip-wrap" data-testid="filmstrip-wrap">
       <div className="filmstrip-toolbar">
         <RatingFilter value={minRating} onChange={setMinRating} />
+        <FlagFilter value={flagFilter} onChange={setFlagFilter} />
       </div>
       <div className="filmstrip" data-testid="filmstrip">
         {visibleEntries.map(({ entry, playlistIndex }) => (

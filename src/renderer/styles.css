@@ -394,12 +394,14 @@ button:disabled {
   flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;
+  gap: 6px;
   padding: 2px 6px;
   background: #1a1a1a;
   border-top: 1px solid #111;
 }
 
-.filmstrip-rating-filter select {
+.filmstrip-rating-filter select,
+.filmstrip-flag-filter select {
   background: #2a2a2a;
   color: #d4d4d4;
   border: 1px solid #444;
@@ -493,6 +495,14 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Rejected cells dim the THUMBNAIL only (reject-flag pack, docs/brief-bank/
+   reject-flag.md), never the cell's own border — its hover/current rings
+   below stay at full opacity so a rejected cell still reads as a normal
+   clickable cell, just visually de-emphasized. */
+.filmstrip-thumb--rejected {
+  opacity: 0.45;
+}
+
 .filmstrip-edited-dot {
   position: absolute;
   top: 4px;
@@ -516,6 +526,25 @@ button:disabled {
   letter-spacing: -1px;
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
   pointer-events: none;
+}
+
+/* Pick/reject glyph (reject-flag pack) — bottom-right, so it never collides
+   with the edited-dot (top-right) or the rating stars (bottom-left). */
+.filmstrip-flag {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  font-size: 11px;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
+  pointer-events: none;
+}
+
+.filmstrip-flag--pick {
+  color: #6bcb77;
+}
+
+.filmstrip-flag--reject {
+  color: #e06c75;
 }
 
 /* Wraps the main pane and the compare pane (compare pack) side by side —

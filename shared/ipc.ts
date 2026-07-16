@@ -140,13 +140,26 @@ export interface PingResult {
 export type OpenImageDialogResult = { canceled: true } | { canceled: false; path: string; fileName: string };
 
 /**
+ * Pick/reject flag (reject-flag pack, docs/brief-bank/reject-flag.md):
+ * independent metadata axis from `rating` — a photo can be rejected AND
+ * still keep its stars (LR-consistent). Lives on the look wrapper's `flag`
+ * key, identity-omission convention (absent = unflagged, never a written
+ * `null`) — see graphDoc.ts's `SidecarDoc.flag`/`sanitizeFlag`. Shared here
+ * (rather than defined once in graphDoc.ts and imported back) because
+ * `FolderImageEntry.flag` below needs it and main/index.ts's cheap wrapper
+ * read can't import renderer engine code, the same reason
+ * `ExportMetadataPolicy`/`ExportColorSpace` already live in this file.
+ */
+export type PhotoFlag = 'pick' | 'reject';
+
+/**
  * One entry in the filmstrip (ROADMAP "Folder filmstrip" — nothing here is
  * written anywhere, it's recomputed every time the strip refreshes).
  * Post-project-storage-migration (stage 1), the strip renders the ACTIVE
  * PROJECT's playlist, not a raw directory listing: `main/index.ts`'s
  * `listImages` handler still enumerates a folder's images (used to discover
  * what to ADD to the playlist — see appStore.ts's openFolder), but
- * `hasLook`/`rating`/`missing` below come from the project's own
+ * `hasLook`/`rating`/`flag`/`missing` below come from the project's own
  * `projectPhotosStatus` handler instead (a photo's look lives in
  * `<projectDir>/looks/`, never next to the photo — see docs/brief-bank/
  * project-storage.md). The renderer never polls the filesystem itself.
@@ -163,11 +176,19 @@ export interface FolderImageEntry {
   /**
    * Star rating 0..5 (ratings pack), read cheaply off the look's wrapper
    * (never the full GraphDoc schema, and never throws on a malformed look
-   * file; see extractSidecarRating in src/main/index.ts). 0 for both "no
+   * file; see extractWrapperMeta in src/main/index.ts). 0 for both "no
    * look yet" and "look has no/invalid rating" — the filmstrip cell and the
    * ★n+ filter treat those identically (unrated).
    */
   rating: number;
+  /**
+   * Pick/reject flag (reject-flag pack), read cheaply off the look's
+   * wrapper the same way `rating` is (never the full GraphDoc schema, never
+   * throws on a malformed look file — see `extractWrapperMeta` in
+   * src/main/index.ts). `null` for both "no look yet" and "look has no/
+   * invalid flag" — same "absent == unflagged" fallback `rating`'s `0` uses.
+   */
+  flag: PhotoFlag | null;
   /**
    * This playlist entry's photo path did not resolve to a readable file
    * (moved/deleted since it was added) — shown as a placeholder cell, never
@@ -233,9 +254,9 @@ export interface SilverboxApi {
    * playlist with each `path` ALREADY RESOLVED to absolute (see
    * engine/graph/projectDoc.ts's resolveProjectPath) — main stays
    * project-path-agnostic, just stats each resolved path (existence →
-   * `missing`) and reads `<dir>/looks/<look>` cheaply for `hasLook`/`rating`
-   * (extractSidecarRating — never the full GraphDoc schema, never throws on
-   * a malformed look file).
+   * `missing`) and reads `<dir>/looks/<look>` cheaply for `hasLook`/`rating`/
+   * `flag` (extractWrapperMeta — never the full GraphDoc schema, never
+   * throws on a malformed look file).
    */
   projectPhotosStatus(dir: string, photos: { path: string; look: string }[]): Promise<FolderImageEntry[]>;
   /**
@@ -471,11 +492,24 @@ export interface CliRenderJob {
    * absent or < n, reported via cliProgress as `{input,status:"skipped-
    * rating"}` rather than rendered — read cheaply (readSidecar + a bare
    * JSON.parse of the wrapper's `rating` key, see appStore.ts's
-   * readSidecarRatingCheap) BEFORE the expensive decode/render, so a
+   * readSidecarWrapperMetaCheap) BEFORE the expensive decode/render, so a
    * `--min-rating` batch over a folder full of unrated images never pays for
    * decoding any of them. null = no filtering (every image renders).
    */
   minRating: number | null;
+  /**
+   * `--skip-rejected` (reject-flag pack): skip any input whose sidecar/look
+   * is flagged `reject`, reported via cliProgress as `{input,status:
+   * "skipped-rejected"}` — read the same cheap wrapper way `minRating` reads
+   * `rating` (see appStore.ts's readSidecarWrapperMetaCheap), BEFORE the
+   * expensive decode/render. Unlike `minRating` this ALSO applies to
+   * `--check` (see CliCheckJob.skipRejected) — a batch job over someone
+   * else's rejects shouldn't render OR golden-check them either. false = no
+   * filtering (today's behavior, unchanged — a user flagging photos in the
+   * GUI must never silently change an existing script's output without this
+   * explicit opt-in).
+   */
+  skipRejected: boolean;
   /**
    * `--allow-external` (external-tool hook node, task #41): a doc's
    * `external` nodes are non-realtime, opaque subprocess invocations — the
@@ -491,10 +525,10 @@ export interface CliRenderJob {
 }
 
 /**
- * One rendered file's result, one skipped-by-rating input (`--min-rating`,
- * never counted as a failure — see main/index.ts's runCliMode), or one
- * image's failure — streamed via cliProgress, one per line under `--json`
- * (NDJSON).
+ * One rendered file's result, one skipped-by-rating (`--min-rating`) or
+ * skipped-rejected (`--skip-rejected`) input — neither ever counted as a
+ * failure, see main/index.ts's runCliMode — or one image's failure —
+ * streamed via cliProgress, one per line under `--json` (NDJSON).
  */
 export type CliRenderResult =
   | {
@@ -507,7 +541,7 @@ export type CliRenderResult =
       /** Non-fatal notes for this file (currently only "external node bypassed — pass `--allow-external`"). Never affects the exit code. */
       warnings?: string[];
     }
-  | { input: string; status: 'skipped-rating' }
+  | { input: string; status: 'skipped-rating' | 'skipped-rejected' }
   | { input: string; error: string };
 
 /**
@@ -544,6 +578,14 @@ export interface CliCheckJob {
   update: boolean;
   /** `--threshold`: max mean ΔE (CIE76) to still call it a pass; see CliCheckOutcome. */
   threshold: number;
+  /**
+   * `--skip-rejected` (reject-flag pack): unlike `--min-rating` (render-only,
+   * rejected outright with `--check`), this ALSO applies here — see
+   * CliRenderJob.skipRejected's doc comment for why. Reported as
+   * `{input,status:"skipped-rejected"}`, same never-a-failure bucket as
+   * `no-golden`/`dims-changed` is NOT in.
+   */
+  skipRejected: boolean;
 }
 
 /**
@@ -591,7 +633,15 @@ export type CliCheckStatus =
   /** The current render's dimensions differ from the stored golden's (the image's aspect ratio changed — a crop
    *  edit since the golden was made) — reported as a FAILURE rather than resampled to compare, because a changed
    *  aspect ratio IS look drift by definition. */
-  | 'dims-changed';
+  | 'dims-changed'
+  /**
+   * `--skip-rejected` (reject-flag pack, CliCheckJob.skipRejected): this
+   * input's sidecar/look is flagged `reject` — never opened/rendered/golden-
+   * compared at all, and (unlike `no-golden`/`dims-changed` above) never a
+   * FAILURE — same never-a-failure bucket `skipped-rating` already has for
+   * `--render` (see main/cliArgs.ts's formatCliProgress).
+   */
+  | 'skipped-rejected';
 
 /** One `--check` image's outcome: a real ΔE comparison, or a status that short-circuits it. */
 export type CliCheckOutcome =

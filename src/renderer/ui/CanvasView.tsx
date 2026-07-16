@@ -77,7 +77,15 @@ declare global {
       /** Folder filmstrip (ROADMAP "nice to have") state: the open folder (if any) + its sorted listing + which path is current. */
       folderState(): {
         dir: string | null;
-        entries: { name: string; path: string; hasLook: boolean; mtimeMs: number; rating: number; missing: boolean }[];
+        entries: {
+          name: string;
+          path: string;
+          hasLook: boolean;
+          mtimeMs: number;
+          rating: number;
+          flag: 'pick' | 'reject' | null;
+          missing: boolean;
+        }[];
         currentPath: string | null;
       };
       /**
@@ -130,8 +138,21 @@ declare global {
       cpuReferenceMean(): { r: number; g: number; b: number } | null;
       graphState(): GraphDoc;
       graphDirty(): boolean;
-      /** `rating` is the ratings pack's star rating (0..5) — see appStore.ts's sidecarRating. */
-      sidecarState(): { notice: string | null; unreadable: boolean; rating: number };
+      /**
+       * `rating` is the ratings pack's star rating (0..5) — see
+       * appStore.ts's sidecarRating. `flag` is the reject-flag pack's
+       * pick/reject flag — see appStore.ts's sidecarFlag.
+       */
+      sidecarState(): { notice: string | null; unreadable: boolean; rating: number; flag: 'pick' | 'reject' | null };
+      /**
+       * Verify-only convenience: drives the SAME store action App.tsx's p/x/u
+       * keys call (reject-flag pack), same argument order — an explicit look
+       * path, not "the current photo" (see appStore.ts's setFlag doc
+       * comment). For the currently open canvas photo, pass
+       * `projectState().currentLookPath`; this is also how a script proves
+       * the "any playlist entry" seam multi-select will use later.
+       */
+      setFlag(lookPath: string, flag: 'pick' | 'reject' | null): Promise<void>;
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
       /** Sidecar visual diff dialog state (git-native completion brief §1) — see appStore.ts's sidecarDiffDialog. */
@@ -1078,6 +1099,7 @@ export function CanvasView() {
             hasLook: e.hasLook,
             mtimeMs: e.mtimeMs,
             rating: e.rating,
+            flag: e.flag,
             missing: e.missing,
           })),
           currentPath: s.imagePath,
@@ -1205,7 +1227,10 @@ export function CanvasView() {
       },
       sidecarState() {
         const s = useAppStore.getState();
-        return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable, rating: s.sidecarRating };
+        return { notice: s.sidecarNotice, unreadable: s.sidecarUnreadable, rating: s.sidecarRating, flag: s.sidecarFlag };
+      },
+      setFlag(lookPath, flag) {
+        return useAppStore.getState().setFlag(lookPath, flag);
       },
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {

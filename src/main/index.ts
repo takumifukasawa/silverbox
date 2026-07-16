@@ -23,6 +23,7 @@ import {
   type DenoiseRunResult,
   type FolderImageEntry,
   type OpenImageDialogResult,
+  type PhotoFlag,
   type PingResult,
   type PresetSummary,
   type Settings,
@@ -56,24 +57,29 @@ const isCliRenderMode = RENDER_FLAG_INDEX !== -1;
 const cliArgv = isCliRenderMode ? process.argv.slice(RENDER_FLAG_INDEX + 1) : [];
 
 /**
- * Best-effort star-rating extraction from a sidecar's raw JSON text (ratings
- * pack) — never throws: malformed JSON, a missing `rating` key, or an
- * out-of-range/non-numeric value all sanitize quietly to 0 (unrated). This
- * is deliberately NOT the renderer's full parseGraphDoc/graphDoc.ts (that
- * module pulls in the whole engine graph — ops, Develop, custom shaders —
- * and throws on anything its own schema migration doesn't understand);
- * listImages needs exactly one wrapper-level number, cheaply, for every file
- * in a folder, so it stays a tiny standalone JSON.parse here in main instead
- * of importing renderer code into the main process.
+ * Best-effort star-rating + pick/reject-flag extraction from a sidecar's raw
+ * JSON text (ratings pack, generalized by the reject-flag pack,
+ * docs/brief-bank/reject-flag.md) — never throws: malformed JSON, a missing
+ * `rating`/`flag` key, or an out-of-range/invalid value all sanitize quietly
+ * to 0/`null` (unrated/unflagged). This is deliberately NOT the renderer's
+ * full parseGraphDoc/graphDoc.ts (that module pulls in the whole engine
+ * graph — ops, Develop, custom shaders — and throws on anything its own
+ * schema migration doesn't understand); projectPhotosStatus needs exactly
+ * these two wrapper-level values, cheaply, for every photo on the playlist,
+ * so it stays a tiny standalone JSON.parse here in main instead of importing
+ * renderer code into the main process. (Formerly `extractSidecarRating`,
+ * rating-only — generalized in place rather than duplicated, since every
+ * caller already reads both fields off the same parsed wrapper object.)
  */
-function extractSidecarRating(raw: string): number {
+function extractWrapperMeta(raw: string): { rating: number; flag: PhotoFlag | null } {
   try {
-    const wrapper = JSON.parse(raw) as { rating?: unknown };
+    const wrapper = JSON.parse(raw) as { rating?: unknown; flag?: unknown };
     const r = wrapper.rating;
-    if (typeof r !== 'number' || !Number.isFinite(r)) return 0;
-    return Math.min(5, Math.max(0, Math.round(r)));
+    const rating = typeof r === 'number' && Number.isFinite(r) ? Math.min(5, Math.max(0, Math.round(r))) : 0;
+    const flag = wrapper.flag === 'pick' || wrapper.flag === 'reject' ? wrapper.flag : null;
+    return { rating, flag };
   } catch {
-    return 0;
+    return { rating: 0, flag: null };
   }
 }
 
@@ -301,7 +307,7 @@ function registerIpc(): void {
       if (!IMAGE_EXTENSIONS.includes(ext)) continue;
       const path = join(dir, dirent.name);
       const st = await stat(path);
-      entries.push({ name: dirent.name, path, hasLook: false, mtimeMs: st.mtimeMs, rating: 0, missing: false });
+      entries.push({ name: dirent.name, path, hasLook: false, mtimeMs: st.mtimeMs, rating: 0, flag: null, missing: false });
     }
     // Filename order, not mtime: hardlinked test fixtures (the verify suite's
     // own isolation trick — see run-verify.mjs) share one inode and so an
@@ -409,15 +415,17 @@ function registerIpc(): void {
         }
         let hasLook = false;
         let rating = 0;
+        let flag: PhotoFlag | null = null;
         try {
           const text = await readFile(join(dir, 'looks', p.look), 'utf8');
           hasLook = true;
-          rating = extractSidecarRating(text);
+          ({ rating, flag } = extractWrapperMeta(text));
         } catch {
-          // no look yet, or unreadable — same "not edited, not rated"
-          // fallback the pre-migration listImages handler used to compute.
+          // no look yet, or unreadable — same "not edited, not rated/
+          // flagged" fallback the pre-migration listImages handler used to
+          // compute.
         }
-        out.push({ name: basename(p.path), path: p.path, hasLook, mtimeMs, rating, missing });
+        out.push({ name: basename(p.path), path: p.path, hasLook, mtimeMs, rating, flag, missing });
       }
       return out;
     }
@@ -771,10 +779,19 @@ async function runCliMode(): Promise<void> {
     else if ('lines' in result) {
       /* never a failure */
     }
-    // '--min-rating' skips are a deliberate no-op, not a failure (see
-    // CliRenderJob.minRating's doc comment) — every other 'status' value
-    // (--check's no-golden/dims-changed) IS a failure unless --update.
-    else if ('status' in result && result.status !== 'updated' && result.status !== 'skipped-rating') hadFailure = true;
+    // '--min-rating'/'--skip-rejected' skips are a deliberate no-op, not a
+    // failure (see CliRenderJob.minRating/.skipRejected's doc comments) —
+    // 'skipped-rejected' is shared by CliRenderResult AND CliCheckStatus
+    // (--skip-rejected applies to --check too, unlike --min-rating) — every
+    // other 'status' value (--check's no-golden/dims-changed) IS a failure
+    // unless --update.
+    else if (
+      'status' in result &&
+      result.status !== 'updated' &&
+      result.status !== 'skipped-rating' &&
+      result.status !== 'skipped-rejected'
+    )
+      hadFailure = true;
     else if ('pass' in result && !result.pass) hadFailure = true;
     const { stderr, line } = formatCliProgress(result, parsed.json);
     (stderr ? process.stderr : process.stdout).write(line + '\n');

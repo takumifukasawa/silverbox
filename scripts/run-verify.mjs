@@ -106,6 +106,7 @@ const ALL_SCRIPTS = [
   { name: 'compare', file: 'verify-compare.mjs' },
   { name: 'nodepreview', file: 'verify-nodepreview.mjs' },
   { name: 'ratings', file: 'verify-ratings.mjs' },
+  { name: 'flags', file: 'verify-flags.mjs' },
   { name: 'imagenode', file: 'verify-imagenode.mjs' },
   { name: 'external', file: 'verify-external.mjs' },
   { name: 'denoise', file: 'verify-denoise.mjs' },

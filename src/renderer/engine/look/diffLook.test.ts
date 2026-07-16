@@ -18,9 +18,9 @@ import { createDefaultCustomShaderParams } from '../graph/customShaderNode';
 import { BLEND_KIND, CUSTOM_KIND } from '../graph/ops';
 import { curveEvaluator } from '../color/toneCurve';
 
-function doc(nodes: GraphNode[], edges: GraphEdge[] = [], rating = 0): SidecarDoc {
+function doc(nodes: GraphNode[], edges: GraphEdge[] = [], rating = 0, flag?: SidecarDoc['flag']): SidecarDoc {
   const graph: GraphDoc = { version: 1, nodes, edges };
-  return { graph, rating };
+  return { graph, rating, ...(flag ? { flag } : {}) };
 }
 
 function devNode(id: string, develop: Partial<DevelopParams> = {}, extra: Partial<GraphNode> = {}): GraphNode {
@@ -65,6 +65,17 @@ describe('diffLook', () => {
     const nodes = chain(devNode('dev'));
     expect(diffLook(doc(nodes, chainEdges, 0), doc(nodes, chainEdges, 5))).toContain('rating: unrated → 5');
     expect(diffLook(doc(nodes, chainEdges, 3), doc(nodes, chainEdges, 0))).toContain('rating: 3 → unrated');
+  });
+
+  it('flag change (reject-flag pack): unflagged/pick/reject, independent of rating', () => {
+    const nodes = chain(devNode('dev'));
+    expect(diffLook(doc(nodes, chainEdges, 0), doc(nodes, chainEdges, 0, 'pick'))).toContain('flag: none → pick');
+    expect(diffLook(doc(nodes, chainEdges, 0, 'pick'), doc(nodes, chainEdges, 0, 'reject'))).toContain('flag: pick → reject');
+    expect(diffLook(doc(nodes, chainEdges, 0, 'reject'), doc(nodes, chainEdges, 0))).toContain('flag: reject → none');
+    // rating changing alongside an unchanged flag reports only the rating line
+    const lines = diffLook(doc(nodes, chainEdges, 3, 'pick'), doc(nodes, chainEdges, 5, 'pick'));
+    expect(lines).toContain('rating: 3 → 5');
+    expect(lines.some((l) => l.startsWith('flag:'))).toBe(false);
   });
 
   it('basic.ev change matches the brief\'s own example format exactly', () => {

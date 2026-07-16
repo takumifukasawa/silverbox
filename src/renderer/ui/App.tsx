@@ -130,6 +130,27 @@ export function App() {
         ev.preventDefault();
         useAppStore.getState().setRating(Number(ev.key));
       }
+      if (!cmd && !ev.altKey && !ev.shiftKey && (ev.key === 'p' || ev.key === 'x' || ev.key === 'u')) {
+        // Pick/reject/unflag (reject-flag pack, docs/brief-bank/reject-
+        // flag.md) — LR muscle memory: p=pick, x=reject, u=unflag. Audited
+        // against the round-8-13 keyboard map before binding (conductor-
+        // playbook.md's shortcut notes + this file's/CanvasView.tsx's own key
+        // handlers) — none of p/x/u collided with anything ('m'=bypass,
+        // 'y'=compare, 'c'=crop, ⇧⌘R=reset, '['/']'=spot radius, digits
+        // 0-5=rating). Acts on the CANVAS photo ONLY for now — whole-
+        // selection fan-out is deferred until multi-select itself exists
+        // (see the brief's scope note); setFlag itself already takes an
+        // explicit look path rather than reaching for "the current photo"
+        // internally, so multi-select can call it per-photo later without
+        // touching this action. Independent of rating (LR-consistent):
+        // never clears/is cleared by the 1-5/0 keys above.
+        if (isTextEntry(ev.target)) return;
+        const s = useAppStore.getState();
+        if (s.imageStatus !== 'ready' || !s.currentLookPath) return;
+        ev.preventDefault();
+        const flag = ev.key === 'p' ? 'pick' : ev.key === 'x' ? 'reject' : null;
+        void s.setFlag(s.currentLookPath, flag);
+      }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
         if (isTextEntry(ev.target)) return;

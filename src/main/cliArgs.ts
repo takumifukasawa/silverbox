@@ -57,6 +57,15 @@ export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg|look.
   --min-rating <0-5>    skip inputs whose sidecar rating is absent or below
                         n, reported as {input,status:"skipped-rating"} — a
                         skip never counts as a failure (exit code unaffected)
+  --skip-rejected       skip inputs whose sidecar/look is flagged reject
+                        (pick/reject flags, docs/brief-bank/reject-flag.md),
+                        reported as {input,status:"skipped-rejected"} — never
+                        a failure (exit code unaffected). Unlike --min-rating
+                        this is also valid with --check (a golden-check batch
+                        skips rejects too — see below). Without this flag, a
+                        photo flagged reject in the GUI renders/checks
+                        exactly as before: an existing script's output must
+                        never change just because someone flagged photos.
   --allow-external      opt-in to running a doc's 'external' hook nodes (task
                         #41) — a batch job over someone else's sidecars must
                         not silently execute arbitrary commands, so without
@@ -99,9 +108,11 @@ flags this as legacy so a --check run nudges you toward --project).
 
   --check               compare each image against its golden instead of
                         rendering to an output file. Options above other
-                        than --json are not valid with --check (a golden is
-                        always the image's own sidecar-or-default look, at
-                        the fixed 512px long edge — nothing else to choose).
+                        than --json/--skip-rejected are not valid with
+                        --check (a golden is always the image's own
+                        sidecar-or-default look, at the fixed 512px long
+                        edge — nothing else to choose; --skip-rejected is
+                        the one exception, see above).
   --update              (re)write the golden for every input instead of
                         comparing (requires --check)
   --threshold <deltaE>  max mean CIE76 ΔE to still call it a PASS (default
@@ -111,7 +122,9 @@ flags this as legacy so a --check run nudges you toward --project).
 A missing golden is a FAILURE unless --update (a check run never silently
 skips an unprotected photo). A dimension mismatch (the image's aspect ratio
 changed since the golden was made — a crop edit) is also a FAILURE, reported
-as {input,status:"dims-changed"} rather than resampled to compare.
+as {input,status:"dims-changed"} rather than resampled to compare. A
+rejected input (--skip-rejected) is neither — reported as
+{input,status:"skipped-rejected"}, never a failure.
 
 Exit codes (--check): 0 every image passed or was updated, 1 one or more
 failed/had no golden (without --update), 2 bad usage.
@@ -166,6 +179,8 @@ export interface CliParsedArgs {
   colorSpace: ExportColorSpace;
   /** --min-rating: only meaningful with mode 'render'; null = no filtering. */
   minRating: number | null;
+  /** --skip-rejected: meaningful with mode 'render' AND 'check' (unlike --min-rating) — see CliRenderJob.skipRejected's doc comment. */
+  skipRejected: boolean;
   json: boolean;
   help: boolean;
   /** --update: only meaningful with mode 'check'. */
@@ -209,6 +224,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     metadata: 'all',
     colorSpace: 'srgb',
     minRating: null,
+    skipRejected: false,
     json: false,
     help: false,
     update: false,
@@ -231,6 +247,9 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       case '--allow-external':
         opts.allowExternal = true;
+        break;
+      case '--skip-rejected':
+        opts.skipRejected = true;
         break;
       case '--project':
         opts.project = argv[++i] ?? null;
@@ -317,6 +336,8 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.metadata !== 'all') return { error: '--metadata is not valid with --check' };
     if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --check' };
     if (opts.minRating !== null) return { error: '--min-rating is not valid with --check' };
+    // --skip-rejected is deliberately NOT rejected here — unlike --min-rating
+    // it's valid with --check too (CliCheckJob.skipRejected's doc comment).
     if (opts.allowExternal) return { error: '--allow-external is not valid with --check' };
     if (opts.diffImage !== null) return { error: '--image is not valid with --check' };
   } else if (opts.mode === 'diff') {
@@ -334,6 +355,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.metadata !== 'all') return { error: '--metadata is not valid with --diff' };
     if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --diff' };
     if (opts.minRating !== null) return { error: '--min-rating is not valid with --diff' };
+    if (opts.skipRejected) return { error: '--skip-rejected is not valid with --diff' };
     if (opts.allowExternal) return { error: '--allow-external is not valid with --diff' };
     if (opts.update) return { error: '--update is not valid with --diff' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --diff' };
@@ -378,7 +400,14 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
   const resolveInput = (p: string): string => resolve(p.endsWith('.json') && projectDir !== null ? projectDir : cwd, p);
   const images = parsed.images.map(resolveInput);
   if (parsed.mode === 'check') {
-    const job: CliCheckJob = { mode: 'check', images, projectDir, update: parsed.update, threshold: parsed.threshold };
+    const job: CliCheckJob = {
+      mode: 'check',
+      images,
+      projectDir,
+      update: parsed.update,
+      threshold: parsed.threshold,
+      skipRejected: parsed.skipRejected,
+    };
     return job;
   }
   if (parsed.mode === 'diff') {
@@ -413,6 +442,7 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
     metadata: parsed.metadata,
     colorSpace: parsed.colorSpace,
     minRating: parsed.minRating,
+    skipRejected: parsed.skipRejected,
     allowExternal: parsed.allowExternal,
   };
   return job;
@@ -446,10 +476,14 @@ export function formatCliProgress(result: CliProgressResult, json: boolean): { s
     };
   }
   if ('status' in result) {
-    // --render's own status (--min-rating skip) is never a failure — a
-    // completely different bucket from --check's no-golden/dims-changed
-    // statuses below (which ARE failures unless --update just wrote them).
+    // --render's own statuses (--min-rating/--skip-rejected skips) are never
+    // failures — a completely different bucket from --check's no-golden/
+    // dims-changed statuses below (which ARE failures unless --update just
+    // wrote them). 'skipped-rejected' is shared by BOTH CliRenderResult and
+    // CliCheckStatus (--skip-rejected applies to --check too, unlike
+    // --min-rating) — same never-a-failure early return either way.
     if (result.status === 'skipped-rating') return { stderr: false, line: `${result.input}: SKIPPED (rating)` };
+    if (result.status === 'skipped-rejected') return { stderr: false, line: `${result.input}: SKIPPED (rejected)` };
     const isFailure = result.status !== 'updated';
     const label = result.status === 'updated' ? 'UPDATED' : result.status === 'no-golden' ? 'NO GOLDEN' : 'DIMS CHANGED';
     return { stderr: isFailure, line: `${result.input}: ${label}` };

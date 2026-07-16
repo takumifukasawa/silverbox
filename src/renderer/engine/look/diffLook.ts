@@ -1,8 +1,8 @@
 /**
  * Sidecar visual diff — "code review for looks" (git-native completion brief
  * §1). `diffLook` is the load-bearing pure function: walk two PARSED sidecars
- * (SidecarDoc — the graph plus its wrapper rating) and emit human-readable,
- * param-language diff lines. No DOM/Electron/GPU dependency, so it runs
+ * (SidecarDoc — the graph plus its wrapper rating/flag) and emit human-
+ * readable, param-language diff lines. No DOM/Electron/GPU dependency, so it runs
  * identically from the hot-reload notice's "Show diff" dialog (renderer),
  * the CLI's `--diff` (also the renderer process — see appStore.ts's
  * runCliDiff), and this file's own unit tests. The VISUAL half (rendering
@@ -92,6 +92,11 @@ function fmtBool(v: boolean): string {
 
 function fmtRating(r: number): string {
   return r === 0 ? 'unrated' : String(r);
+}
+
+/** `flag` reads as 'none' when absent — same "identity has a readable word" spirit as fmtRating's 'unrated'. */
+function fmtFlag(f: SidecarDoc['flag']): string {
+  return f ?? 'none';
 }
 
 function numPush(out: string[], label: string, a: number, b: number): void {
@@ -464,6 +469,7 @@ export function diffLook(a: SidecarDoc, b: SidecarDoc): string[] {
   const lines: string[] = [];
 
   if (a.rating !== b.rating) lines.push(`rating: ${fmtRating(a.rating)} → ${fmtRating(b.rating)}`);
+  if (a.flag !== b.flag) lines.push(`flag: ${fmtFlag(a.flag)} → ${fmtFlag(b.flag)}`);
 
   const aNodes = a.graph.nodes;
   const bNodes = b.graph.nodes;

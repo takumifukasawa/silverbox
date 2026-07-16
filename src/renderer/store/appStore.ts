@@ -18,6 +18,7 @@ import {
   parseGraphDoc,
   resolveExportSettings,
   sanitizeExportOverrides,
+  sanitizeFlag,
   sanitizeRating,
   serializeGraphDoc,
   type AddableKind,
@@ -86,6 +87,7 @@ import {
   type CliRenderJob,
   type CliRenderResult,
   type FolderImageEntry,
+  type PhotoFlag,
   type PresetSummary,
   type Settings,
 } from '../../../shared/ipc';
@@ -393,6 +395,32 @@ interface AppState {
    * like every other graph edit. No-op without an open image.
    */
   setRating(rating: number): void;
+  /**
+   * Pick/reject flag (reject-flag pack, docs/brief-bank/reject-flag.md):
+   * sidecar WRAPPER metadata about the PHOTO, same shape as sidecarRating
+   * just above — an INDEPENDENT axis (rejecting never clears the rating,
+   * and vice versa). `null` = unflagged (identity-omission, never a written
+   * `flag: null` — see graphDoc.ts's SidecarDoc.flag). Reset to `null` on
+   * every image open before a sidecar (if any) restores it, same as
+   * sidecarRating.
+   */
+  sidecarFlag: PhotoFlag | null;
+  /**
+   * Set ('pick'/'reject') or clear (null) a photo's flag — App.tsx's p/x/u
+   * key handler calls this for the CANVAS photo (multi-select flagging is
+   * deferred until multi-select itself exists — see the brief's scope
+   * note). Deliberately takes an explicit `lookPath`, not "the current
+   * photo" implicitly: when `lookPath` IS the open canvas photo
+   * (`currentLookPath`), this rides the same in-memory + autosave pipeline
+   * `setRating` uses (marks graphDirty, no history entry — flags are
+   * metadata, not an undoable look edit, same reasoning as rating);
+   * otherwise it reads/patches/writes that OTHER look file directly off
+   * disk (mirroring relinkPhoto's own read-patch-write shape), since that
+   * photo isn't necessarily open/decoded at all. This is the seam a future
+   * multi-select fan-out calls per selected playlist entry without any
+   * change to this action's signature.
+   */
+  setFlag(lookPath: string, flag: PhotoFlag | null): Promise<void>;
   /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
   sidecarUnknownFields: Record<string, unknown> | null;
   /**
@@ -1046,7 +1074,8 @@ async function buildImportedLookContent(
     parsed.unknown,
     parsed.rating,
     photo,
-    fingerprint
+    fingerprint,
+    parsed.flag
   );
 }
 
@@ -1636,6 +1665,7 @@ function applyExternalGraph(s: AppState, parsed: SidecarDoc, rawText: string): P
     selectedSpotIndex: null,
     sidecarCreatedAt: parsed.createdAt ?? null,
     sidecarRating: parsed.rating,
+    sidecarFlag: parsed.flag ?? null,
     sidecarUnknownFields: parsed.unknown ?? null,
     sidecarUnreadable: false,
     sidecarNotice: null,
@@ -2061,32 +2091,36 @@ export const useAppStore = create<AppState>((set, get) => {
   };
 
   /**
-   * `--min-rating`'s cheap sidecar read (ratings pack): a bare JSON.parse of
-   * just the wrapper's `rating` key, deliberately NOT the full parseGraphDoc
-   * (which validates/migrates the whole graph and can throw) — runCliRender
-   * calls this BEFORE openImageByPath's expensive decode, so a batch over a
-   * folder full of below-threshold images never pays for decoding any of
-   * them. No sidecar, unreadable file, or malformed/missing `rating` key all
-   * resolve to 0 (unrated), same fallback listImages' own cheap read uses
-   * (main/index.ts's extractSidecarRating). A `.json` INPUT (a look file —
-   * CLI tooling parity item 2) reads its OWN rating directly, since
-   * `<lookfile>.json` + SIDECAR_SUFFIX would never resolve to anything real.
+   * `--min-rating`/`--skip-rejected`'s cheap sidecar read (ratings pack;
+   * generalized by the reject-flag pack, docs/brief-bank/reject-flag.md,
+   * from the rating-only `readSidecarRatingCheap`): a bare JSON.parse of
+   * just the wrapper's `rating`/`flag` keys, deliberately NOT the full
+   * parseGraphDoc (which validates/migrates the whole graph and can throw)
+   * — runCliRender/runCliCheck call this BEFORE openImageByPath's expensive
+   * decode, so a batch over a folder full of below-threshold/rejected
+   * images never pays for decoding any of them. No sidecar, unreadable
+   * file, or malformed/missing keys all resolve to `{rating:0,flag:null}`
+   * (unrated/unflagged), same fallback listImages'/projectPhotosStatus' own
+   * cheap read uses (main/index.ts's extractWrapperMeta). A `.json` INPUT (a
+   * look file — CLI tooling parity item 2) reads its OWN wrapper directly,
+   * since `<lookfile>.json` + SIDECAR_SUFFIX would never resolve to
+   * anything real.
    */
-  const readSidecarRatingCheap = async (imagePath: string): Promise<number> => {
+  const readSidecarWrapperMetaCheap = async (imagePath: string): Promise<{ rating: number; flag: PhotoFlag | null }> => {
     let text: string | null;
     try {
       text = imagePath.endsWith('.json')
         ? new TextDecoder().decode(await window.silverbox.readFile(imagePath))
         : await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
     } catch {
-      return 0;
+      return { rating: 0, flag: null };
     }
-    if (text === null) return 0;
+    if (text === null) return { rating: 0, flag: null };
     try {
-      const wrapper = JSON.parse(text) as { rating?: unknown };
-      return sanitizeRating(wrapper.rating);
+      const wrapper = JSON.parse(text) as { rating?: unknown; flag?: unknown };
+      return { rating: sanitizeRating(wrapper.rating), flag: sanitizeFlag(wrapper.flag) ?? null };
     } catch {
-      return 0;
+      return { rating: 0, flag: null };
     }
   };
 
@@ -2234,6 +2268,7 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarUnreadable: false,
   sidecarCreatedAt: null,
   sidecarRating: 0,
+  sidecarFlag: null,
   sidecarUnknownFields: null,
   sidecarFingerprint: null,
   sidecarPhotoAtOpen: null,
@@ -2342,6 +2377,7 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarUnreadable = false;
       let sidecarCreatedAt: string | null = null;
       let sidecarRating = 0;
+      let sidecarFlag: PhotoFlag | null = null;
       let sidecarUnknownFields: Record<string, unknown> | null = null;
       // Project-storage migration stage 3: the just-parsed look's own
       // `fingerprint`/`photo` fields, seeding sidecarFingerprint/
@@ -2413,6 +2449,7 @@ export const useAppStore = create<AppState>((set, get) => {
             graph = parsed.graph;
             sidecarCreatedAt = parsed.createdAt ?? null;
             sidecarRating = parsed.rating;
+            sidecarFlag = parsed.flag ?? null;
             sidecarUnknownFields = parsed.unknown ?? null;
             sidecarFingerprint = parsed.fingerprint ?? null;
             sidecarPhotoAtOpen = parsed.photo ?? null;
@@ -2489,6 +2526,7 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarUnreadable,
         sidecarCreatedAt,
         sidecarRating,
+        sidecarFlag,
         sidecarUnknownFields,
         sidecarFingerprint,
         sidecarPhotoAtOpen,
@@ -3814,12 +3852,21 @@ export const useAppStore = create<AppState>((set, get) => {
     for (const input of job.images) {
       const startedAt = Date.now();
       try {
-        // --min-rating (ratings pack): a cheap sidecar read BEFORE the
-        // expensive decode/render below — an image with no rating (or a
-        // rating below the threshold) is reported as a skip, never rendered.
-        if (job.minRating !== null && (await readSidecarRatingCheap(input)) < job.minRating) {
-          onResult({ input, status: 'skipped-rating' });
-          continue;
+        // --min-rating / --skip-rejected (ratings pack / reject-flag pack):
+        // one cheap sidecar read BEFORE the expensive decode/render below —
+        // an image with no rating (or a rating below the threshold), or one
+        // flagged reject, is reported as a skip, never rendered. Read once,
+        // check both (only when at least one filter is actually active).
+        if (job.minRating !== null || job.skipRejected) {
+          const meta = await readSidecarWrapperMetaCheap(input);
+          if (job.minRating !== null && meta.rating < job.minRating) {
+            onResult({ input, status: 'skipped-rating' });
+            continue;
+          }
+          if (job.skipRejected && meta.flag === 'reject') {
+            onResult({ input, status: 'skipped-rejected' });
+            continue;
+          }
         }
 
         // Render directly from a look file (CLI tooling parity item 2): a
@@ -3951,6 +3998,15 @@ export const useAppStore = create<AppState>((set, get) => {
   async runCliCheck(job, onResult) {
     for (const input of job.images) {
       try {
+        // --skip-rejected (reject-flag pack): unlike --min-rating (rejected
+        // outright with --check, see parseCliArgs), this ALSO applies to
+        // golden checks — same cheap pre-decode read runCliRender uses,
+        // BEFORE opening/rendering/comparing anything.
+        if (job.skipRejected && (await readSidecarWrapperMetaCheap(input)).flag === 'reject') {
+          onResult({ input, status: 'skipped-rejected' });
+          continue;
+        }
+
         // No `skipSidecar`/preset here (unlike runCliRender) — a golden
         // always represents the image's own sidecar-or-default look, the
         // same defaults rule `--render` uses without `--preset`. `--project`
@@ -4137,6 +4193,60 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ sidecarRating: next, graphDirty: true });
   },
 
+  async setFlag(lookPath, flag) {
+    const next = sanitizeFlag(flag ?? undefined) ?? null;
+    // The CANVAS photo (today's only caller — App.tsx's p/x/u keys): update
+    // the live in-memory state and let the ordinary autosave/⌘S pipeline
+    // persist it, same "metadata, not an undoable look edit" contract
+    // setRating already has (no pushHistory) — see AppState.sidecarFlag's
+    // own doc comment for why this branches on the EXPLICIT `lookPath`
+    // argument matching `currentLookPath` rather than assuming "the current
+    // photo" implicitly.
+    if (lookPath === get().currentLookPath) {
+      if (next === get().sidecarFlag) return; // no-op, nothing to save
+      set({ sidecarFlag: next, graphDirty: true });
+      return;
+    }
+    // Any OTHER look file — the seam a future multi-select fan-out uses: a
+    // direct read-patch-write against ITS OWN file, independent of whatever
+    // graph happens to be in memory right now (mirrors relinkPhoto's own
+    // read-patch-write shape above), since that photo isn't necessarily
+    // open/decoded at all.
+    let existingText: string | null = null;
+    try {
+      existingText = await window.silverbox.readSidecar(lookPath);
+    } catch (err) {
+      console.warn(`setFlag: could not read ${lookPath}:`, err);
+      return;
+    }
+    if (existingText === null) {
+      // No look yet for this photo — write a fresh minimal one carrying
+      // just the flag (same shape presetDoc.ts's captureLook round-trip
+      // already produces for a document with no per-photo metadata yet).
+      const content = serializeGraphDoc(defaultGraphDoc(), null, null, undefined, 0, undefined, undefined, next ?? undefined);
+      await window.silverbox.writeSidecar(lookPath, content);
+      return;
+    }
+    let parsed: SidecarDoc;
+    try {
+      parsed = parseGraphDoc(existingText);
+    } catch (err) {
+      console.warn(`setFlag: ${lookPath} is unreadable by this build, leaving it untouched:`, err);
+      return;
+    }
+    const content = serializeGraphDoc(
+      parsed.graph,
+      parsed.source ?? null,
+      parsed.createdAt ?? null,
+      parsed.unknown,
+      parsed.rating,
+      parsed.photo,
+      parsed.fingerprint,
+      next ?? undefined
+    );
+    await window.silverbox.writeSidecar(lookPath, content);
+  },
+
   async saveGraph() {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
@@ -4148,6 +4258,7 @@ export const useAppStore = create<AppState>((set, get) => {
       graph,
       sidecarCreatedAt,
       sidecarRating,
+      sidecarFlag,
       sidecarUnreadable,
       sidecarUnknownFields,
       sidecarFingerprint,
@@ -4186,7 +4297,8 @@ export const useAppStore = create<AppState>((set, get) => {
       sidecarUnknownFields ?? undefined,
       sidecarRating,
       photo,
-      fingerprint
+      fingerprint,
+      sidecarFlag ?? undefined
     );
     await window.silverbox.writeSidecar(currentLookPath, content);
     // Record exactly what we just wrote (hot-reload's self-write-suppression
@@ -4340,7 +4452,8 @@ export const useAppStore = create<AppState>((set, get) => {
         existing.unknown,
         existing.rating,
         newRel,
-        newFingerprint
+        newFingerprint,
+        existing.flag
       );
       await window.silverbox.writeSidecar(lookPath, content);
     }
@@ -4491,7 +4604,7 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async showSidecarDiff() {
-    const { imagePath, image, graph, sidecarRating, currentLookPath } = get();
+    const { imagePath, image, graph, sidecarRating, sidecarFlag, currentLookPath } = get();
     if (!imagePath || !image || !currentLookPath) return;
     const result = await readAndParseSidecar(currentLookPath, image);
     // a slow read can resolve after a DIFFERENT image was opened meanwhile,
@@ -4503,7 +4616,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // from `lastSidecarText` — a dirty session's unsaved edits are exactly
     // what "Show diff" exists to let the user review BEFORE they get
     // clobbered by Reload, so the diff must reflect them.
-    const currentDoc: SidecarDoc = { graph, rating: sidecarRating };
+    const currentDoc: SidecarDoc = { graph, rating: sidecarRating, ...(sidecarFlag ? { flag: sidecarFlag } : {}) };
     const lines = diffLook(currentDoc, result.parsed);
     set({ sidecarDiffDialog: { lines, externalGraph: result.parsed.graph } });
   },
@@ -4645,14 +4758,20 @@ useAppStore.subscribe((state) => {
 // replaces `graph` (ratings pack: a rating is not a graph edit — see
 // AppState.sidecarRating's doc comment) — without this, a rating-only
 // change would mark graphDirty but never actually get autosaved.
+// `sidecarFlag` (reject-flag pack) rides the exact same by-value watch, same
+// reasoning: setFlag's in-memory branch (canvas photo) never replaces
+// `graph` either — a flag is metadata, not a graph edit.
 let lastAutosaveGraph: GraphDoc | null = null;
 let lastAutosaveRating: number | null = null;
+let lastAutosaveFlag: PhotoFlag | null = null;
 useAppStore.subscribe((state) => {
   const graphChanged = state.graph !== lastAutosaveGraph;
   const ratingChanged = state.sidecarRating !== lastAutosaveRating;
-  if (!graphChanged && !ratingChanged) return;
+  const flagChanged = state.sidecarFlag !== lastAutosaveFlag;
+  if (!graphChanged && !ratingChanged && !flagChanged) return;
   lastAutosaveGraph = state.graph;
   lastAutosaveRating = state.sidecarRating;
+  lastAutosaveFlag = state.sidecarFlag;
   if (!state.graphDirty || !state.settings.autosaveSidecar) return;
   if (!state.imagePath || !state.fileName || state.sidecarUnreadable) return;
   cancelAutosaveTimer();

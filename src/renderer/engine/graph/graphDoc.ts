@@ -24,7 +24,7 @@ import { defaultImageParams, IMAGE_KIND, imageBaseName, sanitizeImageParams, typ
 import { defaultExternalParams, EXTERNAL_KIND, isIdentityExternal, sanitizeExternalParams, type ExternalParams } from './externalNode';
 import { defaultDenoiseParams, DENOISE_KIND, isIdentityDenoise, sanitizeDenoiseParams, type DenoiseParams } from './denoiseNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
-import type { ExportColorSpace, ExportMetadataPolicy } from '../../../../shared/ipc';
+import type { ExportColorSpace, ExportMetadataPolicy, PhotoFlag } from '../../../../shared/ipc';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -346,6 +346,17 @@ export interface SidecarDoc {
    * with no fingerprint simply can't auto-verify a relink candidate.
    */
   fingerprint?: string;
+  /**
+   * Pick/reject flag (reject-flag pack, docs/brief-bank/reject-flag.md):
+   * metadata about the PHOTO, like `rating` — an independent axis (LR-
+   * consistent: rejecting a photo never clears its rating, and neither field
+   * ever touches develop history). Identity-omission convention, same as
+   * `photo`/`fingerprint` above — absent means unflagged, `serializeGraphDoc`
+   * never writes a literal `flag: null`. Sanitizer (`sanitizeFlag`) drops any
+   * value other than `'pick'`/`'reject'` quietly rather than rejecting the
+   * whole document — a malformed flag's safe fallback is just "unflagged".
+   */
+  flag?: PhotoFlag;
   /** Unrecognized wrapper-level keys (DESIGN §9 passthrough) — round-tripped verbatim by serializeGraphDoc. */
   unknown?: Record<string, unknown>;
 }
@@ -368,6 +379,18 @@ export const MAX_RATING = 5;
 export function sanitizeRating(raw: unknown): number {
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return 0;
   return Math.min(MAX_RATING, Math.max(0, Math.round(raw)));
+}
+
+/**
+ * Normalize an untrusted `flag` payload to `'pick' | 'reject' | undefined`;
+ * anything else (a stray string, a stale/foreign value, absent) sanitizes
+ * quietly to `undefined` (unflagged) — same lenient-coercion spirit as
+ * `sanitizeRating` above, never throws. Shared by `parseGraphDoc` and the
+ * headless CLI's cheap `--skip-rejected` sidecar read (appStore.ts's
+ * readSidecarWrapperMetaCheap).
+ */
+export function sanitizeFlag(raw: unknown): PhotoFlag | undefined {
+  return raw === 'pick' || raw === 'reject' ? raw : undefined;
 }
 
 // --- Geometry: non-destructive crop + straighten (input node only) ----------
@@ -623,7 +646,7 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
 }
 
 /** Wrapper-level keys `serializeGraphDoc`/`parseGraphDoc` know about; anything else round-trips verbatim (DESIGN §9). */
-const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'photo', 'fingerprint', 'graph']);
+const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'flag', 'photo', 'fingerprint', 'graph']);
 /** Node-level keys the schema knows about; anything else round-trips verbatim per node. */
 const KNOWN_NODE_KEYS = new Set([
   'id',
@@ -674,6 +697,12 @@ const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
  * cheap content hash (SidecarDoc.fingerprint's own doc comment has the
  * stability contract) — omitted when absent, same "no arg ⇒ no key" rule as
  * `photo`.
+ *
+ * `flag` (reject-flag pack) is the wrapper's own pick/reject flag — omitted
+ * entirely when absent (unflagged), same "identity ⇒ not emitted" rule
+ * `rating`'s 0 follows above; presetDoc.ts's captureLook round-trip calls
+ * this with no `flag` arg either, same reasoning (a preset is a look, not a
+ * per-photo flag).
  */
 export function serializeGraphDoc(
   doc: GraphDoc,
@@ -682,7 +711,8 @@ export function serializeGraphDoc(
   unknownWrapperFields?: Record<string, unknown>,
   rating = 0,
   photo?: string,
-  fingerprint?: string
+  fingerprint?: string,
+  flag?: PhotoFlag
 ): string {
   const now = new Date().toISOString();
   const wrapper = {
@@ -691,6 +721,7 @@ export function serializeGraphDoc(
     ...(source ? { source } : {}),
     createdAt: createdAt ?? now,
     ...(rating > 0 ? { rating: sanitizeRating(rating) } : {}),
+    ...(sanitizeFlag(flag) ? { flag: sanitizeFlag(flag) } : {}),
     ...(photo !== undefined ? { photo } : {}),
     ...(fingerprint !== undefined ? { fingerprint } : {}),
     updatedAt: now,
@@ -769,6 +800,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     source?: SidecarSource;
     createdAt?: unknown;
     rating?: unknown;
+    flag?: unknown;
     photo?: unknown;
     fingerprint?: unknown;
     graph?: { nodes?: unknown; edges?: unknown };
@@ -901,6 +933,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     ...(wrapper.source ? { source: wrapper.source } : {}),
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
     rating: sanitizeRating(wrapper.rating),
+    ...(sanitizeFlag(wrapper.flag) ? { flag: sanitizeFlag(wrapper.flag) } : {}),
     ...(typeof wrapper.photo === 'string' ? { photo: wrapper.photo } : {}),
     // Sanitizer convention (project-storage.md stage 3): any non-string
     // value is dropped silently, same as `photo` above — a malformed
