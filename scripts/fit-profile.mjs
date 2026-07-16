@@ -26,16 +26,35 @@
  *      resized. Pair only the CENTER crop (distortion/vignette are ~0 there,
  *      robust to any LR lens-correction framing difference) and reject grid
  *      tiles whose local NCC is below threshold (motion / demosaic edges).
- *   3. Splat each accepted pair's residual (lr − ours) into the 17³ lattice by
- *      trilinear weights on ours' cell, count-weighted.
- *   4. Regularize: node delta = conf · (Σw·residual / Σw), conf =
- *      Σw/(Σw+λ) → low-support nodes decay toward identity; then weighted
- *      diffusion so sparse interior inherits neighbours while the hull stays 0.
+ *   3. Splat PER SCENE, then aggregate with EQUAL WEIGHT PER SCENE (round-4
+ *      reweight — see profileFit.ts's ROUND 3/4 doc-comment record). Round 3
+ *      splatted every accepted PIXEL straight into one global trilinear
+ *      accumulator; the 11 green-heavy ref-green macro shots (100k-240k
+ *      accepted pixels each, vs a few thousand for the 3 original calibration
+ *      scenes) swamped the green cells with their own alignment/CA noise —
+ *      a NET held-out regression. fit-base-curve.mjs's per-scene equal
+ *      weighting (average one (x,y) per scene per quantile — pixel count
+ *      never enters) is the working precedent this mirrors for the 3D
+ *      lattice: each scene splats its OWN accepted pixels into its OWN
+ *      trilinear accumulator (after trimming that scene's own top
+ *      1-TRIM_KEEP_FRAC residual-magnitude outliers — a cheap single-pass
+ *      trimmed-mean substitute that doesn't need per-node pixel lists);
+ *      per cell, a scene's contribution is that scene's OWN weighted mean
+ *      there (so a cell's value no longer scales with how many pixels one
+ *      scene had, only whether it had ENOUGH — MIN_SCENE_CELL_WEIGHT — to
+ *      trust a mean); those per-scene cell means are then averaged ACROSS
+ *      scenes with equal weight (a scene with 240k accepted pixels counts
+ *      exactly as much as one with 3k).
+ *   4. Regularize: node delta = conf · mean_over_scenes(scene cell mean),
+ *      conf = nScenes/(nScenes+λ) where nScenes is the COUNT of scenes with
+ *      usable support at that node (not a pixel tally) → low-support nodes
+ *      decay toward identity; then weighted diffusion so sparse interior
+ *      inherits neighbours while the hull stays 0.
  *   5. Emit the lattice + a fit report: per-cell support, held-out ΔE2000 mean
  *      / p95 BEFORE (no transform) vs AFTER, and per-hue support sectors.
  *
  * Usage:
- *   npm run fit:profile                         # round-3 default: 11 ref-green + 3 calibration pairs
+ *   npm run fit:profile                         # round-4 default: 11 ref-green + 3 calibration pairs
  *   node scripts/fit-profile.mjs <arw> <lr.jpg> [<arw2> <lr2.jpg> ...]
  */
 import { execFileSync } from 'node:child_process';
@@ -57,7 +76,9 @@ const MAX_DIM = 1024; // long-edge cap for the paired buffers
 const CENTER_FRAC = 0.6; // inner box (of each axis) used for pairing
 const NCC_TILES = 12; // NxN tile grid over the center box for the NCC gate
 const NCC_MIN = 0.5; // reject tiles below this local NCC
-const SUPPORT_LAMBDA = 40; // conf = Σw / (Σw + λ)
+const TRIM_KEEP_FRAC = 0.9; // per-scene: keep the 90% smallest-residual-magnitude accepted pixels
+const MIN_SCENE_CELL_WEIGHT = 20; // per-scene trilinear weight-sum floor to trust that scene's cell mean
+const SUPPORT_LAMBDA_SCENES = 1.5; // conf = nScenes / (nScenes + λ) — scene-COUNT scale (≤14 scenes total)
 const DIFFUSION_ITERS = 24; // weighted Laplacian smoothing passes
 const HELDOUT_FRAC = 0.2; // fraction of accepted pairs reserved for ΔE
 
@@ -401,7 +422,8 @@ try {
     return page.evaluate((md) => window.__debug.developedForFit(md), MAX_DIM);
   };
 
-  for (const [arw, lrjpg] of pairs) {
+  for (let sceneIdx = 0; sceneIdx < pairs.length; sceneIdx++) {
+    const [arw, lrjpg] = pairs[sceneIdx];
     console.log(`\n=== pair: ${arw.split('/').pop()} ↔ ${lrjpg.split('/').pop()} ===`);
     const ours = await openDeveloped(arw, { zeroDetail: true });
     if (!ours) throw new Error(`developedForFit returned null (no CPU reference) for ${arw}`);
@@ -458,12 +480,12 @@ try {
             // hue sector from the ours pixel (for coverage reporting)
             const s = mul3(WORK_TO_SRGB, o);
             const hue = hueOf(clamp01(s[0]), clamp01(s[1]), clamp01(s[2]));
-            acceptedPairs.push({ ours: o, lr: l, hue });
+            acceptedPairs.push({ ours: o, lr: l, hue, sceneIdx });
             sceneAccepted++;
           }
       }
     }
-    perScene.push({ scene: arw.split('/').pop(), acceptedTiles, tiles: NCC_TILES * NCC_TILES, pairs: sceneAccepted });
+    perScene.push({ scene: arw.split('/').pop(), sceneIdx, acceptedTiles, tiles: NCC_TILES * NCC_TILES, pairs: sceneAccepted });
     console.log(`  NCC tiles accepted ${acceptedTiles}/${NCC_TILES * NCC_TILES}, pairs ${sceneAccepted}`);
   }
 } finally {
@@ -541,35 +563,74 @@ const nHold = Math.floor(acceptedPairs.length * HELDOUT_FRAC);
 const heldout = idx.slice(0, nHold).map((i) => acceptedPairs[i]);
 const train = idx.slice(nHold).map((i) => acceptedPairs[i]);
 
-// --- splat ------------------------------------------------------------------
-const num = new Float64Array(LATTICE_N ** 3 * 3);
-const den = new Float64Array(LATTICE_N ** 3);
-for (const { neutral, target } of train) {
-  const i0 = [0, 0, 0];
-  const f = [0, 0, 0];
-  for (let k = 0; k < 3; k++) {
-    const c = Math.min(1, Math.max(0, neutral[k])) * (LATTICE_N - 1);
-    i0[k] = Math.min(LATTICE_N - 2, Math.floor(c));
-    f[k] = c - i0[k];
+// --- splat: PER SCENE, then aggregated with EQUAL WEIGHT PER SCENE ----------
+// (see the file-header doc comment "Method" step 3 for the full rationale —
+// this is the round-4 reweight fixing round 3's pixel-weighted regression.)
+const nodesN = LATTICE_N ** 3;
+const nodes3 = nodesN * 3;
+const num = new Float64Array(nodes3);
+const den = new Float64Array(nodesN); // nScenes with usable support at this node (NOT a pixel tally)
+
+const sceneIds = [...new Set(train.map((p) => p.sceneIdx))];
+const sceneSplatReport = [];
+for (const sceneIdx of sceneIds) {
+  const scenePairs = train.filter((p) => p.sceneIdx === sceneIdx);
+  // per-scene trim: reject this scene's OWN largest-magnitude residuals
+  // (misalignment / chromatic-aberration fringe outliers) before splatting —
+  // a cheap trimmed-mean substitute needing only one extra pass, no per-node
+  // pixel lists.
+  const mags = scenePairs
+    .map(({ neutral, target }) => Math.hypot(target[0] - neutral[0], target[1] - neutral[1], target[2] - neutral[2]))
+    .sort((a, b) => a - b);
+  const cutoff = mags.length ? mags[Math.min(mags.length - 1, Math.floor(mags.length * TRIM_KEEP_FRAC))] : Infinity;
+
+  const numS = new Float64Array(nodes3);
+  const denS = new Float64Array(nodesN);
+  let trimmed = 0;
+  for (const { neutral, target } of scenePairs) {
+    const res = [target[0] - neutral[0], target[1] - neutral[1], target[2] - neutral[2]];
+    if (Math.hypot(res[0], res[1], res[2]) > cutoff) {
+      trimmed++;
+      continue;
+    }
+    const i0 = [0, 0, 0];
+    const f = [0, 0, 0];
+    for (let k = 0; k < 3; k++) {
+      const c = Math.min(1, Math.max(0, neutral[k])) * (LATTICE_N - 1);
+      i0[k] = Math.min(LATTICE_N - 2, Math.floor(c));
+      f[k] = c - i0[k];
+    }
+    for (let dx = 0; dx < 2; dx++)
+      for (let dy = 0; dy < 2; dy++)
+        for (let dz = 0; dz < 2; dz++) {
+          const w = (dx ? f[0] : 1 - f[0]) * (dy ? f[1] : 1 - f[1]) * (dz ? f[2] : 1 - f[2]);
+          const nb = (i0[0] + dx) * LATTICE_N * LATTICE_N + (i0[1] + dy) * LATTICE_N + (i0[2] + dz);
+          numS[nb * 3] += w * res[0];
+          numS[nb * 3 + 1] += w * res[1];
+          numS[nb * 3 + 2] += w * res[2];
+          denS[nb] += w;
+        }
   }
-  const res = [target[0] - neutral[0], target[1] - neutral[1], target[2] - neutral[2]];
-  for (let dx = 0; dx < 2; dx++)
-    for (let dy = 0; dy < 2; dy++)
-      for (let dz = 0; dz < 2; dz++) {
-        const w = (dx ? f[0] : 1 - f[0]) * (dy ? f[1] : 1 - f[1]) * (dz ? f[2] : 1 - f[2]);
-        const nb = (i0[0] + dx) * LATTICE_N * LATTICE_N + (i0[1] + dy) * LATTICE_N + (i0[2] + dz);
-        num[nb * 3] += w * res[0];
-        num[nb * 3 + 1] += w * res[1];
-        num[nb * 3 + 2] += w * res[2];
-        den[nb] += w;
-      }
+  // fold this scene's per-cell mean into the equal-weight aggregate: a cell's
+  // contribution from this scene is that scene's OWN weighted mean there
+  // (pixel count no longer matters beyond the MIN_SCENE_CELL_WEIGHT gate).
+  let cellsContributed = 0;
+  for (let n = 0; n < nodesN; n++) {
+    if (denS[n] < MIN_SCENE_CELL_WEIGHT) continue;
+    num[n * 3] += numS[n * 3] / denS[n];
+    num[n * 3 + 1] += numS[n * 3 + 1] / denS[n];
+    num[n * 3 + 2] += numS[n * 3 + 2] / denS[n];
+    den[n] += 1;
+    cellsContributed++;
+  }
+  sceneSplatReport.push({ sceneIdx, trainPixels: scenePairs.length, trimmed, cellsContributed });
 }
 
-// --- regularize: conf-weighted mean, then weighted diffusion ----------------
-const delta = new Float64Array(LATTICE_N ** 3 * 3);
-const conf = new Float64Array(LATTICE_N ** 3);
-for (let n = 0; n < LATTICE_N ** 3; n++) {
-  conf[n] = den[n] / (den[n] + SUPPORT_LAMBDA);
+// --- regularize: conf-weighted mean-of-scene-means, then weighted diffusion -
+const delta = new Float64Array(nodes3);
+const conf = new Float64Array(nodesN);
+for (let n = 0; n < nodesN; n++) {
+  conf[n] = den[n] / (den[n] + SUPPORT_LAMBDA_SCENES);
   if (den[n] > 0) {
     delta[n * 3] = conf[n] * (num[n * 3] / den[n]);
     delta[n * 3 + 1] = conf[n] * (num[n * 3 + 1] / den[n]);
@@ -655,8 +716,10 @@ const report = {
   fittedAt: new Date().toISOString(),
   cameraModel,
   latticeN: LATTICE_N,
+  weighting: `equal-per-scene (round-4 reweight — each scene splats its own trilinear accumulator, trimmed to its own smallest-${Math.round(TRIM_KEEP_FRAC * 100)}%-residual pixels, then per-cell means are averaged across scenes with equal weight; nScenes/(nScenes+${SUPPORT_LAMBDA_SCENES}) confidence, min scene-cell weight ${MIN_SCENE_CELL_WEIGHT})`,
   pairs: pairs.map((p) => ({ arw: p[0], lr: p[1] })),
   perScene,
+  sceneSplat: sceneSplatReport,
   totalPairs: acceptedPairs.length,
   train: train.length,
   heldout: heldout.length,

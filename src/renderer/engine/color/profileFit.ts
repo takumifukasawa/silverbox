@@ -53,6 +53,49 @@
  * confirm before any future attempt. Next time: make the splat per-scene-
  * weighted like the base curve, or add a CA/alignment gate on top of the
  * existing per-tile NCC gate, before trusting a green-heavy refit.
+ *
+ * ROUND 4 ATTEMPT, NOT SHIPPED (2026-07-16): fit-profile.mjs's splat was
+ * reweighted to test round 3's hypothesis directly — each scene now splats
+ * its OWN accepted (train) pixels into its OWN trilinear accumulator (after
+ * trimming that scene's own largest-magnitude 10% of residuals, a cheap
+ * per-scene outlier gate substituting for a true trimmed mean — see the
+ * script's "Method" step 3 doc comment for the full design), then per-cell
+ * scene means are averaged ACROSS scenes with EQUAL weight — a 240k-pixel
+ * ref-green scene counts exactly as much as a 3k-pixel calibration scene.
+ * Confidence became a SCENE COUNT (nScenes/(nScenes+1.5)), not a pixel
+ * tally, which regularizes far more aggressively with only 14 scenes total.
+ * RESULT: this fixed BOTH design-invariant unit tests that round 3 broke —
+ * max residual magnitude dropped to 0.007 (cap 0.12, round 3 was 0.165) and
+ * the far-hull max dropped to 0.005 (cap 0.03, round 3 was 0.079) — but held-
+ * out CHROMA dEab was STILL a regression, within the SAME run (identical
+ * methodology, so before/after are directly comparable to EACH OTHER; NOT to
+ * round 3's or round 1/2's recorded numbers — see the fragility note below):
+ * overall 6.83 -> 7.21, green-region (n=224201 held-out pixels) 8.14 -> 8.53.
+ * The green-region regression shrank markedly versus round 3 (+0.39 here vs
+ * +0.83 in round 3), confirming the pixel-weighting hypothesis was a real
+ * contributor — but it did not flip the sign, and the overall (non-green)
+ * regression got slightly WORSE (+0.38 here vs +0.27 in round 3), so equal-
+ * per-scene weighting alone is not sufficient: the remaining error is not
+ * (only) "green scenes have too much pixel weight," it is that the 11
+ * ref-green scenes' OWN per-scene means still disagree with LR's actual
+ * green rendering more than the 3 calibration scenes' means agree with it
+ * elsewhere — i.e. a genuine alignment/CA-fringing or scene-selection
+ * problem within the ref-green set itself, not (only) a weighting problem.
+ * DECISION: left at the ORIGINAL (round 1/2, 3-pair) lattice again;
+ * scripts/profile-fit.json holds the round-4 raw fit (`shipped: false`,
+ * `attemptLabel` marks it explicitly) for comparison.
+ * FRAGILITY NOTE: this run's own "before" (identity vs LR) came out lower
+ * than round 3's recorded "before" (6.83 vs 7.63 overall, 8.14 vs 8.66
+ * green) despite unchanged code on that path — WebGPU readback / NCC-tile
+ * acceptance is not bit-reproducible run-to-run, so the accepted-pixel
+ * population (and thus the held-out split, even under the same RNG seed)
+ * drifts slightly between runs. Always compare a candidate's before/after
+ * WITHIN THE SAME RUN, never against a different run's recorded numbers.
+ * Next attempt: before trying more scene-level reweighting, add a pixel-
+ * level CA/alignment gate (e.g. reject a pixel if its neighborhood's local
+ * hue disagrees sharply between `ours` and `lr`, not just the tile-level
+ * NCC gate) to the ref-green pairs specifically, or hand-pick a smaller,
+ * cleaner subset of them rather than all 11.
  */
 
 /** Grid nodes per axis. */
