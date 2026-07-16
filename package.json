@@ -24,7 +24,15 @@
       "**/node_modules/@img/**"
     ],
     "mac": {
-      "identity": null
+      "identity": null,
+      "fileAssociations": [
+        {
+          "ext": "silverbox",
+          "name": "Silverbox Project",
+          "description": "Silverbox project manifest (docs/brief-bank/project-storage.md)",
+          "role": "Editor"
+        }
+      ]
     }
   },
   "scripts": {
@@ -75,6 +83,7 @@
     "verify:profilefit": "node scripts/verify-profilefit.mjs",
     "verify:hotreload": "node scripts/verify-hotreload.mjs",
     "verify:cli": "node scripts/verify-cli.mjs",
+    "verify:cli-project": "node scripts/verify-cli-project.mjs",
     "verify:diff": "node scripts/verify-diff.mjs",
     "verify:golden": "node scripts/verify-golden.mjs",
     "verify:preview": "node scripts/verify-preview.mjs",
@@ -90,7 +99,7 @@
     "fit:profile": "node scripts/fit-profile.mjs",
     "verify": "node scripts/run-verify.mjs",
     "verify:smoke": "node scripts/run-verify.mjs --smoke",
-    "verify:serial": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:hsl && npm run verify:detail && npm run verify:dnd && npm run verify:view && npm run verify:grading && npm run verify:scopes && npm run verify:effects && npm run verify:crop && npm run verify:lens && npm run verify:cst && npm run verify:polish && npm run verify:exportsettings && npm run verify:masks && npm run verify:colorkey && npm run verify:spots && npm run verify:lut && npm run verify:presets && npm run verify:hotreload && npm run verify:cli && npm run verify:diff && npm run verify:golden && npm run verify:preview && npm run verify:filmstrip && npm run verify:compare && npm run verify:nodepreview && npm run verify:ratings && npm run verify:imagenode && npm run verify:external && npm run verify:bypass && npm run verify:project && npm run verify:ms14",
+    "verify:serial": "npm run verify:ms0 && npm run verify:ms1 && npm run verify:ms2 && npm run verify:ms3 && npm run verify:ms4 && npm run verify:ms5 && npm run verify:ms6 && npm run verify:ms7 && npm run verify:ms8 && npm run verify:ms9 && npm run verify:ms10 && npm run verify:ms11 && npm run verify:ms12 && npm run verify:ms13 && npm run verify:develop && npm run verify:editing && npm run verify:wb && npm run verify:tonecurve && npm run verify:hsl && npm run verify:detail && npm run verify:dnd && npm run verify:view && npm run verify:grading && npm run verify:scopes && npm run verify:effects && npm run verify:crop && npm run verify:lens && npm run verify:cst && npm run verify:polish && npm run verify:exportsettings && npm run verify:masks && npm run verify:colorkey && npm run verify:spots && npm run verify:lut && npm run verify:presets && npm run verify:hotreload && npm run verify:cli && npm run verify:cli-project && npm run verify:diff && npm run verify:golden && npm run verify:preview && npm run verify:filmstrip && npm run verify:compare && npm run verify:nodepreview && npm run verify:ratings && npm run verify:imagenode && npm run verify:external && npm run verify:bypass && npm run verify:project && npm run verify:ms14",
     "perf:probe": "node scripts/perf-probe.mjs"
   },
   "devDependencies": {

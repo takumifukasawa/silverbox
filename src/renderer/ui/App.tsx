@@ -34,6 +34,32 @@ export function pickDropFile(files: File[]): File | null {
   return files.find((f) => isRawFileName(f.name)) ?? files[0] ?? null;
 }
 
+/**
+ * "What kind of thing is this path, and what should opening it do" —
+ * project.silverbox (or a directory containing one) first, then a plain
+ * photo folder, then a standalone image file (openFolder's own listImages
+ * call throws for anything that isn't a readable directory, which is
+ * exactly the "actually just a file" signal this needs). Shared by the
+ * single-file drop handler below AND the file-association `openPath` push
+ * (project-storage migration, stage 2) — the same disambiguation either way,
+ * whether the path arrived via drag-drop or a double-click in Finder.
+ */
+async function openPathSmart(path: string): Promise<void> {
+  // Dropping/opening project.silverbox itself resolves to its containing
+  // directory; a directory drop is handed to openProjectByPath as-is (it
+  // checks for a manifest inside and returns false if there isn't one, same
+  // "touch nothing, let the caller fall through" contract openFolder's own
+  // false return already has).
+  const projectDir = path.split('/').pop() === PROJECT_MANIFEST_NAME ? path.slice(0, -(PROJECT_MANIFEST_NAME.length + 1)) : path;
+  const openedAsProject = await useAppStore.getState().openProjectByPath(projectDir);
+  if (openedAsProject) return;
+  const openedAsFolder = await useAppStore.getState().openFolder(path);
+  // Not a folder after all — a standalone single-file open. openImageByPath
+  // itself exits folder-browsing by default (see its `keepFolderContext` doc
+  // comment), so nothing else to reset.
+  if (!openedAsFolder) await useAppStore.getState().openImageByPath(path);
+}
+
 export function App() {
   const [dropActive, setDropActive] = useState(false);
 
@@ -298,6 +324,18 @@ export function App() {
     return unsubscribe;
   }, []);
 
+  // File-association open (project-storage migration, stage 2 — packaged
+  // app only, see package.json's `build.fileAssociations` and main/index.ts's
+  // `open-file` handling): same "register the listener BEFORE telling main
+  // we're ready" shape as the CLI effect above, so a path queued from a cold
+  // double-click launch isn't lost to a mount race. Harmless no-op otherwise
+  // (dev mode / no file association never sends `openPath`).
+  useEffect(() => {
+    const unsubscribe = window.silverbox.onOpenPath((path) => void openPathSmart(path));
+    window.silverbox.appReady();
+    return unsubscribe;
+  }, []);
+
   // Drag & drop open (UI spec §14): window-level handlers, Files-only, a
   // depth counter to absorb nested enter/leave, drop resolves the path via
   // webUtils.getPathForFile (File.path is gone in Electron 32+).
@@ -328,34 +366,15 @@ export function App() {
       setDropActive(false);
       const files = [...(ev.dataTransfer?.files ?? [])];
       // A dropped FOLDER also arrives as a single File entry (the OS gives
-      // no other signal), so a lone drop is ambiguous — try it as a PROJECT
-      // first (project.silverbox itself, or a directory containing one —
-      // project-storage migration), then a plain photo folder (openFolder's
-      // own listImages call throws for anything that isn't a readable
-      // directory, which is exactly the "actually just a file" signal this
-      // needs), then a standalone image file. A multi-file drop is
-      // unambiguous (never a folder/project) and keeps today's exact
-      // pickDropFile behavior untouched.
+      // no other signal), so a lone drop is ambiguous — openPathSmart (this
+      // file's module scope, shared with the file-association `openPath`
+      // push below) resolves it: project first, then a plain photo folder,
+      // then a standalone image file. A multi-file drop is unambiguous
+      // (never a folder/project) and keeps today's exact pickDropFile
+      // behavior untouched.
       if (files.length === 1) {
         const path = window.silverbox.getPathForFile(files[0]!);
-        if (path) {
-          void (async () => {
-            // Dropping project.silverbox itself resolves to its containing
-            // directory; a directory drop is handed to openProjectByPath
-            // as-is (it checks for a manifest inside and returns false if
-            // there isn't one, same "touch nothing, let the caller fall
-            // through" contract openFolder's own false return already has).
-            const projectDir =
-              path.split('/').pop() === PROJECT_MANIFEST_NAME ? path.slice(0, -(PROJECT_MANIFEST_NAME.length + 1)) : path;
-            const openedAsProject = await useAppStore.getState().openProjectByPath(projectDir);
-            if (openedAsProject) return;
-            const openedAsFolder = await useAppStore.getState().openFolder(path);
-            // Not a folder after all — a standalone single-file drop.
-            // openImageByPath itself exits folder-browsing by default (see
-            // its `keepFolderContext` doc comment), so nothing else to reset.
-            if (!openedAsFolder) await useAppStore.getState().openImageByPath(path);
-          })();
-        }
+        if (path) void openPathSmart(path);
         return;
       }
       const file = pickDropFile(files);

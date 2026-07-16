@@ -41,7 +41,7 @@ import {
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
-import { defaultImageParams, IMAGE_KIND } from '../engine/graph/imageNode';
+import { defaultImageParams, dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
 import { clearImageNodeSourceCache } from '../engine/graph/imageNodeSource';
 import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { confirmAndRetry, pendingExternalRequest } from '../engine/graph/externalNodeRunner';
@@ -509,16 +509,25 @@ interface AppState {
    * — pass `true` here.
    *
    * `opts.legacySidecarOnly` (headless CLI ONLY — runCliRender/runCliCheck/
-   * runCliDiff's own internal calls): bypasses the project system entirely
-   * and reads/watches the LEGACY adjacent `<image>.silverbox.json` exactly
-   * as before the project-storage migration — no project is resolved/
-   * created, nothing is added to any playlist. Project-aware CLI resolution
-   * is a stage-2 item (docs/brief-bank/project-storage.md); until then the
-   * CLI's behavior must not change at all. Never set by interactive UI code.
+   * runCliDiff's own internal calls, WITHOUT `--project`): bypasses the
+   * project system entirely and reads/watches the LEGACY adjacent
+   * `<image>.silverbox.json` exactly as before the project-storage
+   * migration — no project is resolved/created, nothing is added to any
+   * playlist. Never set by interactive UI code.
+   *
+   * `opts.cliProjectDir` (headless CLI ONLY, `--project <dir>` — CLI tooling
+   * parity, project-storage.md stage 2): resolves `path`'s look from THAT
+   * project's playlist, READ-ONLY — unlike the interactive path's
+   * `ensureProjectAndAddPhoto`, this NEVER adds a playlist row or writes
+   * anything; a photo not already on the playlist opens with the default
+   * look and a `window.silverbox.cliWarn` notice instead (see
+   * resolveCliProjectLook). Mutually exclusive with `legacySidecarOnly` —
+   * exactly one of the two is set by the CLI runners, based on whether
+   * `--project` was given.
    */
   openImageByPath(
     path: string,
-    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean }
+    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean; cliProjectDir?: string }
   ): Promise<void>;
   openImageViaDialog(): Promise<void>;
   selectNode(id: string | null): void;
@@ -1727,12 +1736,16 @@ export const useAppStore = create<AppState>((set, get) => {
    * folder full of below-threshold images never pays for decoding any of
    * them. No sidecar, unreadable file, or malformed/missing `rating` key all
    * resolve to 0 (unrated), same fallback listImages' own cheap read uses
-   * (main/index.ts's extractSidecarRating).
+   * (main/index.ts's extractSidecarRating). A `.json` INPUT (a look file —
+   * CLI tooling parity item 2) reads its OWN rating directly, since
+   * `<lookfile>.json` + SIDECAR_SUFFIX would never resolve to anything real.
    */
   const readSidecarRatingCheap = async (imagePath: string): Promise<number> => {
     let text: string | null;
     try {
-      text = await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
+      text = imagePath.endsWith('.json')
+        ? new TextDecoder().decode(await window.silverbox.readFile(imagePath))
+        : await window.silverbox.readSidecar(imagePath + SIDECAR_SUFFIX);
     } catch {
       return 0;
     }
@@ -1814,6 +1827,34 @@ export const useAppStore = create<AppState>((set, get) => {
   };
 
   /**
+   * `--project <dir>` (CLI tooling parity, project-storage.md stage 2):
+   * READ-ONLY playlist lookup for one photo — the CLI counterpart to
+   * ensureProjectAndAddPhoto above, deliberately NOT sharing its
+   * implementation because this one must never add a playlist row or write
+   * anything (a headless batch over someone else's project must not
+   * silently mutate it — see CliRenderJob.projectDir's doc comment). A photo
+   * already on the playlist resolves to its recorded look; one that isn't
+   * gets a `cliWarn` notice and falls back to the DEFAULT look, but still
+   * needs a deterministic NAME for golden-render naming (CliCheckJob.
+   * projectDir's doc comment) — computed with the same deriveLookName
+   * algorithm ensureProjectAndAddPhoto uses, against a scratch map that is
+   * never written back anywhere (zero mutation, unlike that function's own
+   * use of it).
+   */
+  const resolveCliProjectLook = async (photoPath: string, dir: string): Promise<{ lookPath: string; project: ActiveProject }> => {
+    const text = await window.silverbox.readProjectManifest(dir);
+    if (text === null) throw new Error(`no project.silverbox found at ${dir}`);
+    const manifest = parseProjectManifest(text);
+    const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
+    const row = findPlaylistPhoto(project, photoPath);
+    if (row) return { lookPath: `${dir}/looks/${row.look}`, project };
+    const byAbsPath = new Map(project.photos.map((p) => [resolveProjectPath(dir, p.path), p.look]));
+    const lookName = deriveLookName(photoPath, byAbsPath);
+    window.silverbox.cliWarn(`${photoPath}: not on the project playlist at ${dir} — rendering with the default look`);
+    return { lookPath: `${dir}/looks/${lookName}`, project };
+  };
+
+  /**
    * The filmstrip's per-cell status for `project`'s WHOLE playlist (not
    * scoped to any one folder — "a playlist doesn't own photos", filmstrip-
    * curation.md) via one projectPhotosStatus IPC round trip: resolves every
@@ -1887,7 +1928,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   async openImageByPath(
     path: string,
-    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean }
+    opts?: { skipSidecar?: boolean; keepFolderContext?: boolean; legacySidecarOnly?: boolean; cliProjectDir?: string }
   ) {
     // Newest-open-wins epoch guard + cleanup ledger (OpenSession extraction —
     // architecture-audit risk #1) — see openSession.ts's doc comment for the
@@ -1992,6 +2033,13 @@ export const useAppStore = create<AppState>((set, get) => {
         if (opts?.skipSidecar) {
           sidecar = null;
         } else if (opts?.legacySidecarOnly) {
+          sidecar = await session.guard(window.silverbox.readSidecar(watchPath));
+        } else if (opts?.cliProjectDir) {
+          // `--project <dir>` (CLI tooling parity, stage 2): READ-ONLY
+          // playlist lookup — see resolveCliProjectLook's own doc comment.
+          const resolved = await session.guard(resolveCliProjectLook(path, opts.cliProjectDir));
+          projectPatch = resolved.project;
+          watchPath = resolved.lookPath;
           sidecar = await session.guard(window.silverbox.readSidecar(watchPath));
         } else {
           const { project, look } = await session.guard(ensureProjectAndAddPhoto(path));
@@ -3299,17 +3347,69 @@ export const useAppStore = create<AppState>((set, get) => {
           onResult({ input, status: 'skipped-rating' });
           continue;
         }
+
+        // Render directly from a look file (CLI tooling parity item 2): a
+        // `.json` argument is a per-photo DOCUMENT, not an image — parsed
+        // here, before opening anything, so a missing `photo` field is a
+        // clean per-file error rather than openImageByPath's own "unsupported
+        // file type" (which only knows RAW/JPEG kinds). `openTarget` is what
+        // actually gets decoded/rendered; `input` stays the argument the user
+        // typed for every reported result below.
+        let openTarget = input;
+        let lookGraphText: string | null = null;
+        if (input.endsWith('.json')) {
+          const text = new TextDecoder().decode(await window.silverbox.readFile(input));
+          let photoField: unknown;
+          try {
+            photoField = (JSON.parse(text) as { photo?: unknown }).photo;
+          } catch (err) {
+            throw new Error(`could not parse look file ${input}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          if (typeof photoField !== 'string' || photoField.trim() === '') {
+            throw new Error(
+              `${input} has no \`photo\` field — pass the IMAGE directly instead (a look file only renders directly when it carries \`photo\`, e.g. a project's looks/*.json; a legacy adjacent sidecar has none)`
+            );
+          }
+          // Resolved relative to the look's OWN project dir (parent of
+          // looks/) — same rule regardless of whether --project pointed us
+          // at this file or it was given as a bare standalone path.
+          openTarget = resolveProjectPath(dirnameOf(dirnameOf(input)), photoField);
+          lookGraphText = text;
+        }
+
         // job.preset REPLACES the sidecar entirely (see openImageByPath's
         // skipSidecar doc comment): open as a truly fresh doc with identity
         // geometry, which is all applyLook below actually preserves — the
         // fresh-open defaults (lens profile, base curve) it also seeds get
         // superseded a moment later when applyLook replaces the nodes/edges
         // wholesale with the preset's own, so only the identity geometry
-        // survives into the final render.
-        await get().openImageByPath(input, { skipSidecar: job.preset !== null, legacySidecarOnly: true });
+        // survives into the final render. A look-file argument ALSO skips
+        // the sidecar (lookGraphText replaces it below, geometry included —
+        // unlike --preset, this IS the photo's own document, not a foreign
+        // look to merge onto identity). Whichever of legacySidecarOnly/
+        // cliProjectDir accompanies skipSidecar:true is moot either way
+        // (openImageByPath consults skipSidecar first), so this one
+        // expression covers plain images and look-file arguments alike.
+        await get().openImageByPath(openTarget, {
+          skipSidecar: job.preset !== null || lookGraphText !== null,
+          legacySidecarOnly: job.projectDir === null,
+          ...(job.projectDir !== null ? { cliProjectDir: job.projectDir } : {}),
+        });
         if (get().imageStatus !== 'ready') {
-          throw new Error(get().imageError ?? `failed to open ${input}`);
+          throw new Error(get().imageError ?? `failed to open ${openTarget}`);
         }
+
+        if (lookGraphText !== null) {
+          // Full graph replace (geometry included) — the same "this text IS
+          // the photo's own document" shape hot-reload's readAndParseSidecar
+          // uses, NOT applyLook's preset-style merge (which deliberately
+          // discards geometry — wrong here, this look already has its own).
+          const { width, height } = get().image!;
+          const parsed = parseGraphDoc(lookGraphText, { width, height });
+          set({ graph: parsed.graph, graphDirty: false });
+          revalidateShaders(parsed.graph);
+        }
+
         if (job.preset !== null) {
           const text = await readCliPresetText(job.preset);
           const { look } = parsePresetFile(text);
@@ -3335,7 +3435,10 @@ export const useAppStore = create<AppState>((set, get) => {
           );
         }
 
-        const basePath = cliOutputPath(input, job.outDir);
+        // The PHOTO's own basename (openTarget), not the look-file argument's
+        // — a look-file render must produce the exact same output filename
+        // an equivalent --project image render of the same photo would.
+        const basePath = cliOutputPath(openTarget, job.outDir);
         const used = new Set<string>();
         for (const node of targets) {
           // same disambiguation as exportSelectedOutputs: single target keeps
@@ -3376,12 +3479,17 @@ export const useAppStore = create<AppState>((set, get) => {
       try {
         // No `skipSidecar`/preset here (unlike runCliRender) — a golden
         // always represents the image's own sidecar-or-default look, the
-        // same defaults rule `--render` uses without `--preset`.
-        await get().openImageByPath(input, { legacySidecarOnly: true });
+        // same defaults rule `--render` uses without `--preset`. `--project`
+        // resolves that look from the project's playlist instead of the
+        // legacy adjacent sidecar (see CliCheckJob.projectDir's doc comment).
+        await get().openImageByPath(input, {
+          legacySidecarOnly: job.projectDir === null,
+          ...(job.projectDir !== null ? { cliProjectDir: job.projectDir } : {}),
+        });
         if (get().imageStatus !== 'ready') {
           throw new Error(get().imageError ?? `failed to open ${input}`);
         }
-        const { imagePath, fileName, graph, renderer } = get();
+        const { imagePath, fileName, graph, renderer, project, currentLookPath } = get();
         if (!imagePath || !fileName || !renderer) throw new Error('no image open');
         const bytes = await window.silverbox.readFile(imagePath);
         const kind = isRawFileName(fileName) ? 'raw' : 'jpg';
@@ -3392,6 +3500,15 @@ export const useAppStore = create<AppState>((set, get) => {
         // — always the doc's first, same as --render's no-`--output` default.
         const outputId = outputs[0]!.id;
         const { data, width, height } = await renderer.renderToPixels(full, graph, 1, 'srgb', outputId);
+        // --project's golden relocation (CliCheckJob.projectDir's doc
+        // comment): `<project>/golden/<look-name>.png`, look-name = the
+        // resolved look's own filename with `.json` dropped — derived from
+        // `currentLookPath` (already resolved by openImageByPath's
+        // `cliProjectDir` branch above), never written to the manifest.
+        const goldenPath =
+          job.projectDir !== null && project && currentLookPath
+            ? `${project.dir}/golden/${(currentLookPath.split('/').pop() ?? currentLookPath).replace(/\.json$/, '')}.png`
+            : undefined;
         const outcome = await window.silverbox.checkGoldenImage({
           input,
           data: data.buffer,
@@ -3399,6 +3516,7 @@ export const useAppStore = create<AppState>((set, get) => {
           height,
           update: job.update,
           threshold: job.threshold,
+          ...(goldenPath ? { goldenPath } : {}),
         });
         onResult(outcome);
       } catch (err) {
@@ -3408,7 +3526,42 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   async runCliDiff(job, onResult) {
+    // Resolved once known — used both for the actual render/compare AND as
+    // the reported `input`; falls back to a sidecarA/B pairing string if
+    // resolution itself fails, so a bad pair is still traceable in the
+    // output (CliDiffResult always needs SOME `input` to report against).
+    let image = job.image;
     try {
+      const readText = async (path: string): Promise<string> => new TextDecoder().decode(await window.silverbox.readFile(path));
+      const [textA, textB] = await Promise.all([readText(job.sidecarA), readText(job.sidecarB)]);
+
+      if (image === null) {
+        // `--image` omitted (CLI tooling parity item 4): derive it from both
+        // sidecars' `photo` field — a cheap top-level JSON.parse (NOT the
+        // full parseGraphDoc, which needs image dims we don't have yet),
+        // each resolved relative to ITS OWN project dir (parent of looks/),
+        // the same rule runCliRender's look-file handling uses.
+        const photoOf = (text: string, sidecarPath: string): string | null => {
+          try {
+            const photo = (JSON.parse(text) as { photo?: unknown }).photo;
+            return typeof photo === 'string' && photo.trim() !== ''
+              ? resolveProjectPath(dirnameOf(dirnameOf(sidecarPath)), photo)
+              : null;
+          } catch {
+            return null;
+          }
+        };
+        const photoA = photoOf(textA, job.sidecarA);
+        const photoB = photoOf(textB, job.sidecarB);
+        if (photoA !== null && photoA === photoB) {
+          image = photoA;
+        } else {
+          throw new Error(
+            '--diff needs --image <path>: could not derive it — both sidecars must carry a matching `photo` field (pass --image explicitly otherwise)'
+          );
+        }
+      }
+
       // openImageByPath's job here is ONLY to get an image decoded and the
       // render-worker client mounted (CanvasView's client only exists once
       // `image` is set — see its own doc comment) — its OWN sidecar-or-
@@ -3416,24 +3569,21 @@ export const useAppStore = create<AppState>((set, get) => {
       // sidecarB are parsed and rendered as two INDEPENDENT docs, same
       // "supply my own graph, ignore whatever's open" shape exportOnePath
       // already uses for ordinary exports.
-      await get().openImageByPath(job.image, { legacySidecarOnly: true });
+      await get().openImageByPath(image, { legacySidecarOnly: true });
       if (get().imageStatus !== 'ready') {
-        throw new Error(get().imageError ?? `failed to open ${job.image}`);
+        throw new Error(get().imageError ?? `failed to open ${image}`);
       }
       const { renderer } = get();
       if (!renderer) throw new Error('no image open');
 
-      const readText = async (path: string): Promise<string> => new TextDecoder().decode(await window.silverbox.readFile(path));
-      const [textA, textB] = await Promise.all([readText(job.sidecarA), readText(job.sidecarB)]);
-
-      const kind = isRawFileName(job.image) ? 'raw' : 'jpg';
+      const kind = isRawFileName(image) ? 'raw' : 'jpg';
       const baselineExposureEV = get().settings.baselineExposureEV;
       // loadImage ALSO transfers (detaches) its own `bytes` ArrayBuffer to
       // the decode worker — on top of renderToPixels transferring the
       // resulting PreparedImage's data (see this function's own comment
       // below) — so every decode needs its own FRESH readFile, not a shared
       // `bytes` reused across the two loadImage calls.
-      const fullA = await loadImage(await window.silverbox.readFile(job.image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
+      const fullA = await loadImage(await window.silverbox.readFile(image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
       const dims = { width: fullA.width, height: fullA.height };
       const parsedA = parseGraphDoc(textA, dims);
       const parsedB = parseGraphDoc(textB, dims);
@@ -3443,7 +3593,7 @@ export const useAppStore = create<AppState>((set, get) => {
       // exportOnePath's own doc comment) — a fresh decode per render, not a
       // shared `full` reused across both docs.
       const renderA = await renderer.renderToPixels(fullA, parsedA.graph, 1, 'srgb');
-      const fullB = await loadImage(await window.silverbox.readFile(job.image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
+      const fullB = await loadImage(await window.silverbox.readFile(image), kind, Number.MAX_SAFE_INTEGER, baselineExposureEV);
       const renderB = await renderer.renderToPixels(fullB, parsedB.graph, 1, 'srgb');
 
       if (renderA.width !== renderB.width || renderA.height !== renderB.height) {
@@ -3451,7 +3601,7 @@ export const useAppStore = create<AppState>((set, get) => {
         // dimensions — reported, not resampled to force a comparison (same
         // policy as --check's own dims-changed). The param lines above are
         // unaffected — they need no successful pixel comparison at all.
-        onResult({ input: job.image, lines, status: 'dims-changed' });
+        onResult({ input: image, lines, status: 'dims-changed' });
         return;
       }
       const { deltaE } = await window.silverbox.diffRenderImages({
@@ -3460,9 +3610,9 @@ export const useAppStore = create<AppState>((set, get) => {
         width: renderA.width,
         height: renderA.height,
       });
-      onResult({ input: job.image, lines, deltaE });
+      onResult({ input: image, lines, deltaE });
     } catch (err) {
-      onResult({ input: job.image, error: err instanceof Error ? err.message : String(err) });
+      onResult({ input: image ?? `${job.sidecarA} vs ${job.sidecarB}`, error: err instanceof Error ? err.message : String(err) });
     }
   },
 

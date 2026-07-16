@@ -95,6 +95,7 @@ const ALL_SCRIPTS = [
   { name: 'profilefit', file: 'verify-profilefit.mjs' },
   { name: 'hotreload', file: 'verify-hotreload.mjs' },
   { name: 'cli', file: 'verify-cli.mjs' },
+  { name: 'cli-project', file: 'verify-cli-project.mjs' },
   { name: 'diff', file: 'verify-diff.mjs' },
   { name: 'golden', file: 'verify-golden.mjs' },
   { name: 'preview', file: 'verify-preview.mjs' },

@@ -45,6 +45,30 @@ export const IPC = {
   cliRun: 'cli:run',
   cliProgress: 'cli:progress',
   cliDone: 'cli:done',
+  /**
+   * One-way notice channel (renderer → main) for something that isn't a
+   * per-file result — currently only the `--project` playlist-fallback case
+   * (a photo not on the project's playlist renders with the default look;
+   * see CliRenderJob.projectDir's doc comment): always written to STDERR by
+   * main regardless of `--json`, since it's not part of any file's
+   * structured result and must not get silently swallowed inside a JSON
+   * payload nobody greps for warnings in.
+   */
+  cliWarn: 'cli:warn',
+  /**
+   * File-association open (project-storage migration, stage 2): main pushes
+   * the launched/double-clicked path once the renderer is ready to receive
+   * it (see `appReady` below) — packaged app only, see PROJECT_MANIFEST_NAME's
+   * doc comment (dev mode `electron .` never gets an OS file-open event).
+   */
+  openPath: 'app:openPath',
+  /**
+   * Renderer → main: "I'm mounted and listening for `openPath`." Lets main
+   * flush a file-open event it received before the window finished loading
+   * (a cold launch via double-click) instead of dropping it — same
+   * hold-until-ready shape `cliReady` already uses for the CLI job push.
+   */
+  appReady: 'app:ready',
   // Golden renders (`--check`/`--update` — see main/goldenRender.ts): the
   // renderer's job is producing pixels (same as any CLI render); main's job
   // is encoding, comparing against the golden PNG on disk, and reporting —
@@ -279,6 +303,18 @@ export interface SilverboxApi {
   cliProgress(result: CliProgressResult): void;
   /** Tell main every image in the job has been attempted; main prints the summary and exits. */
   cliDone(): void;
+  /** Send a `cli:warn` notice (see IPC.cliWarn's doc comment) — always printed to main's stderr, independent of `--json`. */
+  cliWarn(message: string): void;
+  /**
+   * Subscribe to main's file-association open push (project-storage
+   * migration, stage 2 — see IPC.openPath's doc comment): `path` is the
+   * launched/double-clicked `project.silverbox` (or a directory containing
+   * one). Returns an unsubscribe function; App.tsx registers this once at
+   * mount, then calls `appReady()`.
+   */
+  onOpenPath(callback: (path: string) => void): () => void;
+  /** Tell main the renderer is mounted and ready to receive an `openPath` push (flushes one queued from before the window finished loading). */
+  appReady(): void;
   /**
    * Golden-render check/update for one image (`--check`/`--update` — see
    * main/goldenRender.ts): hands main the full-resolution rendered pixels
@@ -327,8 +363,31 @@ export type CliRenderPresetRef = { kind: 'path'; value: string } | { kind: 'name
  */
 export interface CliRenderJob {
   mode: 'render';
-  /** Absolute paths, in argv order. */
+  /**
+   * Absolute paths, in argv order. An entry ending in `.json` is a LOOK FILE
+   * (`<project>/looks/<name>.json`, or any standalone look carrying a
+   * `photo` field — CLI tooling parity, project-storage.md stage 2), not an
+   * image: appStore.ts's runCliRender parses it, resolves its `photo` field
+   * relative to the look's own project dir (parent of `looks/`), and renders
+   * THAT photo with the look's own graph verbatim (geometry included — unlike
+   * `--preset`, a look file is a real per-photo document, not a foreign look
+   * being merged onto identity geometry). A look with no `photo` field
+   * (including a legacy adjacent sidecar passed by mistake) is a per-file
+   * error naming the field and the fix.
+   */
   images: string[];
+  /**
+   * `--project <dir>` (CLI tooling parity, project-storage.md stage 2):
+   * every plain-image entry in `images` resolves its look from THIS
+   * project's playlist (`<projectDir>/looks/`) instead of the legacy
+   * adjacent sidecar — a photo not on the playlist renders with the default
+   * look and a `cliWarn` notice (never auto-added to the playlist; a
+   * headless batch must not silently mutate someone's project). null =
+   * today's legacy behavior, byte-identical: each image reads/renders its
+   * own adjacent `<image>.silverbox.json` if any (openImageByPath's
+   * `legacySidecarOnly`).
+   */
+  projectDir: string | null;
   /** Absolute output directory; null = alongside each input. */
   outDir: string | null;
   /** null = use each image's own sidecar (or the default look if none). */
@@ -398,6 +457,21 @@ export interface CliCheckJob {
   mode: 'check';
   /** Absolute paths, in argv order. */
   images: string[];
+  /**
+   * `--project <dir>` (CLI tooling parity, project-storage.md stage 2): same
+   * playlist resolution as CliRenderJob.projectDir, PLUS it relocates where
+   * the golden itself lives — `<projectDir>/golden/<look-name>.png` instead
+   * of the legacy `<image>.silverbox.golden.png` next to the photo (the
+   * etiquette rule applies to goldens too: the app never writes into a photo
+   * folder). `<look-name>` is the resolved look's filename with `.json`
+   * dropped — the playlist row's own look name when the photo is on it, else
+   * the same deterministic name `deriveLookName` would assign (never
+   * written to the manifest — a `--check` run must not mutate the playlist
+   * either). null = legacy adjacent golden, unchanged (main prints a
+   * one-line stderr note that this path is legacy — see main/index.ts's
+   * runCliMode).
+   */
+  projectDir: string | null;
   /** `--update`: (re)write the golden instead of comparing against it. */
   update: boolean;
   /** `--threshold`: max mean ΔE (CIE76) to still call it a pass; see CliCheckOutcome. */
@@ -405,7 +479,7 @@ export interface CliCheckJob {
 }
 
 /**
- * The whole job for one `--diff <sidecarA> <sidecarB> --image <arw>`
+ * The whole job for one `--diff <sidecarA> <sidecarB> [--image <arw>]`
  * invocation (sidecar visual diff, git-native completion brief §1), built by
  * main (src/main/cliArgs.ts's buildCliJob). Unlike CliRenderJob/CliCheckJob
  * this is never a batch over multiple images — the brief's own CLI shape is
@@ -415,12 +489,26 @@ export interface CliCheckJob {
  */
 export interface CliDiffJob {
   mode: 'diff';
+  /**
+   * `--project <dir>` (CLI tooling parity, project-storage.md stage 2): lets
+   * a relative `sidecarA`/`sidecarB` path resolve against the project dir
+   * instead of the launch cwd (src/main/cliArgs.ts's buildCliJob) — the diff
+   * itself never mutates or even reads the project's manifest.
+   */
+  projectDir: string | null;
   /** Absolute path to sidecar A's JSON text (the "before" side of the arrow in every diffLook line). */
   sidecarA: string;
   /** Absolute path to sidecar B's JSON text (the "after" side). */
   sidecarB: string;
-  /** Absolute path to the image both sidecars are rendered against. */
-  image: string;
+  /**
+   * Absolute path to the image both sidecars are rendered against; null when
+   * `--image` was omitted (CLI tooling parity, project-storage.md stage 2)
+   * — appStore.ts's runCliDiff then derives it from both sidecars' `photo`
+   * field (resolved relative to each one's own project dir): if both agree
+   * on the same resolved path, that's the image; if either lacks `photo` or
+   * they disagree, it's a clear per-run error (never a silent guess).
+   */
+  image: string | null;
 }
 
 /** Either job shape `cli:run` can carry; the renderer branches on `mode`. */
@@ -480,6 +568,15 @@ export interface CliCheckImageRequest {
   height: number;
   update: boolean;
   threshold: number;
+  /**
+   * `--project <dir>`'s golden relocation (CliCheckJob.projectDir's doc
+   * comment): when set, main reads/writes THIS path instead of deriving
+   * `${input}${GOLDEN_SUFFIX}` — appStore.ts's runCliCheck computes it as
+   * `<projectDir>/golden/<look-name>.png` once the image's look is resolved.
+   * Main creates `<projectDir>/golden/` on demand (mkdir recursive) since
+   * it's inside the project, not a photo folder.
+   */
+  goldenPath?: string;
 }
 
 /**

@@ -349,8 +349,17 @@ try {
   const rMissingB = runCli(['--diff', pathA]);
   check('--diff with only one path is bad usage (exit 2)', rMissingB.status === 2, rMissingB);
 
-  const rNoImage = runCli(['--diff', pathA, pathB]);
-  check('--diff without --image is bad usage (exit 2)', rNoImage.status === 2, rNoImage);
+  // CLI tooling parity (project-storage.md stage 2): --image is no longer
+  // ALWAYS required at parse time — it CAN be derived from both sidecars'
+  // `photo` field (scripts/verify-cli-project.mjs exercises the successful
+  // derivation). pathA/pathB here are plain hand-written docs with no
+  // `photo` at all, so this is now a RUNTIME "could not derive" failure
+  // (exit 1, {input,error}), not bad usage (exit 2) — see appStore.ts's
+  // runCliDiff.
+  const rNoImage = runCli(['--diff', pathA, pathB, '--json']);
+  check('--diff without --image and with no derivable `photo` exits 1 (not bad usage)', rNoImage.status === 1, rNoImage);
+  const noImageLine = parseNdjson(rNoImage.stdout)[0];
+  check('reports a clear "could not derive" error, not a silent guess', !!noImageLine?.error && /could not derive/.test(noImageLine.error), noImageLine);
 
   const rExtraPositional = runCli(['--diff', pathA, pathB, '--image', arw, arw]);
   check('--diff with a positional image argument is bad usage (exit 2)', rExtraPositional.status === 2, rExtraPositional);

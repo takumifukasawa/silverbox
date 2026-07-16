@@ -47,6 +47,13 @@ const api: SilverboxApi = {
   cliReady: () => ipcRenderer.send(IPC.cliReady),
   cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
   cliDone: () => ipcRenderer.send(IPC.cliDone),
+  cliWarn: (message) => ipcRenderer.send(IPC.cliWarn, message),
+  onOpenPath: (callback) => {
+    const listener = (_ev: IpcRendererEvent, path: string) => callback(path);
+    ipcRenderer.on(IPC.openPath, listener);
+    return () => ipcRenderer.removeListener(IPC.openPath, listener);
+  },
+  appReady: () => ipcRenderer.send(IPC.appReady),
   checkGoldenImage: (req) => ipcRenderer.invoke(IPC.goldenCheck, req),
   diffRenderImages: (req) => ipcRenderer.invoke(IPC.diffRenderImages, req),
   runExternalTool: (req) => ipcRenderer.invoke(IPC.externalToolRun, req),

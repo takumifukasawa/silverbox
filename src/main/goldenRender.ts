@@ -22,7 +22,8 @@
  */
 import sharp from 'sharp';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { compareSrgbBuffers } from '../../shared/color/deltaE';
 import { GOLDEN_LONG_EDGE, GOLDEN_SUFFIX, type CliCheckImageRequest, type CliCheckOutcome } from '../../shared/ipc';
 
@@ -36,8 +37,9 @@ import { GOLDEN_LONG_EDGE, GOLDEN_SUFFIX, type CliCheckImageRequest, type CliChe
  */
 const P95_THRESHOLD_MULTIPLIER = 3;
 
-function goldenPathFor(input: string): string {
-  return `${input}${GOLDEN_SUFFIX}`;
+/** `req.goldenPath` (--project's relocation, CliCheckImageRequest's doc comment) wins over the legacy `<image>.silverbox.golden.png` derivation. */
+function goldenPathFor(req: CliCheckImageRequest): string {
+  return req.goldenPath ?? `${req.input}${GOLDEN_SUFFIX}`;
 }
 
 /** Resize `data` (full-res RGBA8) to the golden's fixed long edge and encode as PNG — the export pipeline's own resize, reused. */
@@ -55,9 +57,14 @@ export async function checkGoldenImage(req: CliCheckImageRequest): Promise<CliCh
     throw new Error(`checkGoldenImage: pixel buffer is ${req.data.byteLength} bytes, expected ${expected}`);
   }
   const pngBuffer = await renderGoldenPng(req.data, req.width, req.height);
-  const goldenPath = goldenPathFor(req.input);
+  const goldenPath = goldenPathFor(req);
 
   if (req.update) {
+    // `<projectDir>/golden/` may not exist yet (first --check --update
+    // --project run) — creating it is fine, it's inside the project, not a
+    // photo folder (the legacy adjacent path's directory always already
+    // exists, so this mkdir is a harmless no-op there).
+    await mkdir(dirname(goldenPath), { recursive: true });
     await writeFile(goldenPath, pngBuffer);
     return { input: req.input, status: 'updated' };
   }

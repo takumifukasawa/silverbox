@@ -10,22 +10,35 @@
  * filesystem. `buildCliJob` resolves every path against the CLI's own launch
  * cwd — the renderer never needs to know what directory the terminal was in.
  */
-import { resolve } from 'node:path';
-import type {
-  CliCheckJob,
-  CliDiffJob,
-  CliJob,
-  CliProgressResult,
-  CliRenderJob,
-  CliRenderPresetRef,
-  ExportColorSpace,
-  ExportMetadataPolicy,
+import { basename, dirname, resolve } from 'node:path';
+import {
+  PROJECT_MANIFEST_NAME,
+  type CliCheckJob,
+  type CliDiffJob,
+  type CliJob,
+  type CliProgressResult,
+  type CliRenderJob,
+  type CliRenderPresetRef,
+  type ExportColorSpace,
+  type ExportMetadataPolicy,
 } from '../../shared/ipc';
 
-export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg> [more images…]
+export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg|look.json> [more…]
        silverbox-render --check [--update] [--threshold <deltaE>] [--json] <image…>
-       silverbox-render --diff <sidecarA> <sidecarB> --image <arw> [--json]
+       silverbox-render --diff <sidecarA> <sidecarB> [--image <arw>] [--json]
 
+  --project <dir>       resolve every plain-image input's look from this
+                        project's playlist (<dir>/looks/) instead of the
+                        legacy adjacent sidecar — a photo not on the
+                        playlist renders with the DEFAULT look and a stderr
+                        warning (never auto-added: a headless run must not
+                        silently mutate someone's project). Accepts the
+                        project directory OR a path to its own
+                        project.silverbox (normalized to the directory).
+                        A relative <name>.json INPUT ARGUMENT (see below)
+                        resolves against this directory instead of the
+                        launch cwd; without --project, today's behavior
+                        is unchanged (each image's own adjacent sidecar).
   --out <dir>          output directory (default: alongside each input)
   --preset <name|path> apply a preset instead of the image's own sidecar.
                         A value ending in .json is read as a preset FILE;
@@ -59,6 +72,15 @@ Without --preset, each image uses its own sidecar if one exists, else the
 same DEFAULT look a fresh open in the app shows (baseline exposure + the
 camera-matched base curve + the embedded Sony lens profile, when present).
 
+Rendering directly from a look file: an input ending in .json (a project's
+looks/<name>.json, or any standalone look carrying a 'photo' field) is
+rendered as-is, geometry included — its 'photo' field is resolved relative
+to the look's own project dir (the parent of looks/), and THAT photo is
+rendered with THIS look's full graph (unlike --preset, which intentionally
+discards geometry). A look with no 'photo' field (a legacy adjacent
+sidecar given directly, for instance) is an error naming the field and the
+fix — open the IMAGE instead, unchanged.
+
 Per-output export overrides: an output node's own sidecar 'export' field
 (set via the app's Inspector, "Export overrides") always wins over
 --quality/--max-dim/--metadata/--colorspace, field by field — the flags
@@ -67,10 +89,13 @@ above only fill in whatever a given output does NOT override.
 Exit codes: 0 every file succeeded, 1 one or more files failed (the rest
 still render and are reported), 2 bad usage.
 
-Golden renders (--check): commits a small reference render
-(<image>.silverbox.golden.png, 512px long edge sRGB) next to each
-image/sidecar, then re-renders and reports drift as it happens — a photo
-archive that owns its own regression suite.
+Golden renders (--check): commits a small reference render (512px long edge
+sRGB), then re-renders and reports drift as it happens — a photo archive
+that owns its own regression suite. With --project, the golden lives at
+<project>/golden/<look-name>.png (inside the project — never next to the
+photo); without --project, it's the legacy <image>.silverbox.golden.png
+next to the image/sidecar (still supported, unchanged — a stderr note
+flags this as legacy so a --check run nudges you toward --project).
 
   --check               compare each image against its golden instead of
                         rendering to an output file. Options above other
@@ -102,14 +127,21 @@ renders (same golden-render style CIE76 comparison --check uses, at the same
   --diff <sidecarA> <sidecarB>
                         two sidecar JSON files (schemaVersion 2/3/4 all
                         accepted and migrated exactly like a normal open) —
-                        neither has to be the image's OWN on-disk sidecar.
-                        This CLI never shells to git; to diff against a git
+                        neither has to be the image's OWN on-disk sidecar;
+                        either side may be a project look file too (its
+                        'photo' field is otherwise unused by --diff). This
+                        CLI never shells to git; to diff against a git
                         revision, produce the file yourself first:
                           git show <rev>:path/to/photo.ARW.silverbox.json > /tmp/old.json
                           silverbox-render --diff /tmp/old.json photo.ARW.silverbox.json --image photo.ARW
-  --image <path>        the image both sidecars render against — required
-                        with --diff, not valid otherwise. No positional
-                        image arguments with --diff (pass it via --image).
+  --image <path>        the image both sidecars render against. May be
+                        OMITTED when both sidecars are project look files
+                        carrying the SAME resolved 'photo' field — it's
+                        derived automatically; otherwise (missing on
+                        either side, or the two disagree) omitting --image
+                        is a clear error. Not valid outside --diff. No
+                        positional image arguments with --diff (pass it
+                        via --image, or rely on the 'photo' derivation).
 
 A geometry difference that changes the rendered dimensions (e.g. a crop edit
 between the two sidecars) is reported as {input,lines,status:"dims-changed"}
@@ -146,8 +178,16 @@ export interface CliParsedArgs {
   sidecarA: string | null;
   /** --diff <sidecarA> <sidecarB>'s second path; only meaningful with mode 'diff'. */
   sidecarB: string | null;
-  /** --image <path>; only meaningful with (and required by) mode 'diff'. */
+  /**
+   * --image <path>; only meaningful with mode 'diff'. null is now valid at
+   * PARSE time (CLI tooling parity, project-storage.md stage 2) — buildCliJob
+   * can't yet know whether both sidecars carry a matching 'photo' field (that
+   * needs a filesystem read), so the "must be derivable or given" check moved
+   * to runtime (appStore.ts's runCliDiff).
+   */
   diffImage: string | null;
+  /** --project <dir>; valid with every mode (render/check/diff) — see CLI_USAGE. null = no project (today's legacy behavior). */
+  project: string | null;
 }
 
 const METADATA_VALUES: ExportMetadataPolicy[] = ['all', 'minimal', 'none'];
@@ -177,6 +217,7 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     sidecarA: null,
     sidecarB: null,
     diffImage: null,
+    project: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -190,6 +231,10 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       case '--allow-external':
         opts.allowExternal = true;
+        break;
+      case '--project':
+        opts.project = argv[++i] ?? null;
+        if (opts.project === null) return { error: '--project expects a directory or a project.silverbox path' };
         break;
       case '--check':
         opts.mode = 'check';
@@ -275,7 +320,11 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.allowExternal) return { error: '--allow-external is not valid with --check' };
     if (opts.diffImage !== null) return { error: '--image is not valid with --check' };
   } else if (opts.mode === 'diff') {
-    if (opts.diffImage === null) return { error: '--diff requires --image <path>' };
+    // --image is no longer required at parse time (CLI tooling parity,
+    // project-storage.md stage 2): it can be DERIVED from both sidecars'
+    // `photo` field at runtime (appStore.ts's runCliDiff) — a filesystem
+    // read this pure parse function never does, so the "derivable or given"
+    // check lives there instead.
     if (opts.images.length > 0) return { error: '--diff takes no positional images — pass the image via --image' };
     if (opts.outDir !== null) return { error: '--out is not valid with --diff' };
     if (opts.preset !== null) return { error: '--preset is not valid with --diff' };
@@ -297,28 +346,52 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
 }
 
 /**
+ * `--project <dir>` normalization (CLI tooling parity, project-storage.md
+ * stage 2): accepts the project DIRECTORY or a path to its own
+ * `project.silverbox` — the latter collapses to its containing directory,
+ * same "drop project.silverbox itself" rule App.tsx's drag-drop handler
+ * already applies to a dropped project file. Pure string/path op, no
+ * filesystem access (parseCliArgs/buildCliJob's own "never touches the
+ * filesystem" contract — the resolved dir's actual validity is checked at
+ * runtime, once, when the job's first image opens against it).
+ */
+function normalizeProjectDir(p: string): string {
+  return basename(p) === PROJECT_MANIFEST_NAME ? dirname(p) : p;
+}
+
+/**
  * Resolve parsed argv into the job the renderer actually consumes — every
  * path made absolute against `cwd` (the terminal's cwd, i.e. `process.cwd()`
  * as seen by main before any `chdir`), so nothing downstream needs to know
  * what directory the CLI was launched from. `preset`'s name-vs-path split:
  * see CLI_USAGE above — a trailing `.json` is the only signal, deliberately
  * simple and easy to document rather than sniffing the filesystem.
+ *
+ * `resolveInput`: a `.json` argument (a look file — CLI tooling parity item
+ * 2) resolves against the ACTIVE PROJECT dir instead of `cwd` when
+ * `--project` is given ("path can be relative to project" — CLI_USAGE) —
+ * every other argument (plain images, and any `.json` when there's no
+ * --project) keeps resolving against `cwd` exactly as before.
  */
 export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
-  const images = parsed.images.map((p) => resolve(cwd, p));
+  const projectDir = parsed.project === null ? null : normalizeProjectDir(resolve(cwd, parsed.project));
+  const resolveInput = (p: string): string => resolve(p.endsWith('.json') && projectDir !== null ? projectDir : cwd, p);
+  const images = parsed.images.map(resolveInput);
   if (parsed.mode === 'check') {
-    const job: CliCheckJob = { mode: 'check', images, update: parsed.update, threshold: parsed.threshold };
+    const job: CliCheckJob = { mode: 'check', images, projectDir, update: parsed.update, threshold: parsed.threshold };
     return job;
   }
   if (parsed.mode === 'diff') {
-    // parseCliArgs's own validation guarantees these three are set whenever
-    // mode reaches 'diff' (sidecarA/sidecarB come from the SAME --diff
-    // parse as the mode flip; diffImage's absence is rejected there too).
+    // parseCliArgs's own validation guarantees sidecarA/sidecarB are set
+    // whenever mode reaches 'diff' (they come from the SAME --diff parse as
+    // the mode flip); diffImage may be null (runtime-derived — see
+    // CliDiffJob.image's doc comment).
     const job: CliDiffJob = {
       mode: 'diff',
-      sidecarA: resolve(cwd, parsed.sidecarA!),
-      sidecarB: resolve(cwd, parsed.sidecarB!),
-      image: resolve(cwd, parsed.diffImage!),
+      projectDir,
+      sidecarA: resolveInput(parsed.sidecarA!),
+      sidecarB: resolveInput(parsed.sidecarB!),
+      image: parsed.diffImage === null ? null : resolve(cwd, parsed.diffImage),
     };
     return job;
   }
@@ -331,6 +404,7 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
   const job: CliRenderJob = {
     mode: 'render',
     images,
+    projectDir,
     outDir: parsed.outDir === null ? null : resolve(cwd, parsed.outDir),
     preset,
     output: parsed.output,

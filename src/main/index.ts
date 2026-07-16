@@ -165,6 +165,27 @@ function armSidecarWatch(sidecarPath: string): void {
 }
 
 function registerIpc(): void {
+  // CLI tooling parity (project-storage.md stage 2): a warning that isn't
+  // any one file's structured result (currently just "--project playlist
+  // fallback") — always to stderr, independent of --json (see IPC.cliWarn's
+  // doc comment). Harmless outside `--render` — only runCliRender/runCliCheck/
+  // runCliDiff ever call it.
+  ipcMain.on(IPC.cliWarn, (_ev, message: unknown) => {
+    if (typeof message === 'string') process.stderr.write(`silverbox-render: ${message}\n`);
+  });
+
+  // File-association open (project-storage migration, stage 2 — see
+  // IPC.openPath's doc comment): the renderer signals it's mounted and
+  // listening; flush whatever `open-file` queued before the window finished
+  // loading (see the `app.on('open-file', …)` registration further down).
+  ipcMain.on(IPC.appReady, () => {
+    rendererOpenPathReady = true;
+    if (pendingOpenPath && mainWindow) {
+      mainWindow.webContents.send(IPC.openPath, pendingOpenPath);
+      pendingOpenPath = null;
+    }
+  });
+
   ipcMain.handle(IPC.ping, (): PingResult => {
     return {
       pid: process.pid,
@@ -426,6 +447,32 @@ function registerIpc(): void {
 const testMode = process.env['SILVERBOX_TEST'] === '1';
 const headless = testMode || isCliRenderMode;
 
+/**
+ * File-association open (project-storage migration, stage 2, packaged app
+ * only — see PROJECT_MANIFEST_NAME's doc comment and package.json's `build.
+ * fileAssociations`). macOS delivers a double-clicked/opened `.silverbox`
+ * file via the `open-file` app event, NOT `process.argv` (that's the
+ * Windows/Linux shape, wired via `second-instance` + a single-instance
+ * lock — NOT implemented here: this app targets macOS only today, see
+ * DESIGN.md). `open-file` can fire before `ready` (a cold launch via
+ * double-click) — registered at module scope, synchronously, so an early
+ * firing is never missed (Electron's own documented requirement); queued in
+ * `pendingOpenPath` until the renderer says it's listening (`appReady`,
+ * registered in registerIpc() above) or sent immediately if it already is
+ * (the app was already running — a second double-click).
+ */
+let pendingOpenPath: string | null = null;
+let rendererOpenPathReady = false;
+app.on('open-file', (event, path) => {
+  event.preventDefault();
+  if (headless) return; // no real double-click scenario in test/CLI runs
+  if (rendererOpenPathReady && mainWindow) {
+    mainWindow.webContents.send(IPC.openPath, path);
+  } else {
+    pendingOpenPath = path;
+  }
+});
+
 if (isCliRenderMode) {
   // Force the real fresh-open defaults (lens profile, base curve) regardless
   // of SILVERBOX_TEST — see SilverboxApi.testFlags's `forceDefaults` doc
@@ -511,6 +558,15 @@ async function runCliMode(): Promise<void> {
   }
 
   const job = buildCliJob(parsed, process.cwd());
+  // Legacy-adjacent-golden nudge (CLI tooling parity item 3): printed once
+  // per invocation, not per image — a batch of 500 goldens shouldn't spam
+  // 500 identical lines. Only for --check without --project; --project's
+  // own golden location needs no nudge (it's already the recommended path).
+  if (job.mode === 'check' && job.projectDir === null) {
+    console.error(
+      'silverbox-render: note: goldens are stored next to the photo (legacy) — pass --project <dir> to keep them inside a project instead\n'
+    );
+  }
   const win = createWindow();
   let hadFailure = false;
 
