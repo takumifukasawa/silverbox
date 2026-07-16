@@ -1102,13 +1102,18 @@ button:disabled {
 }
 
 .mask-invert-row,
-.output-name-row {
+.output-name-row,
+.bw-enable-row {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
   color: #ccc;
   margin-top: 6px;
+}
+
+.bw-enable-row {
+  padding: 0 14px 6px;
 }
 
 .output-name-row input[type='text'] {

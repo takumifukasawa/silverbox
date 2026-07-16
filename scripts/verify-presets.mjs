@@ -155,7 +155,7 @@ try {
   // knows about (mirrors presetFamilies.ts's PRESET_FAMILIES — kept in sync
   // by presetFamilies.test.ts on the unit side, so a drift there would show
   // up as a missing/extra checkbox testid here, not silently).
-  const ALL_FAMILY_IDS = ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail', 'geometry', 'spots', 'masks', 'custom-nodes'];
+  const ALL_FAMILY_IDS = ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail', 'geometry', 'spots', 'masks', 'custom-nodes'];
   /** Everything except geometry — the "whole look" shape every pre-scoping verify section below expects (captureLook never carried geometry either). */
   const WHOLE_LOOK_MINUS_GEOMETRY = ALL_FAMILY_IDS.filter((id) => id !== 'geometry');
 
@@ -705,7 +705,7 @@ try {
   await page.locator('[data-testid="preset-save"]').click();
   await page.waitForSelector('[data-testid="family-scope-dialog"]', { timeout: 5_000 });
   const isFamilyChecked = async (id) => page.locator(`[data-testid="family-scope-checkbox-${id}"] input[type="checkbox"]`).isChecked();
-  for (const id of ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail']) {
+  for (const id of ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail']) {
     check(`"${id}" is checked by default (develop group)`, await isFamilyChecked(id), id);
   }
   for (const id of ['geometry', 'spots', 'masks', 'custom-nodes']) {

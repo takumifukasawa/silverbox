@@ -207,7 +207,7 @@ every reader needs to orient themselves.
 |---|---|---|
 | `input` | The decoded source image; carries non-destructive `geometry` (crop/straighten/orientation) and `lens` (manual distortion/CA/vignette + Sony embedded-profile toggle). | `graphDoc.ts` (`GeometryParams`, `LensParams`) |
 | `output` | A named render target (`name`, default `'main'`); may carry per-output `export` overrides (quality/maxDim/metadata/colorSpace). | `graphDoc.ts` (`ExportOverrides`) |
-| `Develop` | The sectioned "basic develop" node (exposure, white balance, tone curve, color, detail, grain, profile…) — most everyday edits live here. | `developNode.ts` |
+| `Develop` | The sectioned "basic develop" node (exposure, white balance, tone curve, color, HSL, B&W conversion, grading, detail, grain, profile…) — most everyday edits live here. | `developNode.ts` |
 | `exposure`, `whitebalance`, `contrast`, `tonecurve`, `saturation`, `vibrance`, `brightness` | Single-purpose op nodes — the node-editor's building blocks, each a matched WGSL+CPU pair. | `ops.ts` |
 | `custom` | User-authored WGSL fragment shader with a typed GUI param list. | `customShaderNode.ts` |
 | `blend` | Two-input compositor (`a`/`b` ports) with an optional `mask` port; `amount` mixes a→b. | `ops.ts` (`BLEND_KIND`) |

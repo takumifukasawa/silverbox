@@ -658,6 +658,13 @@ interface AppState {
   selectNode(id: string | null): void;
   updateNodeParam(nodeId: string, key: string, value: number): void;
   /**
+   * B&W enable toggle (docs/brief-bank/bw-mixer.md) — a boolean, so it can't
+   * ride updateNodeParam's numeric `value` (n.develop.bw.enabled: boolean).
+   * `mix` is left untouched either way (toggling off/on round-trips it — see
+   * BwParams' doc comment). No-op on a non-Develop nodeId.
+   */
+  setDevelopBwEnabled(nodeId: string, enabled: boolean): void;
+  /**
    * Node bypass toggle (Resolve calls this "mute"; plain `m` / the node
    * body's bypass button): flips `disabled` on `nodeId`, one plain undo entry
    * per toggle (unlike updateNodeParam's coalescing param-drag key — every
@@ -2649,6 +2656,23 @@ export const useAppStore = create<AppState>((set, get) => {
       },
       graphDirty: true,
     }));
+  },
+
+  setDevelopBwEnabled(nodeId, enabled) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== DEVELOP_KIND) return {};
+      const develop = structuredClone(node.develop ?? defaultDevelopParams());
+      develop.bw.enabled = enabled;
+      return {
+        ...pushHistory(s, `param:${nodeId}:bw.enabled`),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)),
+        },
+        graphDirty: true,
+      };
+    });
   },
 
   toggleNodeDisabled(nodeId) {

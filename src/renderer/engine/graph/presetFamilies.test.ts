@@ -57,7 +57,7 @@ describe('isKnownFamilyId', () => {
   it('accepts every id in the shared list, rejects anything else', () => {
     for (const id of ALL_FAMILY_IDS) expect(isKnownFamilyId(id)).toBe(true);
     expect(isKnownFamilyId('mystery-family')).toBe(false);
-    expect(isKnownFamilyId('bw')).toBe(false); // not shipped yet — see PRESET_FAMILIES's doc comment
+    expect(isKnownFamilyId('bw')).toBe(true); // shipped — docs/brief-bank/bw-mixer.md
   });
 });
 
@@ -104,6 +104,21 @@ describe('pickDevelopFamilies', () => {
     const out = pickDevelopFamilies(srcFull, identity, new Set(['curves']));
     expect(out.toneCurve.rgb).toEqual(srcFull.toneCurve.rgb);
     expect(out.hsl.red).toEqual(identity.hsl.red); // hsl not checked
+  });
+
+  it('bw moves independently of hsl (disjoint from the HSL family despite sharing the same band mask)', () => {
+    const srcFull: DevelopParams = {
+      ...defaultDevelopParams(),
+      hsl: { ...defaultDevelopParams().hsl, red: { h: 10, s: 20, l: -5 } },
+      bw: { enabled: true, mix: [30, 0, 0, 0, 0, 0, 0, 0] },
+    };
+    const bwOnly = pickDevelopFamilies(srcFull, identity, new Set(['bw']));
+    expect(bwOnly.bw).toEqual(srcFull.bw);
+    expect(bwOnly.hsl.red).toEqual(identity.hsl.red); // hsl not checked
+
+    const hslOnly = pickDevelopFamilies(srcFull, identity, new Set(['hsl']));
+    expect(hslOnly.hsl.red).toEqual(srcFull.hsl.red);
+    expect(hslOnly.bw).toEqual(identity.bw); // bw not checked
   });
 
   it('apply direction: base = current graph (not identity) — unchecked families stay at the CURRENT value, not reset', () => {

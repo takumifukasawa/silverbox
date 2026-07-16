@@ -129,31 +129,51 @@ const HSL_CENTERS = [0, 30, 60, 120, 180, 240, 270, 300, 360];
 const HSL_CENTERS_WGSL = HSL_CENTERS.map((v) => v.toFixed(1)).join(', ');
 
 /**
+ * Shared hue-band lookup: given a pixel's hue (degrees) and its chroma
+ * (encoded max−min), locates which two adjacent HSL_BAND_CENTER_DEG bands it
+ * sits between and the chroma gate that keeps grays out of every band. This
+ * is THE band mask both wgslHslBands and the B&W mixer (wgslBwMix,
+ * docs/brief-bank/bw-mixer.md) key off of — extracted here so "same band
+ * boundaries" is a code-sharing fact, not a hope. Returns
+ * vec3f(loBandIndex, hiBlendWeight, chromaGateMask); callers blend their own
+ * per-band values with `mix(arr[i], arr[(i+1)%8], w) * satMask`.
+ */
+export const WGSL_HUE_BAND_WEIGHTS = /* wgsl */ `
+fn hueBandWeights(hueDeg: f32, chroma: f32) -> vec3f {
+  let satMask = smoothstep(0.0, ${HSL_CHROMA_MASK_FULL}, chroma);
+  var centers = array<f32, 9>(${HSL_CENTERS_WGSL});
+  var i = 0u;
+  for (; i < 7u; i++) {
+    if (hueDeg < centers[i + 1u]) {
+      break;
+    }
+  }
+  let t = (hueDeg - centers[i]) / (centers[i + 1u] - centers[i]);
+  let w = t * t * (3.0 - 2.0 * t);
+  return vec3f(f32(i), w, satMask);
+}
+`;
+
+/**
  * 8-band HSL adjust, applied in DISPLAY (sRGB-encoded) space. `bands` = WGSL
  * expression for an array<vec4f, 8>, xyz = hue/sat/lum amounts (−1..1).
  *
  * A pixel's hue sits between two adjacent band centers (wrapping 300°→360°=
  * red); the two bands blend with a smoothstep falloff — a smooth partition of
- * unity. The chroma mask keeps grays out of every band and eases the effect
- * in on weakly saturated pixels. Requires WGSL_HSL_HELPERS + srgbEncode/
- * srgbDecode. The pass only exists when some band is non-zero.
+ * unity (hueBandWeights above). The chroma mask keeps grays out of every band
+ * and eases the effect in on weakly saturated pixels. Requires
+ * WGSL_HSL_HELPERS + WGSL_HUE_BAND_WEIGHTS + srgbEncode/srgbDecode. The pass
+ * only exists when some band is non-zero.
  */
 export function wgslHslBands(bands: string): string {
   return /* wgsl */ `  {
     let enc = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
     let hsl = rgb2hsl(enc);
     let chroma = max(enc.r, max(enc.g, enc.b)) - min(enc.r, min(enc.g, enc.b));
-    let satMask = smoothstep(0.0, ${HSL_CHROMA_MASK_FULL}, chroma);
-    var centers = array<f32, 9>(${HSL_CENTERS_WGSL});
-    var i = 0u;
-    for (; i < 7u; i++) {
-      if (hsl.x < centers[i + 1u]) {
-        break;
-      }
-    }
-    let t = (hsl.x - centers[i]) / (centers[i + 1u] - centers[i]);
-    let w = t * t * (3.0 - 2.0 * t);
-    let adj = mix(${bands}[i].xyz, ${bands}[(i + 1u) % 8u].xyz, w) * satMask;
+    let hw = hueBandWeights(hsl.x, chroma);
+    let i = u32(hw.x);
+    let j = (i + 1u) % 8u;
+    let adj = mix(${bands}[i].xyz, ${bands}[j].xyz, hw.y) * hw.z;
     // hue: ±100 → ±${HSL_HUE_FULL_SCALE_DEG}° rotation (wrapped)
     var hue = (hsl.x + adj.x * ${HSL_HUE_FULL_SCALE_DEG}.0) % 360.0;
     if (hue < 0.0) {
@@ -164,6 +184,57 @@ export function wgslHslBands(bands: string): string {
     // luminance: exposure-like gain on the display lightness (black anchored)
     let lum = clamp(hsl.z * exp2(adj.z * ${HSL_LUM_FULL_SCALE_STOPS}), 0.0, 1.0);
     c = srgbDecode(hsl2rgb(vec3f(hue, sat, lum)));
+  }
+`;
+}
+
+// --- B&W conversion (docs/brief-bank/bw-mixer.md) -----------------------------
+//
+// Reuses the EXACT hue-band mask above (hueBandWeights) so the B&W tabs' band
+// boundaries feel identical to the HSL tabs. Sits after HSL / before Color
+// Grading in the Develop chain (developNode.ts) — grading still applies to
+// the resulting mono image (split-toning a B&W is the classic use), while
+// saturation/vibrance/HSL naturally become inert on it (their inputs are
+// neutral) without needing to be disabled.
+
+/**
+ * B&W band-mix global strength (the design brief's "K_BW") — how strongly
+ * each hue band's mix slider darkens/lightens its contribution to the mono
+ * conversion.
+ *
+ * LR-CALIBRATION: provisional — shipped LR-shaped ahead of the next LR
+ * side-by-side session (see docs/brief-bank/bw-mixer.md and the
+ * [[silverbox-lightroom-reference]] calibration workflow); 0.6 is a start
+ * value, not a measured match.
+ */
+export const BW_MIX_STRENGTH = 0.6;
+
+/**
+ * B&W mono conversion: mono = L × (1 + Σ_b mask_b·mix_b/100 × K_BW), then the
+ * mono value replaces all three channels while still LINEAR. `bands` = WGSL
+ * expression for an array<vec4f, 8>, x = mix amount (−1..1) in HSL_BANDS
+ * order (yzw unused — unlike HSL's bands, B&W has only one control per
+ * band). The hue-band mask is computed on the CLAMPED ENCODED signal (same
+ * stability convention wgslHslBands uses for hue/chroma detection); L itself
+ * is the pixel's OWN UNCLAMPED linear luma, so highlights above 1.0 stay
+ * meaningful — same convention saturation/vibrance's `luma(c)` uses. The
+ * multiplier floors at 0 so a −100 mix on a fully-in-band hue crushes to
+ * black instead of inverting. Requires WGSL_HSL_HELPERS + WGSL_HUE_BAND_
+ * WEIGHTS + srgbEncode + the `luma` helper (WGSL_LUMA). The pass only exists
+ * when `enabled` is true (identity invariant — see isIdentityBw).
+ */
+export function wgslBwMix(bands: string): string {
+  return /* wgsl */ `  {
+    let enc = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0)));
+    let hsl = rgb2hsl(enc);
+    let chroma = max(enc.r, max(enc.g, enc.b)) - min(enc.r, min(enc.g, enc.b));
+    let hw = hueBandWeights(hsl.x, chroma);
+    let i = u32(hw.x);
+    let j = (i + 1u) % 8u;
+    let bandMix = mix(${bands}[i].x, ${bands}[j].x, hw.y) * hw.z;
+    let mult = max(1.0 + bandMix * ${BW_MIX_STRENGTH}, 0.0);
+    let mono = luma(c) * mult;
+    c = vec3f(mono, mono, mono);
   }
 `;
 }
@@ -191,6 +262,24 @@ export function cpuRgb2hsl(enc: [number, number, number]): [number, number, numb
   return [h, s, l];
 }
 
+/** CPU mirror of WGSL_HUE_BAND_WEIGHTS — the shared hue/chroma band lookup used by both cpuHslBandsEncoded and cpuBwBandMix. `hue` in degrees, `chroma` = encoded max−min. */
+export interface HueBandWeights {
+  i: number;
+  j: number;
+  w: number;
+  satMask: number;
+}
+export function cpuHueBandWeights(hue: number, chroma: number): HueBandWeights {
+  const tMask = Math.min(Math.max(chroma / HSL_CHROMA_MASK_FULL, 0), 1);
+  const satMask = tMask * tMask * (3 - 2 * tMask);
+  let i = 0;
+  while (i < 7 && hue >= HSL_CENTERS[i + 1]!) i++;
+  const t = (hue - HSL_CENTERS[i]!) / (HSL_CENTERS[i + 1]! - HSL_CENTERS[i]!);
+  const w = t * t * (3 - 2 * t);
+  const j = (i + 1) % 8;
+  return { i, j, w, satMask };
+}
+
 /** CPU mirror of wgslHslBands — operates on ENCODED rgb, returns encoded. */
 export function cpuHslBandsEncoded(
   enc: [number, number, number],
@@ -199,13 +288,7 @@ export function cpuHslBandsEncoded(
   const [h, s, l] = cpuRgb2hsl(enc);
   const [r, g, b] = enc;
   const chroma = Math.max(r, g, b) - Math.min(r, g, b);
-  const tMask = Math.min(Math.max(chroma / HSL_CHROMA_MASK_FULL, 0), 1);
-  const satMask = tMask * tMask * (3 - 2 * tMask);
-  let i = 0;
-  while (i < 7 && h >= HSL_CENTERS[i + 1]!) i++;
-  const t = (h - HSL_CENTERS[i]!) / (HSL_CENTERS[i + 1]! - HSL_CENTERS[i]!);
-  const w = t * t * (3 - 2 * t);
-  const j = (i + 1) % 8;
+  const { i, j, w, satMask } = cpuHueBandWeights(h, chroma);
   const adj = [0, 1, 2].map(
     (k) => (bands[i * 4 + k]! + (bands[j * 4 + k]! - bands[i * 4 + k]!) * w) * satMask
   ) as [number, number, number];
@@ -225,6 +308,23 @@ export function cpuHslBandsEncoded(
   else if (hp >= 5) rgb = [ch, 0, x];
   const m = lum - 0.5 * ch;
   return [rgb[0] + m, rgb[1] + m, rgb[2] + m];
+}
+
+/**
+ * CPU mirror of wgslBwMix's band-mix scalar — the raw Σ_b mask_b·mix_b/100
+ * term (NOT yet scaled by BW_MIX_STRENGTH). `enc` is already-encoded/clamped
+ * rgb (same convention cpuHslBandsEncoded uses); `mix` is one vec4 per band
+ * in HSL_BANDS order (.x = mix/100, matching packBw's layout). The caller
+ * (developNode.ts's cpuBw) applies BW_MIX_STRENGTH and composes with the
+ * pixel's own UNCLAMPED linear luma — the band mask needs the clamped
+ * encoded domain, but L must not be clamped (same split wgslBwMix makes).
+ */
+export function cpuBwBandMix(enc: [number, number, number], mix: Float32Array): number {
+  const [h] = cpuRgb2hsl(enc);
+  const [r, g, b] = enc;
+  const chroma = Math.max(r, g, b) - Math.min(r, g, b);
+  const { i, j, w, satMask } = cpuHueBandWeights(h, chroma);
+  return (mix[i * 4]! + (mix[j * 4]! - mix[i * 4]!) * w) * satMask;
 }
 
 /** Plain linear gain (atomic brightness; no Develop counterpart). `amount` −1..1. */

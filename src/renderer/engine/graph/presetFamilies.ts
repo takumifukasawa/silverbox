@@ -31,21 +31,13 @@ import { BLEND_KIND } from './ops';
  * Every family this build knows about. Ordered for display (FamilyScopeDialog
  * renders them in this order, "develop" group first, "structural" group
  * after a divider).
- *
- * NOTE on `bw`: the brief's family list includes a `bw` (black & white)
- * family "if develop.bw exists in the codebase". As of this writing
- * DevelopParams (developNode.ts) has no `bw` section — Silverbox has no
- * dedicated B&W develop control yet. Add a `{ id: 'bw', ... }` entry here
- * (group: 'develop', defaultChecked: true) AND a branch in
- * pickDevelopFamilies below the day that section lands; until then there is
- * deliberately no `bw` id anywhere in this module; using an unlisted id
- * would just make it an "unknown family" (see isKnownFamilyId).
  */
 export const PRESET_FAMILIES = [
   { id: 'basic-tone', label: 'Basic tone', defaultChecked: true, group: 'develop' },
   { id: 'wb', label: 'White balance', defaultChecked: true, group: 'develop' },
   { id: 'curves', label: 'Tone curve', defaultChecked: true, group: 'develop' },
   { id: 'hsl', label: 'HSL', defaultChecked: true, group: 'develop' },
+  { id: 'bw', label: 'Black & White', defaultChecked: true, group: 'develop' },
   { id: 'grading', label: 'Color grading', defaultChecked: true, group: 'develop' },
   { id: 'effects', label: 'Effects', defaultChecked: true, group: 'develop' },
   { id: 'detail', label: 'Detail', defaultChecked: true, group: 'develop' },
@@ -136,6 +128,7 @@ export function pickDevelopFamilies(
   }
   if (families.has('curves')) out.toneCurve = structuredClone(src.toneCurve);
   if (families.has('hsl')) out.hsl = structuredClone(src.hsl);
+  if (families.has('bw')) out.bw = structuredClone(src.bw);
   if (families.has('grading')) out.grading = structuredClone(src.grading);
   if (families.has('effects')) out.effects = structuredClone(src.effects);
   if (families.has('detail')) out.detail = structuredClone(src.detail);

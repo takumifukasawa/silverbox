@@ -21,10 +21,14 @@ import { applyProfileCpu, DEFAULT_PROFILE, PROFILE_LATTICE_N, packProfileLattice
 import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
 import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
+  BW_MIX_STRENGTH,
+  cpuBwBandMix,
   cpuContrast,
   cpuHslBandsEncoded,
   cpuSaturationVibrance,
   WGSL_HSL_HELPERS,
+  WGSL_HUE_BAND_WEIGHTS,
+  wgslBwMix,
   wgslContrast,
   wgslExposure,
   wgslHslBands,
@@ -81,6 +85,20 @@ export const HSL_BAND_CENTER_DEG: Record<HslBand, number> = {
   purple: 270,
   magenta: 300,
 };
+
+/**
+ * B&W conversion + channel mixer (docs/brief-bank/bw-mixer.md): `mix` is one
+ * −100..+100 amount per HSL_BANDS band (SAME 8 hue bands as HSL, same
+ * order), each darkening/lightening that hue's contribution to the mono
+ * conversion. Identity is `enabled: false` — `mix` is preserved but inert
+ * while disabled, so toggling B&W off/on round-trips the sliders (matches
+ * the HSL/Grading identity convention: the SECTION gates the pass, not every
+ * individual value being zero).
+ */
+export interface BwParams {
+  enabled: boolean;
+  mix: number[];
+}
 
 export interface DetailParams {
   sharpen: { amount: number; radius: number; masking: number };
@@ -154,6 +172,7 @@ export interface DevelopParams {
   basic: DevelopBasicParams;
   toneCurve: ToneCurveParams;
   hsl: Record<HslBand, HslBandParams>;
+  bw: BwParams;
   grading: GradingParams;
   detail: DetailParams;
   effects: EffectsParams;
@@ -187,6 +206,7 @@ export function defaultDevelopParams(): DevelopParams {
     },
     toneCurve: { rgb: identityCurvePoints(), r: identityCurvePoints(), g: identityCurvePoints(), b: identityCurvePoints() },
     hsl: Object.fromEntries(HSL_BANDS.map((b) => [b, { h: 0, s: 0, l: 0 }])) as Record<HslBand, HslBandParams>,
+    bw: { enabled: false, mix: HSL_BANDS.map(() => 0) },
     grading: {
       shadows: { hue: 0, sat: 0, lum: 0 },
       midtones: { hue: 0, sat: 0, lum: 0 },
@@ -229,6 +249,11 @@ export function isIdentityToneCurve(tc: ToneCurveParams): boolean {
 
 export function isIdentityHsl(hsl: Record<HslBand, HslBandParams>): boolean {
   return HSL_BANDS.every((band) => hsl[band].h === 0 && hsl[band].s === 0 && hsl[band].l === 0);
+}
+
+/** `enabled: false` is the ONLY identity condition — `mix` stays inert-but-preserved while off (see BwParams' doc comment). */
+export function isIdentityBw(bw: BwParams): boolean {
+  return !bw.enabled;
 }
 
 export function isIdentityDetail(d: DetailParams): boolean {
@@ -371,8 +396,25 @@ struct HslParams {
 }
 @group(0) @binding(1) var<uniform> u: HslParams;
 `,
-  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_HSL_HELPERS,
+  helpers: WGSL_SRGB_ENCODE + WGSL_SRGB_DECODE + WGSL_HSL_HELPERS + WGSL_HUE_BAND_WEIGHTS,
   body: wgslHslBands('u.bands'),
+});
+
+// B&W conversion (docs/brief-bank/bw-mixer.md), applied right after HSL /
+// before Color/Grading — see wgslBwMix's doc comment for the full formula
+// and the "grading still tints a B&W" pipeline-position rationale. Reuses
+// the exact HSL band mask (WGSL_HUE_BAND_WEIGHTS) so band boundaries feel
+// identical between the two tab sets. Only exists when `enabled` is true.
+const BW_WGSL = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct BwParams {
+  // one vec4 per band in HSL_BANDS order: x = mix (−1..1), yzw unused
+  bands: array<vec4f, 8>,
+}
+@group(0) @binding(1) var<uniform> u: BwParams;
+`,
+  helpers: WGSL_SRGB_ENCODE + WGSL_HSL_HELPERS + WGSL_HUE_BAND_WEIGHTS + WGSL_LUMA,
+  body: wgslBwMix('u.bands'),
 });
 
 const COLOR_WGSL = nodePassWgsl({
@@ -423,6 +465,15 @@ function packHsl(hsl: Record<HslBand, HslBandParams>): Float32Array {
     f[i * 4] = hsl[band].h / 100;
     f[i * 4 + 1] = hsl[band].s / 100;
     f[i * 4 + 2] = hsl[band].l / 100;
+  });
+  return f;
+}
+
+/** Packs BwParams.mix (HSL_BANDS order) into the same array<vec4f,8> layout HSL uses — .x only, yzw unused. */
+function packBw(bw: BwParams): Float32Array {
+  const f = new Float32Array(8 * 4);
+  HSL_BANDS.forEach((_band, i) => {
+    f[i * 4] = (bw.mix[i] ?? 0) / 100;
   });
   return f;
 }
@@ -1086,6 +1137,7 @@ export function compileDevelop(
     b.blacks !== 0;
   const curveActive = !isIdentityToneCurve(params.toneCurve);
   const hslActive = !isIdentityHsl(params.hsl);
+  const bwActive = !isIdentityBw(params.bw);
   const colorActive = b.saturation !== 0 || b.vibrance !== 0;
   const gradingActive = !isIdentityGrading(params.grading);
   const d = params.detail;
@@ -1101,6 +1153,7 @@ export function compileDevelop(
 
   const lut = curveActive ? buildToneCurveLut(params.toneCurve) : null;
   const hslBands = hslActive ? packHsl(params.hsl) : null;
+  const bwBands = bwActive ? packBw(params.bw) : null;
   const grading = gradingActive ? packGrading(params.grading) : null;
   const fxPixel = fxPixelActive ? packFxPixel(e) : null;
   const profile = profileActive ? packProfileLattice(profileLattice, params.profile.amount) : null;
@@ -1116,6 +1169,12 @@ export function compileDevelop(
   }
   if (hslBands) {
     passes.push({ shaderId: 'develop/hsl', wgsl: HSL_WGSL, uniforms: hslBands.buffer as ArrayBuffer });
+  }
+  if (bwBands) {
+    // after HSL, before saturation/vibrance and Grading — downstream color
+    // stages naturally go inert on the resulting mono image (see BwParams'
+    // doc comment); Grading still applies (split-toning a B&W).
+    passes.push({ shaderId: 'develop/bw', wgsl: BW_WGSL, uniforms: bwBands.buffer as ArrayBuffer });
   }
   if (colorActive) passes.push({ shaderId: 'develop/color', wgsl: COLOR_WGSL, uniforms: packColor(b) });
   if (grading) {
@@ -1158,6 +1217,7 @@ export function compileDevelop(
           if (toneActive) out = cpuDevelopTone(out, b, wbGains);
           if (lut) out = cpuToneCurve(out, lut);
           if (hslBands) out = cpuHsl(out, hslBands);
+          if (bwBands) out = cpuBw(out, bwBands);
           if (colorActive) out = cpuSaturationVibrance(out, b.saturation / 100, b.vibrance / 100);
           if (grading) out = cpuGrading(out, grading);
           if (fxPixel) out = cpuFxPixel(out, fxPixel, x, y, width, height);
@@ -1175,6 +1235,24 @@ function cpuHsl(px: Rgb, bands: Float32Array): Rgb {
   ];
   const out = cpuHslBandsEncoded(enc, bands);
   return [srgbDecode(out[0]), srgbDecode(out[1]), srgbDecode(out[2])];
+}
+
+/**
+ * Mirror of the B&W pass: the hue-band mask reads the CLAMPED ENCODED signal
+ * (same stability convention cpuHsl uses), but L is the pixel's OWN
+ * UNCLAMPED linear luma — mono = L × (1 + bandMix × BW_MIX_STRENGTH),
+ * floored at 0.
+ */
+function cpuBw(px: Rgb, mix: Float32Array): Rgb {
+  const enc: Rgb = [
+    srgbEncode(Math.min(Math.max(px[0], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[1], 0), 1)),
+    srgbEncode(Math.min(Math.max(px[2], 0), 1)),
+  ];
+  const bandMix = cpuBwBandMix(enc, mix);
+  const mult = Math.max(1 + bandMix * BW_MIX_STRENGTH, 0);
+  const mono = lumaCpu(px[0], px[1], px[2]) * mult;
+  return [mono, mono, mono];
 }
 
 /** Mirror of the toneCurve pass: encode → LUT lookup (lerp) → decode. */

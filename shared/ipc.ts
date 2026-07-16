@@ -797,9 +797,10 @@ export const DEFAULT_SETTINGS: Settings = {
   denoiseModelConsent: false,
   denoiseModelUrl: '',
   // Keep in sync with presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS (the
-  // "develop" group: basic tone / WB / curves / HSL / grading / effects /
-  // detail) — pinned equal by a unit test, see this field's doc comment.
-  presetSaveFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail'],
+  // "develop" group: basic tone / WB / curves / HSL / B&W / grading /
+  // effects / detail) — pinned equal by a unit test, see this field's doc
+  // comment.
+  presetSaveFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

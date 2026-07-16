@@ -193,6 +193,54 @@ function HslSection({ node, params }: { node: GraphNode; params: DevelopParams }
   );
 }
 
+/** Desaturated tint per band (brief: "shown desaturated-tinted") — same hue center as hslTrackGradient's tracks, much lower saturation so the B&W tabs read as siblings of the HSL tabs without competing with them. */
+function bwTrackGradient(band: HslBand): string {
+  const c = HSL_BAND_CENTER_DEG[band];
+  return `linear-gradient(90deg, hsl(${c},22%,32%), hsl(${c},22%,62%))`;
+}
+
+/**
+ * B&W section (docs/brief-bank/bw-mixer.md): an enable toggle + the 8
+ * HSL_BANDS sliders, in the HSL tab's visual style (same band swatch hues,
+ * desaturated-tinted). Disabled collapses to just the toggle — no auto-mix
+ * button in v1. `mix` stays inert-but-preserved while disabled (toggling
+ * back on restores whatever was dialed in).
+ */
+function BwSection({ node, params }: { node: GraphNode; params: DevelopParams }) {
+  const setDevelopBwEnabled = useAppStore((s) => s.setDevelopBwEnabled);
+  const bw = params.bw;
+  return (
+    <>
+      <label className="bw-enable-row">
+        <input
+          type="checkbox"
+          data-testid="bw-enable"
+          checked={bw.enabled}
+          onChange={(ev) => setDevelopBwEnabled(node.id, ev.target.checked)}
+        />
+        Convert to Black &amp; White
+      </label>
+      {bw.enabled &&
+        HSL_BANDS.map((band, i) => (
+          <ParamSlider
+            key={band}
+            nodeId={node.id}
+            def={{
+              key: `bw.mix.${i}`,
+              label: band,
+              min: -100,
+              max: 100,
+              step: 1,
+              default: 0,
+              gradient: bwTrackGradient(band),
+            }}
+            value={bw.mix[i] ?? 0}
+          />
+        ))}
+    </>
+  );
+}
+
 /** The aggregated Develop panel — Basic now; more sections per spec order. */
 function DevelopInspector({ node }: { node: GraphNode }) {
   const wbModel = useAppStore((s) => s.wbModel);
@@ -263,6 +311,9 @@ function DevelopInspector({ node }: { node: GraphNode }) {
       </Section>
       <Section title="HSL">
         <HslSection node={node} params={params} />
+      </Section>
+      <Section title="B&W">
+        <BwSection node={node} params={params} />
       </Section>
       <Section title="Color Grading">
         <div className="grading-wheels">

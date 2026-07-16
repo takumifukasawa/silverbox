@@ -157,6 +157,8 @@ declare global {
       /** Fraction of decoded pixels whose WORK_TO_SRGB has any channel < −0.001 (out-of-gamut probe). */
       outOfGamutFraction(): number | null;
       updateNodeParam(nodeId: string, key: string, value: number): void;
+      /** Verify-only convenience wrapper around the boolean bw.enabled toggle (see appStore.ts's setDevelopBwEnabled — can't ride updateNodeParam's numeric `value`). */
+      setDevelopBwEnabled(nodeId: string, enabled: boolean): void;
       applyShaderSource(nodeId: string, src: string): Promise<void>;
       addShaderParam(nodeId: string, def: { name: string; min: number; max: number; default: number }): string | null;
       updateShaderParam(nodeId: string, name: string, value: number): void;
@@ -1265,6 +1267,9 @@ export function CanvasView() {
       },
       updateNodeParam(nodeId, key, value) {
         useAppStore.getState().updateNodeParam(nodeId, key, value);
+      },
+      setDevelopBwEnabled(nodeId, enabled) {
+        useAppStore.getState().setDevelopBwEnabled(nodeId, enabled);
       },
       applyShaderSource(nodeId, src) {
         return useAppStore.getState().applyShaderSource(nodeId, src);

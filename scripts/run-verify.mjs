@@ -55,6 +55,8 @@ const ALL_SCRIPTS = [
   // Pure-function unit tier (vitest) — no electron/playwright, just a plain
   // command. Fast, so it leads the pool. See runScript's `command` handling.
   { name: 'unit', command: ['npx', 'vitest', 'run'] },
+  // Spec-honesty round trip (docs/sidecar-spec.md examples vs the real parsers) — pure node, no build, no fixtures: keep it beside `unit` as the other fast pool entry.
+  { name: 'sidecar-spec', file: 'verify-sidecar-spec.mjs' },
   { name: 'ms0', file: 'verify-ms0-decode.mjs' },
   { name: 'ms1', file: 'verify-ms1-app.mjs' },
   { name: 'ms2', file: 'verify-ms2-decode-display.mjs' },
@@ -74,6 +76,7 @@ const ALL_SCRIPTS = [
   { name: 'wb', file: 'verify-wb.mjs' },
   { name: 'tonecurve', file: 'verify-tonecurve.mjs' },
   { name: 'hsl', file: 'verify-hsl.mjs' },
+  { name: 'bw', file: 'verify-bw.mjs' },
   { name: 'detail', file: 'verify-detail.mjs' },
   { name: 'dnd', file: 'verify-dnd.mjs' },
   { name: 'view', file: 'verify-view.mjs' },
