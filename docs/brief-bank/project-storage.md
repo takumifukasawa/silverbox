@@ -1,10 +1,13 @@
 # Brief: project storage — the ONE place documents live
 
 Status: DECIDED 2026-07-13 (user + conductor discussion, superseding
-the adjacent-sidecar placement). Implementation NOT started — staged
-for the golden window; this is the largest structural migration in the
-queue and touches autosave, hot-reload, CLI, golden renders, and every
-verify script.
+the adjacent-sidecar placement). **ALL THREE STAGES LANDED 2026-07-16**
+(65aaa68 stage 1 + suite migration, db9feae stage 2 CLI parity, a5404c1
+stage 3 relink/fingerprint/import/save-as-move; suite 55/55). The
+container format is documented in docs/sidecar-spec.md. Remaining
+follow-ups: user hand-test of the dialog-driven flows, and a
+verify:sidecar-spec round-trip script keeping the spec's worked
+examples honest.
 
 ## The decision
 
