@@ -84,6 +84,23 @@ declare global {
        * read/delete/write look files through `currentLookPath` directly.
        */
       projectState(): { dir: string | null; name: string | null; photoCount: number; currentLookPath: string | null };
+      /**
+       * Project-storage migration, stage 3 ("Missing photos"/relink): rewrite
+       * playlist row `playlistIndex`'s path to `newPath` — see appStore.ts's
+       * relinkPhoto. `force` bypasses a fingerprint mismatch (mirrors the
+       * Toolbar's "Relink anyway" button). Native dialogs aren't drivable
+       * from Playwright, so this IS the tested path; Filmstrip's "Relink…"
+       * button is a thin wrapper around the exact same store action.
+       */
+      relinkPhoto(playlistIndex: number, newPath: string, force?: boolean): Promise<'relinked' | 'mismatch' | 'error'>;
+      /** Verify-only: the pending relink fingerprint-mismatch notice (see appStore.ts's relinkMismatchNotice), or null. */
+      relinkMismatchState(): { playlistIndex: number; newPath: string; message: string } | null;
+      /** Verify-only: "Scan folder for candidates" (Filmstrip's second missing-cell button) without a native folder dialog. */
+      scanFolderForRelink(playlistIndex: number, dir: string): Promise<'relinked' | 'no-match' | 'error'>;
+      /** Verify-only: "Import sidecars from folder…" (project-storage migration stage 3) without a native folder dialog. */
+      importSidecarsFromFolder(dir: string): Promise<{ imported: number; skippedExisting: number; skippedUnreadable: number }>;
+      /** Verify-only: "Save as project…" (Quick project → real project, MOVE) without native dialogs. */
+      saveQuickProjectAs(destDir: string): Promise<{ ok: true } | { ok: false; message: string }>;
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
       thumbnailRevocations(): string[];
       /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
@@ -1030,6 +1047,21 @@ export function CanvasView() {
           photoCount: s.project?.photos.length ?? 0,
           currentLookPath: s.currentLookPath,
         };
+      },
+      relinkPhoto(playlistIndex, newPath, force) {
+        return useAppStore.getState().relinkPhoto(playlistIndex, newPath, force);
+      },
+      relinkMismatchState() {
+        return useAppStore.getState().relinkMismatchNotice;
+      },
+      scanFolderForRelink(playlistIndex, dir) {
+        return useAppStore.getState().scanFolderForRelink(playlistIndex, dir);
+      },
+      importSidecarsFromFolder(dir) {
+        return useAppStore.getState().importSidecarsFromFolder(dir);
+      },
+      saveQuickProjectAs(destDir) {
+        return useAppStore.getState().saveQuickProjectAs(destDir);
       },
       thumbnailRevocations() {
         return [...thumbnailRevocationLog()];

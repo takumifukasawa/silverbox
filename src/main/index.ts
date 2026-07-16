@@ -1,6 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { watch, type FSWatcher } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { join, dirname, basename, extname } from 'node:path';
 import {
@@ -70,6 +71,52 @@ function extractSidecarRating(raw: string): number {
     return Math.min(5, Math.max(0, Math.round(r)));
   } catch {
     return 0;
+  }
+}
+
+/**
+ * Cheap content fingerprint of a photo file (project-storage migration,
+ * stage 3 — docs/brief-bank/project-storage.md's "Missing photos" section):
+ * used by relink to verify a candidate replacement is (probably) the SAME
+ * photo, without hashing the whole multi-tens-of-MB RAW file.
+ *
+ * STABILITY CONTRACT — this recipe must never change once shipped, since a
+ * look's stored `fingerprint` (SidecarDoc.fingerprint) is compared against a
+ * FRESH computation of this same function on a relink candidate; changing
+ * the recipe would silently break every fingerprint ever written. The exact
+ * byte layout hashed (SHA-256, lowercase hex digest):
+ *
+ *   1. the file's size in bytes, as an 8-byte little-endian unsigned integer
+ *   2. the file's first min(65536, size) bytes
+ *   3. the file's last min(65536, size) bytes
+ *
+ * For a file smaller than 128KB, (2) and (3) overlap (or are identical) —
+ * that's fine, the recipe is still fully deterministic given the file's
+ * bytes, which is all that matters (no different file could ever produce
+ * the same head/tail/size triple by accident any more than a whole-file hash
+ * could). Reading only the head+tail (not the whole file) keeps this cheap
+ * even for a 60MB+ ARW.
+ */
+async function computeFingerprint(path: string): Promise<string> {
+  const st = await stat(path);
+  const size = st.size;
+  const headLen = Math.min(65536, size);
+  const tailLen = Math.min(65536, size);
+  const handle = await open(path, 'r');
+  try {
+    const head = Buffer.alloc(headLen);
+    if (headLen > 0) await handle.read(head, 0, headLen, 0);
+    const tail = Buffer.alloc(tailLen);
+    if (tailLen > 0) await handle.read(tail, 0, tailLen, size - tailLen);
+    const sizePrefix = Buffer.alloc(8);
+    sizePrefix.writeBigUInt64LE(BigInt(size));
+    const hash = createHash('sha256');
+    hash.update(sizePrefix);
+    hash.update(head);
+    hash.update(tail);
+    return hash.digest('hex');
+  } finally {
+    await handle.close();
   }
 }
 
@@ -218,7 +265,12 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.openFolderDialog, async (): Promise<OpenImageDialogResult> => {
-    const result = await dialog.showOpenDialog({ properties: ['openDirectory'] });
+    // `createDirectory` (macOS-only NSOpenPanel option): lets "Save as
+    // project…" pick a BRAND-NEW destination folder without leaving the
+    // dialog — harmless for every other caller of this same dialog (Open
+    // Folder…, Import sidecars from folder…, Scan folder for candidates),
+    // which only ever browse to an existing folder anyway.
+    const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] });
     const path = result.filePaths[0];
     if (result.canceled || !path) return { canceled: true };
     return { canceled: false, path, fileName: basename(path) };
@@ -365,6 +417,131 @@ function registerIpc(): void {
         out.push({ name: basename(p.path), path: p.path, hasLook, mtimeMs, rating, missing });
       }
       return out;
+    }
+  );
+
+  // Fingerprint (project-storage migration, stage 3 — relink's verification
+  // anchor): see computeFingerprint's own doc comment for the stability
+  // contract. null on ENOENT (same "not there" convention as readSidecar/
+  // readProjectManifest), not a thrown error — a photo that's since vanished
+  // again is a normal, expected outcome for a caller checking a candidate.
+  ipcMain.handle(IPC.fingerprintFile, async (_ev, path: unknown): Promise<string | null> => {
+    if (typeof path !== 'string') throw new Error('fingerprintFile: path must be a string');
+    try {
+      return await computeFingerprint(path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw err;
+    }
+  });
+
+  // "Scan folder for candidates" (Missing photos, stage 3): ONE round trip
+  // does the whole job — list `dir` non-recursively (same IMAGE_EXTENSIONS
+  // filter as listImages), try basename-matching candidates first then the
+  // rest, and return the first whose fingerprint matches (or, when the look
+  // never had a fingerprint to verify against, the first exact-basename
+  // match, unverified). null when nothing matches.
+  ipcMain.handle(
+    IPC.scanFolderForRelink,
+    async (_ev, dir: unknown, basenameHint: unknown, expectedFingerprint: unknown): Promise<string | null> => {
+      if (typeof dir !== 'string') throw new Error('scanFolderForRelink: dir must be a string');
+      if (typeof basenameHint !== 'string') throw new Error('scanFolderForRelink: basenameHint must be a string');
+      if (expectedFingerprint !== null && typeof expectedFingerprint !== 'string') {
+        throw new Error('scanFolderForRelink: expectedFingerprint must be a string or null');
+      }
+      const dirents = await readdir(dir, { withFileTypes: true });
+      const candidates: string[] = [];
+      for (const dirent of dirents) {
+        if (!dirent.isFile()) continue;
+        const ext = extname(dirent.name).slice(1).toLowerCase();
+        if (!IMAGE_EXTENSIONS.includes(ext)) continue;
+        candidates.push(join(dir, dirent.name));
+      }
+      // Basename-matching candidates first, then the rest in filename order
+      // (mirrors listImages' own sort — "sorted" reads the same way here).
+      candidates.sort((a, b) => {
+        const aFirst = basename(a) === basenameHint ? 0 : 1;
+        const bFirst = basename(b) === basenameHint ? 0 : 1;
+        return aFirst !== bFirst ? aFirst - bFirst : a.localeCompare(b);
+      });
+      if (expectedFingerprint === null) {
+        // No stored fingerprint to verify against (a pre-stage-3 look) — the
+        // best this can do is an unverified exact-basename match.
+        return candidates.find((c) => basename(c) === basenameHint) ?? null;
+      }
+      for (const candidate of candidates) {
+        let fp: string;
+        try {
+          fp = await computeFingerprint(candidate);
+        } catch {
+          continue; // vanished/unreadable mid-scan — try the next candidate
+        }
+        if (fp === expectedFingerprint) return candidate;
+      }
+      return null;
+    }
+  );
+
+  // "Import sidecars from folder…" (Migration & compatibility, stage 3):
+  // pure enumeration, same division of labor as listImages — the renderer
+  // (appStore.ts's importSidecarsFromFolder) reads/parses/rewrites each one.
+  ipcMain.handle(IPC.listSidecarFiles, async (_ev, dir: unknown): Promise<string[]> => {
+    if (typeof dir !== 'string') throw new Error('listSidecarFiles: dir must be a string');
+    const dirents = await readdir(dir, { withFileTypes: true });
+    return dirents
+      .filter((d) => d.isFile() && d.name.endsWith(SIDECAR_SUFFIX))
+      .map((d) => join(dir, d.name))
+      .sort((a, b) => a.localeCompare(b));
+  });
+
+  // "Save as project…" (Quick project → real project, MOVE not copy — user
+  // decision, docs/brief-bank/project-storage.md's "Quick project" section):
+  // physically relocates each given look (+ its golden/ PNG, if any) from
+  // `srcDir` into `destDir`. Manifest writes are NOT this handler's job —
+  // the renderer writes both (the new project's + the emptied quick
+  // project's) through the existing projectWrite handler above, same as
+  // every other playlist mutation.
+  ipcMain.handle(
+    IPC.moveProjectFiles,
+    async (_ev, srcDir: unknown, destDir: unknown, lookNames: unknown): Promise<void> => {
+      if (typeof srcDir !== 'string' || typeof destDir !== 'string') {
+        throw new Error('moveProjectFiles: srcDir/destDir must be strings');
+      }
+      if (!Array.isArray(lookNames) || !lookNames.every((n) => typeof n === 'string')) {
+        throw new Error('moveProjectFiles: lookNames must be an array of strings');
+      }
+      await mkdir(join(destDir, 'looks'), { recursive: true });
+      // rename() is atomic and free within one filesystem; destDir may be on
+      // a DIFFERENT volume than the quick project (an external drive, a
+      // different mount) — node reports that as EXDEV, falling back to a
+      // copy+delete (still a MOVE from the user's point of view: nothing is
+      // left behind in srcDir once this resolves).
+      const moveOne = async (src: string, dest: string): Promise<void> => {
+        try {
+          await rename(src, dest);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+          await copyFile(src, dest);
+          await rm(src, { force: true });
+        }
+      };
+      for (const name of lookNames as string[]) {
+        await moveOne(join(srcDir, 'looks', name), join(destDir, 'looks', name));
+        // Golden renders (`--check`/`--update` with `--project` —
+        // CliCheckJob.projectDir's doc comment): `<projectDir>/golden/
+        // <look-name>.png`, look-name = the look's own filename with `.json`
+        // dropped. Moved alongside its look, if one exists, so a `--check`
+        // run against the NEW project location still has its baseline.
+        const goldenName = `${name.replace(/\.json$/, '')}.png`;
+        const goldenSrc = join(srcDir, 'golden', goldenName);
+        try {
+          await stat(goldenSrc);
+        } catch {
+          continue; // no golden for this look — nothing to move
+        }
+        await mkdir(join(destDir, 'golden'), { recursive: true });
+        await moveOne(goldenSrc, join(destDir, 'golden', goldenName));
+      }
     }
   );
 

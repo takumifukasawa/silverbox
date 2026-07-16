@@ -28,6 +28,14 @@ export const IPC = {
   // given the project's already-resolved photo list — see FolderImageEntry's
   // doc comment and main/index.ts's handler.
   projectPhotosStatus: 'project:photosStatus',
+  // Project storage, stage 3 (docs/brief-bank/project-storage.md — relink +
+  // fingerprint + import-sidecars + save-as-move): see main/index.ts's
+  // handlers (computeFingerprint's doc comment carries the fingerprint
+  // recipe's forever-stable contract) and SilverboxApi's own doc comments.
+  fingerprintFile: 'fs:fingerprintFile',
+  scanFolderForRelink: 'fs:scanFolderForRelink',
+  listSidecarFiles: 'fs:listSidecarFiles',
+  moveProjectFiles: 'project:moveFiles',
   exportImageDialog: 'dialog:exportImage',
   exportEncode: 'export:encode',
   exportLutDialog: 'dialog:exportLut',
@@ -223,6 +231,44 @@ export interface SilverboxApi {
    * a malformed look file).
    */
   projectPhotosStatus(dir: string, photos: { path: string; look: string }[]): Promise<FolderImageEntry[]>;
+  /**
+   * Cheap content fingerprint of a photo file (project-storage migration,
+   * stage 3 — relink's verification anchor): see main/index.ts's
+   * computeFingerprint doc comment for the exact byte recipe (a forever-
+   * stable contract once shipped) and SidecarDoc.fingerprint's doc comment
+   * for where the result gets stored. null when `path` doesn't resolve to a
+   * readable file (same "not there" convention as readSidecar).
+   */
+  fingerprintFile(path: string): Promise<string | null>;
+  /**
+   * "Scan folder for candidates" (Missing photos, stage 3): one round trip
+   * walks `dir` non-recursively (IMAGE_EXTENSIONS filter, same as
+   * listImages), checking basename-matching files first then the rest,
+   * fingerprinting each against `expectedFingerprint` until a match — or,
+   * when the row's look never had a fingerprint to verify against
+   * (`expectedFingerprint === null`), falling back to an unverified exact
+   * `basenameHint` match. Returns the matching candidate's absolute path, or
+   * null when nothing matches.
+   */
+  scanFolderForRelink(dir: string, basenameHint: string, expectedFingerprint: string | null): Promise<string | null>;
+  /**
+   * "Import sidecars from folder…" (Migration & compatibility, stage 3):
+   * absolute paths of every adjacent legacy sidecar (`*.silverbox.json`) in
+   * `dir`, non-recursive, sorted. Pure enumeration — appStore.ts's
+   * importSidecarsFromFolder reads/parses/rewrites each one into the active
+   * project's `looks/`.
+   */
+  listSidecarFiles(dir: string): Promise<string[]>;
+  /**
+   * "Save as project…" (Quick project → real project, MOVE not copy — user
+   * decision, docs/brief-bank/project-storage.md's "Quick project" section):
+   * physically relocates each `lookNames` entry's look file (and its
+   * `golden/` PNG, if any) from `<srcDir>/looks/` into `<destDir>/looks/`.
+   * Manifest writes are NOT this call's job — the renderer writes both
+   * projects' manifests itself through writeProjectManifest, same as every
+   * other playlist mutation; this is purely the filesystem move.
+   */
+  moveProjectFiles(srcDir: string, destDir: string, lookNames: string[]): Promise<void>;
   /**
    * Arm the main-process sidecar watcher for `path` (sidecar hot-reload —
    * the AI-editing loop). Re-armed on every image open; each call tears down

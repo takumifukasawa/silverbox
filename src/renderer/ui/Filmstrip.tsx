@@ -5,21 +5,80 @@ import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnail
 import { MAX_RATING } from '../engine/graph/graphDoc';
 
 /**
+ * Missing-photo placeholder cell (project-storage migration §"Missing
+ * photos", stage 3): the playlist row's path no longer resolves. Two
+ * affordances, per the brief — "Relink…" (native file dialog, verifying a
+ * `fingerprint` if the look has one — appStore.ts's relinkPhoto handles the
+ * match/mismatch/no-fingerprint cases) and "Scan folder…" (pick a folder,
+ * main fingerprints candidates in it and relinks on the first match —
+ * scanFolderForRelink). A plain `<div>`, not a `<button>` (it holds two real
+ * `<button>`s of its own — nesting interactive controls inside a `<button>`
+ * is invalid HTML and would make the inner ones unreachable).
+ */
+function MissingFilmstripCell({ entry, playlistIndex }: { entry: FolderImageEntry; playlistIndex: number }) {
+  const relinkPhoto = useAppStore((s) => s.relinkPhoto);
+  const scanFolderForRelink = useAppStore((s) => s.scanFolderForRelink);
+
+  return (
+    <div
+      className="filmstrip-cell filmstrip-cell--missing"
+      data-testid="filmstrip-cell"
+      data-path={entry.path}
+      title={`${entry.name} — file not found`}
+    >
+      <span className="filmstrip-missing-badge" data-testid="filmstrip-missing-badge">
+        ?
+      </span>
+      <div className="filmstrip-relink-actions">
+        <button
+          type="button"
+          data-testid="filmstrip-relink-button"
+          title="Locate this photo's new location"
+          onClick={() => {
+            void (async () => {
+              const result = await window.silverbox.openImageDialog();
+              if (!result.canceled) await relinkPhoto(playlistIndex, result.path);
+            })();
+          }}
+        >
+          Relink…
+        </button>
+        <button
+          type="button"
+          data-testid="filmstrip-scan-folder-button"
+          title="Scan a folder for this photo (matched by content, not just filename)"
+          onClick={() => {
+            void (async () => {
+              const result = await window.silverbox.openFolderDialog();
+              if (!result.canceled) await scanFolderForRelink(playlistIndex, result.path);
+            })();
+          }}
+        >
+          Scan folder…
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/**
  * One cell: a thumbnail button that opens its image on click. The thumbnail
  * itself loads lazily — an IntersectionObserver (rooted at the scrolling
  * strip, `.filmstrip`) fires getThumbnail() the first time the cell actually
  * scrolls into view, not on mount, so opening a 400-image folder doesn't
  * decode 400 previews eagerly (thumbnailCache.ts's own concurrency queue
- * caps how many run at once regardless).
+ * caps how many run at once regardless). A `missing` entry renders as
+ * MissingFilmstripCell instead (its own relink affordances) — see that
+ * component's doc comment.
  */
-function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: boolean }) {
+function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEntry; current: boolean; playlistIndex: number }) {
   const cellRef = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState<string | null>(null);
   const openImageByPath = useAppStore((s) => s.openImageByPath);
 
   useEffect(() => {
     const el = cellRef.current;
-    if (!el || entry.missing) return; // nothing to decode for a photo that doesn't resolve — see the `missing` placeholder styling below
+    if (!el || entry.missing) return; // nothing to decode for a photo that doesn't resolve — see MissingFilmstripCell
     let cancelled = false;
     const observer = new IntersectionObserver(
       (observed) => {
@@ -38,25 +97,19 @@ function FilmstripCell({ entry, current }: { entry: FolderImageEntry; current: b
     };
   }, [entry.path, entry.missing]);
 
+  if (entry.missing) return <MissingFilmstripCell entry={entry} playlistIndex={playlistIndex} />;
+
   return (
     <button
       ref={cellRef}
       type="button"
-      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}${entry.missing ? ' filmstrip-cell--missing' : ''}`}
+      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}`}
       data-testid="filmstrip-cell"
       data-path={entry.path}
-      title={entry.missing ? `${entry.name} — file not found` : entry.name}
-      disabled={entry.missing}
-      onClick={() => {
-        if (!entry.missing) void openImageByPath(entry.path, { keepFolderContext: true });
-      }}
+      title={entry.name}
+      onClick={() => void openImageByPath(entry.path, { keepFolderContext: true })}
     >
       {url && <img src={url} alt="" className="filmstrip-thumb" data-testid="filmstrip-thumb" />}
-      {entry.missing && (
-        <span className="filmstrip-missing-badge" data-testid="filmstrip-missing-badge">
-          ?
-        </span>
-      )}
       {entry.hasLook && (
         <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved look" />
       )}
@@ -134,9 +187,15 @@ export function Filmstrip() {
   // instance takes over — never leaked, never revoked while still in use.
   useEffect(() => () => revokeAllThumbnails(), []);
 
+  // Indexed BEFORE the rating filter: folderEntries is 1:1 with the active
+  // project's `photos` array in order (buildPlaylistEntries, appStore.ts),
+  // so an entry's position here IS its playlist index — relinkPhoto/
+  // scanFolderForRelink (Missing photos, stage 3) need that index, and the
+  // ★n+ filter below must not renumber it.
+  const indexedEntries = useMemo(() => folderEntries.map((entry, playlistIndex) => ({ entry, playlistIndex })), [folderEntries]);
   const visibleEntries = useMemo(
-    () => (minRating === 0 ? folderEntries : folderEntries.filter((e) => e.rating >= minRating)),
-    [folderEntries, minRating]
+    () => (minRating === 0 ? indexedEntries : indexedEntries.filter(({ entry }) => entry.rating >= minRating)),
+    [indexedEntries, minRating]
   );
 
   return (
@@ -145,8 +204,8 @@ export function Filmstrip() {
         <RatingFilter value={minRating} onChange={setMinRating} />
       </div>
       <div className="filmstrip" data-testid="filmstrip">
-        {visibleEntries.map((entry) => (
-          <FilmstripCell key={entry.path} entry={entry} current={entry.path === imagePath} />
+        {visibleEntries.map(({ entry, playlistIndex }) => (
+          <FilmstripCell key={entry.path} entry={entry} current={entry.path === imagePath} playlistIndex={playlistIndex} />
         ))}
       </div>
     </div>

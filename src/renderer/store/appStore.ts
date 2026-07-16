@@ -32,6 +32,7 @@ import {
   defaultProjectManifest,
   deriveLookName,
   parseProjectManifest,
+  PROJECT_SCHEMA_VERSION,
   relativizeProjectPath,
   resolveProjectPath,
   serializeProjectManifest,
@@ -192,6 +193,70 @@ interface AppState {
    */
   importLegacySidecar(): Promise<void>;
   /**
+   * "Import sidecars from folder…" (Migration & compatibility, project-
+   * storage migration stage 3): a toolbar/menu action, NOT the single-photo
+   * one-click offer above — walks `dir` for adjacent legacy sidecars and
+   * copies each one not already on the active project's playlist into
+   * `looks/` (deriveLookName collision rules), adding `photo`+`fingerprint`
+   * and appending the photo to the playlist. Originals untouched (a copy,
+   * never a move). Returns the completion counts (also surfaced as
+   * `projectNotice`, same banner the toolbar already shows for other project
+   * notices — no new modal framework).
+   */
+  importSidecarsFromFolder(dir: string): Promise<{ imported: number; skippedExisting: number; skippedUnreadable: number }>;
+  /**
+   * Relink mismatch notice (Missing photos, stage 3): set by relinkPhoto
+   * when the row's look already has a `fingerprint` that DISAGREES with the
+   * candidate the user just picked — "fingerprint differs — relink anyway?"
+   * (reusing the notice+button pattern legacySidecarImportNotice/
+   * sidecarHotReloadNotice already established, no new modal framework).
+   * The Toolbar's "Relink anyway" button re-calls relinkPhoto with
+   * `force: true` using these exact fields. Cleared on every successful
+   * relink and whenever a fresh relink attempt starts.
+   */
+  relinkMismatchNotice: { playlistIndex: number; newPath: string; message: string } | null;
+  /**
+   * Relink (Missing photos, stage 3): point playlist row `playlistIndex` at
+   * `newPath` — the Filmstrip's "Relink…" button's answer to the native file
+   * dialog, or scanFolderForRelink's already-verified candidate below. When
+   * the row's look has a stored `fingerprint` that disagrees with
+   * `newPath`'s own and `force` isn't set, this refuses and sets
+   * `relinkMismatchNotice` instead of writing anything (`'mismatch'`); a
+   * look with no stored fingerprint at all can't be verified, so it always
+   * proceeds. On success (`'relinked'`), rewrites the playlist row's `path`
+   * (re-relativized) and — when the row already has a look on disk — that
+   * look's own `photo` + `fingerprint` fields (kept in lockstep so a LATER
+   * relink of the same row can verify against the right file), then
+   * refreshes `folderEntries` so the cell's thumbnail/rating/missing-badge
+   * update immediately. `'error'` covers an out-of-range index or an
+   * unreadable candidate file.
+   */
+  relinkPhoto(playlistIndex: number, newPath: string, force?: boolean): Promise<'relinked' | 'mismatch' | 'error'>;
+  /**
+   * "Scan folder for candidates" (Missing photos, stage 3): the Filmstrip's
+   * second missing-cell affordance — hands the row's own expected
+   * fingerprint (if any) and last-known basename to main's one-round-trip
+   * scanFolderForRelink IPC, then relinks immediately (`force: true`) on a
+   * hit, since main already did whatever verification is possible. Sets
+   * `projectNotice` (not relinkMismatchNotice — there's no "anyway" to
+   * confirm, just nothing found) when the folder holds no match.
+   */
+  scanFolderForRelink(playlistIndex: number, dir: string): Promise<'relinked' | 'no-match' | 'error'>;
+  /**
+   * "Save as project…" (Quick project → real project, MOVE not copy — user
+   * decision, docs/brief-bank/project-storage.md's "Quick project" section):
+   * only meaningful when the ACTIVE project IS the quick project (the
+   * Toolbar disables the action otherwise; this re-checks defensively and
+   * returns `ok: false` rather than silently doing nothing). Moves every
+   * playlist row's look file (+ golden/ PNG, if any) into `destDir`, writes
+   * a fresh manifest there (destDir's own basename as the project name,
+   * every photo path re-relativized), switches the active project to it,
+   * and empties the quick project's OWN manifest back to zero rows — Quick
+   * stays a real, usable directory for the next no-ceremony open, just with
+   * nothing on its playlist anymore.
+   */
+  saveQuickProjectAs(destDir: string): Promise<{ ok: true } | { ok: false; message: string }>;
+  /**
    * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
    * catalog): non-null while the open image came from an explicit folder OR
    * project open (a folder/project.silverbox drop, the toolbar's "Open
@@ -321,6 +386,24 @@ interface AppState {
   setRating(rating: number): void;
   /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
   sidecarUnknownFields: Record<string, unknown> | null;
+  /**
+   * The current look's `fingerprint` wrapper field, as last read from/
+   * written to disk this session (project-storage migration, stage 3) —
+   * null before it's ever been computed (a pre-stage-3 look, or a brand-new
+   * one that hasn't been saved yet). saveGraph reads this to decide whether
+   * a fresh fingerprint computation is needed (see its own doc comment); set
+   * from the parsed look at open time and refreshed after every save.
+   */
+  sidecarFingerprint: string | null;
+  /**
+   * The current look's `photo` wrapper field, exactly as read from disk at
+   * open time (before this session's own saves rewrite it) — saveGraph's
+   * "photo path changed" signal for whether a stale fingerprint needs
+   * recomputing (see its own doc comment). Refreshed after every save to
+   * whatever was just written, so a SECOND save in the same session doesn't
+   * re-trigger the "changed" branch off a now-stale open-time snapshot.
+   */
+  sidecarPhotoAtOpen: string | null;
   /**
    * Raw sidecar TEXT this session has already accounted for — set on image
    * open (whatever was on disk then, or null if no sidecar existed), on
@@ -845,6 +928,60 @@ function cancelAutosaveTimer(): void {
     clearTimeout(autosaveTimer);
     autosaveTimer = null;
   }
+}
+
+// --- Fingerprint (project-storage migration, stage 3) ----------------------
+//
+// The sha256 recipe itself lives main-side (src/main/index.ts's
+// computeFingerprint — the stability contract's home); this module only
+// ever ASKS for it and memoizes the answer per photo PATH for the lifetime
+// of the session, so N autosaves in a row of the SAME open photo cost one
+// IPC round trip (a head+tail disk read), not N ("cache per photo per
+// session" — docs/brief-bank/project-storage.md's fingerprint section).
+// Module scope (not store state): it's a pure cache, never itself part of
+// any document, and every caller (saveGraph, relinkPhoto, the folder-import
+// batch) reaches it the same way regardless of which store action is running.
+const fingerprintCache = new Map<string, string>();
+async function computeFingerprintCached(photoPath: string): Promise<string | null> {
+  const cached = fingerprintCache.get(photoPath);
+  if (cached !== undefined) return cached;
+  const fingerprint = await window.silverbox.fingerprintFile(photoPath);
+  if (fingerprint !== null) fingerprintCache.set(photoPath, fingerprint);
+  return fingerprint;
+}
+
+/**
+ * Shared core between importLegacySidecar (the single-photo one-click offer,
+ * for the CURRENTLY open photo) and importSidecarsFromFolder (the toolbar's
+ * batch action, stage 3): parse an adjacent legacy sidecar's raw text and
+ * re-serialize it as a project look — adding `photo` (relative to the
+ * project dir) and a freshly computed `fingerprint`. Throws on anything
+ * parseGraphDoc itself rejects; callers decide what "unreadable" means for
+ * their own UI (importLegacySidecar surfaces one notice, the folder batch
+ * just counts it and moves on to the next file). `srcDims` is the decoded
+ * image's dims, when known (see parseGraphDoc's own doc comment on the
+ * pre-v4 mask/spot coordinate migration this enables) — the folder batch has
+ * no decoded dims for photos it hasn't opened, so it omits this, same as any
+ * other dimensionless caller.
+ */
+async function buildImportedLookContent(
+  project: ActiveProject,
+  imagePath: string,
+  text: string,
+  srcDims?: { width: number; height: number }
+): Promise<string> {
+  const parsed = parseGraphDoc(text, srcDims);
+  const photo = relativizeProjectPath(project.dir, imagePath);
+  const fingerprint = (await computeFingerprintCached(imagePath)) ?? undefined;
+  return serializeGraphDoc(
+    parsed.graph,
+    parsed.source ?? null,
+    parsed.createdAt ?? null,
+    parsed.unknown,
+    parsed.rating,
+    photo,
+    fingerprint
+  );
 }
 
 // --- Baseline-exposure re-decode debounce (round-13 fix pack item 2) -------
@@ -1876,6 +2013,7 @@ export const useAppStore = create<AppState>((set, get) => {
   projectNotice: null,
   currentLookPath: null,
   legacySidecarImportNotice: null,
+  relinkMismatchNotice: null,
   folderDir: null,
   folderEntries: [],
   openingPreview: null,
@@ -1902,6 +2040,8 @@ export const useAppStore = create<AppState>((set, get) => {
   sidecarCreatedAt: null,
   sidecarRating: 0,
   sidecarUnknownFields: null,
+  sidecarFingerprint: null,
+  sidecarPhotoAtOpen: null,
   lastSidecarText: null,
   sidecarHotReloadNotice: null,
   sidecarDiffDialog: null,
@@ -2008,6 +2148,13 @@ export const useAppStore = create<AppState>((set, get) => {
       let sidecarCreatedAt: string | null = null;
       let sidecarRating = 0;
       let sidecarUnknownFields: Record<string, unknown> | null = null;
+      // Project-storage migration stage 3: the just-parsed look's own
+      // `fingerprint`/`photo` fields, seeding sidecarFingerprint/
+      // sidecarPhotoAtOpen (see their own doc comments) — null for a
+      // pre-stage-3 look, a brand-new photo, or a legacy adjacent sidecar
+      // (which never carries either field).
+      let sidecarFingerprint: string | null = null;
+      let sidecarPhotoAtOpen: string | null = null;
       let usedSidecar = false;
       // Raw disk text this session is about to account for (hot-reload's
       // self-write-suppression baseline — see AppState.lastSidecarText's doc
@@ -2072,6 +2219,8 @@ export const useAppStore = create<AppState>((set, get) => {
             sidecarCreatedAt = parsed.createdAt ?? null;
             sidecarRating = parsed.rating;
             sidecarUnknownFields = parsed.unknown ?? null;
+            sidecarFingerprint = parsed.fingerprint ?? null;
+            sidecarPhotoAtOpen = parsed.photo ?? null;
             usedSidecar = true;
           } catch (err) {
             sidecarNotice = `sidecar ignored: ${err instanceof Error ? err.message : String(err)}`;
@@ -2146,6 +2295,8 @@ export const useAppStore = create<AppState>((set, get) => {
         sidecarCreatedAt,
         sidecarRating,
         sidecarUnknownFields,
+        sidecarFingerprint,
+        sidecarPhotoAtOpen,
         lastSidecarText: sidecarRawText,
         sidecarHotReloadNotice: null,
         sidecarDiffDialog: null,
@@ -3676,6 +3827,8 @@ export const useAppStore = create<AppState>((set, get) => {
       sidecarRating,
       sidecarUnreadable,
       sidecarUnknownFields,
+      sidecarFingerprint,
+      sidecarPhotoAtOpen,
       project,
       currentLookPath,
     } = get();
@@ -3690,14 +3843,42 @@ export const useAppStore = create<AppState>((set, get) => {
     // — a `legacySidecarOnly` CLI session (project stays null there) writes
     // the SAME bytes as before the migration, no `photo` field at all.
     const photo = project ? relativizeProjectPath(project.dir, imagePath) : undefined;
-    const content = serializeGraphDoc(graph, source, createdAt, sidecarUnknownFields ?? undefined, sidecarRating, photo);
+    // `fingerprint` (project-storage migration, stage 3): computed once per
+    // photo path per session (computeFingerprintCached's own doc comment),
+    // written whenever it's still absent OR the look's own recorded `photo`
+    // at open time no longer matches what we're about to write — the one
+    // way that can happen mid-session is a Relink rewriting THIS SAME look
+    // for a different photo (relinkPhoto below writes its own fresh
+    // fingerprint directly, so this is a defensive fallback for any other
+    // way the two could drift, e.g. a hand-edited look). Never computed at
+    // all outside a project (photo undefined ⇒ nothing to fingerprint).
+    let fingerprint = sidecarFingerprint ?? undefined;
+    if (project && photo !== undefined && (fingerprint === undefined || sidecarPhotoAtOpen !== photo)) {
+      fingerprint = (await computeFingerprintCached(imagePath)) ?? undefined;
+    }
+    const content = serializeGraphDoc(
+      graph,
+      source,
+      createdAt,
+      sidecarUnknownFields ?? undefined,
+      sidecarRating,
+      photo,
+      fingerprint
+    );
     await window.silverbox.writeSidecar(currentLookPath, content);
     // Record exactly what we just wrote (hot-reload's self-write-suppression
     // baseline) and clear any hot-reload notice: our edits just overwrote
     // disk, resolving whatever pending/malformed conflict was showing (see
     // AppState.sidecarHotReloadNotice's doc comment). The fs-watch echo of
     // THIS write will read back identical text and be ignored silently.
-    set({ graphDirty: false, sidecarCreatedAt: createdAt, lastSidecarText: content, sidecarHotReloadNotice: null });
+    set({
+      graphDirty: false,
+      sidecarCreatedAt: createdAt,
+      sidecarFingerprint: fingerprint ?? null,
+      sidecarPhotoAtOpen: photo ?? null,
+      lastSidecarText: content,
+      sidecarHotReloadNotice: null,
+    });
   },
 
   async importLegacySidecar() {
@@ -3717,16 +3898,7 @@ export const useAppStore = create<AppState>((set, get) => {
       return;
     }
     try {
-      const parsed = parseGraphDoc(text, { width: image.width, height: image.height });
-      const photo = relativizeProjectPath(project.dir, imagePath);
-      const content = serializeGraphDoc(
-        parsed.graph,
-        parsed.source ?? null,
-        parsed.createdAt ?? null,
-        parsed.unknown,
-        parsed.rating,
-        photo
-      );
+      const content = await buildImportedLookContent(project, imagePath, text, { width: image.width, height: image.height });
       await window.silverbox.writeSidecar(legacySidecarImportNotice.lookPath, content);
       set({ legacySidecarImportNotice: null });
       // Re-open exactly like any other open: the just-written look is now
@@ -3736,6 +3908,202 @@ export const useAppStore = create<AppState>((set, get) => {
     } catch (err) {
       set({ sidecarNotice: `legacy sidecar is unreadable, nothing imported: ${err instanceof Error ? err.message : String(err)}` });
     }
+  },
+
+  async importSidecarsFromFolder(dir) {
+    const project = await ensureActiveProject();
+    let sidecarPaths: string[];
+    try {
+      sidecarPaths = await window.silverbox.listSidecarFiles(dir);
+    } catch (err) {
+      set({ projectNotice: `could not read ${dir}: ${err instanceof Error ? err.message : String(err)}` });
+      return { imported: 0, skippedExisting: 0, skippedUnreadable: 0 };
+    }
+    let photos = project.photos;
+    const byAbsPath = new Map(photos.map((p) => [resolveProjectPath(project.dir, p.path), p.look]));
+    let imported = 0;
+    let skippedExisting = 0;
+    let skippedUnreadable = 0;
+    for (const sidecarPath of sidecarPaths) {
+      const imagePath = sidecarPath.slice(0, -SIDECAR_SUFFIX.length);
+      // Same identity rule as ensureProjectAndAddPhoto/openFolder — never
+      // re-import a photo already on the playlist (report it, don't skip
+      // silently — the completion notice's own "M skipped" count).
+      if (findPlaylistPhoto({ ...project, photos }, imagePath)) {
+        skippedExisting++;
+        continue;
+      }
+      let text: string | null;
+      try {
+        text = await window.silverbox.readSidecar(sidecarPath);
+      } catch {
+        text = null;
+      }
+      if (text === null) {
+        skippedUnreadable++;
+        continue;
+      }
+      let content: string;
+      try {
+        // No decoded dims for a folder photo we haven't opened — see
+        // buildImportedLookContent's own doc comment on the dimensionless-
+        // caller tradeoff this accepts.
+        content = await buildImportedLookContent(project, imagePath, text);
+      } catch (err) {
+        console.warn(`importSidecarsFromFolder: skipping unreadable sidecar ${sidecarPath}:`, err);
+        skippedUnreadable++;
+        continue;
+      }
+      const look = deriveLookName(imagePath, byAbsPath);
+      await window.silverbox.writeSidecar(`${project.dir}/looks/${look}`, content);
+      byAbsPath.set(imagePath, look);
+      photos = [...photos, { path: relativizeProjectPath(project.dir, imagePath), look }];
+      imported++;
+    }
+    if (photos !== project.photos) set({ project: { ...project, photos } });
+    set({
+      projectNotice: `imported ${imported} look${imported === 1 ? '' : 's'} (${skippedExisting} skipped: already in project, ${skippedUnreadable} unreadable)`,
+    });
+    const current = get().project;
+    if (current) {
+      const entries = await buildPlaylistEntries(current);
+      if (get().project === current) set({ folderEntries: entries });
+    }
+    return { imported, skippedExisting, skippedUnreadable };
+  },
+
+  async relinkPhoto(playlistIndex, newPath, force = false) {
+    const project = get().project;
+    const row = project?.photos[playlistIndex];
+    if (!project || !row) return 'error';
+    const newFingerprint = await computeFingerprintCached(newPath);
+    if (newFingerprint === null) return 'error'; // the candidate file itself is unreadable
+    const lookPath = `${project.dir}/looks/${row.look}`;
+    let existingText: string | null = null;
+    try {
+      existingText = await window.silverbox.readSidecar(lookPath);
+    } catch (err) {
+      console.warn(`relinkPhoto: could not read ${lookPath}:`, err);
+    }
+    let existing: SidecarDoc | null = null;
+    if (existingText !== null) {
+      try {
+        existing = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`relinkPhoto: ${lookPath} is unreadable by this build, relinking the playlist row anyway:`, err);
+      }
+    }
+    if (existing?.fingerprint && existing.fingerprint !== newFingerprint && !force) {
+      set({
+        relinkMismatchNotice: {
+          playlistIndex,
+          newPath,
+          message: `${newPath.split('/').pop() ?? newPath}: fingerprint differs — relink anyway?`,
+        },
+      });
+      return 'mismatch';
+    }
+    const newRel = relativizeProjectPath(project.dir, newPath);
+    const photos = project.photos.map((p, i) => (i === playlistIndex ? { ...p, path: newRel } : p));
+    set({ project: { ...project, photos }, relinkMismatchNotice: null });
+    if (existing) {
+      // Keep `photo`/`fingerprint` in lockstep with the row's new path — a
+      // LATER relink of this same row must verify against the RIGHT file,
+      // not whatever this row pointed at before.
+      const content = serializeGraphDoc(
+        existing.graph,
+        existing.source ?? null,
+        existing.createdAt ?? null,
+        existing.unknown,
+        existing.rating,
+        newRel,
+        newFingerprint
+      );
+      await window.silverbox.writeSidecar(lookPath, content);
+    }
+    const current = get().project;
+    if (current) {
+      const entries = await buildPlaylistEntries(current);
+      if (get().project === current) set({ folderEntries: entries });
+    }
+    return 'relinked';
+  },
+
+  async scanFolderForRelink(playlistIndex, dir) {
+    const project = get().project;
+    const row = project?.photos[playlistIndex];
+    if (!project || !row) return 'error';
+    const lookPath = `${project.dir}/looks/${row.look}`;
+    let expectedFingerprint: string | null = null;
+    try {
+      const text = await window.silverbox.readSidecar(lookPath);
+      if (text !== null) expectedFingerprint = parseGraphDoc(text).fingerprint ?? null;
+    } catch (err) {
+      console.warn(`scanFolderForRelink: could not read ${lookPath}:`, err);
+    }
+    // The photo's own last-known basename (NOT the look's filename — a
+    // collision-suffixed look like `dup.ARW-2.json` must still hint at
+    // `dup.ARW`, the actual photo basename main is scanning the folder for).
+    const basenameHint = row.path.split('/').pop() ?? row.path;
+    const candidate = await window.silverbox.scanFolderForRelink(dir, basenameHint, expectedFingerprint);
+    if (candidate === null) {
+      set({ projectNotice: `no matching photo found in ${dir}` });
+      return 'no-match';
+    }
+    // main already did whatever verification is possible this round trip —
+    // nothing left for relinkPhoto's own mismatch gate to add.
+    const result = await get().relinkPhoto(playlistIndex, candidate, true);
+    return result === 'error' ? 'error' : 'relinked';
+  },
+
+  async saveQuickProjectAs(destDir) {
+    const project = get().project;
+    const quickDir = window.silverbox.testFlags.projectDirOverride ?? get().settings.quickProjectDir;
+    if (!project || !quickDir || project.dir !== quickDir) {
+      return { ok: false, message: 'only the Quick project can be saved as a new project' };
+    }
+    const normalize = (p: string) => p.replace(/\/+$/, '');
+    if (normalize(destDir) === normalize(quickDir) || normalize(destDir).startsWith(`${normalize(quickDir)}/`)) {
+      return { ok: false, message: 'destination cannot be inside the Quick project' };
+    }
+    const lookNames = project.photos.map((p) => p.look);
+    try {
+      await window.silverbox.moveProjectFiles(project.dir, destDir, lookNames);
+    } catch (err) {
+      return { ok: false, message: `could not move project files: ${err instanceof Error ? err.message : String(err)}` };
+    }
+    const newPhotos: ProjectPhoto[] = project.photos.map((p) => ({
+      path: relativizeProjectPath(destDir, resolveProjectPath(project.dir, p.path)),
+      look: p.look,
+    }));
+    const name = destDir.split('/').filter((s) => s.length > 0).pop() || 'Project';
+    cancelAutosaveTimer();
+    const newProject: ActiveProject = { dir: destDir, name, photos: newPhotos, unknown: null };
+    set({ project: newProject, folderDir: destDir });
+    // Quick's OWN manifest is no longer covered by the debounced playlist-
+    // save subscriber (bottom of this file) once `project` points elsewhere
+    // — emptied here, immediately, rather than left stale on disk.
+    const emptiedQuick: ProjectManifest = {
+      schemaVersion: PROJECT_SCHEMA_VERSION,
+      name: project.name,
+      photos: [],
+      ...(project.unknown ? { unknown: project.unknown } : {}),
+    };
+    await window.silverbox.writeProjectManifest(quickDir, serializeProjectManifest(emptiedQuick));
+    const entries = await buildPlaylistEntries(newProject);
+    if (get().project === newProject) set({ folderEntries: entries });
+    // The currently open photo's look lived at `<quickDir>/looks/<name>` —
+    // repoint currentLookPath/the hot-reload watch at its NEW home (same
+    // filename, new project dir) so the open session isn't left watching a
+    // path that no longer exists.
+    const lookPrefix = `${project.dir}/looks/`;
+    const curLookPath = get().currentLookPath;
+    if (curLookPath && curLookPath.startsWith(lookPrefix)) {
+      const newLookPath = `${destDir}/looks/${curLookPath.slice(lookPrefix.length)}`;
+      set({ currentLookPath: newLookPath });
+      void window.silverbox.watchSidecar(newLookPath);
+    }
+    return { ok: true };
   },
 
   // Sidecar hot-reload (the AI-editing loop): handleExternalSidecarChange is

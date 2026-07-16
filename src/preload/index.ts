@@ -13,6 +13,11 @@ const api: SilverboxApi = {
   readProjectManifest: (dir) => ipcRenderer.invoke(IPC.projectRead, dir),
   writeProjectManifest: (dir, content) => ipcRenderer.invoke(IPC.projectWrite, dir, content),
   projectPhotosStatus: (dir, photos) => ipcRenderer.invoke(IPC.projectPhotosStatus, dir, photos),
+  fingerprintFile: (path) => ipcRenderer.invoke(IPC.fingerprintFile, path),
+  scanFolderForRelink: (dir, basenameHint, expectedFingerprint) =>
+    ipcRenderer.invoke(IPC.scanFolderForRelink, dir, basenameHint, expectedFingerprint),
+  listSidecarFiles: (dir) => ipcRenderer.invoke(IPC.listSidecarFiles, dir),
+  moveProjectFiles: (srcDir, destDir, lookNames) => ipcRenderer.invoke(IPC.moveProjectFiles, srcDir, destDir, lookNames),
   onSidecarChanged: (callback) => {
     const listener = () => callback();
     ipcRenderer.on(IPC.sidecarChanged, listener);

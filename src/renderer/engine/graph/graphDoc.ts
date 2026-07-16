@@ -322,6 +322,18 @@ export interface SidecarDoc {
    * captureLook never passes one to serializeGraphDoc).
    */
   photo?: string;
+  /**
+   * Cheap content fingerprint of the photo file (project-storage migration,
+   * stage 3 — docs/brief-bank/project-storage.md's "Missing photos"
+   * section): the hex string main's `fingerprintFile` IPC computes (see
+   * src/main/index.ts's computeFingerprint doc comment for the exact byte
+   * recipe — it is a forever-stable contract, since Relink compares a
+   * candidate file's freshly computed fingerprint against this stored
+   * value). Absent on every look saved before stage 3 shipped and on
+   * presets/captureLook output (same reasoning as `photo` above) — a look
+   * with no fingerprint simply can't auto-verify a relink candidate.
+   */
+  fingerprint?: string;
   /** Unrecognized wrapper-level keys (DESIGN §9 passthrough) — round-tripped verbatim by serializeGraphDoc. */
   unknown?: Record<string, unknown>;
 }
@@ -599,7 +611,7 @@ export function sanitizeLens(raw: unknown, nodeId: string): LensParams {
 }
 
 /** Wrapper-level keys `serializeGraphDoc`/`parseGraphDoc` know about; anything else round-trips verbatim (DESIGN §9). */
-const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'photo', 'graph']);
+const KNOWN_WRAPPER_KEYS = new Set(['schemaVersion', 'source', 'createdAt', 'updatedAt', 'rating', 'photo', 'fingerprint', 'graph']);
 /** Node-level keys the schema knows about; anything else round-trips verbatim per node. */
 const KNOWN_NODE_KEYS = new Set([
   'id',
@@ -644,6 +656,11 @@ const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
  * writes don't exist anymore post-migration, but presetDoc.ts's captureLook
  * round-trip still calls this with no `photo` arg, same reasoning as
  * `rating` above).
+ *
+ * `fingerprint` (project-storage migration, stage 3) is the photo file's
+ * cheap content hash (SidecarDoc.fingerprint's own doc comment has the
+ * stability contract) — omitted when absent, same "no arg ⇒ no key" rule as
+ * `photo`.
  */
 export function serializeGraphDoc(
   doc: GraphDoc,
@@ -651,7 +668,8 @@ export function serializeGraphDoc(
   createdAt: string | null,
   unknownWrapperFields?: Record<string, unknown>,
   rating = 0,
-  photo?: string
+  photo?: string,
+  fingerprint?: string
 ): string {
   const now = new Date().toISOString();
   const wrapper = {
@@ -661,6 +679,7 @@ export function serializeGraphDoc(
     createdAt: createdAt ?? now,
     ...(rating > 0 ? { rating: sanitizeRating(rating) } : {}),
     ...(photo !== undefined ? { photo } : {}),
+    ...(fingerprint !== undefined ? { fingerprint } : {}),
     updatedAt: now,
     graph: {
       nodes: doc.nodes.map((n) => {
@@ -737,6 +756,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     createdAt?: unknown;
     rating?: unknown;
     photo?: unknown;
+    fingerprint?: unknown;
     graph?: { nodes?: unknown; edges?: unknown };
   };
   const version = wrapper.schemaVersion;
@@ -864,6 +884,11 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     ...(typeof wrapper.createdAt === 'string' ? { createdAt: wrapper.createdAt } : {}),
     rating: sanitizeRating(wrapper.rating),
     ...(typeof wrapper.photo === 'string' ? { photo: wrapper.photo } : {}),
+    // Sanitizer convention (project-storage.md stage 3): any non-string
+    // value is dropped silently, same as `photo` above — a malformed
+    // fingerprint just means "can't auto-verify a relink", not a reason to
+    // reject the whole document.
+    ...(typeof wrapper.fingerprint === 'string' ? { fingerprint: wrapper.fingerprint } : {}),
     ...(Object.keys(unknownWrapper).length > 0 ? { unknown: unknownWrapper } : {}),
   };
 }

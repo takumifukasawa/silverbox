@@ -78,8 +78,19 @@ function OpenMenu() {
   const imageStatus = useAppStore((s) => s.imageStatus);
   const openImageViaDialog = useAppStore((s) => s.openImageViaDialog);
   const openFolder = useAppStore((s) => s.openFolder);
+  const importSidecarsFromFolder = useAppStore((s) => s.importSidecarsFromFolder);
+  const saveQuickProjectAs = useAppStore((s) => s.saveQuickProjectAs);
+  const project = useAppStore((s) => s.project);
+  const settings = useAppStore((s) => s.settings);
   const [open, setOpen] = useState(false);
   const busy = imageStatus === 'loading';
+  // "Save as project…" (Quick project → real project, MOVE — see
+  // saveQuickProjectAs's own doc comment) only makes sense while the ACTIVE
+  // project IS the quick project — a real project is already its own home,
+  // no move semantics apply. Same quick-project identity check
+  // ensureActiveProject itself uses.
+  const quickDir = window.silverbox.testFlags.projectDirOverride ?? settings.quickProjectDir;
+  const isQuickProject = !!project && !!quickDir && project.dir === quickDir;
 
   return (
     <span className="open-menu">
@@ -110,6 +121,37 @@ function OpenMenu() {
               }}
             >
               Open Folder…
+            </button>
+            <button
+              data-testid="import-sidecars-folder-button"
+              title="Copy every adjacent *.silverbox.json in a folder into this project's looks/ (originals left untouched)"
+              onClick={() => {
+                setOpen(false);
+                void (async () => {
+                  const result = await window.silverbox.openFolderDialog();
+                  if (!result.canceled) await importSidecarsFromFolder(result.path);
+                })();
+              }}
+            >
+              Import sidecars from folder…
+            </button>
+            <button
+              data-testid="save-as-project-button"
+              disabled={!isQuickProject}
+              title={
+                isQuickProject
+                  ? "Move the Quick project's current photos + looks into a new project folder"
+                  : 'Only the Quick project can be saved as a new project'
+              }
+              onClick={() => {
+                setOpen(false);
+                void (async () => {
+                  const result = await window.silverbox.openFolderDialog();
+                  if (!result.canceled) await saveQuickProjectAs(result.path);
+                })();
+              }}
+            >
+              Save as project…
             </button>
           </div>
         </>
@@ -233,6 +275,8 @@ export function Toolbar() {
   const legacySidecarImportNotice = useAppStore((s) => s.legacySidecarImportNotice);
   const importLegacySidecar = useAppStore((s) => s.importLegacySidecar);
   const projectNotice = useAppStore((s) => s.projectNotice);
+  const relinkMismatchNotice = useAppStore((s) => s.relinkMismatchNotice);
+  const relinkPhoto = useAppStore((s) => s.relinkPhoto);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
@@ -437,6 +481,23 @@ export function Toolbar() {
             </span>
             <button onClick={() => void importLegacySidecar()} data-testid="import-legacy-sidecar-button">
               Import sidecar
+            </button>
+          </span>
+        )}
+        {relinkMismatchNotice && (
+          // Missing photos, stage 3: the row's look already has a
+          // `fingerprint` that disagrees with the candidate the user just
+          // picked — reusing the same notice+button pattern as the
+          // hot-reload/legacy-sidecar notices above (no new modal framework).
+          <span className="toolbar-hotreload-notice">
+            <span className="toolbar-warn" data-testid="relink-mismatch-notice" title={relinkMismatchNotice.message}>
+              {relinkMismatchNotice.message}
+            </span>
+            <button
+              onClick={() => void relinkPhoto(relinkMismatchNotice.playlistIndex, relinkMismatchNotice.newPath, true)}
+              data-testid="relink-anyway-button"
+            >
+              Relink anyway
             </button>
           </span>
         )}
