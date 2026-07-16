@@ -25,6 +25,13 @@
  *  7. Look-name collision: two different photos sharing a basename (from
  *     different directories) get suffixed look names (`-2`), and each
  *     restores its OWN edit correctly.
+ *  8. Autosave flush-before-switch (conductor review "data loss" finding):
+ *     an edit made <1000ms before switching photos — well inside the
+ *     debounce, before it would ever have fired on its own — must still
+ *     reach disk, both via __openImageByPath (8a) and __openProjectByPath
+ *     (8b), without leaking the flushed photo's bookkeeping onto whichever
+ *     photo the switch landed on (8a); a rapid A→B→A round trip preserves
+ *     both edits (8c).
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -40,6 +47,15 @@ const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const JPG_PATH = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
 const quickProjectDir = ensureTestProjectEnv();
+
+// Check 8 needs autosave actually ON — isolate settings.json the same way
+// verify-cst.mjs/verify-exportsettings.mjs do (reuse the runner's assignment
+// when present; otherwise mint our own fresh temp dir for a standalone run).
+// This machine's own real settings.json has autosaveSidecar OFF, which would
+// silently no-op every check below without this.
+const ownUserData = !process.env.SILVERBOX_USER_DATA;
+const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-project-userdata-'));
+process.env.SILVERBOX_USER_DATA = userDataDir;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -57,7 +73,7 @@ const check = (name, cond, actual) => {
 
 const cleanupPaths = [];
 
-const app = await electron.launch({ args: [projectRoot] });
+const app = await electron.launch({ args: [projectRoot], env: { ...process.env, SILVERBOX_USER_DATA: userDataDir } });
 try {
   const page = await app.firstWindow();
   await page.waitForSelector('.app-layout', { timeout: 15_000 });
@@ -258,10 +274,126 @@ try {
   check("dirX's dup.ARW restores its OWN ev (0.11), not the other file's", (await devEv()) === 0.11, await devEv());
   await openAndWait(dupY);
   check("dirY's dup.ARW restores its OWN ev (0.22), not the other file's", (await devEv()) === 0.22, await devEv());
+
+  // Fire-and-forget switch (never await the open call itself — see this
+  // repo's verify-script conventions: a held evaluate can die mid-decode).
+  const switchImage = (path) => page.evaluate((p) => void window.__openImageByPath(p), path);
+  const switchProject = (dir) => page.evaluate((d) => void window.__openProjectByPath(d), dir);
+  const waitReady = () => page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+  const evOf = (doc) => doc?.graph?.nodes?.find((n) => n.id === 'dev')?.develop?.basic?.ev;
+  /**
+   * Poll a look file until `evOf(doc) === expectedEv` or the timeout lapses,
+   * returning whatever the LAST read was. The flush write is fire-and-forget
+   * (never awaited by the app itself), and — unlike check 2's "does the file
+   * exist yet" poll — these look files already exist from earlier checks, so
+   * merely polling for existence would return stale pre-flush content
+   * immediately instead of waiting for the write this check is about.
+   */
+  const pollLookForEv = async (path, expectedEv) => {
+    let doc = null;
+    for (let i = 0; i < 50; i++) {
+      if (existsSync(path)) {
+        doc = JSON.parse(readFileSync(path, 'utf8'));
+        if (evOf(doc) === expectedEv) return doc;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return doc;
+  };
+
+  // === 8a. __openImageByPath flushes the OLD photo's dirty edit before the switch ===
+  console.log('verify-project (8a. __openImageByPath flushes a dirty edit made <1000ms before the switch):');
+  // Checks 6/7 left the active project pointed elsewhere (secondProjectDir) —
+  // reset to the quick project first so `lookPathFor(ARW_PATH)` below (which
+  // assumes SILVERBOX_TEST_PROJECT) actually names where this open's look
+  // will land, same reset 8d does before its own round trip.
+  await switchProject(quickProjectDir);
+  await page.waitForFunction((p) => window.__debug?.projectState().dir === p, quickProjectDir, { timeout: 15_000 });
+  await waitReady();
+  await openAndWait(ARW_PATH);
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.63));
+  check('A (ARW) is dirty right after the edit', await page.evaluate(() => window.__debug.graphDirty()), null);
+  // Switch immediately — no waiting for the 1000ms debounce.
+  await switchImage(JPG_PATH);
+  await waitReady();
+  check('B (JPG) is now the open photo', (await page.evaluate(() => window.__debug.folderState().currentPath)) === JPG_PATH, null);
+  const flushedA = await pollLookForEv(lookPathFor(ARW_PATH), 0.63);
+  check("A's look file on disk carries the pre-switch edit (nothing lost)", evOf(flushedA) === 0.63, flushedA);
+
+  // === 8b. B's own state is untouched by A's flush bookkeeping ===
+  console.log('verify-project (8b. the flushed photo\'s bookkeeping does not leak onto the newly-open photo):');
+  check("B is NOT dirty (A's flush post-write set() did not stomp B)", (await page.evaluate(() => window.__debug.graphDirty())) === false, null);
+  check("B's graph is intact (fresh default ev, not A's 0.63)", (await devEv()) === 0, await devEv());
+
+  // === 8c. Same flush guarantee across __openProjectByPath ===
+  console.log('verify-project (8c. __openProjectByPath flushes the OLD project\'s dirty photo before switching projects):');
+  const flushProjADir = mkdtempSync(join(tmpdir(), 'silverbox-project-flushA-'));
+  const flushProjAPhotosDir = mkdtempSync(join(tmpdir(), 'silverbox-project-flushA-photos-'));
+  cleanupPaths.push(flushProjADir, flushProjAPhotosDir);
+  mkdirSync(join(flushProjADir, 'looks'), { recursive: true });
+  const flushAArw = join(flushProjAPhotosDir, 'flushA.ARW');
+  linkSync(ARW_PATH, flushAArw);
+  writeFileSync(
+    join(flushProjADir, 'project.silverbox'),
+    JSON.stringify({ schemaVersion: 1, name: 'FlushA', photos: [{ path: flushAArw, look: 'flushA.ARW.json' }] }, null, 2) + '\n',
+    'utf8'
+  );
+  const flushProjBDir = mkdtempSync(join(tmpdir(), 'silverbox-project-flushB-'));
+  const flushProjBPhotosDir = mkdtempSync(join(tmpdir(), 'silverbox-project-flushB-photos-'));
+  cleanupPaths.push(flushProjBDir, flushProjBPhotosDir);
+  mkdirSync(join(flushProjBDir, 'looks'), { recursive: true });
+  const flushBArw = join(flushProjBPhotosDir, 'flushB.ARW');
+  linkSync(ARW_PATH, flushBArw);
+  writeFileSync(
+    join(flushProjBDir, 'project.silverbox'),
+    JSON.stringify({ schemaVersion: 1, name: 'FlushB', photos: [{ path: flushBArw, look: 'flushB.ARW.json' }] }, null, 2) + '\n',
+    'utf8'
+  );
+
+  await switchProject(flushProjADir);
+  await page.waitForFunction((p) => window.__debug?.projectState().dir === p, flushProjADir, { timeout: 15_000 });
+  await waitReady();
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.77));
+  check('FlushA\'s photo is dirty right after the edit', await page.evaluate(() => window.__debug.graphDirty()), null);
+
+  // Switch projects immediately — no waiting for the debounce.
+  await switchProject(flushProjBDir);
+  await page.waitForFunction((p) => window.__debug?.projectState().dir === p, flushProjBDir, { timeout: 15_000 });
+  await waitReady();
+  const flushedProjA = await pollLookForEv(join(flushProjADir, 'looks', 'flushA.ARW.json'), 0.77);
+  check("the OLD project's photo look carries the pre-switch edit", evOf(flushedProjA) === 0.77, flushedProjA);
+  check('the NEW project (FlushB) photo is NOT dirty (no bookkeeping leak)', (await page.evaluate(() => window.__debug.graphDirty())) === false, null);
+
+  // === 8d. Rapid A→B→A round trip preserves BOTH edits ===
+  console.log('verify-project (8d. rapid A-edit -> open-B -> B-edit -> open-A round trip preserves both edits):');
+  await switchProject(quickProjectDir);
+  await page.waitForFunction((p) => window.__debug?.projectState().dir === p, quickProjectDir, { timeout: 15_000 });
+  await waitReady();
+  await openAndWait(ARW_PATH);
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1.11));
+  await switchImage(JPG_PATH);
+  await waitReady();
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1.22));
+  await switchImage(ARW_PATH);
+  await waitReady();
+
+  const roundTripA = await pollLookForEv(lookPathFor(ARW_PATH), 1.11);
+  const roundTripB = await pollLookForEv(lookPathFor(JPG_PATH), 1.22);
+  check("A's round-trip edit (1.11) landed on disk", evOf(roundTripA) === 1.11, roundTripA);
+  check("B's round-trip edit (1.22) landed on disk", evOf(roundTripB) === 1.22, roundTripB);
+  // The reopened A itself must reflect its OWN edit, not B's — either read
+  // straight off the freshly-flushed look (the common case, given a small
+  // JSON write finishes long before a RAW decode does) or via the clean-
+  // session hot-reload picking up the flush's write after the fact.
+  await page
+    .waitForFunction(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 1.11, { timeout: 10_000 })
+    .catch(() => {});
+  check("reopening A after the round trip shows A's OWN edit (1.11), not B's or stale", (await devEv()) === 1.11, await devEv());
 } finally {
   await app.close();
 }
 
+if (ownUserData) rmSync(userDataDir, { recursive: true, force: true });
 for (const p of cleanupPaths) rmSync(p, { recursive: true, force: true });
 
 if (failures > 0) {

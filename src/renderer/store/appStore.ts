@@ -28,6 +28,7 @@ import {
   type GraphNode,
   type LensParams,
   type SidecarDoc,
+  type SidecarSource,
 } from '../engine/graph/graphDoc';
 import {
   defaultProjectManifest,
@@ -1042,6 +1043,151 @@ async function computeFingerprintCached(photoPath: string): Promise<string | nul
   const fingerprint = await window.silverbox.fingerprintFile(photoPath);
   if (fingerprint !== null) fingerprintCache.set(photoPath, fingerprint);
   return fingerprint;
+}
+
+// --- Autosave flush-on-switch (conductor review finding, data loss) --------
+//
+// saveGraph reads its own `get()` lazily, mid-flight, which is exactly right
+// for its ordinary callers (⌘S, the debounce timer) — but wrong for a flush
+// that has to survive a photo switch racing it: by the time an awaited
+// `writeSidecar` resolves, `get()` could already belong to the NEW photo.
+// So the serialization is split into a pure capture step (everything
+// saveGraph needs, pulled out of state synchronously, before anything else
+// runs) and an async write step (no state reads at all — only what's in the
+// snapshot). saveGraph and flushPendingAutosave below both go
+// capture-then-write; only what happens with the *result* differs (see each
+// one's own guard).
+
+/** Pure snapshot of everything saveGraph needs to serialize ONE photo's look. */
+interface GraphSaveSnapshot {
+  imagePath: string;
+  currentLookPath: string;
+  source: SidecarSource;
+  graph: GraphDoc;
+  sidecarCreatedAt: string | null;
+  sidecarRating: number;
+  sidecarFlag: PhotoFlag | null;
+  sidecarUnknownFields: Record<string, unknown> | null;
+  sidecarFingerprint: string | null;
+  sidecarPhotoAtOpen: string | null;
+  project: ActiveProject | null;
+}
+
+/**
+ * Capture step — mirrors saveGraph's own early-return guard exactly
+ * (`imagePath`/`fileName`/`sidecarUnreadable`/`currentLookPath`), so a caller
+ * gets `null` in precisely the cases saveGraph itself would silently no-op
+ * for. Callers that stand in for the debounced autosave timer (rather than
+ * an explicit save) additionally check `graphDirty && settings.autosaveSidecar`
+ * themselves first — see flushPendingAutosave.
+ */
+function captureGraphSaveSnapshot(state: AppState): GraphSaveSnapshot | null {
+  const {
+    imagePath,
+    fileName,
+    image,
+    graph,
+    sidecarCreatedAt,
+    sidecarRating,
+    sidecarFlag,
+    sidecarUnreadable,
+    sidecarUnknownFields,
+    sidecarFingerprint,
+    sidecarPhotoAtOpen,
+    project,
+    currentLookPath,
+  } = state;
+  if (!imagePath || !fileName || sidecarUnreadable || !currentLookPath) return null;
+  return {
+    imagePath,
+    currentLookPath,
+    source: {
+      fileName,
+      ...(image?.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+      kind: isRawFileName(fileName) ? 'raw' : 'jpg',
+    },
+    graph,
+    sidecarCreatedAt,
+    sidecarRating,
+    sidecarFlag,
+    sidecarUnknownFields,
+    sidecarFingerprint,
+    sidecarPhotoAtOpen,
+    project,
+  };
+}
+
+/**
+ * Write step — serializes `snapshot` and writes it to disk. Reads nothing
+ * from the store (only the snapshot itself), so it's safe to run arbitrarily
+ * long after capture, racing whatever the store does meanwhile. Returns what
+ * the post-write bookkeeping needs; the caller decides whether the snapshot
+ * it captured is still the store's current photo before applying it (see
+ * saveGraph and flushPendingAutosave).
+ */
+async function writeGraphSaveSnapshot(
+  snapshot: GraphSaveSnapshot
+): Promise<{ createdAt: string; fingerprint: string | null; photo: string | null; content: string }> {
+  const createdAt = snapshot.sidecarCreatedAt ?? new Date().toISOString();
+  // `photo` (project-storage migration): only meaningful inside a project —
+  // see saveGraph's own doc comment on this and the fingerprint fallback
+  // below, which this mirrors exactly.
+  const photo = snapshot.project ? relativizeProjectPath(snapshot.project.dir, snapshot.imagePath) : undefined;
+  let fingerprint = snapshot.sidecarFingerprint ?? undefined;
+  if (snapshot.project && photo !== undefined && (fingerprint === undefined || snapshot.sidecarPhotoAtOpen !== photo)) {
+    fingerprint = (await computeFingerprintCached(snapshot.imagePath)) ?? undefined;
+  }
+  const content = serializeGraphDoc(
+    snapshot.graph,
+    snapshot.source,
+    createdAt,
+    snapshot.sidecarUnknownFields ?? undefined,
+    snapshot.sidecarRating,
+    photo,
+    fingerprint,
+    snapshot.sidecarFlag ?? undefined
+  );
+  await window.silverbox.writeSidecar(snapshot.currentLookPath, content);
+  return { createdAt, fingerprint: fingerprint ?? null, photo: photo ?? null, content };
+}
+
+/**
+ * Flush whatever autosave the timer `cancelAutosaveTimer` is about to cancel
+ * would have performed for the photo that's closing (openImageByPath /
+ * openProjectByPath's own doc comments on their cancel calls) — conductor
+ * review finding: without this, an edit made <1000ms before switching photos
+ * (a slider move, a rating, a flag — anything that only marks `graphDirty`)
+ * was silently lost, because nothing else ever gets another chance to save
+ * it once the new open replaces `graph`/`imagePath` in memory.
+ *
+ * `state` must be captured by the CALLER before its own first `set()` — this
+ * function itself never reads the store except inside the write's `.then`,
+ * by which point a newer open may already own it (see the guard there).
+ * Fire-and-forget on purpose: the write targets the OLD photo's look file, a
+ * different path than whatever the new open is about to touch, so nothing on
+ * disk races — the only ordering that matters (capture before mutation) is
+ * already satisfied by the caller passing in a pre-mutation `state`.
+ */
+function flushPendingAutosave(state: AppState): void {
+  if (!state.graphDirty || !state.settings.autosaveSidecar) return;
+  const snapshot = captureGraphSaveSnapshot(state);
+  if (!snapshot) return;
+  void writeGraphSaveSnapshot(snapshot).then((result) => {
+    // The disk write already happened — that's the point, the edit is safe.
+    // Only the in-memory bookkeeping is stale if a newer open has since
+    // claimed `imagePath` (same idea as saveGraph's own post-write guard);
+    // skipping lastSidecarText here is correct too — the hot-reload watcher
+    // has re-armed onto the new photo's look by the time this resolves.
+    if (useAppStore.getState().imagePath !== snapshot.imagePath) return;
+    useAppStore.setState({
+      graphDirty: false,
+      sidecarCreatedAt: result.createdAt,
+      sidecarFingerprint: result.fingerprint,
+      sidecarPhotoAtOpen: result.photo,
+      lastSidecarText: result.content,
+      sidecarHotReloadNotice: null,
+    });
+  });
 }
 
 /**
@@ -2316,6 +2462,12 @@ export const useAppStore = create<AppState>((set, get) => {
     // (openImageByPath never creates it), so there's no single owning
     // session to register it against — called unconditionally here instead,
     // exactly where the old epoch guard used to call it.
+    // Flush it instead of just dropping it (conductor review finding, data
+    // loss): `get()` here still reads the OLD photo — nothing below this
+    // line has mutated the store yet — so flushPendingAutosave's capture is
+    // guaranteed pre-mutation. See its own doc comment for why the actual
+    // write doesn't need to be awaited before the open proceeds.
+    flushPendingAutosave(get());
     cancelAutosaveTimer();
     // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
     // default — see this method's `keepFolderContext` doc comment.
@@ -2639,6 +2791,14 @@ export const useAppStore = create<AppState>((set, get) => {
       set({ projectNotice: `project.silverbox at ${dir} is corrupt, not opened: ${message}` });
       return false;
     }
+    // Same flush-before-drop as openImageByPath's own cancelAutosaveTimer
+    // call (conductor review finding, data loss) — a project switch is
+    // itself a photo switch a moment later (this function goes on to open
+    // the project's first playlist entry below), so the currently open
+    // photo's pending edit belongs here just as much. `get()` here still
+    // reads whatever was open before this project switch — nothing above
+    // this line touches imagePath/graph/currentLookPath.
+    flushPendingAutosave(get());
     cancelAutosaveTimer();
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     set({ project, folderDir: dir, folderEntries: [] });
@@ -4251,56 +4411,17 @@ export const useAppStore = create<AppState>((set, get) => {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
     cancelAutosaveTimer();
-    const {
-      imagePath,
-      fileName,
-      image,
-      graph,
-      sidecarCreatedAt,
-      sidecarRating,
-      sidecarFlag,
-      sidecarUnreadable,
-      sidecarUnknownFields,
-      sidecarFingerprint,
-      sidecarPhotoAtOpen,
-      project,
-      currentLookPath,
-    } = get();
-    if (!imagePath || !fileName || sidecarUnreadable || !currentLookPath) return;
-    const source = {
-      fileName,
-      ...(image?.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
-      kind: (isRawFileName(fileName) ? 'raw' : 'jpg') as 'raw' | 'jpg',
-    };
-    const createdAt = sidecarCreatedAt ?? new Date().toISOString();
-    // `photo` (project-storage migration): only meaningful inside a project
-    // — a `legacySidecarOnly` CLI session (project stays null there) writes
-    // the SAME bytes as before the migration, no `photo` field at all.
-    const photo = project ? relativizeProjectPath(project.dir, imagePath) : undefined;
-    // `fingerprint` (project-storage migration, stage 3): computed once per
-    // photo path per session (computeFingerprintCached's own doc comment),
-    // written whenever it's still absent OR the look's own recorded `photo`
-    // at open time no longer matches what we're about to write — the one
-    // way that can happen mid-session is a Relink rewriting THIS SAME look
-    // for a different photo (relinkPhoto below writes its own fresh
-    // fingerprint directly, so this is a defensive fallback for any other
-    // way the two could drift, e.g. a hand-edited look). Never computed at
-    // all outside a project (photo undefined ⇒ nothing to fingerprint).
-    let fingerprint = sidecarFingerprint ?? undefined;
-    if (project && photo !== undefined && (fingerprint === undefined || sidecarPhotoAtOpen !== photo)) {
-      fingerprint = (await computeFingerprintCached(imagePath)) ?? undefined;
-    }
-    const content = serializeGraphDoc(
-      graph,
-      source,
-      createdAt,
-      sidecarUnknownFields ?? undefined,
-      sidecarRating,
-      photo,
-      fingerprint,
-      sidecarFlag ?? undefined
-    );
-    await window.silverbox.writeSidecar(currentLookPath, content);
+    // capture-then-write (shared with flushPendingAutosave — see its own
+    // doc comment): captured synchronously here, so the write below can take
+    // as long as it needs without reading `get()` again.
+    const snapshot = captureGraphSaveSnapshot(get());
+    if (!snapshot) return;
+    const result = await writeGraphSaveSnapshot(snapshot);
+    // A photo switch racing this exact await (⌘S, then immediately clicking
+    // another filmstrip photo before the write resolves) must not stomp the
+    // NEW photo's state with THIS photo's bookkeeping — same guard
+    // flushPendingAutosave uses. The disk write already happened either way.
+    if (get().imagePath !== snapshot.imagePath) return;
     // Record exactly what we just wrote (hot-reload's self-write-suppression
     // baseline) and clear any hot-reload notice: our edits just overwrote
     // disk, resolving whatever pending/malformed conflict was showing (see
@@ -4308,10 +4429,10 @@ export const useAppStore = create<AppState>((set, get) => {
     // THIS write will read back identical text and be ignored silently.
     set({
       graphDirty: false,
-      sidecarCreatedAt: createdAt,
-      sidecarFingerprint: fingerprint ?? null,
-      sidecarPhotoAtOpen: photo ?? null,
-      lastSidecarText: content,
+      sidecarCreatedAt: result.createdAt,
+      sidecarFingerprint: result.fingerprint,
+      sidecarPhotoAtOpen: result.photo,
+      lastSidecarText: result.content,
       sidecarHotReloadNotice: null,
     });
   },
@@ -4513,6 +4634,14 @@ export const useAppStore = create<AppState>((set, get) => {
       look: p.look,
     }));
     const name = destDir.split('/').filter((s) => s.length > 0).pop() || 'Project';
+    // NOT a flush site: the currently open PHOTO never changes here (only
+    // which project/directory owns it, already moved on disk by
+    // moveProjectFiles above) — a dirty in-memory edit stays graphDirty:true
+    // and gets picked up by the next real save (⌘S, or the next edit
+    // re-arming the debounce) against the repointed currentLookPath below.
+    // Canceling here only prevents the OLD timer from firing against the
+    // now-moved (soon target of a stale write) path in the gap before
+    // currentLookPath is repointed a few lines down.
     cancelAutosaveTimer();
     const newProject: ActiveProject = { dir: destDir, name, photos: newPhotos, unknown: null };
     set({ project: newProject, folderDir: destDir });
@@ -4629,7 +4758,13 @@ export const useAppStore = create<AppState>((set, get) => {
     const before = get().settings;
     const settings = await window.silverbox.settingsUpdate(partial);
     set({ settings });
-    // turning autosave off must not leave a stale timer to fire once more
+    // turning autosave off must not leave a stale timer to fire once more.
+    // NOT a flush site: the photo stays open (no switch), so the dirty edit
+    // stays in memory and reaches disk via the next ⌘S — flushing here would
+    // override the user's own "stop autosaving" choice. This falls out of
+    // flushPendingAutosave's guard for free anyway: `settings` above is
+    // already the NEW (autosaveSidecar: false) value by the time anything
+    // downstream could call it.
     if (!settings.autosaveSidecar) cancelAutosaveTimer();
     // Round-10 fix pack item 3: baselineExposureEV is the only setting an
     // open image's DECODE depends on (previewLongEdge only affects the
