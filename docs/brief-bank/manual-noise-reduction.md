@@ -1,6 +1,10 @@
 # Brief: manual noise reduction — LR-style sub-sliders + the missing default
 
-Status: DECIDED (user, 2026-07-12), queued after the denoise hook node.
+Status: LANDED 2026-07-12 (fbd7562 — same day as the decision; this
+status line lagged reality and even triggered a redundant implementation
+dispatch on 2026-07-16, which became a full verification audit instead:
+the landed code matches this brief end-to-end, all gates green 59/59).
+The four sub-slider mapping constants remain LR-CALIBRATION provisional.
 Complements — does not replace — the external denoise hook (that is LR's
 "AI Denoise" analogue; this is the Manual Noise Reduction panel).
 
