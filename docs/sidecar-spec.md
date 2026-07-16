@@ -407,6 +407,7 @@ radial vignette mask.
 
 **`MyProject/project.silverbox`**
 
+<!-- spec-example: manifest -->
 ```json
 {
   "schemaVersion": 1,
@@ -419,6 +420,7 @@ radial vignette mask.
 
 **`MyProject/looks/DSC001.ARW.json`**
 
+<!-- spec-example: look -->
 ```json
 {
   "schemaVersion": 4,
@@ -474,18 +476,23 @@ radial vignette mask.
       { "id": "e1", "from": "exp-1", "to": "blend-1", "port": "a" },
       { "id": "e2", "from": "exp-1", "to": "blend-1", "port": "b" },
       { "id": "e3", "from": "mask-1", "to": "blend-1", "port": "mask" },
-      { "id": "e4", "from": "blend-1", "to": "out" }
+      { "id": "e4", "from": "blend-1", "to": "out" },
+      { "id": "e5", "from": "in", "to": "mask-1" }
     ]
   }
 }
 ```
 
-This example is meant to be kept honest by machine, not by hand: a verify
-script should extract this document's two fenced JSON blocks under §10 and
-round-trip them — `parseProjectManifest` on the manifest, `parseGraphDoc` on
-the look file — asserting both parse without throwing and that the look's
-`photo`/`fingerprint`/`rating` come back exactly as written
-(`docs/brief-bank/git-native-completion.md` §2 calls for this as
-`npm run verify:sidecar-spec`; not yet implemented as of this writing — this
-doc was written in a docs-only pass, and wiring the actual round-trip script
-is a follow-up code task, not a doc task).
+This example is meant to be kept honest by machine, not by hand:
+`npm run verify:sidecar-spec` (`scripts/verify-sidecar-spec.mjs`) extracts
+this document's two fenced JSON blocks under §10 (tagged with
+`<!-- spec-example: manifest -->` / `<!-- spec-example: look -->` HTML
+comments immediately above each fence) and round-trips them —
+`parseProjectManifest` on the manifest, `parseGraphDoc` on the look file —
+asserting both parse without throwing, that the look's
+`photo`/`fingerprint`/`rating` come back exactly as written, that an unknown
+field injected into either example survives a round trip, that this doc's
+stated `schemaVersion` values (`1` for the manifest, `4` for the look) match
+`PROJECT_SCHEMA_VERSION`/`SIDECAR_SCHEMA_VERSION` in the source, and that the
+fingerprint recipe in §7 matches a reference implementation on a fixed byte
+buffer.

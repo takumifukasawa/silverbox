@@ -42,11 +42,16 @@ worked example (project.silverbox + one look file). Written BY HAND
 from graphDoc.ts/projectDoc.ts/main's computeFingerprint (a generator
 script would rot).
 
-**Still open**: the verify script this brief originally called for —
-`npm run verify:sidecar-spec`, round-tripping the spec's own worked
-example through `parseGraphDoc`/`parseProjectManifest` unchanged — is
-NOT yet implemented (out of scope for the docs-only pass that wrote
-the spec; needs a code-touching follow-up).
+**Landed** (code follow-up): `npm run verify:sidecar-spec`
+(`scripts/verify-sidecar-spec.mjs`) round-trips the spec's own §10 worked
+example through the real `parseGraphDoc`/`serializeGraphDoc` and
+`parseProjectManifest`/`serializeProjectManifest` — reached via an esbuild
+Node bundle of the source modules directly (no Electron/Playwright needed;
+both modules are pure-function, dependency-free, same precedent as the
+vitest `unit` tier and `verify-ms0-decode.mjs`'s esbuild bundling) — plus
+checks the doc's stated schema versions against
+`SIDECAR_SCHEMA_VERSION`/`PROJECT_SCHEMA_VERSION` and the fingerprint recipe
+in §7 against a from-scratch reference implementation.
 
 ## 3. Reproducibility stamp
 
