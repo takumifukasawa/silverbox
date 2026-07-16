@@ -16,33 +16,81 @@
  *   2. Sample the decoded linear buffer (imageForVerify) through the EXIT
  *      transform (WORK_TO_SRGB → sRGB encode), the same math CanvasView's
  *      cpuReferenceMean and verify-cst use — giving our display-encoded luma.
- *   3. Same for the camera JPEG.
+ *   3. Same for the camera JPEG (or LR export — whatever reference the curve
+ *      should match).
  *   4. For dense quantiles q (dropping the clipped top/bottom 0.5%), pair
- *      x_q = our encoded luma at q with y_q = JPEG encoded luma at q. This is
- *      the target transfer x→y in the tone editor's 0..255 point space.
- *   5. Place interior control points AT percentile-matched pairs (so they lie
- *      exactly on the transfer), pin (0,0)+(255,255), enforce monotonicity,
- *      and measure the RMS with which the existing PCHIP evaluator
- *      (engine/color/toneCurve.ts) reproduces the dense transfer.
+ *      x_q = our encoded luma at q with y_q = the reference's encoded luma at
+ *      q. This is the target transfer x→y in the tone editor's 0..255 point
+ *      space, PER SCENE.
+ *   5. MULTI-SCENE (round 3): with more than one pair, a fixed set of
+ *      quantiles (CTRL_Q) is evaluated independently in EVERY scene, then the
+ *      x and y at each CTRL_Q index are averaged ACROSS SCENES (one x,y pair
+ *      per scene per index — equal weight per scene, regardless of a scene's
+ *      pixel count or how many scenes are big/bright/dark, so one large or
+ *      extreme scene can't dominate the fit). Interior control points sit at
+ *      these per-index scene-averaged (x,y) pairs; pin (0,0)+(255,255),
+ *      enforce monotonicity, and measure the RMS with which the existing
+ *      PCHIP evaluator (engine/color/toneCurve.ts) reproduces each scene's
+ *      dense transfer (reported per scene AND pooled).
  *
- * Output: the fitted points + RMS printed as JSON, and written to
- * scripts/base-curve.fit.json (a fixture for reference / diffing).
+ * Output: the fitted points + per-scene RMS/percentile-band report printed as
+ * JSON, and written to scripts/base-curve.fit.json (a fixture for reference /
+ * diffing).
  *
  * Usage:
- *   npm run fit:basecurve                       # default DSC02993 pair
+ *   npm run fit:basecurve                       # round-3 default (14 scenes, joint)
  *   node scripts/fit-base-curve.mjs <arw> <jpg>
+ *   node scripts/fit-base-curve.mjs <arw1> <jpg1> <arw2> <jpg2> ...   # custom joint set
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync, readFileSync } from 'node:fs';
+import { writeFileSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
 
 process.env.SILVERBOX_TEST = '1'; // windowless; also suppresses the base-curve default so we sample the NEUTRAL decode
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
-const ARW_PATH = process.argv[2] ?? process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
-const JPG_PATH = process.argv[3] ?? process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
+
+/**
+ * Round-3 default pair set: every ref-green ARW+JPG pair (11, green-heavy
+ * scenes — the previous fit/lattice had almost no green support) plus the 3
+ * documented LR-Classic-default-export calibration pairs from rounds 1-2
+ * (docs/brief-bank/lr-calibration-session.md "Preparation" — DSC02993 test
+ * ARW, DSC07349 Italy sunset, DSC03298 Italy architecture; all confirmed
+ * "user imports into LR with DEFAULT settings, Adobe Color"). A 4th lr-calib
+ * scene, DSC09305, has a plain LR export too, but its provenance in the docs
+ * is as an EFFECTS-calibration scene (dehaze/clarity/texture/sharpen sweeps,
+ * "09305 was the trusted scene" for CLARITY, per the lightroom-reference
+ * memory) — not documented as a plain Adobe-Color-defaults capture for base
+ * curve / profile fitting, so it is deliberately left out here.
+ */
+function defaultPairs() {
+  const greenDir = join(projectRoot, 'test-assets', 'ref-green');
+  const bases = [...new Set(readdirSync(greenDir).filter((f) => f.endsWith('.ARW')).map((f) => f.replace(/\.ARW$/, '')))].sort();
+  const greenPairs = bases.map((b) => [join('test-assets', 'ref-green', `${b}.ARW`), join('test-assets', 'ref-green', `${b}.jpg`)]);
+  const lrCalibPairs = [
+    ['test-assets/test.ARW', 'test-assets/lr-calib/DSC02993.jpg'],
+    ['test-assets/italy/DSC07349.ARW', 'test-assets/lr-calib/DSC07349.jpg'],
+    ['test-assets/italy/DSC03298.ARW', 'test-assets/lr-calib/DSC03298.jpg'],
+  ];
+  return [...greenPairs, ...lrCalibPairs];
+}
+
+function parsePairs() {
+  const args = process.argv.slice(2);
+  if (args.length === 0) {
+    const arw = process.env.SILVERBOX_TEST_ARW;
+    const jpg = process.env.SILVERBOX_TEST_JPG;
+    if (arw && jpg) return [[arw, jpg]];
+    return defaultPairs();
+  }
+  if (args.length % 2 !== 0) throw new Error('pass pairs: <arw> <jpg> [<arw2> <jpg2> ...]');
+  const pairs = [];
+  for (let i = 0; i < args.length; i += 2) pairs.push([args[i], args[i + 1]]);
+  return pairs;
+}
+const PAIRS = parsePairs();
 
 // --- exit transform + luma (mirrors workingSpace.ts / srgb.ts EXACTLY) -------
 const WORK_TO_SRGB = [
@@ -131,7 +179,18 @@ const ipcSrc = readFileSync(join(projectRoot, 'shared', 'ipc.ts'), 'utf8');
 const evMatch = ipcSrc.match(/baselineExposureEV:\s*([\d.]+)/);
 const DEFAULT_EV = evMatch ? Number(evMatch[1]) : 0.5;
 
+// Old (pre-refit) shipped curve, for BEFORE/AFTER percentile-band reporting
+// only — read straight from source so this never has to be hand-maintained.
+const baseCurveSrc = readFileSync(join(projectRoot, 'src', 'renderer', 'engine', 'color', 'baseCurve.ts'), 'utf8');
+const oldCurveMatch = baseCurveSrc.match(/A7C2_BASE_CURVE[^=]*=\s*(\[[\s\S]*?\]);/);
+const OLD_POINTS = oldCurveMatch ? JSON.parse(oldCurveMatch[1].replace(/,(\s*[\]])/g, '$1')) : null;
+
+const CTRL_Q = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9];
+const BAND_Q = [0.1, 0.25, 0.5, 0.75, 0.9]; // report bands (round-1 style)
+
 const app = await electron.launch({ args: [projectRoot] });
+const scenes = []; // { pair, ours(sorted), jpg(sorted), ctrl: [{x,y}], dense: [{x,y}] }
+let cameraModel = null;
 try {
   const page = await app.firstWindow();
   await page.waitForSelector('.app-layout', { timeout: 15_000 });
@@ -168,67 +227,114 @@ try {
     return lum;
   };
 
-  const arwSample = await openAndSample(ARW_PATH);
-  const cameraModel = await page.evaluate(() => window.__debug.captureInfo()?.cameraModel ?? null);
-  const jpgSample = await openAndSample(JPG_PATH);
-  console.log(`ARW preview ${arwSample.width}×${arwSample.height}, JPEG ${jpgSample.width}×${jpgSample.height}`);
-  const ours = distribution(arwSample);
-  const jpg = distribution(jpgSample);
-
-  // dense transfer, dropping the clipped top/bottom 0.5%
-  const dense = [];
-  for (let q = 0.005; q <= 0.995 + 1e-9; q += 0.005) {
-    dense.push({ q, x: quantile(ours, q), y: quantile(jpg, q) });
+  for (const [arwPath, jpgPath] of PAIRS) {
+    console.log(`\n=== scene: ${arwPath.split('/').pop()} ↔ ${jpgPath.split('/').pop()} ===`);
+    const arwSample = await openAndSample(arwPath);
+    cameraModel = cameraModel ?? (await page.evaluate(() => window.__debug.captureInfo()?.cameraModel ?? null));
+    const jpgSample = await openAndSample(jpgPath);
+    console.log(`  ARW preview ${arwSample.width}×${arwSample.height}, JPEG ${jpgSample.width}×${jpgSample.height}`);
+    const ours = distribution(arwSample);
+    const jpg = distribution(jpgSample);
+    const dense = [];
+    for (let q = 0.005; q <= 0.995 + 1e-9; q += 0.005) dense.push({ x: quantile(ours, q), y: quantile(jpg, q) });
+    const ctrl = CTRL_Q.map((q) => ({ x: quantile(ours, q), y: quantile(jpg, q) }));
+    const bands = BAND_Q.map((q) => ({ q, ours: quantile(ours, q), jpg: quantile(jpg, q) }));
+    scenes.push({ arw: arwPath, jpg: jpgPath, ours, jpg_: jpg, ctrl, dense, bands });
   }
-  const p50x = quantile(ours, 0.5);
-  const p50y = quantile(jpg, 0.5);
-  console.log(`p50: ours ${p50x.toFixed(1)} → jpeg ${p50y.toFixed(1)} (Δ ${(p50y - p50x).toFixed(1)} / 255)`);
-
-  // interior control points AT percentile-matched pairs (they lie on the transfer)
-  const CTRL_Q = [0.05, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9];
-  const interior = CTRL_Q.map((q) => [Math.round(quantile(ours, q)), Math.round(quantile(jpg, q))]);
-  // assemble: pinned endpoints + interior, strictly increasing x, monotone y
-  const raw = [[0, 0], ...interior, [255, 255]];
-  const points = [];
-  for (const [x, y] of raw) {
-    const px = Math.min(255, Math.max(0, x));
-    const py = Math.min(255, Math.max(0, y));
-    if (points.length > 0) {
-      const prev = points[points.length - 1];
-      if (px <= prev[0]) continue; // drop a non-increasing x (collapsed quantile)
-      if (py < prev[1]) {
-        points.push([px, prev[1]]); // clamp to keep the curve monotone
-        continue;
-      }
-    }
-    points.push([px, py]);
-  }
-
-  // RMS of the PCHIP curve vs the dense transfer
-  const evalCurve = curveEvaluator(points);
-  let se = 0;
-  for (const s of dense) {
-    const d = evalCurve(s.x) - s.y;
-    se += d * d;
-  }
-  const rms = Math.sqrt(se / dense.length);
-
-  const result = {
-    arw: ARW_PATH,
-    jpg: JPG_PATH,
-    fittedAt: new Date().toISOString(),
-    baselineExposureEV: await page.evaluate(() => window.__debug.settingsState().baselineExposureEV),
-    cameraModel,
-    p50: { ours: Number(p50x.toFixed(2)), jpeg: Number(p50y.toFixed(2)) },
-    rms: Number(rms.toFixed(3)),
-    points,
-  };
-
-  console.log('\nfitted base curve:');
-  console.log(JSON.stringify(result, null, 2));
-  const outPath = join(projectRoot, 'scripts', 'base-curve.fit.json');
-  writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n');
-  console.log(`\nwrote ${outPath}`);
 } finally {
   await app.close();
 }
+
+// --- MULTI-SCENE aggregation: average each CTRL_Q index's (x,y) ACROSS
+// SCENES (one value per scene per index — equal per-scene weight, immune to
+// scene pixel count / how many scenes happen to be bright or dark) ----------
+const interior = CTRL_Q.map((_, i) => {
+  const xs = scenes.map((s) => s.ctrl[i].x);
+  const ys = scenes.map((s) => s.ctrl[i].y);
+  const meanX = xs.reduce((a, b) => a + b, 0) / xs.length;
+  const meanY = ys.reduce((a, b) => a + b, 0) / ys.length;
+  return [Math.round(meanX), Math.round(meanY)];
+});
+// assemble: pinned endpoints + interior, strictly increasing x, monotone y
+const raw = [[0, 0], ...interior, [255, 255]];
+const points = [];
+for (const [x, y] of raw) {
+  const px = Math.min(255, Math.max(0, x));
+  const py = Math.min(255, Math.max(0, y));
+  if (points.length > 0) {
+    const prev = points[points.length - 1];
+    if (px <= prev[0]) continue; // drop a non-increasing x (collapsed quantile)
+    if (py < prev[1]) {
+      points.push([px, prev[1]]); // clamp to keep the curve monotone
+      continue;
+    }
+  }
+  points.push([px, py]);
+}
+
+const newCurve = curveEvaluator(points);
+const oldCurve = OLD_POINTS ? curveEvaluator(OLD_POINTS) : null;
+
+// per-scene RMS (new curve vs this scene's own dense transfer) + before/after
+// percentile bands (old curve vs new curve, both vs the reference's actual
+// percentile — the "round-1 style bands").
+let pooledSe = 0;
+let pooledN = 0;
+const perScene = scenes.map((s) => {
+  let se = 0;
+  for (const d of s.dense) {
+    const e = newCurve(d.x) - d.y;
+    se += e * e;
+  }
+  pooledSe += se;
+  pooledN += s.dense.length;
+  const rms = Math.sqrt(se / s.dense.length);
+  const bands = s.bands.map((b) => {
+    const beforeVal = oldCurve ? oldCurve(b.ours) : b.ours;
+    const afterVal = newCurve(b.ours);
+    return {
+      q: b.q,
+      jpgTarget: Number(b.jpg.toFixed(1)),
+      before: oldCurve ? Number(beforeVal.toFixed(1)) : null,
+      after: Number(afterVal.toFixed(1)),
+      beforeDelta: oldCurve ? Number((beforeVal - b.jpg).toFixed(1)) : null,
+      afterDelta: Number((afterVal - b.jpg).toFixed(1)),
+    };
+  });
+  return {
+    arw: s.arw,
+    jpg: s.jpg,
+    p50: { ours: Number(s.ours[Math.floor(s.ours.length / 2)].toFixed(1)), jpeg: Number(s.jpg_[Math.floor(s.jpg_.length / 2)].toFixed(1)) },
+    rms: Number(rms.toFixed(3)),
+    bands,
+  };
+});
+const pooledRms = Math.sqrt(pooledSe / pooledN);
+
+console.log('\n===== PER-SCENE BEFORE/AFTER (luma percentile bands, encoded 0..255) =====');
+for (const s of perScene) {
+  console.log(`\n${s.arw.split('/').pop()}  (p50 ours ${s.p50.ours} → jpeg ${s.p50.jpeg}, new-curve RMS ${s.rms})`);
+  for (const b of s.bands) {
+    console.log(
+      `  q${b.q}: target ${b.jpgTarget}  before ${b.before ?? 'n/a'} (Δ${b.beforeDelta ?? 'n/a'})  after ${b.after} (Δ${b.afterDelta})`
+    );
+  }
+}
+console.log(`\npooled RMS across ${scenes.length} scene(s): ${pooledRms.toFixed(3)}`);
+
+const result = {
+  fittedAt: new Date().toISOString(),
+  baselineExposureEV: DEFAULT_EV,
+  cameraModel,
+  sceneCount: scenes.length,
+  weighting: 'equal-per-scene (CTRL_Q quantile pairs averaged across scenes, not pixel-weighted)',
+  pooledRms: Number(pooledRms.toFixed(3)),
+  points,
+  perScene,
+};
+
+console.log('\nfitted base curve (points):');
+console.log(JSON.stringify(points));
+const outPath = join(projectRoot, 'scripts', 'base-curve.fit.json');
+writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n');
+console.log(`\nwrote ${outPath}`);

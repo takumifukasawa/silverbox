@@ -35,12 +35,12 @@
  *      / p95 BEFORE (no transform) vs AFTER, and per-hue support sectors.
  *
  * Usage:
- *   npm run fit:profile                         # the three calibration pairs
+ *   npm run fit:profile                         # round-3 default: 11 ref-green + 3 calibration pairs
  *   node scripts/fit-profile.mjs <arw> <lr.jpg> [<arw2> <lr2.jpg> ...]
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
 
@@ -62,15 +62,27 @@ const DIFFUSION_ITERS = 24; // weighted Laplacian smoothing passes
 const HELDOUT_FRAC = 0.2; // fraction of accepted pairs reserved for ΔE
 
 // --- default calibration pairs ----------------------------------------------
-const DEFAULT_PAIRS = [
+// Round 3 (docs/brief-bank/lr-calibration-session.md, lightroom-reference
+// memory): greens were support-starved in the round-1 lattice (near-zero
+// pairs in the 60-180deg sectors) and stayed identity there. Adding the 11
+// green-heavy ref-green pairs alongside the 3 original calibration pairs
+// (same provenance rule as fit-base-curve.mjs's defaultPairs — LR imported
+// with DEFAULT settings) gives the green sectors real support.
+const DEFAULT_LR_CALIB_PAIRS = [
   ['test-assets/test.ARW', 'test-assets/lr-calib/DSC02993.jpg'],
   ['test-assets/italy/DSC07349.ARW', 'test-assets/lr-calib/DSC07349.jpg'],
   ['test-assets/italy/DSC03298.ARW', 'test-assets/lr-calib/DSC03298.jpg'],
 ];
+function defaultPairs() {
+  const greenDir = join(projectRoot, 'test-assets', 'ref-green');
+  const bases = [...new Set(readdirSync(greenDir).filter((f) => f.endsWith('.ARW')).map((f) => f.replace(/\.ARW$/, '')))].sort();
+  const greenPairs = bases.map((b) => [join('test-assets', 'ref-green', `${b}.ARW`), join('test-assets', 'ref-green', `${b}.jpg`)]);
+  return [...greenPairs, ...DEFAULT_LR_CALIB_PAIRS];
+}
 
 function parsePairs() {
   const args = process.argv.slice(2);
-  if (args.length === 0) return DEFAULT_PAIRS;
+  if (args.length === 0) return defaultPairs();
   if (args.length % 2 !== 0) throw new Error('pass pairs: <arw> <lr.jpg> [<arw2> <lr2.jpg> ...]');
   const pairs = [];
   for (let i = 0; i < args.length; i += 2) pairs.push([args[i], args[i + 1]]);
@@ -619,6 +631,14 @@ const after50 = dEStats(heldout, 50);
 const trainBefore = dEStats(train, 0);
 const trainAfter = dEStats(train, 100);
 
+// GREEN hue region (60-180deg: yellow-green through green-cyan, sectors 2-5)
+// — the round-1/2 lattice left this identity for lack of support; report it
+// separately so the ref-green pairs' actual effect is visible.
+const isGreen = (p) => p.hue >= 0 && p.hue >= 60 && p.hue < 180;
+const heldoutGreen = heldout.filter(isGreen);
+const beforeGreen = heldoutGreen.length ? dEStats(heldoutGreen, 0) : null;
+const afterGreen = heldoutGreen.length ? dEStats(heldoutGreen, 100) : null;
+
 // per-hue support (12 sectors of 30°) over the training set
 const hueSectors = new Array(12).fill(0);
 let achromatic = 0;
@@ -650,6 +670,18 @@ const report = {
     before: { mean: +trainBefore.mean.toFixed(3), p95: +trainBefore.p95.toFixed(3) },
     after100: { mean: +trainAfter.mean.toFixed(3), p95: +trainAfter.p95.toFixed(3) },
   },
+  greenRegion: {
+    n: heldoutGreen.length,
+    heldoutChromaDEab: beforeGreen
+      ? { before: +beforeGreen.chromaMean.toFixed(3), after100: +afterGreen.chromaMean.toFixed(3) }
+      : null,
+    heldoutDeltaE2000: beforeGreen
+      ? {
+          before: { mean: +beforeGreen.mean.toFixed(3), p95: +beforeGreen.p95.toFixed(3) },
+          after100: { mean: +afterGreen.mean.toFixed(3), p95: +afterGreen.p95.toFixed(3) },
+        }
+      : null,
+  },
   hueSupport: { sectors30deg: hueSectors, achromatic },
 };
 
@@ -662,6 +694,16 @@ console.log(`held-out ΔE2000 p95:  ${before.p95.toFixed(2)} → ${after100.p95.
 console.log(
   `held-out CHROMA ΔEab mean: ${before.chromaMean.toFixed(2)} → ${after100.chromaMean.toFixed(2)} (amount 100) — the profile's actual job (luma is the base curve's)`
 );
+if (beforeGreen) {
+  console.log(
+    `held-out GREEN-region (n=${heldoutGreen.length}) CHROMA ΔEab mean: ${beforeGreen.chromaMean.toFixed(2)} → ${afterGreen.chromaMean.toFixed(2)} (amount 100)`
+  );
+  console.log(
+    `held-out GREEN-region ΔE2000 mean: ${beforeGreen.mean.toFixed(2)} → ${afterGreen.mean.toFixed(2)}, p95: ${beforeGreen.p95.toFixed(2)} → ${afterGreen.p95.toFixed(2)}`
+  );
+} else {
+  console.log('held-out GREEN-region: no held-out pairs in the 60-180deg sector');
+}
 
 // --- emit lattice ------------------------------------------------------------
 // round to a compact fixed precision; store as a flat residual array

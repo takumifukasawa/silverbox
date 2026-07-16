@@ -28,6 +28,31 @@
  * deliberately projected out. Recommended follow-up: refit the base curve
  * across multiple scenes, then re-fit this profile for a cleaner chroma
  * character. Refit:  npm run fit:profile [<arw> <lr.jpg> ...]
+ *
+ * ROUND 3 ATTEMPT, NOT SHIPPED (2026-07-16): after the base curve WAS refit
+ * across 14 scenes (baseCurve.ts), this lattice was re-fit jointly across
+ * those same 14 scenes (the 3 pairs above + 11 green-heavy ref-green pairs,
+ * added because greens had near-zero support here — sectors 2-3 had ~9.2k/
+ * ~0.5k training pixels). The result (scripts/profile-fit.json holds the raw
+ * fit) was a NET REGRESSION on held-out data — CHROMA dEab mean 7.63 -> 7.90
+ * at amount 100, worse in the green region too (8.66 -> 9.49) — AND it broke
+ * two of this file's own design-invariant unit tests (profileFit.test.ts):
+ * the bounded-residual cap (max |delta| 0.165, cap is 0.12) and the far-hull
+ * near-identity guarantee (0.079, cap 0.03) — i.e. the fitted lattice no
+ * longer safely extrapolates to identity for unseen/wide-gamut colors.
+ * HYPOTHESIS: this lattice's splat is PIXEL-weighted (unlike the base
+ * curve's per-scene weighting), so the ref-green shallow-DOF macro shots —
+ * which each contribute 100k-240k accepted pixels vs the original pairs —
+ * dominate the green cells outright, and shallow-DOF foliage is a worst case
+ * for sub-pixel misalignment / chromatic-aberration fringing at high-
+ * contrast leaf edges (lens correction is deliberately OFF while fitting).
+ * DECISION: this file was left at the ORIGINAL (round 1/2, 3-pair) lattice
+ * above rather than shipping the regression; the round-3 attempt is
+ * preserved in scripts/profile-fit.json and rendered for visual comparison
+ * (see the round3-compare.html artifact from that session) so a human can
+ * confirm before any future attempt. Next time: make the splat per-scene-
+ * weighted like the base curve, or add a CA/alignment gate on top of the
+ * existing per-tile NCC gate, before trusting a green-heavy refit.
  */
 
 /** Grid nodes per axis. */
