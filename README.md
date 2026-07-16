@@ -5,9 +5,13 @@ A node-based, non-destructive RAW/JPEG developer for the desktop.
 Silverbox pairs a Lightroom-style develop workflow with a compositor's node
 graph: open a Sony ARW (or any libraw-supported RAW, or a JPEG), edit it
 through a graph of GPU passes, and export a full-resolution JPEG/PNG. Edits
-never touch the original file — the whole graph lives in a plain-JSON sidecar
-next to the image, which means your looks diff, branch and review like source
-code.
+never touch the original file — the whole graph lives as a plain-JSON look
+file inside a project folder (or the visible Quick project at
+`~/Silverbox/Quick` until you make one), which means your looks diff, branch
+and review like source code. **The app never writes into your photo
+folders** — old adjacent `<image>.silverbox.json` sidecars from before
+project storage remain readable forever, but every new write lands inside
+the project itself.
 
 What makes it different:
 
@@ -15,25 +19,38 @@ What makes it different:
   output` chain covers the usual workflow, but any node's output can fan out,
   branches recombine through blend nodes, and single-purpose atomic nodes
   (exposure, contrast, white balance, …) can be wired anywhere.
+- **A project folder, not a hidden catalog.** A project is a visible,
+  double-clickable `project.silverbox` manifest (name + photo playlist) next
+  to a `looks/` folder holding one JSON look per photo — a real directory
+  you can put under git, not an app-internal library. No-ceremony opens land
+  in the Quick project (`~/Silverbox/Quick` by default) until you "Save as
+  project…" somewhere else. Photos are referenced, never copied or moved.
 - **Looks you write in code.** A customShader node compiles the body of
   `shade(color, uv) -> vec3f` (WGSL) into the pipeline, with GUI-declared
   float parameters exposed as `P.<name>` sliders. Broken code never breaks
   the preview — the last valid shader keeps rendering while the error is
   shown with editor line numbers.
-- **git-native documents.** The sidecar (`<image>.silverbox.json`) is a
-  pretty-printed, stable JSON document (schemaVersion 4) carrying the graph,
-  its provenance and timestamps. Older sidecars still load: v2/v3 are read
-  transparently, and pre-v4 mask/spot coordinates — which were normalized
-  against the cropped/straightened output — are migrated on load into
-  "anchor space" (normalized against the oriented full frame, before crop and
-  rotation) so a spot or mask stays pinned to its image content when the crop
-  or angle changes. While an image is open, an external change to its
+- **git-native documents.** The look document (one JSON file per photo —
+  inside a project's `looks/`, or historically `<image>.silverbox.json` next
+  to the image) is a pretty-printed, stable JSON document (schemaVersion 4)
+  carrying the graph, its provenance and timestamps. Older sidecars still
+  load: v2/v3 are read transparently, and pre-v4 mask/spot coordinates —
+  which were normalized against the cropped/straightened output — are
+  migrated on load into "anchor space" (normalized against the oriented
+  full frame, before crop and rotation) so a spot or mask stays pinned to
+  its image content when the crop or angle changes. While an image is
+  open, an external change to its
   sidecar — a hand edit, `git checkout`, or an AI agent — hot-reloads live:
   a clean session swaps it in as one undo entry, a session with unsaved
   edits shows a Reload prompt instead of clobbering them.
 
 The principles behind these choices — and what Silverbox deliberately is
-not — are written down in [DESIGN.md](DESIGN.md).
+not — are written down in [DESIGN.md](DESIGN.md). The on-disk container —
+project layout, the look file's schema, what's promised to survive forever
+— is specced in [docs/sidecar-spec.md](docs/sidecar-spec.md), written so
+precisely that a human in a text editor or an AI agent can hand-author a
+valid look file from the spec alone: the sidecar isn't just readable, it's
+a writable API.
 
 ## Develop features
 
@@ -55,6 +72,14 @@ not — are written down in [DESIGN.md](DESIGN.md).
 - **Detail** — bilateral luminance NR, chroma NR and unsharp-mask sharpening
   with edge masking, computed in a luma/chroma space and scaled so preview
   and full-resolution export agree in look.
+- **Denoise, two ways.** An external-tool hook node pipes pixels through any
+  command-line denoiser (a `{in}`/`{out}` command template, e.g. G'MIC) as a
+  non-realtime finishing step. An in-engine ML denoiser (NAFNet-based, no
+  external round trip, working directly on linear data) is wired into the
+  same node contract and, with your one-click consent, downloads its ~112 MB
+  model on first use — in progress: the model release isn't published yet,
+  so until it is the node passes through unchanged with a badge instead of
+  offering a download that isn't there yet.
 - **Effects** — dehaze, clarity, texture, film grain and a post-crop
   vignette with midpoint control.
 - **Crop & straighten** — non-destructive normalized crop rectangle with a
@@ -133,7 +158,11 @@ Batch export from the command line — `git pull` a photo repo, run the CLI,
 get JPEGs — without opening a window. It's an argv mode of the same app
 (`electron . --render …`, reusing the windowless machinery the verify suite
 runs on): a hidden window loads, decodes each image full-resolution, applies
-its sidecar (or the default look, or `--preset`), renders, and exits.
+its sidecar (or the default look, `--preset`, or — with `--project` — the
+project's own `looks/` playlist), renders, and exits. Point it at a look
+file directly (any `<name>.json`, project or legacy) instead of an image and
+it renders exactly that look's graph, geometry included, against the photo
+the look points at.
 
 ```sh
 npm run build                                   # once, or after pulling changes
@@ -146,6 +175,9 @@ npm run render -- --preset bw-punchy --out ~/exports *.ARW
 
 # 3. Every named output, smaller/faster for a web gallery, NDJSON progress
 npm run render -- --output all --quality 75 --max-dim 2048 --json photo.ARW > log.ndjson
+
+# 4. Resolve each image's look from a project's looks/ playlist
+npm run render -- --project ~/photos/Italy2026 DSC001.ARW DSC002.ARW
 ```
 
 Once installed (`npm link`, or globally via a package registry), the same
@@ -201,7 +233,27 @@ passed or was updated, `1` one or more failed/had no golden, `2` bad usage.
 
 Commit the `.silverbox.golden.png` files alongside your sidecars — they're
 real, viewable PNGs, so `git diff`-by-eye and `git log -p` both work on them
-the same way they already do on the JSON sidecars.
+the same way they already do on the JSON sidecars. With `--project`, goldens
+live inside the project instead (`<project>/golden/<look-name>.png`) rather
+than next to the photo.
+
+### Sidecar diff
+
+"Code review for looks": compare two versions of a sidecar/look file — an
+AI-edited document before you trust it, or two git revisions of the same
+photo — without opening the app.
+
+```sh
+silverbox-render --diff before.json after.json --image photo.ARW
+```
+
+Reports human-readable param differences (added/removed nodes, changed
+values, curve changes summarized rather than dumped point-by-point) plus
+the ΔE between renders of the two, the same CIE76-in-Lab comparison
+`--check` uses. `--image` may be omitted when both sidecars are project
+look files pointing at the same photo — it's derived automatically. Exit
+code reflects whether the comparison *ran*, not whether it found
+differences (the `git diff` convention: `0` even when the two differ).
 
 ## Verification
 
