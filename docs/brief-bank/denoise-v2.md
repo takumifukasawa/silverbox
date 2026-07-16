@@ -1,7 +1,22 @@
 # Brief: in-engine ML denoise (denoise v2)
 
-Status: RESEARCHED (sources fetched 2026-07-16), ready to stage after the
-open user decisions below. v2 endorsed as NEEDED (user, 2026-07-14): v1's
+Status: RESEARCHED (sources fetched 2026-07-16); **STAGE 0 SPIKE PASSED
+same day** — NAFNet-SIDD-width32 exports cleanly to ONNX and runs under
+onnxruntime with dynamic H/W (see docs/research/nafnet-spike/ for the
+full report + the export/fp16 scripts). Load-bearing facts for the
+implementation: opset **17**, legacy tracer (`dynamo=False` — torch
+2.13's default dynamo path can't do dynamic_axes); LayerNorm2d decomposed
+to plain ops (bit-exact, diff 0.0); the model's self-pad was removed at
+export so **input H/W must be divisible by 16** (the tiler owns padding);
+torch↔ORT max diff 1.16e-05 fp32; 512² CPU-EP inference ~0.31 s;
+checkpoint from the HF mirror, sha256
+89c70e808d1783b6c07911306e106aaf0d4f7f3da8c61078b99ff7f8929a26f4,
+29.2M params; fp32 ONNX ~112 MB → fp16 ~56 MB (max diff 8.9e-03 vs fp32 —
+eyeball fp16 on a real photo before making it the shipped default).
+Still UNVERIFIED: CoreML EP numerics/speed under onnxruntime-node,
+memory peak at 512² tiles, an explicit weights-license statement.
+DRUNet fallback NOT needed. Ready to stage after the open user
+decisions below. v2 endorsed as NEEDED (user, 2026-07-14): v1's
 8-bit + [0,1]-clamp round trip caps it at downstream finishing; rivaling
 LR's AI Denoise means denoising EARLY — in-engine, at the INPUT stage, on
 post-demosaic linear Rec.2020 rgba16float, no external round trip, no
