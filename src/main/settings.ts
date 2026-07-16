@@ -98,6 +98,12 @@ export function sanitizeSettings(raw: unknown): Settings {
     typeof src.quickProjectDir === 'string' && src.quickProjectDir.trim() !== ''
       ? src.quickProjectDir
       : join(homedir(), 'Silverbox', 'Quick');
+  // In-engine ML denoise (denoise v2, stage 1): consent is a plain boolean
+  // (see Settings.denoiseModelConsent's doc comment for why it persists
+  // forever once true — "once per install, not per session"); the URL
+  // override is lenient like everything else here (a non-string ⇒ default).
+  result.denoiseModelConsent = src.denoiseModelConsent === true;
+  result.denoiseModelUrl = typeof src.denoiseModelUrl === 'string' ? src.denoiseModelUrl : DEFAULT_SETTINGS.denoiseModelUrl;
   return result as unknown as Settings;
 }
 

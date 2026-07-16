@@ -93,6 +93,13 @@ export const IPC = {
   externalToolRun: 'external:run',
   /** Verify-only: how many times this session actually spawned a subprocess (cache hits/failures-before-spawn don't count) — scripts/verify-external.mjs's "does not re-spawn on an unchanged upstream" check. */
   externalToolSpawnCount: 'external:spawnCount',
+  // In-engine ML denoise (denoise v2, stage 1 — docs/brief-bank/denoise-v2.md):
+  // main-process ONNX Runtime inference over post-demosaic linear pixels, the
+  // SAME "pixels already travel render worker → main" contract v1's external
+  // node uses (see src/main/denoise.ts).
+  denoiseRun: 'denoise:run',
+  /** Verify-only: how many times this session actually ran ORT inference (cache hits don't count) — scripts/verify-denoise.mjs's cache check, spawnCount-style. */
+  denoiseRunCount: 'denoise:runCount',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. Retired as a WRITE target by the project-storage migration (stage 1) — still READ forever (principle 9) for legacy adjacent sidecars and CLI import. */
@@ -390,6 +397,21 @@ export interface SilverboxApi {
   runExternalTool(req: ExternalToolRequest): Promise<ExternalToolResult>;
   /** Verify-only: real subprocess spawn count this session (cache hits don't count) — scripts/verify-external.mjs. */
   externalToolSpawnCount(): Promise<number>;
+  /**
+   * In-engine ML denoise (denoise v2, stage 1): run the pinned NAFNet ONNX
+   * model (tiled, see src/main/denoiseInfer.ts) over one denoise node's
+   * upstream pixels. SECURITY (defense in depth, unlike v1's external node):
+   * main re-checks `denoiseModelConsent` itself before ever downloading —
+   * the caller passing a request is NOT sufficient authorization for a
+   * network fetch, only for using an ALREADY-present model. Resolves
+   * `{ok:false,...}` rather than throwing on any failure (missing model, no
+   * consent, download/hash-verify failure, ORT init/inference error) — same
+   * "never throws, caller does passthrough+badge" contract as
+   * runExternalTool.
+   */
+  runDenoise(req: DenoiseRunRequest): Promise<DenoiseRunResult>;
+  /** Verify-only: real ORT inference run count this session (cache hits don't count) — scripts/verify-denoise.mjs. */
+  denoiseRunCount(): Promise<number>;
 }
 
 /**
@@ -722,6 +744,29 @@ export interface Settings {
    * verify suite.
    */
   quickProjectDir: string;
+  /**
+   * In-engine ML denoise (denoise v2, stage 1): "Download denoise model
+   * (~112 MB)?" one-time consent (docs/brief-bank/denoise-v2.md's SECURITY
+   * section) — false until the user explicitly clicks the Inspector's
+   * consent button ONCE, ever; true persists across every future doc/session
+   * ("once per install, not per session"). main's model-ensure logic
+   * (src/main/denoiseModel.ts) is the ONLY place this gates an actual
+   * network download — it re-reads this field itself rather than trusting
+   * the renderer's call site, so a doc opened from the internet can never
+   * trigger a silent download even if some future caller forgot to check
+   * first (defense in depth, unlike v1 external node's fully-trusting model,
+   * because "may we hit the network for 112MB" is a materially different
+   * risk than "run a command the user already typed in").
+   */
+  denoiseModelConsent: boolean;
+  /**
+   * Self-hoster override for DENOISE_MODEL_URL (shared/denoiseModel.ts) —
+   * empty string = use the default GitHub release asset. Never bypasses the
+   * sha256 verification (DENOISE_MODEL_SHA256 is fixed regardless of URL), so
+   * an override can only point at a mirror of the SAME pinned artifact, not
+   * an arbitrary substitute model.
+   */
+  denoiseModelUrl: string;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -733,6 +778,8 @@ export const DEFAULT_SETTINGS: Settings = {
   export: { quality: 90, maxDim: null, metadata: 'all', colorSpace: 'srgb' },
   exportPresets: [],
   quickProjectDir: '',
+  denoiseModelConsent: false,
+  denoiseModelUrl: '',
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */
@@ -819,6 +866,43 @@ export interface ExternalToolRequest {
 export type ExternalToolResult =
   | { ok: true; width: number; height: number; data: ArrayBuffer }
   | { ok: false; reason: string };
+
+/**
+ * In-engine ML denoise (denoise v2, stage 1) — see src/main/denoise.ts.
+ * `data` is tightly-packed RGBA float32 pixels, ALWAYS sRGB-encoded (unlike
+ * ExternalToolRequest there is no linear-mode toggle: the pipeline-placement
+ * contract (docs/brief-bank/denoise-v2.md option (a)) always encodes before
+ * inference and decodes after — the weights are trained on display-encoded
+ * noise). `cacheKey` deliberately EXCLUDES strength (hash of input-pixel
+ * hash + the pinned model's sha256 + nodeId only) — the full-strength
+ * denoised result is what gets cached; the interactive strength blend
+ * (output = lerp(input, denoised, strength/100)) happens GPU-side at
+ * re-entry (graphRenderer.ts), cheap enough to redo per render rather than
+ * fold into the cache key (see the brief's cache section).
+ */
+export interface DenoiseRunRequest {
+  cacheKey: string;
+  width: number;
+  height: number;
+  data: ArrayBuffer;
+}
+
+export type DenoiseRunResult =
+  | {
+      ok: true;
+      width: number;
+      height: number;
+      /** sRGB-encoded RGBA float32 — the FULL-STRENGTH inference result (strength blend happens at GPU re-entry, not here). */
+      data: ArrayBuffer;
+      /** Which ONNX Runtime execution provider actually initialized ('coreml' | 'cpu') — reproducibility-stamp material (see docs/brief-bank/denoise-v2.md's Determinism section); CoreML/GPU EPs are not bitwise-deterministic run-to-run, this is diagnostic, never golden-compared. */
+      ep: string;
+    }
+  | {
+      ok: false;
+      reason: string;
+      /** True when the failure is specifically "model not downloaded and consent was never given" — lets the UI show the consent button instead of a plain error badge; false for every other failure (missing/corrupt file after consent, ORT init error, inference error — all still passthrough+badge, just a different badge). */
+      needsConsent: boolean;
+    };
 
 declare global {
   interface Window {

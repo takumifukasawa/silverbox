@@ -33,6 +33,8 @@ import {
 import { SPOTS_CAP, SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND, imageBaseName } from '../engine/graph/imageNode';
 import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode';
+import { denoiseModelSizeLabel } from '../../../shared/denoiseModel';
 import { anchorRadiusToOutput, outputRadiusToAnchor } from '../engine/graph/anchorSpace';
 import {
   defaultDevelopParams,
@@ -1151,6 +1153,95 @@ function ExternalInspector({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * In-engine ML denoise (denoise v2, stage 1): a single strength slider (0 =
+ * identity, bit-exact pass-through) plus the one-time model-download consent
+ * button — see docs/brief-bank/denoise-v2.md's SECURITY section and
+ * denoiseNodeRunner.ts's doc comment for why this is a DIFFERENT kind of
+ * gate than the external-tool node's per-command confirm: consent is
+ * persisted (Settings.denoiseModelConsent), granted once per install, and
+ * gates a NETWORK DOWNLOAD, not "running this node" — a denoise node whose
+ * model is already downloaded needs no button at all, ever.
+ */
+function DenoiseInspector({ node }: { node: GraphNode }) {
+  const setDenoiseStrength = useAppStore((s) => s.setDenoiseStrength);
+  const needsConsent = useAppStore((s) => s.denoiseNodeNeedsConsent[node.id]);
+  const error = useAppStore((s) => s.denoiseNodeErrors[node.id]);
+  const running = useAppStore((s) => s.denoiseNodeRunning[node.id]);
+  const consentDenoiseModel = useAppStore((s) => s.consentDenoiseModel);
+  const params = node.denoise ?? defaultDenoiseParams();
+  const sessionRef = useRef<number | null>(null);
+  return (
+    <>
+      <div className="inspector-title">Denoise: in-engine ML noise reduction (NAFNet).</div>
+      <Section title="Strength">
+        <div className="param-row" title="Double-click to reset" onDoubleClick={() => setDenoiseStrength(node.id, 0, null)}>
+          <span className={`param-label${params.strength !== 0 ? ' changed' : ''}`}>Strength</span>
+          <input
+            type="range"
+            data-testid="denoise-node-strength"
+            min={0}
+            max={100}
+            step={1}
+            value={params.strength}
+            onChange={(ev) => {
+              sessionRef.current ??= Date.now();
+              setDenoiseStrength(node.id, Number(ev.target.value), `denoise-strength:${node.id}:${sessionRef.current}`);
+            }}
+            onPointerUp={() => {
+              sessionRef.current = null;
+            }}
+          />
+          <input
+            type="number"
+            min={0}
+            max={100}
+            step={1}
+            value={params.strength}
+            onChange={(ev) => setDenoiseStrength(node.id, Number(ev.target.value), null)}
+          />
+        </div>
+        <div className="inspector-hint">
+          0 = off (bit-exact pass-through). Blends the full-strength denoised result over this node's input —
+          non-realtime (tiled ONNX Runtime inference over the linear working image, expect seconds).
+        </div>
+      </Section>
+      {needsConsent && (
+        <Section title="Model download">
+          <div className="inspector-notice" data-testid="denoise-node-consent-notice">
+            This node needs the NAFNet denoise model (~{denoiseModelSizeLabel()}), downloaded once and reused by every
+            doc — never fetched without this explicit click.
+          </div>
+          <button type="button" data-testid="denoise-node-consent" onClick={() => void consentDenoiseModel(node.id)}>
+            Download denoise model (~{denoiseModelSizeLabel()})?
+          </button>
+        </Section>
+      )}
+      {running && (
+        <div className="inspector-notice" data-testid="denoise-node-running-notice">
+          Running denoise…
+        </div>
+      )}
+      {error && (
+        <div className="inspector-notice inspector-notice--row" data-testid="denoise-node-error-notice" title={error}>
+          <span className="inspector-notice-text">Failed — rendering pass-through until it succeeds: {error}</span>
+          <button
+            type="button"
+            className="inspector-notice-copy"
+            data-testid="denoise-node-error-copy"
+            title="Copy the full error text to the clipboard"
+            onClick={() => {
+              void navigator.clipboard.writeText(error);
+            }}
+          >
+            Copy
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -1183,6 +1274,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   }
   if (node.kind === EXTERNAL_KIND) {
     return <ExternalInspector node={node} />;
+  }
+  if (node.kind === DENOISE_KIND) {
+    return <DenoiseInspector node={node} />;
   }
   if (node.kind === 'input') {
     return (

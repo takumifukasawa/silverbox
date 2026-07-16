@@ -45,7 +45,7 @@ import { setCustomShaderArtifact, clearCustomShaderArtifacts } from '../graph/cu
 import { createWbModel, type WbModel } from '../color/whiteBalance';
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderWorkerCommand, RenderWorkerRequest, RenderWorkerResponse } from './renderProtocol';
-import type { ExternalToolResult } from '../../../../shared/ipc';
+import type { DenoiseRunResult, ExternalToolResult } from '../../../../shared/ipc';
 
 let resolveRenderer: ((r: GraphRenderer) => void) | null = null;
 const rendererReady = new Promise<GraphRenderer>((resolve) => {
@@ -96,6 +96,9 @@ const imageNodeCache = new Map<string, PreparedImage>();
  */
 const externalResultCache = new Map<string, { encoded: boolean; result: ExternalToolResult }>();
 const EXTERNAL_RESULT_CACHE_CAPACITY = 12;
+/** In-engine ML denoise (denoise v2, stage 1): same replay-list role as `externalResultCache`, minus the `encoded` flag (denoise always encodes). */
+const denoiseResultCache = new Map<string, DenoiseRunResult>();
+const DENOISE_RESULT_CACHE_CAPACITY = 12;
 
 function post(message: RenderWorkerResponse, transfer: Transferable[] = []): void {
   (self as unknown as Worker).postMessage(message, transfer);
@@ -283,6 +286,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       // in lockstep so it never replays a since-abandoned photo's textures.
       imageNodeCache.clear();
       externalResultCache.clear();
+      denoiseResultCache.clear();
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -364,6 +368,13 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
             (reqPayload) => post({ type: 'externalRunRequest', ...reqPayload }, [reqPayload.data]),
             (nodeId) => post({ type: 'externalNodeReady', nodeId })
           );
+          // In-engine ML denoise (denoise v2, stage 1): same fire-and-forget
+          // shape as checkExternalNodes just above — see its doc comment.
+          void renderer.checkDenoiseNodes(
+            plan,
+            (reqPayload) => post({ type: 'denoiseRunRequest', ...reqPayload }, [reqPayload.data]),
+            (nodeId) => post({ type: 'denoiseNodeReady', nodeId })
+          );
         })
         .catch((err) => {
           post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
@@ -386,6 +397,28 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       if (compareRendererReady) {
         void compareRendererReady
           .then((renderer) => renderer.setExternalResult(msg.cacheKey, msg.encoded, msg.result))
+          .catch((err) => {
+            post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          });
+      }
+      return;
+    }
+    case 'denoiseResult': {
+      denoiseResultCache.delete(msg.cacheKey);
+      denoiseResultCache.set(msg.cacheKey, msg.result);
+      while (denoiseResultCache.size > DENOISE_RESULT_CACHE_CAPACITY) {
+        const oldest = denoiseResultCache.keys().next().value;
+        if (oldest === undefined) break;
+        denoiseResultCache.delete(oldest);
+      }
+      void rendererReady
+        .then((renderer) => renderer.setDenoiseResult(msg.cacheKey, msg.result))
+        .catch((err) => {
+          post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+        });
+      if (compareRendererReady) {
+        void compareRendererReady
+          .then((renderer) => renderer.setDenoiseResult(msg.cacheKey, msg.result))
           .catch((err) => {
             post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
           });
@@ -416,6 +449,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
           // this is the full, correct set for whatever doc is current.
           for (const [path, image] of imageNodeCache) renderer.setImageNodeTexture(path, image);
           for (const [key, entry] of externalResultCache) renderer.setExternalResult(key, entry.encoded, entry.result);
+          for (const [key, result] of denoiseResultCache) renderer.setDenoiseResult(key, result);
           resolveCompareRenderer!(renderer);
         },
         (err) => {

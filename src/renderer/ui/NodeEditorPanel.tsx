@@ -22,6 +22,7 @@ import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { computeAutoLayout, type LayoutEdgeInput, type LayoutNodeInput } from './nodeAutoLayout';
 
 /** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's. */
@@ -180,7 +181,10 @@ function buildNodes(
   externalNodeNeedsConfirm: Record<string, string>,
   externalNodeErrors: Record<string, string>,
   externalNodeRunning: Record<string, boolean>,
-  imageNodeSourceThumbs: Record<string, string>
+  imageNodeSourceThumbs: Record<string, string>,
+  denoiseNodeNeedsConsent: Record<string, boolean>,
+  denoiseNodeErrors: Record<string, string>,
+  denoiseNodeRunning: Record<string, boolean>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
@@ -203,6 +207,20 @@ function buildNodes(
       } else if (externalNodeNeedsConfirm[n.id]) {
         badge = '●';
         badgeTitle = 'Confirm to run this external command (see the Inspector)';
+      }
+    }
+    // In-engine ML denoise (denoise v2, stage 1): same priority ordering as
+    // the external node's badge above (running > error > needs-something).
+    if (n.kind === DENOISE_KIND) {
+      if (denoiseNodeRunning[n.id]) {
+        badge = '⟳';
+        badgeTitle = 'Denoise running — expect seconds to minutes';
+      } else if (denoiseNodeErrors[n.id]) {
+        badge = '⚠';
+        badgeTitle = denoiseNodeErrors[n.id];
+      } else if (denoiseNodeNeedsConsent[n.id]) {
+        badge = '●';
+        badgeTitle = 'Download the denoise model to run this node (see the Inspector)';
       }
     }
     return {
@@ -236,6 +254,7 @@ function buildNodes(
         n.kind === SPOTS_KIND ||
         n.kind === IMAGE_KIND ||
         n.kind === EXTERNAL_KIND ||
+        n.kind === DENOISE_KIND ||
         (n.kind === 'output' && outputCount > 1),
     };
   }) as Node[];
@@ -283,6 +302,11 @@ export function NodeEditorPanel() {
   const externalNodeNeedsConfirm = useAppStore((s) => s.externalNodeNeedsConfirm);
   const externalNodeErrors = useAppStore((s) => s.externalNodeErrors);
   const externalNodeRunning = useAppStore((s) => s.externalNodeRunning);
+  // In-engine ML denoise (denoise v2, stage 1): needs-consent/error/running
+  // badge state, resynced the same debounced way as the external node's own.
+  const denoiseNodeNeedsConsent = useAppStore((s) => s.denoiseNodeNeedsConsent);
+  const denoiseNodeErrors = useAppStore((s) => s.denoiseNodeErrors);
+  const denoiseNodeRunning = useAppStore((s) => s.denoiseNodeRunning);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -308,7 +332,10 @@ export function NodeEditorPanel() {
       externalNodeNeedsConfirm,
       externalNodeErrors,
       externalNodeRunning,
-      imageNodeSourceThumbs
+      imageNodeSourceThumbs,
+      denoiseNodeNeedsConsent,
+      denoiseNodeErrors,
+      denoiseNodeRunning
     )
   );
   // Suppressed while a drag is in flight: the store's node position is still
@@ -328,7 +355,10 @@ export function NodeEditorPanel() {
         externalNodeNeedsConfirm,
         externalNodeErrors,
         externalNodeRunning,
-        imageNodeSourceThumbs
+        imageNodeSourceThumbs,
+        denoiseNodeNeedsConsent,
+        denoiseNodeErrors,
+        denoiseNodeRunning
       )
     );
   }, [
@@ -342,6 +372,9 @@ export function NodeEditorPanel() {
     externalNodeErrors,
     externalNodeRunning,
     imageNodeSourceThumbs,
+    denoiseNodeNeedsConsent,
+    denoiseNodeErrors,
+    denoiseNodeRunning,
   ]);
 
   // Round-12 fix pack item 1 ("開くRAWによってはノードが何も表示されない？"): React

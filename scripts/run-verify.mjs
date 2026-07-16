@@ -105,6 +105,7 @@ const ALL_SCRIPTS = [
   { name: 'ratings', file: 'verify-ratings.mjs' },
   { name: 'imagenode', file: 'verify-imagenode.mjs' },
   { name: 'external', file: 'verify-external.mjs' },
+  { name: 'denoise', file: 'verify-denoise.mjs' },
   { name: 'bypass', file: 'verify-bypass.mjs' },
   { name: 'project', file: 'verify-project.mjs' },
   { name: 'project2', file: 'verify-project2.mjs' },

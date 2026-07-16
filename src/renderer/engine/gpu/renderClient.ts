@@ -14,7 +14,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
-import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
+import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import type { HistogramData, RendererStats, ScopeSamples } from './graphRenderer';
 import type {
   RenderWorkerCommand,
@@ -65,6 +65,14 @@ function routeMessage(ev: MessageEvent<RenderWorkerResponse>): void {
     activeClient?.handleExternalNodeReady(msg.nodeId);
     return;
   }
+  if (msg.type === 'denoiseRunRequest') {
+    activeClient?.handleDenoiseRunRequest(msg);
+    return;
+  }
+  if (msg.type === 'denoiseNodeReady') {
+    activeClient?.handleDenoiseNodeReady(msg.nodeId);
+    return;
+  }
   const entry = pending.get(msg.reqId);
   if (!entry) return;
   pending.delete(msg.reqId);
@@ -96,6 +104,9 @@ export class RenderWorkerClient {
     | ((req: { nodeId: string; cacheKey: string; command: string; encoded: boolean; width: number; height: number; data: ArrayBuffer }) => void)
     | null = null;
   private onExternalNodeReady: ((nodeId: string) => void) | null = null;
+  /** In-engine ML denoise (denoise v2, stage 1): registered by CanvasView.tsx, forwards to denoiseNodeRunner.ts (the IPC call lives there, not here) — same role as `onExternalRunRequest`. */
+  private onDenoiseRunRequest: ((req: { nodeId: string; cacheKey: string; width: number; height: number; data: ArrayBuffer }) => void) | null = null;
+  private onDenoiseNodeReady: ((nodeId: string) => void) | null = null;
   /** initCompare is idempotent per client instance (transferControlToOffscreen can only run once per canvas element) — mirrors the constructor's own one-shot transfer. */
   private compareInitialized = false;
 
@@ -152,6 +163,29 @@ export class RenderWorkerClient {
   /** External-tool hook node (task #41): apply a completed/failed round trip worker-side (see graphRenderer.ts's setExternalResult) — `result.data` is transferred when `result.ok`. */
   postExternalResult(nodeId: string, cacheKey: string, encoded: boolean, result: ExternalToolResult): void {
     const msg: RenderWorkerCommand = { type: 'externalResult', nodeId, cacheKey, encoded, result };
+    getWorker().postMessage(msg, result.ok ? [result.data] : []);
+  }
+
+  /** In-engine ML denoise (denoise v2, stage 1): registers the handler denoiseNodeRunner.ts's per-request entry point is wired through (CanvasView.tsx's mount effect) — same role as setExternalRunRequestHandler. */
+  setDenoiseRunRequestHandler(fn: (req: { nodeId: string; cacheKey: string; width: number; height: number; data: ArrayBuffer }) => void): void {
+    this.onDenoiseRunRequest = fn;
+  }
+
+  setDenoiseNodeReadyHandler(fn: (nodeId: string) => void): void {
+    this.onDenoiseNodeReady = fn;
+  }
+
+  handleDenoiseRunRequest(req: { nodeId: string; cacheKey: string; width: number; height: number; data: ArrayBuffer }): void {
+    this.onDenoiseRunRequest?.(req);
+  }
+
+  handleDenoiseNodeReady(nodeId: string): void {
+    this.onDenoiseNodeReady?.(nodeId);
+  }
+
+  /** In-engine ML denoise: apply a completed/failed round trip worker-side (see graphRenderer.ts's setDenoiseResult) — `result.data` is transferred when `result.ok`. */
+  postDenoiseResult(nodeId: string, cacheKey: string, result: DenoiseRunResult): void {
+    const msg: RenderWorkerCommand = { type: 'denoiseResult', nodeId, cacheKey, result };
     getWorker().postMessage(msg, result.ok ? [result.data] : []);
   }
 

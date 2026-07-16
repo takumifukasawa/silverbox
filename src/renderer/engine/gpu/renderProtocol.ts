@@ -24,7 +24,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
-import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
+import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 
 /** Fire-and-forget commands: main → worker, no response expected. */
 export type RenderWorkerCommand =
@@ -91,7 +91,14 @@ export type RenderWorkerCommand =
    * re-posting a 'render' command afterward so the fresh texture actually
    * shows up (same "fire-and-forget, caller re-renders" shape as 'imageNode').
    */
-  | { type: 'externalResult'; nodeId: string; cacheKey: string; encoded: boolean; result: ExternalToolResult };
+  | { type: 'externalResult'; nodeId: string; cacheKey: string; encoded: boolean; result: ExternalToolResult }
+  /**
+   * In-engine ML denoise (denoise v2, stage 1): the completed (or failed)
+   * result of one round trip through denoiseNodeRunner.ts's IPC call — see
+   * graphRenderer.ts's setDenoiseResult. Same "caching/decoding only, caller
+   * re-posts render()" shape as 'externalResult'.
+   */
+  | { type: 'denoiseResult'; nodeId: string; cacheKey: string; result: DenoiseRunResult };
 
 /** One entry of the request/response bridge's method union (see graphRenderer.ts for the referenced methods). */
 export type RenderWorkerRequestMethod =
@@ -199,4 +206,22 @@ export type RenderWorkerResponse =
    * re-post a 'render' command for resolveSteps to pick the cached texture up
    * (see GraphRenderer.checkExternalNodes' `notifyReady` callback).
    */
-  | { type: 'externalNodeReady'; nodeId: string };
+  | { type: 'externalNodeReady'; nodeId: string }
+  /**
+   * In-engine ML denoise (denoise v2, stage 1): the renderer wants ORT
+   * inference run over the given pixels for `nodeId` — main-thread only from
+   * here (denoiseNodeRunner.ts owns the actual IPC call, see shared/ipc.ts's
+   * SilverboxApi.runDenoise doc comment). Posted from
+   * GraphRenderer.checkDenoiseNodes after the debounce settles; `data` is
+   * transferred, same convention as 'externalRunRequest'.
+   */
+  | {
+      type: 'denoiseRunRequest';
+      nodeId: string;
+      cacheKey: string;
+      width: number;
+      height: number;
+      data: ArrayBuffer;
+    }
+  /** In-engine ML denoise: a result was already cached for this node's current content hash — same role as 'externalNodeReady'. */
+  | { type: 'denoiseNodeReady'; nodeId: string };

@@ -46,6 +46,9 @@ import { defaultImageParams, dirnameOf, IMAGE_KIND } from '../engine/graph/image
 import { clearImageNodeSourceCache } from '../engine/graph/imageNodeSource';
 import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { confirmAndRetry, pendingExternalRequest } from '../engine/graph/externalNodeRunner';
+import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode';
+import { retryPendingDenoise } from '../engine/graph/denoiseNodeRunner';
+import { DENOISE_MODEL_SHA256 } from '../../../shared/denoiseModel';
 import { sha256Hex, type HistogramData, type ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
@@ -781,6 +784,23 @@ interface AppState {
   /** Bumped whenever an external-tool round trip settles (success or failure) or a cached result becomes ready with no run needed — mirrors imageNodeRev's role in re-running CanvasView's render effect. */
   externalNodeRev: number;
   bumpExternalNodeRev(): void;
+  // --- In-engine ML denoise (denoise v2, stage 1) ----------------------------
+  /** Replace a denoise node's strength (Inspector's slider); `coalesceKey` null = its own undo entry, same convention as setExternalCommand. */
+  setDenoiseStrength(nodeId: string, strength: number, coalesceKey: string | null): void;
+  /** nodeId → true while the model isn't downloaded and consent hasn't been granted yet (SECURITY gate, see denoiseModel.ts) — absent/false once consent is granted or the model was already present. */
+  denoiseNodeNeedsConsent: Record<string, boolean>;
+  setDenoiseNodeNeedsConsent(nodeId: string, needsConsent: boolean): void;
+  /** Inspector's "Download denoise model" button: persists consent (settingsUpdate) then immediately retries the last pending request for this node. */
+  consentDenoiseModel(nodeId: string): Promise<void>;
+  /** nodeId → the most recent round-trip failure reason (pass-through + badge on ANY failure, EXCEPT a needsConsent failure — that's `denoiseNodeNeedsConsent`'s own badge, not this one) — absent = no error. */
+  denoiseNodeErrors: Record<string, string>;
+  setDenoiseNodeError(nodeId: string, error: string | null): void;
+  /** nodeId → true while its ORT inference round trip is actually in flight (spinner badge) — same role as externalNodeRunning. */
+  denoiseNodeRunning: Record<string, boolean>;
+  setDenoiseNodeRunning(nodeId: string, running: boolean): void;
+  /** Bumped whenever a denoise round trip settles or a cached result becomes ready with no run needed — mirrors externalNodeRev's role. */
+  denoiseNodeRev: number;
+  bumpDenoiseNodeRev(): void;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -1780,6 +1800,107 @@ export const useAppStore = create<AppState>((set, get) => {
     return working;
   };
 
+  /**
+   * In-engine ML denoise export cut point (denoise v2, stage 1) — the SAME
+   * "rewrite one node at a time into a synthetic image node" mechanism
+   * resolveExternalNodesForExport uses, adapted for denoise's two
+   * differences: (1) no CLI opt-in flag at all — this always runs,
+   * unconditionally, for every export (interactive or CLI); "bypassed" here
+   * means specifically "model unavailable/no consent yet", reported as a
+   * `warnings` entry so the CLI's contract ("passes through with a warning
+   * line") is satisfied without a new flag; (2) a genuine STRENGTH blend —
+   * the cached result is always FULL-STRENGTH (see DenoiseRunResult's doc
+   * comment), so this blends it against the node's own LINEAR input by
+   * strength/100 (mirrors denoiseTiling.ts's `lerp`) BEFORE wrapping the
+   * blended pixels as the synthetic image-node source — unlike the
+   * interactive preview's GPU re-entry blend (graphRenderer.ts's
+   * DENOISE_BLEND_SHADER), this one is a plain CPU loop since export re-
+   * enters through a full pixel replacement, not a live GPU pass.
+   */
+  const resolveDenoiseNodesForExport = async (baseGraph: GraphDoc, full: PreparedImage): Promise<{ graph: GraphDoc; warnings: string[] }> => {
+    const renderer = get().renderer;
+    if (!renderer) return { graph: baseGraph, warnings: [] };
+    let working = baseGraph;
+    const warnings: string[] = [];
+    for (let pass = 0; pass < 8; pass++) {
+      let plan: ReturnType<typeof buildPlan>;
+      try {
+        plan = buildPlan(working, { srcWidth: full.width, srcHeight: full.height });
+      } catch {
+        break;
+      }
+      const step = plan.steps.find((s) => s.type === 'denoise');
+      if (step === undefined) break;
+      if (step.type !== 'denoise') break; // narrows step for TS below; unreachable in practice
+      const inEdge = working.edges.find((e) => e.target === step.nodeId);
+      if (!inEdge) break; // a denoise node always has exactly one input once it reaches buildPlan's own validation
+      const nodeId = step.nodeId;
+      const strength = step.strength;
+      const bypass = (doc: GraphDoc): GraphDoc => ({
+        ...doc,
+        nodes: doc.nodes.filter((n) => n.id !== nodeId),
+        edges: doc.edges
+          .filter((e) => e.target !== nodeId)
+          .map((e) => (e.source === nodeId ? { ...e, source: inEdge.source } : e)),
+      });
+      try {
+        // Always captured ENCODED (denoise has no linear mode, see
+        // shared/ipc.ts's DenoiseRunRequest doc comment) — this SAME
+        // captured buffer feeds inference below; its decoded-to-linear form
+        // (`inputLinear`) is what the strength blend mixes against.
+        const captured = await renderer.captureExternalInput(full, working, 1, true, inEdge.source, undefined);
+        const pixelHash = await sha256Hex(captured.data.buffer as ArrayBuffer);
+        const cacheKey = await sha256Hex(new TextEncoder().encode(`${pixelHash}|${DENOISE_MODEL_SHA256}|${nodeId}`).buffer);
+        const result = await window.silverbox.runDenoise({
+          cacheKey,
+          width: captured.width,
+          height: captured.height,
+          data: captured.data.buffer as ArrayBuffer,
+        });
+        if (!result.ok) {
+          const msg = result.needsConsent
+            ? `denoise node bypassed — model not downloaded (grant consent in the Inspector, then export again)`
+            : `denoise node failed during export, passing through: ${result.reason}`;
+          console.warn(`${msg} (node ${nodeId})`);
+          warnings.push(msg);
+          working = bypass(working);
+          continue;
+        }
+        const inputLinear = await renderer.decodeExternalResult(new Float32Array(captured.data), captured.width, captured.height, true);
+        const denoisedLinear = await renderer.decodeExternalResult(new Float32Array(result.data), result.width, result.height, true);
+        const t = Math.min(100, Math.max(0, strength)) / 100;
+        const blended = new Float32Array(inputLinear.length);
+        for (let i = 0; i < inputLinear.length; i += 4) {
+          blended[i] = inputLinear[i]! + (denoisedLinear[i]! - inputLinear[i]!) * t;
+          blended[i + 1] = inputLinear[i + 1]! + (denoisedLinear[i + 1]! - inputLinear[i + 1]!) * t;
+          blended[i + 2] = inputLinear[i + 2]! + (denoisedLinear[i + 2]! - inputLinear[i + 2]!) * t;
+          blended[i + 3] = 1;
+        }
+        const syntheticPath = `denoise:${nodeId}:${cacheKey}`;
+        renderer.setImageNodeSource(syntheticPath, {
+          data: blended,
+          width: result.width,
+          height: result.height,
+          fullWidth: result.width,
+          fullHeight: result.height,
+          flip: 0,
+          decodeMs: 0,
+        });
+        working = {
+          ...working,
+          nodes: working.nodes.map((n) =>
+            n.id === nodeId ? { id: n.id, kind: IMAGE_KIND, position: n.position, image: { path: syntheticPath } } : n
+          ),
+        };
+      } catch (err) {
+        console.warn(`denoise node ${nodeId} failed during export, passing through:`, err);
+        warnings.push(`denoise node failed during export, passing through: ${err instanceof Error ? err.message : String(err)}`);
+        working = bypass(working);
+      }
+    }
+    return { graph: working, warnings };
+  };
+
   const exportOnePath = async (
     targetPath: string,
     outputId: string | undefined,
@@ -1820,6 +1941,17 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     } else {
       exportGraph = await resolveExternalNodesForExport(graph, full);
+    }
+    // In-engine ML denoise (denoise v2, stage 1): unlike the external node,
+    // no CLI opt-in gate — always attempted. A model that isn't downloaded
+    // yet (no consent) or any other inference failure bypasses just that
+    // node (pass-through) and adds a `warnings` entry, same shape as the
+    // external node's own warning above (see resolveDenoiseNodesForExport's
+    // doc comment).
+    const denoiseResolved = await resolveDenoiseNodesForExport(exportGraph, full);
+    exportGraph = denoiseResolved.graph;
+    if (denoiseResolved.warnings.length > 0) {
+      warnings = [...(warnings ?? []), ...denoiseResolved.warnings];
     }
     const { data, width, height } = await renderer.renderToPixels(full, exportGraph, 1, colorSpace, outputId, allowExternal);
     const cap = full.capture;
@@ -2555,6 +2687,12 @@ export const useAppStore = create<AppState>((set, get) => {
         // command is identity (bit-exact pass-through), so adding one never
         // changes the render until the user actually types a command.
         node = { id, kind, position: { ...out.position }, external: defaultExternalParams() };
+      } else if (kind === DENOISE_KIND) {
+        // Spliced into the chain like every other 1-in-1-out kind (NOT the
+        // disconnected-source treatment IMAGE_KIND gets) — strength 0 is
+        // identity (bit-exact pass-through), so adding one never changes the
+        // render until the user raises the strength slider.
+        node = { id, kind, position: { ...out.position }, denoise: defaultDenoiseParams() };
       } else {
         // fresh WB atomics start at the image's as-shot values (= identity)
         const params =
@@ -3028,6 +3166,77 @@ export const useAppStore = create<AppState>((set, get) => {
   externalNodeRev: 0,
   bumpExternalNodeRev() {
     set((s) => ({ externalNodeRev: s.externalNodeRev + 1 }));
+  },
+
+  // --- In-engine ML denoise (denoise v2, stage 1) ----------------------------
+  setDenoiseStrength(nodeId, strength, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== DENOISE_KIND) return {};
+      return {
+        ...pushHistory(s, coalesceKey),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, denoise: { strength } } : n)),
+        },
+        graphDirty: true,
+      };
+    });
+  },
+
+  denoiseNodeNeedsConsent: {},
+  setDenoiseNodeNeedsConsent(nodeId, needsConsent) {
+    set((s) =>
+      needsConsent === (s.denoiseNodeNeedsConsent[nodeId] ?? false)
+        ? {}
+        : { denoiseNodeNeedsConsent: { ...s.denoiseNodeNeedsConsent, [nodeId]: needsConsent || (undefined as unknown as boolean) } }
+    );
+  },
+
+  async consentDenoiseModel(nodeId) {
+    const { renderer } = get();
+    if (!renderer) return;
+    // Persisted, install-wide consent (Settings.denoiseModelConsent's doc
+    // comment) — main (denoiseModel.ts) is the actual security gate and
+    // re-reads this itself; this just unblocks the retry below.
+    await get().updateSettings({ denoiseModelConsent: true });
+    set((s) => ({ denoiseNodeNeedsConsent: { ...s.denoiseNodeNeedsConsent, [nodeId]: undefined as unknown as boolean } }));
+    retryPendingDenoise(
+      nodeId,
+      renderer,
+      (startedNodeId) => {
+        get().setDenoiseNodeError(startedNodeId, null);
+        get().setDenoiseNodeRunning(startedNodeId, true);
+      },
+      (settledNodeId, ok, error) => {
+        get().setDenoiseNodeRunning(settledNodeId, false);
+        get().setDenoiseNodeError(settledNodeId, ok ? null : (error ?? 'unknown error'));
+        get().bumpDenoiseNodeRev();
+      }
+    );
+  },
+
+  denoiseNodeErrors: {},
+  setDenoiseNodeError(nodeId, error) {
+    set((s) =>
+      error === (s.denoiseNodeErrors[nodeId] ?? null)
+        ? {}
+        : { denoiseNodeErrors: { ...s.denoiseNodeErrors, [nodeId]: error ?? (undefined as unknown as string) } }
+    );
+  },
+
+  denoiseNodeRunning: {},
+  setDenoiseNodeRunning(nodeId, running) {
+    set((s) =>
+      running === (s.denoiseNodeRunning[nodeId] ?? false)
+        ? {}
+        : { denoiseNodeRunning: { ...s.denoiseNodeRunning, [nodeId]: running || (undefined as unknown as boolean) } }
+    );
+  },
+
+  denoiseNodeRev: 0,
+  bumpDenoiseNodeRev() {
+    set((s) => ({ denoiseNodeRev: s.denoiseNodeRev + 1 }));
   },
 
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {

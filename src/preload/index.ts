@@ -63,6 +63,8 @@ const api: SilverboxApi = {
   diffRenderImages: (req) => ipcRenderer.invoke(IPC.diffRenderImages, req),
   runExternalTool: (req) => ipcRenderer.invoke(IPC.externalToolRun, req),
   externalToolSpawnCount: () => ipcRenderer.invoke(IPC.externalToolSpawnCount),
+  runDenoise: (req) => ipcRenderer.invoke(IPC.denoiseRun, req),
+  denoiseRunCount: () => ipcRenderer.invoke(IPC.denoiseRunCount),
 };
 
 contextBridge.exposeInMainWorld('silverbox', api);

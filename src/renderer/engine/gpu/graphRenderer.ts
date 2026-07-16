@@ -30,7 +30,8 @@ import {
 } from '../lens/sonyLensProfile';
 import { WGSL_SRGB_TO_WORK, WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
-import type { ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
+import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
+import { DENOISE_MODEL_SHA256 } from '../../../../shared/denoiseModel';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -145,6 +146,43 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 const EXTERNAL_RESULT_LRU_CAPACITY = 12;
 /** Idle debounce before an external node's command actually runs, after the last upstream pixel change (see checkExternalNodes). */
 const EXTERNAL_DEBOUNCE_MS = 600;
+
+// --- In-engine ML denoise (denoise v2, stage 1 — docs/brief-bank/denoise-v2.md) ---
+//
+// Same shape as the external-tool hook node's own readback/cache/debounce
+// machinery just above, minus the encoded/linear toggle (denoise ALWAYS
+// encodes before inference and decodes after — see DENOISE_BLEND_SHADER's
+// doc comment) and PLUS a genuine strength blend at re-entry (the external
+// node just blits its cached result in place of `src`; denoise instead
+// mixes the FULL-STRENGTH cached result against `src` by `strength/100` —
+// see DENOISE_BLEND_SHADER).
+/** In-memory LRU capacity for decoded denoise RESULT textures — same rationale/figure as EXTERNAL_RESULT_LRU_CAPACITY. */
+const DENOISE_RESULT_LRU_CAPACITY = 12;
+/** Idle debounce before a denoise node's inference actually runs, after the last upstream pixel change (see checkDenoiseNodes) — same figure as EXTERNAL_DEBOUNCE_MS; ORT inference is even less "realtime" than most external tools, but there is no reason for a SHORTER debounce than the external node's own. */
+const DENOISE_DEBOUNCE_MS = 600;
+
+/**
+ * The strength blend's re-entry pass: `srcA` is the node's own (linear)
+ * input, `srcB` is the FULL-STRENGTH denoised result (already decoded back
+ * to linear by the SAME uploadExternalResult() the external node's ENCODED
+ * mode uses — denoise has no linear mode, it always encodes/decodes, see
+ * that method's reuse in setDenoiseResult below), `params.x` is
+ * strength/100. `output = mix(a, b, t)` — exactly denoiseTiling.ts's `lerp`
+ * pure reference, just GPU-side (see DenoiseRunResult's doc comment for why
+ * the blend happens here rather than being folded into the cache key).
+ */
+const DENOISE_BLEND_SHADER = /* wgsl */ `
+@group(0) @binding(0) var srcA: texture_2d<f32>;
+@group(0) @binding(1) var srcB: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: vec4f;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let a = textureLoad(srcA, vec2i(pos.xy), 0);
+  let b = textureLoad(srcB, vec2i(pos.xy), 0);
+  return vec4f(mix(a.rgb, b.rgb, params.x), 1.0);
+}
+`;
 
 /** Box-filter taps per axis for THUMBNAIL_SHADER — 4×4 = 16 samples per output texel, plenty of anti-aliasing at a ~64px thumbnail and still trivial GPU cost. */
 const THUMBNAIL_TAPS = 4;
@@ -661,6 +699,8 @@ interface ExecStep {
   imageMissing?: boolean;
   /** External-tool step (task #41) with a FRESH cached result available for its current content hash: blit this view instead of `src` — see resolveSteps' 'external' branch. Absent = plain pass-through of `src` (the phases already read `src` via a passthrough pipeline in that case). */
   externalResultView?: GPUTextureView;
+  /** Denoise step (denoise v2, stage 1) with a FRESH cached FULL-STRENGTH result available: blend it against `src` by strength/100 (DENOISE_BLEND_SHADER) instead of a plain pass-through — see resolveSteps' 'denoise' branch. Absent = plain pass-through of `src` (no result yet, or still stale). */
+  denoiseResultView?: GPUTextureView;
 }
 
 
@@ -724,6 +764,14 @@ export class GraphRenderer {
   private externalPassthroughPipelineCache: GPURenderPipeline | null = null;
   private externalEncodePipelineCache: GPURenderPipeline | null = null;
   private externalDecodePipelineCache: GPURenderPipeline | null = null;
+  // --- In-engine ML denoise (denoise v2, stage 1) -----------------------------
+  /** Decoded RESULT textures (FULL-STRENGTH, pre-blend), keyed by content-hash cacheKey (see checkDenoiseNodes/setDenoiseResult) — a bounded LRU, same shape as `externalResultTextures`. */
+  private denoiseResultTextures = new Map<string, GPUTexture>();
+  /** Each denoise node's MOST RECENTLY COMPUTED upstream content-hash cacheKey — same role as `externalNodeCacheKey`. */
+  private denoiseNodeCacheKey = new Map<string, string>();
+  /** Per-node idle-debounce timers (DENOISE_DEBOUNCE_MS) — same role as `externalDebounceTimers`. */
+  private denoiseDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private denoiseBlendPipelineCache: GPURenderPipeline | null = null;
   private steps: ExecStep[] = [];
   private outputIndex = -1;
   private blendPipelineCache: GPURenderPipeline | null = null;
@@ -907,6 +955,13 @@ export class GraphRenderer {
     this.externalNodeCacheKey.clear();
     for (const t of this.externalDebounceTimers.values()) clearTimeout(t);
     this.externalDebounceTimers.clear();
+    // In-engine ML denoise cache invalidation on main-image switch — same
+    // rationale as the external-tool node's own cache just above.
+    for (const t of this.denoiseResultTextures.values()) this.destroyTexture(t);
+    this.denoiseResultTextures.clear();
+    this.denoiseNodeCacheKey.clear();
+    for (const t of this.denoiseDebounceTimers.values()) clearTimeout(t);
+    this.denoiseDebounceTimers.clear();
     this.destroyTexture(this.baseTexture);
     this.baseTexture = null;
     this.destroyBuffer(this.resampleUniform);
@@ -1026,6 +1081,19 @@ export class GraphRenderer {
       });
     }
     return this.externalDecodePipelineCache;
+  }
+
+  /** Denoise step (denoise v2, stage 1) re-entry blend: two-texture mix by strength/100 — see DENOISE_BLEND_SHADER. */
+  private denoiseBlendPipeline(): GPURenderPipeline {
+    if (!this.denoiseBlendPipelineCache) {
+      const module = this.device.createShaderModule({ code: DENOISE_BLEND_SHADER });
+      this.denoiseBlendPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.denoiseBlendPipelineCache;
   }
 
   /**
@@ -1227,6 +1295,103 @@ export class GraphRenderer {
       } catch {
         // Best-effort scan — one node's readback failing must never break
         // every other node's check, or the render loop itself.
+      }
+    }
+  }
+
+  /** Insert/refresh a denoise-result texture's LRU recency — same shape as storeExternalResultTexture. */
+  private storeDenoiseResultTexture(cacheKey: string, tex: GPUTexture): void {
+    const existing = this.denoiseResultTextures.get(cacheKey);
+    if (existing) this.destroyTexture(existing);
+    this.denoiseResultTextures.delete(cacheKey);
+    this.denoiseResultTextures.set(cacheKey, tex);
+    while (this.denoiseResultTextures.size > DENOISE_RESULT_LRU_CAPACITY) {
+      const oldestKey = this.denoiseResultTextures.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.destroyTexture(this.denoiseResultTextures.get(oldestKey));
+      this.denoiseResultTextures.delete(oldestKey);
+    }
+  }
+
+  /** Bump an existing denoise-result entry's LRU recency without touching its content (a cache HIT during checkDenoiseNodes). */
+  private touchDenoiseResultTexture(cacheKey: string): void {
+    const tex = this.denoiseResultTextures.get(cacheKey);
+    if (!tex) return;
+    this.denoiseResultTextures.delete(cacheKey);
+    this.denoiseResultTextures.set(cacheKey, tex);
+  }
+
+  /**
+   * Apply a completed (or failed) denoise round trip (renderWorker.ts's
+   * 'denoiseResult' command, itself relayed from denoiseNodeRunner.ts's IPC
+   * call): on success, decode + cache the FULL-STRENGTH result texture under
+   * `cacheKey` (the SAME uploadExternalResult() the external node's ENCODED
+   * mode uses — denoise's result is always sRGB-encoded, see
+   * DenoiseRunResult's doc comment) so the NEXT render() picks it up (see
+   * resolveSteps' 'denoise' branch). On failure (including needsConsent),
+   * nothing is cached — the node stays/returns to pass-through.
+   */
+  setDenoiseResult(cacheKey: string, result: DenoiseRunResult): void {
+    if (!result.ok) return;
+    const data = new Float32Array(result.data);
+    const tex = this.uploadExternalResult(data, result.width, result.height, true);
+    this.storeDenoiseResultTexture(cacheKey, tex);
+  }
+
+  /**
+   * After every render(), scan the PLAN's denoise steps: read back each
+   * one's CURRENT upstream pixels (ALWAYS sRGB-encoded — see
+   * externalEncodePipeline's reuse here), content-hash them together with
+   * the pinned model's sha256 (strength deliberately EXCLUDED — see
+   * DenoiseRunResult's doc comment), and act exactly like
+   * checkExternalNodes: unchanged ⇒ nothing to do; changed + already cached
+   * (undo/redo) ⇒ touch LRU + notifyReady, no inference; changed + not
+   * cached ⇒ debounce (DENOISE_DEBOUNCE_MS), then hand the caller a run
+   * request — main-thread side (denoiseNodeRunner.ts) makes the actual IPC
+   * call. Never throws into the caller (best-effort scan, same as
+   * checkExternalNodes).
+   */
+  async checkDenoiseNodes(
+    plan: RenderPlan,
+    requestRun: (req: { nodeId: string; cacheKey: string; width: number; height: number; data: ArrayBuffer }) => void,
+    notifyReady: (nodeId: string) => void
+  ): Promise<void> {
+    if (!this.source) return;
+    const myGen = this.setGraphGen;
+    const { width, height } = this;
+    for (const step of plan.steps) {
+      if (step.type !== 'denoise') continue;
+      try {
+        const view =
+          step.src < 0
+            ? this.planGeometry || this.lensActive
+              ? this.baseTexture?.createView()
+              : this.source?.createView()
+            : this.stepTextures[step.src]?.createView();
+        if (!view) continue;
+        const rgba = await this.captureViaPipeline(view, this.externalEncodePipeline(), width, height);
+        if (myGen !== this.setGraphGen) return; // a newer render superseded this frame's readback — drop it
+        const pixelHash = await sha256Hex(rgba.buffer as ArrayBuffer);
+        const cacheKey = await sha256Hex(
+          new TextEncoder().encode(`${pixelHash}|${DENOISE_MODEL_SHA256}|${step.nodeId}`).buffer
+        );
+        if (this.denoiseNodeCacheKey.get(step.nodeId) === cacheKey) continue; // unchanged since last check
+        this.denoiseNodeCacheKey.set(step.nodeId, cacheKey);
+        if (this.denoiseResultTextures.has(cacheKey)) {
+          this.touchDenoiseResultTexture(cacheKey);
+          notifyReady(step.nodeId);
+          continue;
+        }
+        const nodeId = step.nodeId;
+        clearTimeout(this.denoiseDebounceTimers.get(nodeId));
+        const timer = setTimeout(() => {
+          this.denoiseDebounceTimers.delete(nodeId);
+          if (this.denoiseNodeCacheKey.get(nodeId) !== cacheKey) return;
+          requestRun({ nodeId, cacheKey, width, height, data: rgba.buffer as ArrayBuffer });
+        }, DENOISE_DEBOUNCE_MS);
+        this.denoiseDebounceTimers.set(nodeId, timer);
+      } catch {
+        // Best-effort scan — one node's readback failing must never break every other node's check, or the render loop itself.
       }
     }
   }
@@ -1525,6 +1690,28 @@ export class GraphRenderer {
           src: op.src,
         };
       }
+      if (op.type === 'denoise') {
+        // A fresh cached FULL-STRENGTH result for this node's CURRENT
+        // content hash (see checkDenoiseNodes): blend it against `src` by
+        // strength/100 (DENOISE_BLEND_SHADER) instead of the external node's
+        // plain blit — denoise has a real strength knob, external doesn't.
+        // No result yet ⇒ plain pass-through of `src`, same "never gray"
+        // rule as the external node (this node's input is a perfectly good
+        // picture already).
+        const cacheKey = this.denoiseNodeCacheKey.get(op.nodeId);
+        const resultTex = cacheKey ? this.denoiseResultTextures.get(cacheKey) : undefined;
+        if (resultTex) {
+          return {
+            phases: [{ pipeline: this.denoiseBlendPipeline(), uniformBuffer: this.vec4Buffer([op.strength / 100, 0, 0, 0]) }],
+            src: op.src,
+            denoiseResultView: resultTex.createView(),
+          };
+        }
+        return {
+          phases: [{ pipeline: this.externalPassthroughPipeline(), uniformBuffer: null }],
+          src: op.src,
+        };
+      }
       const hasMask = op.srcMask !== undefined;
       return {
         phases: [{ pipeline: hasMask ? this.blendMaskPipeline() : this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
@@ -1680,6 +1867,19 @@ export class GraphRenderer {
         // texture-binding shape as the plain pass-through phase below.
         const phase = step.phases[0]!;
         addPass(encoder, views[i]!, phase.pipeline, [{ binding: 0, resource: step.externalResultView }]);
+        return;
+      }
+      if (step.denoiseResultView) {
+        // Denoise step (denoise v2, stage 1) with a fresh cached FULL-
+        // STRENGTH result: blend it against `at(step.src)` by strength/100
+        // (DENOISE_BLEND_SHADER) — unlike the external node's plain blit,
+        // this genuinely reads BOTH textures.
+        const phase = step.phases[0]!;
+        addPass(encoder, views[i]!, phase.pipeline, [
+          { binding: 0, resource: at(step.src) },
+          { binding: 1, resource: step.denoiseResultView },
+          { binding: 2, resource: { buffer: phase.uniformBuffer! } },
+        ]);
         return;
       }
       if (step.srcB !== undefined) {

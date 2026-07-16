@@ -56,7 +56,9 @@ import {
 import { dirnameOf, IMAGE_KIND, resolveImagePath } from '../engine/graph/imageNode';
 import { imageNodeDecodeCount, syncImageNodeSources } from '../engine/graph/imageNodeSource';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
+import { handleDenoiseRunRequest } from '../engine/graph/denoiseNodeRunner';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { SpotBrushCursor } from './SpotBrushCursor';
@@ -274,6 +276,16 @@ declare global {
       confirmExternalNode(nodeId: string): void;
       /** Verify-only: real subprocess spawn count this session (main process — see externalTool.ts). */
       externalToolSpawnCount(): Promise<number>;
+      /** In-engine ML denoise (denoise v2, stage 1): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'denoise'. */
+      denoiseNodeState(
+        nodeId?: string
+      ): { strength: number; needsConsent: boolean; error: string | null; running: boolean } | null;
+      /** Verify-only: set a denoise node's strength — one undo entry (bypasses the Inspector's slider). */
+      setDenoiseStrength(nodeId: string, strength: number): void;
+      /** Verify-only: click-equivalent of the Inspector's "Download denoise model" consent button. */
+      consentDenoiseModel(nodeId: string): Promise<void>;
+      /** Verify-only: real ORT inference run count this session (main process — see denoise.ts). */
+      denoiseRunCount(): Promise<number>;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
@@ -400,6 +412,10 @@ export function CanvasView() {
   // effect so client.render() reposts and the fresh texture shows up" role
   // as imageNodeRev above.
   const externalNodeRev = useAppStore((s) => s.externalNodeRev);
+  // In-engine ML denoise (denoise v2, stage 1): same "re-run this effect so
+  // client.render() reposts and the fresh texture shows up" role as
+  // externalNodeRev/imageNodeRev above.
+  const denoiseNodeRev = useAppStore((s) => s.denoiseNodeRev);
   const setImageNodeMissing = useAppStore((s) => s.setImageNodeMissing);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
@@ -775,6 +791,31 @@ export function CanvasView() {
           );
         });
         client.setExternalNodeReadyHandler(() => useAppStore.getState().bumpExternalNodeRev());
+        // In-engine ML denoise (denoise v2, stage 1): same split as the
+        // external-tool node just above — the worker only knows WHAT to run
+        // (GraphRenderer.checkDenoiseNodes), denoiseNodeRunner.ts owns the
+        // actual IPC call. No per-doc confirm gate here (see that file's
+        // SECURITY note) — `onNeedsConsent` just flips a badge state; the
+        // Inspector's consent button (appStore.ts's consentDenoiseModel)
+        // is what actually grants it.
+        client.setDenoiseRunRequestHandler((req) => {
+          void handleDenoiseRunRequest(
+            req,
+            client,
+            (nodeId) => useAppStore.getState().setDenoiseNodeNeedsConsent(nodeId, true),
+            (nodeId, ok, error) => {
+              useAppStore.getState().setDenoiseNodeRunning(nodeId, false);
+              useAppStore.getState().setDenoiseNodeError(nodeId, ok ? null : (error ?? 'unknown error'));
+              useAppStore.getState().bumpDenoiseNodeRev();
+            },
+            (nodeId) => {
+              useAppStore.getState().setDenoiseNodeNeedsConsent(nodeId, false);
+              useAppStore.getState().setDenoiseNodeError(nodeId, null);
+              useAppStore.getState().setDenoiseNodeRunning(nodeId, true);
+            }
+          );
+        });
+        client.setDenoiseNodeReadyHandler(() => useAppStore.getState().bumpDenoiseNodeRev());
         clientRef.current = client;
         useAppStore.getState().setRenderer(client);
       }
@@ -963,6 +1004,7 @@ export function CanvasView() {
     imagePath,
     imageNodeRev,
     externalNodeRev,
+    denoiseNodeRev,
   ]);
 
   // Round-11 fix pack item 4 ("PNG chosen on an Image node showed no node
@@ -1454,6 +1496,28 @@ export function CanvasView() {
       },
       externalToolSpawnCount() {
         return window.silverbox.externalToolSpawnCount();
+      },
+      /** In-engine ML denoise (denoise v2, stage 1): strength + needsConsent/error/running badge state for `nodeId` (defaults to the current selection); null when it isn't a denoise node. */
+      denoiseNodeState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (node?.kind !== DENOISE_KIND) return null;
+        return {
+          strength: node.denoise?.strength ?? 0,
+          needsConsent: s.denoiseNodeNeedsConsent[id!] ?? false,
+          error: s.denoiseNodeErrors[id!] ?? null,
+          running: s.denoiseNodeRunning[id!] ?? false,
+        };
+      },
+      setDenoiseStrength(nodeId, strength) {
+        useAppStore.getState().setDenoiseStrength(nodeId, strength, null);
+      },
+      consentDenoiseModel(nodeId) {
+        return useAppStore.getState().consentDenoiseModel(nodeId);
+      },
+      denoiseRunCount() {
+        return window.silverbox.denoiseRunCount();
       },
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;

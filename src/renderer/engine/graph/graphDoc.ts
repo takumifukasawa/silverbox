@@ -22,6 +22,7 @@ import { cpuMaskShape, defaultMaskParams, MASK_KIND, MASK_WGSL, packMaskUniform,
 import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, SPOTS_WGSL, type SpotsParams, type Spot } from './spotsNode';
 import { defaultImageParams, IMAGE_KIND, imageBaseName, sanitizeImageParams, type ImageParams } from './imageNode';
 import { defaultExternalParams, EXTERNAL_KIND, isIdentityExternal, sanitizeExternalParams, type ExternalParams } from './externalNode';
+import { defaultDenoiseParams, DENOISE_KIND, isIdentityDenoise, sanitizeDenoiseParams, type DenoiseParams } from './denoiseNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy } from '../../../../shared/ipc';
 
@@ -37,7 +38,8 @@ export type GraphNodeKind =
   | typeof MASK_KIND
   | typeof SPOTS_KIND
   | typeof IMAGE_KIND
-  | typeof EXTERNAL_KIND;
+  | typeof EXTERNAL_KIND
+  | typeof DENOISE_KIND;
 
 export interface GraphNode {
   id: string;
@@ -61,6 +63,8 @@ export interface GraphNode {
   image?: ImageParams;
   /** External-tool hook node (denoise v1, task #41): command template + color-boundary toggle; only for kind 'external'. */
   external?: ExternalParams;
+  /** In-engine ML denoise (denoise v2, stage 1): output-blend strength; only for kind 'denoise'. */
+  denoise?: DenoiseParams;
   /**
    * Bypass toggle (node bypass feature, Resolve's Ctrl+D): absent/false =
    * active (default). Legal on every 1-in/1-out chain kind (ops, custom,
@@ -122,6 +126,7 @@ export type AddableKind =
   | typeof SPOTS_KIND
   | typeof IMAGE_KIND
   | typeof EXTERNAL_KIND
+  | typeof DENOISE_KIND
   | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
@@ -148,6 +153,7 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
     return path ? `image — ${imageBaseName(path)}` : 'image';
   }
   if (node.kind === EXTERNAL_KIND) return 'external';
+  if (node.kind === DENOISE_KIND) return 'denoise';
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
 }
@@ -267,7 +273,13 @@ export function sanitizeExportOverrides(raw: unknown, nodeId: string): ExportOve
 export function defaultParams(
   kind: Exclude<
     AddableKind,
-    typeof CUSTOM_KIND | typeof MASK_KIND | typeof SPOTS_KIND | typeof IMAGE_KIND | typeof EXTERNAL_KIND | 'output'
+    | typeof CUSTOM_KIND
+    | typeof MASK_KIND
+    | typeof SPOTS_KIND
+    | typeof IMAGE_KIND
+    | typeof EXTERNAL_KIND
+    | typeof DENOISE_KIND
+    | 'output'
   >
 ): Record<string, number> {
   const defs = kind === BLEND_KIND ? BLEND_PARAM_DEFS : OPS[kind].params;
@@ -626,6 +638,7 @@ const KNOWN_NODE_KEYS = new Set([
   'spots',
   'image',
   'external',
+  'denoise',
   'disabled',
   'name',
   'export',
@@ -702,6 +715,7 @@ export function serializeGraphDoc(
           ...(n.spots ? { spots: n.spots } : {}),
           ...(n.image ? { image: n.image } : {}),
           ...(n.external ? { external: n.external } : {}),
+          ...(n.denoise ? { denoise: n.denoise } : {}),
           ...(n.disabled ? { disabled: true } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
@@ -803,6 +817,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
       n.kind !== SPOTS_KIND &&
       n.kind !== IMAGE_KIND &&
       n.kind !== EXTERNAL_KIND &&
+      n.kind !== DENOISE_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -844,6 +859,9 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     }
     if (n.kind === EXTERNAL_KIND) {
       n.external = sanitizeExternalParams(n.external, n.id);
+    }
+    if (n.kind === DENOISE_KIND) {
+      n.denoise = sanitizeDenoiseParams(n.denoise, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -1041,6 +1059,13 @@ export type PlanStep =
       command: string;
       /** true = 16-bit sRGB-encoded round trip; false = 32-bit linear Rec.2020 float — see externalNode.ts's ExternalParams doc comment. */
       encoded: boolean;
+    }
+  | {
+      nodeId: string;
+      type: 'denoise';
+      src: number;
+      /** 0–100 output-blend strength (denoiseNode.ts's DenoiseParams.strength) — carried into the plan so the GPU re-entry blend pass (graphRenderer.ts) knows how much of the full-strength inference result to mix in; the runtime round trip itself (readback → main-process ORT inference → GPU re-entry) is keyed by a content hash computed separately (not part of the plan — see graphRenderer.ts's checkDenoiseNodes), same "plan is pure, hash depends on pixels" split as the 'external' step. */
+      strength: number;
     };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -1352,6 +1377,27 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           steps.push({ nodeId: id, type: 'external', src, command: params.command, encoded: params.encoded });
           index = steps.length - 1;
         }
+      } else if (node.kind === DENOISE_KIND) {
+        // In-engine ML denoise (denoise v2, stage 1): identity at strength 0
+        // — same bit-exact pass-through invariant every other node kind
+        // upholds for its own identity params. Unlike 'external' there is no
+        // ctx-level CLI gate (no --allow-external-style opt-in — this is a
+        // first-party built-in, see docs/brief-bank/denoise-v2.md); the ONE
+        // gate (model-download consent) lives entirely in main
+        // (denoiseModel.ts) and denoiseNodeRunner.ts, resolved at RUN time,
+        // never at buildPlan/compile time — a doc with a nonzero-strength
+        // denoise node and no consent yet still compiles this step and
+        // renders pass-through until consent is granted (see
+        // GraphRenderer.checkDenoiseNodes). No CPU mirror (cpu: null
+        // territory, like 'external') — the round trip depends on actual
+        // pixel content via an out-of-process (main) ORT inference call.
+        const params = node.denoise ?? defaultDenoiseParams();
+        if (isIdentityDenoise(params)) {
+          index = src;
+        } else {
+          steps.push({ nodeId: id, type: 'denoise', src, strength: params.strength });
+          index = steps.length - 1;
+        }
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip
@@ -1445,6 +1491,12 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
       // could mirror even in principle. Same "check planHasCpuReference
       // first" contract as 'image'/spatial ops.
       throw new Error(`step ${step.nodeId} has no CPU reference`);
+    } else if (step.type === 'denoise') {
+      // No CPU mirror — a neural net's receptive field is spatial by
+      // construction, same class of step as 'external'/spatial ops; the
+      // round trip depends on main-process ORT inference over GPU-readback
+      // pixels, nothing a JS reference could mirror even in principle.
+      throw new Error(`step ${step.nodeId} has no CPU reference`);
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -1471,6 +1523,7 @@ export function planHasCpuReference(plan: RenderPlan): boolean {
     if (s.type === 'passes') return s.cpu !== null;
     if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
     if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
+    if (s.type === 'denoise') return false; // no CPU mirror — see PlanStep's doc comment
     return true; // blend (always has a CPU-evaluable inline mix)
   });
 }

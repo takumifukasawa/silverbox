@@ -19,6 +19,8 @@ import {
   type ExportLutResult,
   type ExternalToolRequest,
   type ExternalToolResult,
+  type DenoiseRunRequest,
+  type DenoiseRunResult,
   type FolderImageEntry,
   type OpenImageDialogResult,
   type PingResult,
@@ -27,6 +29,7 @@ import {
 } from '../../shared/ipc';
 import { CLI_USAGE, buildCliJob, formatCliProgress, parseCliArgs } from './cliArgs';
 import { diffRenderImages } from './diffRender';
+import { denoiseRunCount, runDenoise } from './denoise';
 import { externalToolSpawnCount, runExternalTool } from './externalTool';
 import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
@@ -608,6 +611,13 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.externalToolSpawnCount, async (): Promise<number> => externalToolSpawnCount());
+
+  ipcMain.handle(IPC.denoiseRun, async (_ev, req: DenoiseRunRequest): Promise<DenoiseRunResult> => {
+    const settings = await readSettings();
+    return runDenoise(req, settings.denoiseModelConsent, settings.denoiseModelUrl);
+  });
+
+  ipcMain.handle(IPC.denoiseRunCount, async (): Promise<number> => denoiseRunCount());
 }
 
 /**

@@ -7,6 +7,7 @@ import { MASK_KIND } from '../engine/graph/maskNode';
 import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
+import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { PresetsMenu } from './PresetsMenu';
 
 /**
@@ -26,6 +27,7 @@ function AddNodeMenu() {
     SPOTS_KIND,
     IMAGE_KIND,
     EXTERNAL_KIND,
+    DENOISE_KIND,
     'output',
     ...(Object.keys(OPS) as AddableKind[]),
   ];
