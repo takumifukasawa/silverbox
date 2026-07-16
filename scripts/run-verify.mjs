@@ -30,13 +30,48 @@
  * ms14 (electron-builder packaging, mutates dist/) is NOT poolable — it runs
  * SERIALLY after the pool, once nothing else is touching the build output.
  *
+ * Flaky-retry policy
+ * -------------------
+ * Pooled scripts share the machine's CPU/GPU/disk under `SILVERBOX_VERIFY_JOBS`
+ * concurrent Electron instances, and that contention produces occasional false
+ * reds that are NOT the script's fault — three concrete cases hit on
+ * 2026-07-16/17: a React Flow drag test lost pointermove events under
+ * scheduler pressure, an Electron launch hung past its timeout waiting for a
+ * GPU context under load, and a GPU-readback NCC check read 0.52 (should be
+ * ~1.0) because a contended frame was captured mid-composite — all three
+ * passed cleanly standalone and on an immediate rerun. Chasing each one down
+ * as if it were a real regression costs real investigation time, so:
+ *
+ *  - Any script that FAILS in the pool gets exactly ONE retry, run SERIALLY
+ *    (no pool, no contention) after the whole pool has drained, using a
+ *    completely fresh isolation environment (setupIsolation() again — the
+ *    same function the pool uses, not a forked copy of its logic).
+ *  - A retry that PASSES counts toward the pass total, but is never reported
+ *    as an indistinguishable PASS: it prints as `FLAKY <name> (failed pooled,
+ *    passed serial retry)` and the final `SUITE:` line grows a `(N flaky)`
+ *    suffix. A flake rate that creeps up over time is a real signal — hiding
+ *    it defeats the point of tracking it at all.
+ *  - A retry that FAILS too is treated as a genuine failure: normal FAIL
+ *    reporting, non-zero exit, log file kept as-is. Retrying is a filter for
+ *    load-induced noise, not a way to launder a real per-script determinism
+ *    bug — those still need to be fixed in the script, not retried away.
+ *
  * Usage:
  *   node scripts/run-verify.mjs           # full 32-script suite
  *   node scripts/run-verify.mjs --smoke   # ms1 + develop + ms10 + cst only
  */
 import { spawn } from 'node:child_process';
 import { execFileSync } from 'node:child_process';
-import { linkSync, mkdirSync, mkdtempSync, openSync, rmSync, writeSync, closeSync } from 'node:fs';
+import {
+  linkSync,
+  mkdirSync,
+  mkdtempSync,
+  openSync,
+  renameSync,
+  rmSync,
+  writeSync,
+  closeSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -251,6 +286,53 @@ console.log(`build done in ${fmtSeconds(buildMs)}s\n`);
 console.log(`pool (concurrency ${jobs}): ${poolJobs.map((s) => s.name).join(', ')}`);
 const poolResults = await runPool(poolJobs, jobs);
 
+// --- Flaky retry pass ---------------------------------------------------
+// See the header comment for the policy. Every pooled script that failed
+// gets exactly one retry, serially, in a fresh isolation environment — no
+// pool contention this time.
+const failedPool = poolResults.filter((r) => !r.ok);
+if (failedPool.length > 0) {
+  console.log(
+    `\nretrying ${failedPool.length} failed pooled script(s) serially (fresh isolation, no contention): ${failedPool
+      .map((r) => r.name)
+      .join(', ')}`,
+  );
+}
+for (const failed of failedPool) {
+  const script = poolJobs.find((s) => s.name === failed.name);
+  const flakyLogPath = join(logDir, `${failed.name}.flaky.log`);
+  // Preserve the pool run's failure log BEFORE runScript() below reuses
+  // `<name>.log` — we don't yet know if the retry will pass.
+  renameSync(failed.logPath, flakyLogPath);
+  const isolation = setupIsolation(script.name);
+  let retryResult;
+  try {
+    retryResult = await runScript(script, { extraEnv: isolation.env });
+  } finally {
+    isolation.cleanup();
+  }
+  if (retryResult.ok) {
+    // Flaky: failed under pool contention, passed in isolation. Keep the
+    // pool run's failure log around (renamed) so a later reader can see the
+    // flake happened, without mistaking it for a current failure — the
+    // fresh `<name>.log` from this retry is the current, passing record.
+    failed.ok = true;
+    failed.flaky = true;
+    failed.durationMs = retryResult.durationMs;
+    failed.logPath = retryResult.logPath;
+    console.log(`  FLAKY ${failed.name.padEnd(16)} (failed pooled, passed serial retry)`);
+  } else {
+    // Real failure, not a flake: drop the "flaky" rename so today's ordinary
+    // failure behavior (single `<name>.log` holding the latest failing run)
+    // is what stands. Per-script determinism bugs still need fixing, not
+    // retrying away.
+    rmSync(flakyLogPath, { force: true });
+    failed.durationMs = retryResult.durationMs;
+    failed.logPath = retryResult.logPath;
+    printCompletion(failed);
+  }
+}
+
 let exclusiveResults = [];
 if (exclusiveJobs.length > 0) {
   console.log(`\nexclusive tail (serial): ${exclusiveJobs.map((s) => s.name).join(', ')}`);
@@ -263,13 +345,27 @@ const totalMs = Date.now() - overallStart;
 console.log('\n--- summary ---');
 const nameWidth = Math.max(...allResults.map((r) => r.name.length));
 for (const r of allResults) {
+  if (r.flaky) {
+    console.log(
+      `  FLAKY ${r.name.padEnd(nameWidth)}  ${fmtSeconds(r.durationMs).padStart(7)}s  (failed pooled, passed serial retry)  log: ${r.logPath}`,
+    );
+    continue;
+  }
   const status = r.ok ? 'PASS' : 'FAIL';
   const logNote = r.ok ? '' : `  log: ${r.logPath}`;
   console.log(`  ${status}  ${r.name.padEnd(nameWidth)}  ${fmtSeconds(r.durationMs).padStart(7)}s${logNote}`);
 }
 
 const passCount = allResults.filter((r) => r.ok).length;
+const flakyCount = allResults.filter((r) => r.flaky).length;
+const suiteStatus = passCount === allResults.length ? 'PASS' : 'FAIL';
+// Keep the `SUITE:` prefix and plain `PASS n/n` shape stable when there were
+// zero flakes — the conductor's log grep for `SUITE:` (see
+// docs/conductor-playbook.md) depends on it. The `(N flaky)` suffix only
+// appears when it's true, so a clean run is never silently identical to a
+// run that papered over a flake.
+const flakySuffix = flakyCount > 0 ? ` (${flakyCount} flaky)` : '';
 console.log(`\nbuild: ${fmtSeconds(buildMs)}s, total wall time: ${fmtSeconds(totalMs)}s`);
-console.log(`SUITE: ${passCount === allResults.length ? 'PASS' : 'FAIL'} ${passCount}/${allResults.length}`);
+console.log(`SUITE: ${suiteStatus} ${passCount}/${allResults.length}${flakySuffix}`);
 
 process.exit(passCount === allResults.length ? 0 : 1);
