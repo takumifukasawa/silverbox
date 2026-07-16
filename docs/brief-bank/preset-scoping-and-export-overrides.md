@@ -1,6 +1,9 @@
 # Brief: preset scoping + per-output export-override UX
 
-Status: DESIGN OPEN (user feedback 2026-07-13, hand-testing rounds A/B).
+Status: §1 preset scoping LANDED 2026-07-16 (2e2cd0b — save-time family
+checkboxes, FamilyScopeDialog shared component, includes-list presets;
+see that commit + presetFamilies.ts). §2 export overrides still open.
+Original: DESIGN OPEN (user feedback 2026-07-13, hand-testing rounds A/B).
 Two related "which settings does this thing carry" problems.
 
 ## 1. Preset scoping ("temp/tint/exposure はいじらない方がいい？")

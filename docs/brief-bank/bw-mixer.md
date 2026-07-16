@@ -1,9 +1,9 @@
 # Brief: B&W conversion + channel mixer
 
-Status: DESIGNED 2026-07-16 (conductor). Feature-queue slot 3. One
-implementer run, but the FORMULA CONSTANTS are calibration-session
-material — ship LR-shaped with honest placeholders, then tune in the
-next LR side-by-side (add to the round-3+ agenda).
+Status: LANDED 2026-07-16 (54ab624) — K_BW=0.6 and the WORKING_LUMA
+choice (pipeline-consistent Rec.709 weights, not literal Rec.2020) are
+both flagged provisional pending an LR side-by-side; verify-bw.mjs
+covers behavior. Original design notes below.
 Prereq reading: the 8-band HSL implementation end-to-end (band
 definitions, chroma mask, GPU pass + CPU mirror, InspectorPanel tab
 UI), developNode param conventions + identity pass-skip invariant,

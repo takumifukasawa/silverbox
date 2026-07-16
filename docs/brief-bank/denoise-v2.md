@@ -1,6 +1,14 @@
 # Brief: in-engine ML denoise (denoise v2)
 
-Status: RESEARCHED (sources fetched 2026-07-16); **STAGE 0 SPIKE PASSED
+Status: **STAGE 1 LANDED 2026-07-16** (a5ca998 node/runtime/tiling/cache/
+consent + ade0562 EP default): real-model E2E measured ~10s for a full
+2560 preview on CPU EP; **CoreML EP crashes the Electron main process
+mid-run on the real model** (fine on the tiny fixture — model-scale-
+dependent, quarantined behind SILVERBOX_DENOISE_EP=coreml, see
+denoiseInfer.ts). fp16 measured visually identical to fp32 (max diff
+0.06/255). REMAINING: publish the model release asset (user decision
+pending), then hand-test. Earlier: RESEARCHED (sources fetched
+2026-07-16); **STAGE 0 SPIKE PASSED
 same day** — NAFNet-SIDD-width32 exports cleanly to ONNX and runs under
 onnxruntime with dynamic H/W (see docs/research/nafnet-spike/ for the
 full report + the export/fp16 scripts). Load-bearing facts for the

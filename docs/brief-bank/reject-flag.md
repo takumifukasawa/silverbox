@@ -1,8 +1,10 @@
 # Brief: pick/reject flags
 
-Status: DESIGNED 2026-07-16 (conductor). Feature-queue slot 2 (after
-multi-select+sync — and it composes with it: flag keys act on the
-whole selection). Small feature; one implementer run.
+Status: LANDED 2026-07-16 (9efc65c) — implemented ahead of
+multi-select+sync (which was gated on a hand-test); the flag store
+action takes an explicit look path so the later multi-select fan-out
+plugs in without surgery. verify-flags.mjs covers it. Original design
+notes below.
 Prereq reading: Filmstrip.tsx (★n+ filter, cell badges), the rating
 plumbing end-to-end (wrapper field in graphDoc.ts, setRating in
 appStore, extractSidecarRating cheap read, projectPhotosStatus IPC,
