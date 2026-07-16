@@ -389,6 +389,67 @@ try {
     .waitForFunction(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 1.11, { timeout: 10_000 })
     .catch(() => {});
   check("reopening A after the round trip shows A's OWN edit (1.11), not B's or stale", (await devEv()) === 1.11, await devEv());
+
+  // === 9. Same-photo reopen (conductor review follow-up, round 2) ===
+  // A regression the checks above didn't cover: __openImageByPath called
+  // with the SAME path already open. verify-basecurve.mjs caught this — the
+  // flush wrote a not-yet-saved edit straight into the SAME look file this
+  // reopen's own readSidecar was about to read, so an unsaved "Reset the
+  // curve" edit got persisted and read back as if it had always been saved,
+  // permanently corrupting later checks (a subsequent edit to that exact
+  // same value became a silent no-op, since nothing had actually changed).
+  // Fix: openImageByPath now skips the flush entirely for a same-path
+  // reopen (it races its OWN upcoming sidecar read for the identical file)
+  // — a same-path reopen is a reload-from-disk gesture, not a switch, so an
+  // unsaved edit must be DISCARDED, exactly like it always was before the
+  // original autosave-flush fix.
+  console.log('verify-project (9. same-photo reopen: saved edits survive, unsaved edits are discarded, later edits still work):');
+  await switchProject(quickProjectDir);
+  await page.waitForFunction((p) => window.__debug?.projectState().dir === p, quickProjectDir, { timeout: 15_000 });
+  await waitReady();
+  await openAndWait(ARW_PATH);
+  const baselineMean = await page.evaluate(() => window.__debug.readbackMean());
+
+  // 9a. edit -> save -> reopen the SAME photo -> the SAVED edit survives.
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 2));
+  const editedMean = await page.evaluate(() => window.__debug.readbackMean());
+  check('9a. the ev edit visibly brightens the render before saving', editedMean.g > baselineMean.g + 0.1, { baselineMean, editedMean });
+  await save();
+  check('9a. saved and clean before the reopen', (await page.evaluate(() => window.__debug.graphDirty())) === false, null);
+  await switchImage(ARW_PATH); // same-path reopen, immediately after saving
+  await waitReady();
+  check("9a. reopening the same (already-saved) photo restores its OWN saved edit (2)", (await devEv()) === 2, await devEv());
+  check('9a. reopened same-path photo is not dirty', (await page.evaluate(() => window.__debug.graphDirty())) === false, null);
+
+  // 9b. a NEW edit after the same-path reopen must still take effect — the
+  // base-curve regression's failure mode was exactly a "stuck" graph that
+  // silently ignored the next edit because nothing had actually changed.
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.5));
+  const afterReopenEditMean = await page.evaluate(() => window.__debug.readbackMean());
+  check('9b. dirty again after the post-reopen edit', await page.evaluate(() => window.__debug.graphDirty()), null);
+  check(
+    "9b. the render actually changed for the post-reopen edit (graph isn't stuck)",
+    Math.abs(afterReopenEditMean.g - editedMean.g) > 0.02,
+    { editedMean, afterReopenEditMean }
+  );
+  check('9b. the graph param reflects the new edit (0.5)', (await devEv()) === 0.5, await devEv());
+  await save();
+
+  // 9c. THE regression itself: an UNSAVED edit, reopening the SAME photo
+  // immediately (well inside the debounce) — must be DISCARDED, not
+  // flushed to disk.
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 1.75));
+  check('9c. dirty right after the unsaved edit', await page.evaluate(() => window.__debug.graphDirty()), null);
+  await switchImage(ARW_PATH); // reopen the SAME photo, unsaved, no waiting
+  await waitReady();
+  check("9c. reopening the SAME photo discards the unsaved edit (restores the last save, 0.5)", (await devEv()) === 0.5, await devEv());
+  check('9c. reopened photo is not dirty', (await page.evaluate(() => window.__debug.graphDirty())) === false, null);
+  const onDiskAfterDiscard = JSON.parse(readFileSync(lookPathFor(ARW_PATH), 'utf8'));
+  check(
+    "9c. the discarded edit never reached disk (a same-path reopen must not flush)",
+    evOf(onDiskAfterDiscard) === 0.5,
+    onDiskAfterDiscard
+  );
 } finally {
   await app.close();
 }

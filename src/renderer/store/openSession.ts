@@ -93,4 +93,18 @@ export class OpenSession<Opts = unknown> {
     OpenSession.current = null;
     OpenSession.epochCounter = 0;
   }
+
+  /**
+   * The epoch of the most-recently-constructed session (0 if none yet) — for
+   * callers that never construct a session of their own (e.g. a
+   * fire-and-forget autosave flush kicked off alongside — not instead of — a
+   * NEW session) but still need to snapshot "the current epoch" at one
+   * moment and later ask whether anything newer has since superseded it.
+   * Equivalent to constructing a throwaway session and reading its own
+   * staleness, without the side effect of claiming the epoch or running the
+   * previous session's disposers.
+   */
+  static currentEpoch(): number {
+    return OpenSession.current?.epoch ?? 0;
+  }
 }

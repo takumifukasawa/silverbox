@@ -1160,24 +1160,59 @@ async function writeGraphSaveSnapshot(
  * was silently lost, because nothing else ever gets another chance to save
  * it once the new open replaces `graph`/`imagePath` in memory.
  *
+ * CALLER CONTRACT — do not call this for a same-path reopen. A first version
+ * of this fix called it unconditionally from openImageByPath, including when
+ * the path being opened is the SAME one already open; that write races the
+ * reopen's OWN upcoming read of the identical look file and can hand it back
+ * the very in-memory edit the reopen is supposed to discard (a same-path
+ * "reopen" is a reload-from-disk gesture, not a switch — verify-basecurve's
+ * "reopening re-seeds" / "deleted-curve sidecar is not re-seeded" checks
+ * caught this regression: the flushed identity-curve edit got persisted and
+ * read straight back, so the curve was never re-seeded and a later Reset to
+ * that SAME identity curve was a no-op that hung waiting for a histogram
+ * change that could never come). openImageByPath's own call site guards
+ * this; openProjectByPath's own look file is always project-scoped
+ * (`currentLookPath`), which a project switch always changes even when the
+ * underlying photo path repeats, so it has no same-path case to guard.
+ *
  * `state` must be captured by the CALLER before its own first `set()` — this
  * function itself never reads the store except inside the write's `.then`,
  * by which point a newer open may already own it (see the guard there).
- * Fire-and-forget on purpose: the write targets the OLD photo's look file, a
- * different path than whatever the new open is about to touch, so nothing on
- * disk races — the only ordering that matters (capture before mutation) is
- * already satisfied by the caller passing in a pre-mutation `state`.
+ * Returns the write's own promise (resolved immediately if there was nothing
+ * to flush) so a caller with an ordering requirement of its own (currently
+ * only openProjectByPath, for the `project` reference — see its call site)
+ * can await it; openImageByPath's own call site does NOT await it, on
+ * purpose — the write targets the OLD photo's look file, a different path
+ * than whatever the new open is about to touch, so nothing on disk races,
+ * and awaiting it would slow down every ordinary filmstrip switch for
+ * nothing.
  */
-function flushPendingAutosave(state: AppState): void {
-  if (!state.graphDirty || !state.settings.autosaveSidecar) return;
+function flushPendingAutosave(state: AppState): Promise<void> {
+  if (!state.graphDirty || !state.settings.autosaveSidecar) return Promise.resolve();
   const snapshot = captureGraphSaveSnapshot(state);
-  if (!snapshot) return;
-  void writeGraphSaveSnapshot(snapshot).then((result) => {
+  if (!snapshot) return Promise.resolve();
+  // Epoch token (conductor review finding #2): `imagePath` equality alone
+  // can't tell "the session this flush belongs to" apart from "a LATER
+  // reopen of that same path" — e.g. A (dirty) → switch to B (this flush
+  // fires, fire-and-forget) → switch back to A before the write resolves.
+  // By the time it resolves, `imagePath` reads A again — coincidentally
+  // matching — even though a brand-new session now owns A. Snapshotting the
+  // current OpenSession epoch here and comparing it after the write closes
+  // that gap: any open (same path or not) constructed after this moment
+  // bumps the epoch, so a real "still current" check needs both this AND
+  // the imagePath check below (imagePath alone would wrongly apply a stale
+  // flush's bookkeeping onto a *different* photo that hasn't superseded the
+  // epoch yet — see openImageByPath, which constructs its OpenSession
+  // before calling this).
+  const epochAtCapture = OpenSession.currentEpoch();
+  return writeGraphSaveSnapshot(snapshot).then((result) => {
     // The disk write already happened — that's the point, the edit is safe.
-    // Only the in-memory bookkeeping is stale if a newer open has since
-    // claimed `imagePath` (same idea as saveGraph's own post-write guard);
-    // skipping lastSidecarText here is correct too — the hot-reload watcher
-    // has re-armed onto the new photo's look by the time this resolves.
+    // Only the in-memory bookkeeping is stale if a newer session has since
+    // claimed the epoch, OR a different photo now owns `imagePath` (same
+    // idea as saveGraph's own post-write guard); skipping lastSidecarText
+    // here is correct too — the hot-reload watcher has re-armed onto the
+    // new photo's look by the time this resolves.
+    if (OpenSession.currentEpoch() !== epochAtCapture) return;
     if (useAppStore.getState().imagePath !== snapshot.imagePath) return;
     useAppStore.setState({
       graphDirty: false,
@@ -2463,11 +2498,20 @@ export const useAppStore = create<AppState>((set, get) => {
     // session to register it against — called unconditionally here instead,
     // exactly where the old epoch guard used to call it.
     // Flush it instead of just dropping it (conductor review finding, data
-    // loss): `get()` here still reads the OLD photo — nothing below this
-    // line has mutated the store yet — so flushPendingAutosave's capture is
-    // guaranteed pre-mutation. See its own doc comment for why the actual
-    // write doesn't need to be awaited before the open proceeds.
-    flushPendingAutosave(get());
+    // loss): `priorState` here still reads the OLD photo — nothing above
+    // this line has mutated the store yet — so flushPendingAutosave's
+    // capture is guaranteed pre-mutation. See its own doc comment for why
+    // the actual write doesn't need to be awaited before the open proceeds.
+    //
+    // EXCEPT when `path` is the SAME one already open: that's a reopen, not
+    // a switch (see flushPendingAutosave's CALLER CONTRACT doc comment for
+    // the regression this guards — verify-basecurve's "reopening re-seeds"/
+    // "deleted-curve sidecar" checks, which rely on an unsaved edit being
+    // DISCARDED by reopening, same as they always were before this fix).
+    // Flushing here would write straight into the file this reopen's own
+    // upcoming readSidecar is about to read, racing it.
+    const priorState = get();
+    if (priorState.imagePath !== path) void flushPendingAutosave(priorState);
     cancelAutosaveTimer();
     // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
     // default — see this method's `keepFolderContext` doc comment.
@@ -2798,7 +2842,23 @@ export const useAppStore = create<AppState>((set, get) => {
     // photo's pending edit belongs here just as much. `get()` here still
     // reads whatever was open before this project switch — nothing above
     // this line touches imagePath/graph/currentLookPath.
-    flushPendingAutosave(get());
+    //
+    // AWAITED — unlike openImageByPath's own fire-and-forget flush.
+    // captureGraphSaveSnapshot reads `project` to relativize the photo's
+    // `photo` field, and `project` is reassigned a few lines below; the
+    // nested `openImageByPath(first.path, ...)` call further down does its
+    // OWN flush attempt too (same photo, unless this one already cleared
+    // graphDirty). If that inner attempt fired WHILE this one was still
+    // in flight, it would capture the NEW project reference and tag the OLD
+    // project's own look file with the wrong project's `photo` value.
+    // Awaiting here guarantees graphDirty is settled (false, or a genuine
+    // write failure left it true and dirty on purpose) before `project` is
+    // ever reassigned — project switches are rare/heavy already, so the
+    // extra wait is negligible. No same-path hazard to guard here (unlike
+    // openImageByPath): `currentLookPath` is project-scoped, so switching
+    // projects always changes the look file even when the underlying photo
+    // path happens to repeat across projects.
+    await flushPendingAutosave(get());
     cancelAutosaveTimer();
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     set({ project, folderDir: dir, folderEntries: [] });
@@ -4416,11 +4476,18 @@ export const useAppStore = create<AppState>((set, get) => {
     // as long as it needs without reading `get()` again.
     const snapshot = captureGraphSaveSnapshot(get());
     if (!snapshot) return;
+    // Epoch token, same reasoning as flushPendingAutosave's own: `imagePath`
+    // equality alone can't tell "still this save" apart from "a LATER
+    // reopen of the same path" (e.g. ⌘S, then immediately reopening the
+    // SAME photo before this write resolves — imagePath reads the same
+    // either way).
+    const epochAtCapture = OpenSession.currentEpoch();
     const result = await writeGraphSaveSnapshot(snapshot);
     // A photo switch racing this exact await (⌘S, then immediately clicking
     // another filmstrip photo before the write resolves) must not stomp the
     // NEW photo's state with THIS photo's bookkeeping — same guard
     // flushPendingAutosave uses. The disk write already happened either way.
+    if (OpenSession.currentEpoch() !== epochAtCapture) return;
     if (get().imagePath !== snapshot.imagePath) return;
     // Record exactly what we just wrote (hot-reload's self-write-suppression
     // baseline) and clear any hot-reload notice: our edits just overwrote
