@@ -68,7 +68,13 @@ import { createWbModel, DEFAULT_WB_MODEL, type WbModel } from '../engine/color/w
 import { sanitizeCurvePoints } from '../engine/color/toneCurve';
 import { baseCurveForModel } from '../engine/color/baseCurve';
 import { buildLutExport } from '../engine/color/lutExport';
-import { parsePresetFile, serializePreset } from '../engine/graph/presetDoc';
+import { parsePresetFile, serializePreset, type ParsedPreset } from '../engine/graph/presetDoc';
+import {
+  buildScopedLook,
+  isKnownFamilyId,
+  mergeScopedLook,
+  type PresetFamilyId,
+} from '../engine/graph/presetFamilies';
 import { diffLook } from '../engine/look/diffLook';
 import {
   DEFAULT_SETTINGS,
@@ -545,14 +551,38 @@ interface AppState {
   /** `<userData>/presets/*.json` summaries (task #37); refreshed after save/delete and once at boot. */
   presets: PresetSummary[];
   /**
-   * Save the CURRENT graph as a whole-look preset file named `name`
-   * (captureLook — the exact copyDevelopSettings geometry-stripping
-   * contract). Same display name as an existing preset overwrites it (its
-   * slug/createdAt/unknown wrapper keys are reused — DESIGN §9 passthrough);
-   * a different name that sanitizes to the same slug disambiguates (-2, -3…).
+   * Save the CURRENT graph as a preset file named `name`. Same display name
+   * as an existing preset overwrites it (its slug/createdAt/unknown wrapper
+   * keys are reused — DESIGN §9 passthrough); a different name that
+   * sanitizes to the same slug disambiguates (-2, -3…).
+   *
+   * `families` (preset scoping, docs/brief-bank/
+   * preset-scoping-and-export-overrides.md §1): when provided (the Save
+   * flow, via FamilyScopeDialog), the preset is written SCOPED — only the
+   * checked families' data lands in the file (presetFamilies.ts's
+   * buildScopedLook), and the wrapper's `includes` records exactly that set
+   * (plus any unknown ids preserved from an overwritten file — see this
+   * method's implementation). When omitted (the "Update with current look"
+   * button, which does not re-prompt for families), the file being
+   * overwritten's OWN existing scope is reused verbatim — a whole-look
+   * preset stays whole-look, a scoped one stays scoped to the same
+   * families, refreshed with the current graph's values. A brand new
+   * preset saved with no `families` arg and no prior file at its slug is
+   * the historical whole-look shape (captureLook, no `includes` key) —
+   * back-compat for any caller that predates this feature.
    */
-  savePreset(name: string): Promise<void>;
-  /** Apply a saved preset by slug — exactly the pasteDevelopSettings code path (applyLook), one undo entry. No-op without an open image. */
+  savePreset(name: string, families?: PresetFamilyId[]): Promise<void>;
+  /**
+   * Apply a saved preset by slug, one undo entry. No-op without an open
+   * image. A whole-look preset (`includes` absent — every preset saved
+   * before this feature existed, or saved without ever touching a family
+   * checkbox) follows the historical applyLook path unchanged. A
+   * family-scoped preset merges ONLY its checked families onto the
+   * CURRENTLY open graph (presetFamilies.ts's mergeScopedLook) — every
+   * other family is left exactly as it already was, never reset toward
+   * some default. Unknown family ids in `includes` (a newer build's) are
+   * ignored here, per the brief's forward-compat rule.
+   */
   applyPreset(slug: string): Promise<void>;
   /** Delete a saved preset's file; refreshes the list. No confirm dialog (see PresetsMenu's low-friction-but-not-accidental design). */
   deletePreset(slug: string): Promise<void>;
@@ -574,6 +604,15 @@ interface AppState {
    * minus the history push.
    */
   setPreviewLook(look: GraphDoc | null): void;
+  /**
+   * Preset-scoping-aware hover preview (PresetsMenu.tsx's handleRowEnter):
+   * preview exactly what Apply would produce for `parsed`, family-scoped
+   * merge included — a whole-look preset (`includes` absent) previews via
+   * the same raw-swap setPreviewLook always used; a scoped preset previews
+   * the SAME mergeScopedLook applyPreset itself uses, so hovering never
+   * shows a different result than actually clicking Apply would.
+   */
+  previewParsedPreset(parsed: ParsedPreset): void;
   /** Replace the input node's geometry (crop + straighten); `coalesceKey` null = its own undo entry. */
   setGeometry(geo: GeometryParams, coalesceKey: string | null): void;
   /** Replace the input node's lens corrections; `coalesceKey` null = its own undo entry. */
@@ -1506,6 +1545,23 @@ function mergeLookWithCurrentGeometry(currentGraph: GraphDoc, look: GraphDoc): G
  */
 function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: GraphDoc } {
   const graph = mergeLookWithCurrentGeometry(s.graph, look);
+  return { ...pushHistory(s, null), graph, graphDirty: true };
+}
+
+/**
+ * Preset scoping's apply-time branch (appStore.ts's applyPreset): a
+ * whole-look preset (`parsed.includes` absent) goes through applyLook
+ * unchanged — bit-for-bit the historical behavior, so every preset saved
+ * before this feature existed keeps applying exactly as it always did. A
+ * scoped preset merges ONLY its checked, KNOWN families onto the CURRENT
+ * graph (presetFamilies.ts's mergeScopedLook) — everything else on `s.graph`
+ * is left untouched, never reset toward `parsed.look`'s own values. Like
+ * applyLook, this is one undo entry (pushHistory's `null`).
+ */
+function applyParsedPreset(s: AppState, parsed: ParsedPreset): Partial<AppState> & { graph: GraphDoc } {
+  if (!parsed.includes) return applyLook(s, parsed.look);
+  const families = new Set(parsed.includes.filter(isKnownFamilyId));
+  const graph = structuredClone(mergeScopedLook(s.graph, parsed.look, families));
   return { ...pushHistory(s, null), graph, graphDirty: true };
 }
 
@@ -3503,7 +3559,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   presets: [],
 
-  async savePreset(name) {
+  async savePreset(name, families) {
     const trimmed = name.trim();
     if (!trimmed) return;
     const { graph } = get();
@@ -3521,12 +3577,14 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     let unknownFields: Record<string, unknown> | undefined;
     let createdAt = new Date().toISOString();
+    let existingIncludes: string[] | undefined;
     const existingText = await window.silverbox.presetRead(slug);
     if (existingText) {
       try {
         const parsed = parsePresetFile(existingText);
         unknownFields = parsed.unknown;
         createdAt = parsed.createdAt;
+        existingIncludes = parsed.includes;
       } catch (err) {
         // this slug's file on disk is unreadable — overwrite it cleanly
         // rather than fail the save (promise-9 leaves the OLD file alone
@@ -3534,7 +3592,30 @@ export const useAppStore = create<AppState>((set, get) => {
         console.warn(`overwriting unreadable preset file for slug "${slug}":`, err);
       }
     }
-    const content = serializePreset(trimmed, captureLook(graph), createdAt, unknownFields);
+    // Preset scoping: `families` (the Save-dialog's checked ids) wins when
+    // given; otherwise this is the "Update with current look" flow, which
+    // deliberately does not re-prompt — reuse whatever family scope the
+    // file already had (verbatim, known ids AND any preserved-unknown ones
+    // alike — this is also what makes an unknown future family id survive a
+    // reload/re-save round trip, per the brief's forward-compat rule).
+    // `families === undefined` with no existing file at all is the
+    // historical whole-look shape (no `includes` key at all) — the
+    // back-compat path for any caller that predates this feature.
+    let look: GraphDoc;
+    let includesOut: string[] | undefined;
+    if (families !== undefined) {
+      look = buildScopedLook(families.includes('geometry') ? graph : captureLook(graph), new Set(families));
+      const priorUnknown = existingIncludes?.filter((id) => !isKnownFamilyId(id)) ?? [];
+      includesOut = [...families, ...priorUnknown];
+    } else if (existingIncludes !== undefined) {
+      const priorKnown = existingIncludes.filter(isKnownFamilyId);
+      look = buildScopedLook(priorKnown.includes('geometry') ? graph : captureLook(graph), new Set(priorKnown));
+      includesOut = existingIncludes;
+    } else {
+      look = captureLook(graph);
+      includesOut = undefined;
+    }
+    const content = serializePreset(trimmed, look, createdAt, unknownFields, includesOut);
     await window.silverbox.presetWrite(slug, content);
     set({ presets: await window.silverbox.presetsList() });
   },
@@ -3543,16 +3624,16 @@ export const useAppStore = create<AppState>((set, get) => {
     if (get().imageStatus !== 'ready') return;
     const text = await window.silverbox.presetRead(slug);
     if (!text) return;
-    let look: GraphDoc;
+    let parsed: ParsedPreset;
     try {
-      ({ look } = parsePresetFile(text));
+      parsed = parsePresetFile(text);
     } catch (err) {
       console.warn(`preset "${slug}" could not be parsed:`, err);
       return;
     }
     let nextGraph: GraphDoc | null = null;
     set((s) => {
-      const patch = applyLook(s, look);
+      const patch = applyParsedPreset(s, parsed);
       nextGraph = patch.graph;
       return patch;
     });
@@ -3568,6 +3649,15 @@ export const useAppStore = create<AppState>((set, get) => {
 
   setPreviewLook(look) {
     set((s) => ({ previewLook: look ? mergeLookWithCurrentGeometry(s.graph, look) : null }));
+  },
+
+  previewParsedPreset(parsed) {
+    set((s) => {
+      const merged = parsed.includes
+        ? mergeScopedLook(s.graph, parsed.look, new Set(parsed.includes.filter(isKnownFamilyId)))
+        : parsed.look;
+      return { previewLook: mergeLookWithCurrentGeometry(s.graph, merged) };
+    });
   },
 
   setGeometry(geo, coalesceKey) {

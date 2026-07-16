@@ -767,6 +767,22 @@ export interface Settings {
    * an arbitrary substitute model.
    */
   denoiseModelUrl: string;
+  /**
+   * Preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md
+   * §1): last-used family checkbox state in the preset Save dialog
+   * (FamilyScopeDialog.tsx via PresetsMenu.tsx), remembered LR-style across
+   * saves/sessions. Plain family-id strings, not `PresetFamilyId[]` — this
+   * file is isomorphic and deliberately doesn't import the renderer-only
+   * engine/graph/presetFamilies.ts module; src/main/settings.ts's
+   * sanitizeSettings only checks the array/string SHAPE, the same lenient
+   * "malformed value degrades quietly" convention as every other field
+   * here. An id this build doesn't recognize is preserved rather than
+   * dropped (same forward-compat reasoning as a preset file's own
+   * `includes` — see presetDoc.ts). A test in presetFamilies.test.ts pins
+   * this array equal to presetFamilies.ts's own DEFAULT_CHECKED_FAMILY_IDS
+   * so the two can never silently drift apart.
+   */
+  presetSaveFamilies: string[];
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -780,6 +796,10 @@ export const DEFAULT_SETTINGS: Settings = {
   quickProjectDir: '',
   denoiseModelConsent: false,
   denoiseModelUrl: '',
+  // Keep in sync with presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS (the
+  // "develop" group: basic tone / WB / curves / HSL / grading / effects /
+  // detail) — pinned equal by a unit test, see this field's doc comment.
+  presetSaveFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail'],
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

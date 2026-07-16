@@ -104,6 +104,14 @@ export function sanitizeSettings(raw: unknown): Settings {
   // override is lenient like everything else here (a non-string ⇒ default).
   result.denoiseModelConsent = src.denoiseModelConsent === true;
   result.denoiseModelUrl = typeof src.denoiseModelUrl === 'string' ? src.denoiseModelUrl : DEFAULT_SETTINGS.denoiseModelUrl;
+  // Preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md
+  // §1): last-used Save-dialog family checkboxes. Shape-only validation —
+  // an unrecognized family id (a newer build's) is a normal string, not
+  // rejected here; presetFamilies.ts's isKnownFamilyId is where semantic
+  // filtering happens, at the one call site that needs it.
+  result.presetSaveFamilies = Array.isArray(src.presetSaveFamilies)
+    ? src.presetSaveFamilies.filter((id): id is string => typeof id === 'string')
+    : DEFAULT_SETTINGS.presetSaveFamilies;
   return result as unknown as Settings;
 }
 

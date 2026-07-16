@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
-import { parsePresetFile } from '../engine/graph/presetDoc';
-import type { GraphDoc } from '../engine/graph/graphDoc';
+import { parsePresetFile, type ParsedPreset } from '../engine/graph/presetDoc';
+import { FamilyScopeDialog } from './FamilyScopeDialog';
 
 /** Debounce for the hover-preview fetch/render (round-7 UX pack G §4) — long
  *  enough that skimming past several rows doesn't trigger a full-graph render
@@ -9,12 +9,27 @@ import type { GraphDoc } from '../engine/graph/graphDoc';
 const HOVER_PREVIEW_DELAY_MS = 120;
 
 /**
- * "Presets ▾" toolbar dropdown (task #37): a develop preset is a WHOLE
- * LOOK — the entire develop graph, file-based (`<userData>/presets/*.json`)
- * and git-shareable (ROADMAP.md "Presets"). It runs through appStore.ts's
- * captureLook/applyLook, the exact copyDevelopSettings/pasteDevelopSettings
- * code path — saving snapshots what ⌘⇧C would capture, applying does
- * exactly what ⌘⇧V does.
+ * "Presets ▾" toolbar dropdown (task #37): a develop preset is normally a
+ * WHOLE LOOK — the entire develop graph, file-based
+ * (`<userData>/presets/*.json`) and git-shareable (ROADMAP.md "Presets"). It
+ * runs through appStore.ts's captureLook/applyLook, the exact
+ * copyDevelopSettings/pasteDevelopSettings code path — saving snapshots what
+ * ⌘⇧C would capture, applying does exactly what ⌘⇧V does.
+ *
+ * Preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md
+ * §1): Save no longer writes immediately — it opens FamilyScopeDialog.tsx
+ * (the same shared component docs/brief-bank/multi-select-sync.md's future
+ * "Sync…" feature reuses), a checkbox list of param families (basic tone /
+ * WB / curves / HSL / grading / effects / detail, plus an off-by-default
+ * "structural" group: geometry/spots/masks/custom-nodes). Only the CHECKED
+ * families' data is written into the file (presetFamilies.ts's
+ * buildScopedLook) — the preset FILE contains only what it claims, so it
+ * stays diffable and honest, and Apply merges only those families onto the
+ * current graph (mergeScopedLook), leaving everything else exactly as it
+ * was already open. "Update with current look" is unchanged (still one
+ * click, no dialog) — it reuses whatever family scope the preset already
+ * had. A preset with no `includes` key at all (every file saved before this
+ * feature existed) still applies whole-look, unconditionally.
  *
  * Placement: lives here in the toolbar (next to "+ Radial"/"+ Linear"),
  * NOT the per-node InspectorPanel — a preset is a whole-graph concept with
@@ -32,7 +47,8 @@ const HOVER_PREVIEW_DELAY_MS = 120;
  * below possible; a native `<option>`'s hover isn't reliably reachable
  * (the popup is OS-drawn once open). §3 adds "Update with current look"
  * (overwrite the selected preset via the same savePreset name-collision
- * path); §4 adds the hover preview itself.
+ * path); §4 adds the hover preview itself (now family-scope-aware — see
+ * previewParsedPreset in appStore.ts).
  */
 export function PresetsMenu() {
   const imageStatus = useAppStore((s) => s.imageStatus);
@@ -41,19 +57,30 @@ export function PresetsMenu() {
   const applyPreset = useAppStore((s) => s.applyPreset);
   const deletePreset = useAppStore((s) => s.deletePreset);
   const setPreviewLook = useAppStore((s) => s.setPreviewLook);
+  const previewParsedPreset = useAppStore((s) => s.previewParsedPreset);
   const copyDevelopSettings = useAppStore((s) => s.copyDevelopSettings);
   const pasteDevelopSettings = useAppStore((s) => s.pasteDevelopSettings);
   const hasClipboard = useAppStore((s) => s.developClipboard !== null);
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState('');
   const [saveName, setSaveName] = useState('');
+  // Preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md
+  // §1): Save no longer writes immediately — it opens the shared family-
+  // checkbox dialog first (FamilyScopeDialog.tsx), which hands back the
+  // checked family ids on confirm. "Update with current look" is unchanged
+  // (no dialog) — it deliberately reuses whatever scope the preset already
+  // had, see appStore.ts's savePreset doc comment.
+  const [saveScopeOpen, setSaveScopeOpen] = useState(false);
 
-  // Parsed-look cache, per menu OPEN (brief: "parse the preset file lazily +
-  // cache per open of the menu") — a preset file edited on disk while the
-  // menu happens to stay open across several hovers would otherwise show a
-  // stale preview, but that's the same staleness window presetsState()
-  // itself already accepts (it's a snapshot refreshed on save/delete/boot).
-  const cacheRef = useRef<Map<string, GraphDoc>>(new Map());
+  // Parsed-PRESET cache (not just its `.look`), per menu OPEN (brief: "parse
+  // the preset file lazily + cache per open of the menu") — a preset file
+  // edited on disk while the menu happens to stay open across several
+  // hovers would otherwise show a stale preview, but that's the same
+  // staleness window presetsState() itself already accepts (a snapshot
+  // refreshed on save/delete/boot). Caching the WHOLE ParsedPreset (not just
+  // `.look`) is what lets the hover preview stay family-scope-aware — see
+  // previewParsedPreset's doc comment.
+  const cacheRef = useRef<Map<string, ParsedPreset>>(new Map());
   const hoverTimerRef = useRef<number | undefined>(undefined);
   // Which slug is CURRENTLY hovered, so a debounced fetch that resolves
   // after the pointer has already left (or moved to a different row) never
@@ -98,13 +125,13 @@ export function PresetsMenu() {
     clearTimeout(hoverTimerRef.current);
     hoverTimerRef.current = window.setTimeout(() => {
       void (async () => {
-        let look = cacheRef.current.get(slug);
-        if (!look) {
+        let parsed = cacheRef.current.get(slug);
+        if (!parsed) {
           try {
             const text = await window.silverbox.presetRead(slug);
             if (!text) return;
-            look = parsePresetFile(text).look;
-            cacheRef.current.set(slug, look);
+            parsed = parsePresetFile(text);
+            cacheRef.current.set(slug, parsed);
           } catch (err) {
             // Parse failure = no preview, no crash (brief's explicit rule) —
             // the row stays hoverable, it just never shows a preview.
@@ -112,7 +139,10 @@ export function PresetsMenu() {
             return;
           }
         }
-        if (hoveredSlugRef.current === slug) setPreviewLook(look);
+        // previewParsedPreset (not the raw setPreviewLook) so a family-scoped
+        // preset previews the exact MERGED result Apply would produce, not
+        // the raw preset content (preset-scoping brief's explicit rule).
+        if (hoveredSlugRef.current === slug) previewParsedPreset(parsed);
       })();
     }, HOVER_PREVIEW_DELAY_MS);
   };
@@ -208,16 +238,26 @@ export function PresetsMenu() {
                 type="button"
                 data-testid="preset-save"
                 disabled={!ready || saveName.trim() === ''}
-                onClick={() => {
-                  const name = saveName;
-                  setSaveName('');
-                  void savePreset(name);
-                }}
-                title="Save the current whole-look develop graph as a named preset (same name overwrites it)"
+                onClick={() => setSaveScopeOpen(true)}
+                title="Choose which develop families to save as a named preset (same name overwrites it)"
               >
                 Save
               </button>
             </div>
+            <FamilyScopeDialog
+              open={saveScopeOpen}
+              title="Save preset"
+              targetDescription={`Save "${saveName.trim()}" with:`}
+              settingsKey="presetSaveFamilies"
+              confirmLabel="Save"
+              onCancel={() => setSaveScopeOpen(false)}
+              onConfirm={(families) => {
+                setSaveScopeOpen(false);
+                const name = saveName;
+                setSaveName('');
+                void savePreset(name, families);
+              }}
+            />
             {/* Visible-path principle (DESIGN.md): copy/paste develop
                 settings existed only as ⌘⇧C/V — the adoption audit's one
                 violation. The clickable path lives here because a preset is

@@ -2457,6 +2457,37 @@ button:disabled {
   gap: 8px;
 }
 
+/* FamilyScopeDialog (preset-scoping brief §1) — reuses .export-dialog's
+   chrome; only the checkbox-list body is bespoke. */
+.family-scope-target {
+  font-size: 11px;
+  color: #999;
+  margin-top: 4px;
+}
+
+.family-scope-list {
+  gap: 4px;
+}
+
+.family-scope-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #ddd;
+  padding: 2px 0;
+}
+
+.family-scope-divider {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #888;
+  border-top: 1px solid #444;
+  margin-top: 6px;
+  padding-top: 8px;
+}
+
 /* Sidecar visual diff dialog (git-native completion brief §1) — wider than
    the default .export-dialog (360px) since diff lines run long, and its own
    scrollable line list rather than the default body's flex row gap. */

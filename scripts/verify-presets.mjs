@@ -147,6 +147,38 @@ try {
   /** Click (= select, same as choosing an <option> used to) the row with this display name. */
   const selectPresetRow = (name) => presetRow(name).click();
 
+  // --- preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md §1) ---
+  //
+  // Save no longer writes immediately — clicking "Save" opens the shared
+  // FamilyScopeDialog.tsx first (family checkboxes), which must be
+  // confirmed before anything lands on disk. Every family id this build
+  // knows about (mirrors presetFamilies.ts's PRESET_FAMILIES — kept in sync
+  // by presetFamilies.test.ts on the unit side, so a drift there would show
+  // up as a missing/extra checkbox testid here, not silently).
+  const ALL_FAMILY_IDS = ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail', 'geometry', 'spots', 'masks', 'custom-nodes'];
+  /** Everything except geometry — the "whole look" shape every pre-scoping verify section below expects (captureLook never carried geometry either). */
+  const WHOLE_LOOK_MINUS_GEOMETRY = ALL_FAMILY_IDS.filter((id) => id !== 'geometry');
+
+  /** Explicit check/uncheck of every known family checkbox to exactly `idsToCheck` — deterministic regardless of whatever the dialog remembered from a PRIOR section's save (settings persist across the whole suite run). */
+  const setFamilyCheckboxes = async (idsToCheck) => {
+    const want = new Set(idsToCheck);
+    for (const id of ALL_FAMILY_IDS) {
+      const checkbox = page.locator(`[data-testid="family-scope-checkbox-${id}"] input[type="checkbox"]`);
+      if (want.has(id)) await checkbox.check();
+      else await checkbox.uncheck();
+    }
+  };
+
+  /** Fill the name field, click Save, check exactly `families`, confirm — the new multi-step replacement for the old one-click Save. */
+  const saveWithFamilies = async (name, families) => {
+    await page.locator('[data-testid="preset-save-name"]').fill(name);
+    await page.locator('[data-testid="preset-save"]').click();
+    await page.waitForSelector('[data-testid="family-scope-dialog"]', { timeout: 5_000 });
+    await setFamilyCheckboxes(families);
+    await page.locator('[data-testid="family-scope-confirm"]').click();
+    await page.waitForSelector('[data-testid="family-scope-dialog"]', { state: 'detached', timeout: 5_000 });
+  };
+
   // ---------------------------------------------------------------------
   console.log('verify-presets (1. edited graph -> save preset via the UI -> file exists):');
   await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.6));
@@ -162,8 +194,11 @@ try {
   const editedGraph = await graphState();
 
   await openPresetsMenu();
-  await page.locator('[data-testid="preset-save-name"]').fill('My Look');
-  await page.locator('[data-testid="preset-save"]').click();
+  // Whole-look-equivalent save: every family EXCEPT geometry checked (the
+  // historical whole-look shape — captureLook never carried geometry
+  // either), so the extra 'exposure' op node (custom-nodes family) lands
+  // in the file too.
+  await saveWithFamilies('My Look', WHOLE_LOOK_MINUS_GEOMETRY);
   await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'My Look')));
 
   const myLookSlug = slugify('My Look');
@@ -238,8 +273,7 @@ try {
     JSON.stringify({ ...beforeInjection, futureFeature: { some: 'newer-build-only data' } }, null, 2) + '\n'
   );
   await openPresetsMenu();
-  await page.locator('[data-testid="preset-save-name"]').fill('My Look');
-  await page.locator('[data-testid="preset-save"]').click();
+  await saveWithFamilies('My Look', WHOLE_LOOK_MINUS_GEOMETRY);
   const survived = await waitForCondition(() => {
     if (!existsSync(myLookPath)) return false;
     const onDisk = JSON.parse(readFileSync(myLookPath, 'utf8'));
@@ -254,8 +288,7 @@ try {
 
   // ---------------------------------------------------------------------
   console.log('verify-presets (5. slug collision: two different names sanitizing to the same slug disambiguate):');
-  await page.locator('[data-testid="preset-save-name"]').fill('My/Look');
-  await page.locator('[data-testid="preset-save"]').click();
+  await saveWithFamilies('My/Look', WHOLE_LOOK_MINUS_GEOMETRY);
   await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'My/Look')));
 
   const collidedSlug = slugify('My/Look'); // "My-Look" — already owned by the DIFFERENTLY-named "My Look"
@@ -289,8 +322,10 @@ try {
   check('the crop actually took effect (setup)', croppedGeometry.crop.w === 0.5 && croppedGeometry.angle === 7, croppedGeometry);
 
   await openPresetsMenu();
-  await page.locator('[data-testid="preset-save-name"]').fill('Crop Test');
-  await page.locator('[data-testid="preset-save"]').click();
+  // 'geometry' deliberately left UNCHECKED — this is the whole point of the
+  // section: even though the family checkbox now exists, the default-off
+  // behavior must still mean "never carries the crop" unless explicitly opted in.
+  await saveWithFamilies('Crop Test', WHOLE_LOOK_MINUS_GEOMETRY);
   await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'Crop Test')));
 
   await openAndWait(ARW_PATH); // reopen: back to identity geometry, empty history
@@ -530,9 +565,248 @@ try {
     { gAfterShortcutReset, freshOpenReferenceGraph }
   );
 
+  // =======================================================================
+  // Preset scoping (docs/brief-bank/preset-scoping-and-export-overrides.md
+  // §1): save-time family checkboxes (FamilyScopeDialog.tsx), scoped apply
+  // (appStore.ts's mergeScopedLook), and whole-look back-compat.
+  // =======================================================================
+
+  console.log('verify-presets (12. save with only basic-tone checked -> the file has ONLY basic tone, `includes` lists it):');
+  await closePresetsMenu();
+  await openAndWait(ARW_PATH); // fresh default graph
+  await page.evaluate(() => {
+    window.__debug.updateNodeParam('dev', 'basic.ev', 0.45);
+    window.__debug.updateNodeParam('dev', 'basic.contrast', 18);
+    window.__debug.updateNodeParam('dev', 'hsl.red.h', 12);
+    window.__debug.updateNodeParam('dev', 'grading.shadows.sat', 25);
+    window.__debug.updateNodeParam('dev', 'effects.clarity', 30);
+    window.__debug.updateNodeParam('dev', 'detail.sharpen.amount', 40);
+  });
+  await page.evaluate(() => window.__debug.setToneCurvePoints('dev', 'rgb', [[0, 0], [128, 90], [255, 255]]));
+  const devBeforeScopedSave = (await graphState()).nodes.find((n) => n.id === 'dev').develop;
+  check(
+    'setup: every develop section actually moved off identity',
+    devBeforeScopedSave.basic.ev === 0.45 &&
+      JSON.stringify(devBeforeScopedSave.toneCurve.rgb) !== JSON.stringify([[0, 0], [255, 255]]) &&
+      devBeforeScopedSave.hsl.red.h === 12 &&
+      devBeforeScopedSave.grading.shadows.sat === 25 &&
+      devBeforeScopedSave.effects.clarity === 30 &&
+      devBeforeScopedSave.detail.sharpen.amount === 40,
+    devBeforeScopedSave
+  );
+
+  await openPresetsMenu();
+  await saveWithFamilies('Basic Only', ['basic-tone']);
+  await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'Basic Only')));
+
+  const basicOnlySlug = slugify('Basic Only');
+  const basicOnlyPath = join(presetsDir, `${basicOnlySlug}.json`);
+  check('the scoped preset file exists', existsSync(basicOnlyPath), basicOnlyPath);
+  const basicOnlyOnDisk = existsSync(basicOnlyPath) ? JSON.parse(readFileSync(basicOnlyPath, 'utf8')) : null;
+  check(
+    '`includes` lists exactly ["basic-tone"]',
+    JSON.stringify(basicOnlyOnDisk?.includes) === JSON.stringify(['basic-tone']),
+    basicOnlyOnDisk?.includes
+  );
+  const savedDev = basicOnlyOnDisk?.look?.graph?.nodes?.find((n) => n.id === 'dev')?.develop;
+  check('basic-tone fields ARE captured (ev/contrast)', savedDev?.basic?.ev === 0.45 && savedDev?.basic?.contrast === 18, savedDev?.basic);
+  check(
+    'curves come back at identity — NOTHING else was saved',
+    JSON.stringify(savedDev?.toneCurve?.rgb) === JSON.stringify([[0, 0], [255, 255]]),
+    savedDev?.toneCurve
+  );
+  check('hsl comes back at identity', savedDev?.hsl?.red?.h === 0 && savedDev?.hsl?.red?.s === 0, savedDev?.hsl?.red);
+  check('grading comes back at identity', savedDev?.grading?.shadows?.sat === 0 && savedDev?.grading?.shadows?.lum === 0, savedDev?.grading?.shadows);
+  check('effects come back at identity', savedDev?.effects?.clarity === 0, savedDev?.effects);
+  check('detail comes back at identity', savedDev?.detail?.sharpen?.amount === 0, savedDev?.detail?.sharpen);
+  check(
+    'no structural nodes present (still the plain 3-node default chain)',
+    basicOnlyOnDisk?.look?.graph?.nodes?.length === 3,
+    basicOnlyOnDisk?.look?.graph?.nodes?.map((n) => n.type)
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (13. applying that scoped preset onto a doc with curves edits -> basic tone changes, curves untouched):');
+  await openAndWait(ARW_PATH); // fresh default graph
+  await page.evaluate(() => window.__debug.setToneCurvePoints('dev', 'rgb', [[0, 0], [64, 40], [255, 255]]));
+  const curveBeforeScopedApply = (await graphState()).nodes.find((n) => n.id === 'dev').develop.toneCurve;
+  check(
+    'setup: curves actually moved off identity',
+    JSON.stringify(curveBeforeScopedApply.rgb) !== JSON.stringify([[0, 0], [255, 255]]),
+    curveBeforeScopedApply
+  );
+
+  await openPresetsMenu();
+  await selectPresetRow('Basic Only');
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.45));
+
+  const devAfterScopedApply = (await graphState()).nodes.find((n) => n.id === 'dev').develop;
+  check(
+    'basic tone changed (pulled from the preset)',
+    devAfterScopedApply.basic.ev === 0.45 && devAfterScopedApply.basic.contrast === 18,
+    devAfterScopedApply.basic
+  );
+  check(
+    'curves untouched — still the pre-apply edit, NOT reset to the preset\'s identity curve',
+    JSON.stringify(devAfterScopedApply.toneCurve) === JSON.stringify(curveBeforeScopedApply),
+    devAfterScopedApply.toneCurve
+  );
+  check(
+    'node count untouched (a scoped apply merges in place — no structural family was part of this preset)',
+    (await graphState()).nodes.length === 3,
+    (await graphState()).nodes.length
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (14. an OLD preset file with no `includes` key still applies WHOLE-LOOK — back-compat):');
+  await openAndWait(ARW_PATH); // fresh default graph
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', 0.55));
+  await page.evaluate(() => window.__debug.setToneCurvePoints('dev', 'rgb', [[0, 0], [100, 60], [255, 255]]));
+  await openPresetsMenu();
+  await saveWithFamilies('Old Style', WHOLE_LOOK_MINUS_GEOMETRY);
+  await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'Old Style')));
+
+  const oldStyleSlug = slugify('Old Style');
+  const oldStylePath = join(presetsDir, `${oldStyleSlug}.json`);
+  const oldStyleOnDisk = JSON.parse(readFileSync(oldStylePath, 'utf8'));
+  check('setup: the freshly-saved file DOES have an `includes` key (about to strip it)', Array.isArray(oldStyleOnDisk.includes), oldStyleOnDisk.includes);
+  delete oldStyleOnDisk.includes;
+  writeFileSync(oldStylePath, JSON.stringify(oldStyleOnDisk, null, 2) + '\n');
+
+  await openAndWait(ARW_PATH); // fresh default graph, empty history
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', -0.2)); // decoy — must be OVERWRITTEN by a whole-look apply
+  await page.evaluate(() => window.__debug.setToneCurvePoints('dev', 'rgb', [[0, 0], [200, 210], [255, 255]])); // decoy
+
+  await openPresetsMenu();
+  await selectPresetRow('Old Style');
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.55));
+
+  const devAfterOldApply = (await graphState()).nodes.find((n) => n.id === 'dev').develop;
+  check('whole-look apply overwrote basic tone (decoy gone)', devAfterOldApply.basic.ev === 0.55, devAfterOldApply.basic.ev);
+  check(
+    'whole-look apply ALSO overwrote curves (proves the `includes`-absent path is NOT the scoped merge)',
+    JSON.stringify(devAfterOldApply.toneCurve.rgb) === JSON.stringify([[0, 0], [100, 60], [255, 255]]),
+    devAfterOldApply.toneCurve.rgb
+  );
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (15. geometry/spots (and masks/custom-nodes) default OFF in the family-scope dialog):');
+  // Clear the remembered selection first — earlier sections' saves each
+  // persisted their own choice, and the dialog would otherwise show THAT
+  // instead of the true shipped defaults this check is about. An empty
+  // array sanitizes as a valid (if trivial) array, not "malformed -> fall
+  // back to DEFAULT_SETTINGS", but FamilyScopeDialog's own `.length > 0`
+  // guard treats zero remembered ids the same as none at all.
+  await page.evaluate(() => window.__debug.updateSettings({ presetSaveFamilies: [] }));
+  await openPresetsMenu();
+  await page.locator('[data-testid="preset-save-name"]').fill('Defaults Check');
+  await page.locator('[data-testid="preset-save"]').click();
+  await page.waitForSelector('[data-testid="family-scope-dialog"]', { timeout: 5_000 });
+  const isFamilyChecked = async (id) => page.locator(`[data-testid="family-scope-checkbox-${id}"] input[type="checkbox"]`).isChecked();
+  for (const id of ['basic-tone', 'wb', 'curves', 'hsl', 'grading', 'effects', 'detail']) {
+    check(`"${id}" is checked by default (develop group)`, await isFamilyChecked(id), id);
+  }
+  for (const id of ['geometry', 'spots', 'masks', 'custom-nodes']) {
+    check(`"${id}" is UNCHECKED by default (structural — "rarely what you want")`, !(await isFamilyChecked(id)), id);
+  }
+  await page.locator('[data-testid="family-scope-cancel"]').click();
+  await page.waitForSelector('[data-testid="family-scope-dialog"]', { state: 'detached', timeout: 5_000 });
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (16. an unknown `includes` id survives a save-reload round trip via Update — forward-compat):');
+  const basicOnlyBeforeInjection = JSON.parse(readFileSync(basicOnlyPath, 'utf8'));
+  writeFileSync(
+    basicOnlyPath,
+    JSON.stringify({ ...basicOnlyBeforeInjection, includes: [...basicOnlyBeforeInjection.includes, 'mystery-family-from-a-newer-build'] }, null, 2) + '\n'
+  );
+
+  await openAndWait(ARW_PATH); // fresh default graph
+  await openPresetsMenu();
+  await selectPresetRow('Basic Only');
+  await page.locator('[data-testid="preset-apply"]').click();
+  await waitForCondition(() => page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev')?.develop?.basic?.ev === 0.45));
+  // Update reuses the file's OWN existing `includes` verbatim (no dialog) —
+  // this is the one save path that must preserve an id it doesn't understand.
+  await page.locator('[data-testid="preset-update"]').click();
+  await waitForCondition(() => {
+    if (!existsSync(basicOnlyPath)) return false;
+    const onDisk = JSON.parse(readFileSync(basicOnlyPath, 'utf8'));
+    return Array.isArray(onDisk.includes) && onDisk.includes.includes('mystery-family-from-a-newer-build');
+  });
+  const basicOnlyAfterUpdate = JSON.parse(readFileSync(basicOnlyPath, 'utf8'));
+  check(
+    'the unknown family id survived the Update round trip',
+    basicOnlyAfterUpdate.includes.includes('mystery-family-from-a-newer-build'),
+    basicOnlyAfterUpdate.includes
+  );
+  check('the known "basic-tone" id is still there too', basicOnlyAfterUpdate.includes.includes('basic-tone'), basicOnlyAfterUpdate.includes);
+
+  // ---------------------------------------------------------------------
+  console.log('verify-presets (17. setting up the relaunch-persistence check: save with a distinctive family selection):');
+  await openPresetsMenu();
+  await saveWithFamilies('Relaunch Marker', ['wb', 'detail']);
+  await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'Relaunch Marker')));
+  const settingsAfterMarkerSave = await page.evaluate(() => window.__debug.settingsState());
+  check(
+    'settings.presetSaveFamilies now remembers exactly the just-checked set',
+    JSON.stringify(settingsAfterMarkerSave.presetSaveFamilies) === JSON.stringify(['wb', 'detail']),
+    settingsAfterMarkerSave.presetSaveFamilies
+  );
+
   check('no page errors across the presets checks', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();
+  if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
+  // NOTE: userDataDir is deliberately NOT removed here — section 18 below
+  // relaunches a SECOND app instance against this exact same userData dir
+  // to prove settings.json (presetSaveFamilies) survives a real process
+  // relaunch, not just an in-memory store. Cleanup happens once, at the
+  // very end, after that second instance has also closed.
+}
+
+// ---------------------------------------------------------------------
+// 18. Last-used family checkboxes persist across a RELAUNCH (not just an
+// in-app store) — a genuinely separate `electron.launch` against the SAME
+// SILVERBOX_USER_DATA dir, mirroring verify-ratings.mjs's own two-instance
+// pattern for exactly this kind of "survives a real process boundary" claim.
+console.log('verify-presets (18. last-used family checkboxes persist across a relaunch):');
+if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
+const app2 = await electron.launch({ args: [projectRoot] });
+try {
+  const page2 = await app2.firstWindow();
+  await page2.waitForSelector('.app-layout', { timeout: 15_000 });
+  await page2.waitForFunction(() => window.__debug?.settingsState() != null, { timeout: 15_000 });
+  await page2.evaluate(() => window.__debug.updateSettings({ autosaveSidecar: false }));
+
+  const settingsAfterRelaunch = await page2.evaluate(() => window.__debug.settingsState());
+  check(
+    'presetSaveFamilies survived the relaunch (read back from settings.json on disk, not carried over in memory)',
+    JSON.stringify(settingsAfterRelaunch.presetSaveFamilies) === JSON.stringify(['wb', 'detail']),
+    settingsAfterRelaunch
+  );
+
+  await page2.evaluate((p) => {
+    void window.__openImageByPath(p);
+  }, ARW_PATH);
+  await page2.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
+
+  await page2.locator('[data-testid="presets-button"]').click();
+  await page2.waitForSelector('[data-testid="presets-menu"]', { timeout: 5_000 });
+  await page2.locator('[data-testid="preset-save-name"]').fill('Whatever');
+  await page2.locator('[data-testid="preset-save"]').click();
+  await page2.waitForSelector('[data-testid="family-scope-dialog"]', { timeout: 5_000 });
+
+  const isFamilyCheckedIn2 = async (id) => page2.locator(`[data-testid="family-scope-checkbox-${id}"] input[type="checkbox"]`).isChecked();
+  for (const id of ['wb', 'detail']) {
+    check(`(relaunch) the dialog pre-checks "${id}", matching the persisted selection`, await isFamilyCheckedIn2(id), id);
+  }
+  for (const id of ['basic-tone', 'curves', 'hsl', 'grading', 'effects', 'geometry', 'spots', 'masks', 'custom-nodes']) {
+    check(`(relaunch) "${id}" stayed UNCHECKED (not part of the persisted selection)`, !(await isFamilyCheckedIn2(id)), id);
+  }
+} finally {
+  await app2.close();
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
   if (ownUserData) rmSync(userDataDir, { recursive: true, force: true });
 }
