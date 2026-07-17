@@ -1,4 +1,5 @@
 import LibRaw from 'libraw-wasm';
+import type { Metadata as LibRawMetadata } from 'libraw-wasm';
 import type { CameraColorInfo, DecodedImage, RawDecoder } from './RawDecoder';
 
 /**
@@ -7,6 +8,58 @@ import type { CameraColorInfo, DecodedImage, RawDecoder } from './RawDecoder';
  * workingSpaceInfo() hook so the verify harness can assert the decode target.
  */
 export const DECODE_OUTPUT_COLOR = 8;
+
+/**
+ * Shared libraw `open()` settings for BOTH decode passes below (see
+ * `decode()`'s doc comment) — kept identical across passes so metadata read
+ * from either one is consistent.
+ */
+const OPEN_SETTINGS = { useCameraWb: true, outputBps: 16, outputColor: DECODE_OUTPUT_COLOR, noAutoBright: true } as const;
+
+/**
+ * Camera-recommended crop for round-11's decode-frame fix (task: "libraw
+ * decodes 4624×3080 for an a7C II shot whose camera JPEG/LR export are
+ * 4608×3072 with a DIFFERENT origin — a too-large, off-origin source frame
+ * that a naive symmetric border-crop can't fix, because the required origin
+ * shift isn't symmetric").
+ *
+ * libraw-wasm ≥1.6 exposes `imgdata.sizes.raw_inset_crops` (Sony's own
+ * recommended develop crop, straight from the ARW) via `metadata(true)`.
+ * Verified empirically against the camera JPEG (scratchpad NCC alignment,
+ * both DSC02993 and DSC03298): applying `raw_inset_crops[0]` via libraw's
+ * `cropbox` setting (which operates in the SAME pre-rotation frame as
+ * `sizes.iwidth`/`iheight` — "applied before rotation" per LibRawSettings'
+ * own doc) lands the decoded frame's center within ~1px of the camera's, vs.
+ * ~35px off before. This is the libraw route the task brief asked to
+ * exhaust first, and it works — no per-model fallback table needed.
+ *
+ * One real limitation found during validation: for DSC02993 (landscape,
+ * flip=0), libraw's own `iwidth`/`iheight` (its internal "active area" size)
+ * is a few pixels SHORT of `cleft+cwidth`/`ctop+cheight` — Sony's crop
+ * rectangle claims 28 columns / 22 rows that this libraw-wasm build never
+ * demosaics at all (confirmed: `imageData()`, `rawImageData()`, and a
+ * cropbox spanning the FULL `raw_width`×`raw_height` all cap out at
+ * `iwidth`×`iheight`, so those pixels are not recoverable through any
+ * exposed API). DSC03298 (portrait) has no such shortfall and lands on
+ * camera-exact dims. `computeCropbox` below clamps to what's actually
+ * decodable, so DSC02993 comes out ~0.6%/0.7% smaller than the camera's
+ * 4608×3072 (4580×3050) with the origin still correctly aligned — a real,
+ * documented libraw-wasm limitation, not a logic bug in this file.
+ */
+export function computeCropbox(meta: LibRawMetadata): [number, number, number, number] | null {
+  const crop = meta.raw_inset_crops?.[0];
+  if (!crop) return null;
+  const { cleft, ctop, cwidth, cheight } = crop;
+  // libraw fills unused raw_inset_crops slots with the 0xFFFF sentinel.
+  if (!(cwidth > 0) || !(cheight > 0) || cleft >= 0xffff || ctop >= 0xffff || cleft < 0 || ctop < 0) return null;
+  const iw = meta.iwidth ?? 0;
+  const ih = meta.iheight ?? 0;
+  if (iw <= 0 || ih <= 0 || cleft >= iw || ctop >= ih) return null;
+  const w = Math.min(cwidth, iw - cleft);
+  const h = Math.min(cheight, ih - ctop);
+  if (w <= 0 || h <= 0) return null;
+  return [cleft, ctop, w, h];
+}
 
 /**
  * RAW decoder backed by libraw-wasm (runs in its own Web Worker).
@@ -37,11 +90,29 @@ export class LibrawDecoder implements RawDecoder {
     sharedRaw ??= new LibRaw();
     const raw = sharedRaw;
     {
-      // open() transfers the buffer to the worker; `bytes` is detached after this.
-      await raw.open(bytes, { useCameraWb: true, outputBps: 16, outputColor: DECODE_OUTPUT_COLOR, noAutoBright: true });
+      // Keep an intact copy BEFORE the first open(): open() transfers its
+      // argument to the worker, detaching it, so if this file needs a
+      // second, crop-aware open() pass (see computeCropbox above) we need a
+      // buffer that pass can still consume.
+      const bytesForCropPass = bytes.slice();
 
-      const meta = await raw.metadata(true);
+      // open() transfers the buffer to the worker; `bytes` is detached after this.
+      await raw.open(bytes, OPEN_SETTINGS);
+
+      let meta = await raw.metadata(true);
       if (!meta) throw new Error('libraw: no metadata');
+
+      // Camera-recommended crop, when libraw exposes one (see computeCropbox's
+      // doc comment) — re-open with it applied BEFORE the (expensive)
+      // imageData() demosaic runs, so we only ever pay for one full decode.
+      const cropbox = computeCropbox(meta);
+      if (cropbox) {
+        await raw.open(bytesForCropPass, { ...OPEN_SETTINGS, cropbox });
+        const croppedMeta = await raw.metadata(true);
+        if (!croppedMeta) throw new Error('libraw: no metadata (cropped pass)');
+        meta = croppedMeta;
+      }
+
       const img = await raw.imageData();
       if (!img) throw new Error('libraw: no image data');
       if (img.colors !== 3) throw new Error(`libraw: expected 3 color channels, got ${img.colors}`);

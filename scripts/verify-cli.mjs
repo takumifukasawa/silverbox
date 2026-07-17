@@ -52,8 +52,11 @@ process.env.SILVERBOX_TEST = '1';
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 const SRC_ARW = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 const SRC_JPG = process.env.SILVERBOX_TEST_JPG ?? 'test-assets/test.JPG';
-const FULL_WIDTH = 4624;
-const FULL_HEIGHT = 3080;
+// round-11 decode-frame fix: 4580×3050 (raw_inset_crops-clamped), not the
+// old too-large/off-origin 4624×3080 — see librawDecoder.ts's
+// computeCropbox doc comment.
+const FULL_WIDTH = 4580;
+const FULL_HEIGHT = 3050;
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');

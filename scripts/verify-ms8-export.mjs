@@ -1,8 +1,9 @@
 /**
  * Milestone 8 verify: full-resolution export. Opens the ARW, applies an
  * exposure edit, exports to JPEG and PNG, and checks each file on disk:
- * full 4624×3080 dimensions and channel means matching the (identically
- * edited) preview readback.
+ * full 4580×3050 dimensions (round-11 decode-frame fix — see
+ * librawDecoder.ts's computeCropbox doc comment) and channel means matching
+ * the (identically edited) preview readback.
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, existsSync, statSync, unlinkSync, readFileSync } from 'node:fs';
@@ -94,7 +95,7 @@ try {
   check('JPEG file exists and is >1MB', existsSync(OUT_JPG) && statSync(OUT_JPG).size > 1_000_000,
     existsSync(OUT_JPG) ? statSync(OUT_JPG).size : 'missing');
   const jpg = await measureExport(OUT_JPG);
-  check('JPEG is full resolution 4624×3080', jpg.width === 4624 && jpg.height === 3080, {
+  check('JPEG is full resolution 4580×3050', jpg.width === 4580 && jpg.height === 3050, {
     w: jpg.width,
     h: jpg.height,
   });
@@ -113,7 +114,7 @@ try {
   const pngState = await exportAndWait(OUT_PNG);
   check('PNG export completes without error', pngState.status === 'idle', pngState);
   const png = await measureExport(OUT_PNG);
-  check('PNG is full resolution 4624×3080', png.width === 4624 && png.height === 3080, {
+  check('PNG is full resolution 4580×3050', png.width === 4580 && png.height === 3050, {
     w: png.width,
     h: png.height,
   });

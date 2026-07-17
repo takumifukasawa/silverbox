@@ -241,6 +241,22 @@ look with identity geometry (the common case) never needs to think about
 this: anchor space and output space coincide exactly when crop is full and
 angle is 0.
 
+**Known limitation (round-11 decode-frame fix):** anchor space is normalized
+against the *decoded* frame's own dimensions, which changed for Sony ARWs
+when the decoder started applying the camera's embedded `raw_inset_crops`
+recommendation instead of libraw's own (too-large, off-origin) default frame
+— see `src/renderer/engine/decoder/librawDecoder.ts`'s `computeCropbox` doc
+comment for the full story. A spot/mask authored against the OLD decoded
+frame (any look saved before this fix, on a Sony ARW) is anchored to a
+normalized fraction of a frame whose origin has since shifted by a real,
+per-shot amount (tens of pixels, not a fixed constant) — reopening that look
+will show the spot/mask offset from where it was placed. The sidecar has no
+field recording which decode frame a look was authored against, and the
+shift is per-shot (depends on that file's own `raw_inset_crops`), so there is
+no safe automatic migration: `SIDECAR_SCHEMA_VERSION` was **not** bumped for
+this, and no compensation is applied on load. Affected looks need their
+spots/masks manually nudged back into place after reopening once.
+
 ### 4.4 Bypass
 
 Any node except `input`/`output`/`image` may carry `"disabled": true`

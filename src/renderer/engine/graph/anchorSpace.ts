@@ -29,6 +29,19 @@
  * identity (orientation alone never moves a point WITHIN its own oriented
  * frame), so anchor and output coords coincide — bit-exact, and every
  * pre-existing identity-geometry doc/verify is untouched.
+ *
+ * KNOWN LIMITATION (round-11 decode-frame fix): `ow`/`oh` here are the
+ * ORIENTED-frame dims, which trace back to the decoder's own output size
+ * (PreparedImage.fullWidth/fullHeight). When librawDecoder.ts started
+ * applying the camera's embedded raw_inset_crops recommendation for Sony
+ * ARWs (fixing a too-large, off-origin default decode frame — see that
+ * file's computeCropbox doc comment), the decoded frame's origin shifted by
+ * a real, per-shot pixel amount. A spot/mask normalized against the OLD
+ * frame is now a slightly-wrong fraction of the NEW one — there is no stored
+ * "which decode frame was this authored against" marker to compensate with,
+ * and the shift amount varies per shot, so no automatic migration is
+ * applied (see docs/sidecar-spec.md §4.3). Affected looks need a manual
+ * nudge after reopening once.
  */
 import { rot } from './cropFit';
 import type { GeometryParams } from './graphDoc';
