@@ -12,6 +12,9 @@
  *  2. Keys 1-5 set / 0 clears the rating; the toolbar reflects it; it marks
  *     graphDirty but pushes NO history entry (deliberate divergence from
  *     every other graph mutation — see appStore.ts's setRating).
+ *  2c. The toolbar's clear-rating button (UX pack, hand-test 2026-07-17
+ *     item 2 — a mouse path for what the '0' key already does): set to 3 via
+ *     the key, click clears it to 0, and the disk eventually reflects it too.
  *  3. isTextEntry guards it: a focused text input swallows the digit.
  *  4. Autosave writes it to disk (polling the FILE/its parsed content, never
  *     `graphDirty === false` alone — see verify-filmstrip.mjs's own fix for
@@ -252,6 +255,26 @@ try {
 
   // set to 3 for the next sections (via a star click — keeps both input paths exercised across the file)
   await page.locator('[data-testid="toolbar-star-3"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 3, { timeout: 5_000 });
+
+  // === 2c. Clear-rating button (UX pack, hand-test 2026-07-17 item 2 —
+  // "setting rating back to 0 is awkward"): a mouse path for exactly what
+  // the '0' key already does, sitting left of the 5 stars. ===
+  console.log('verify-ratings (2c. the clear-rating button sets rating to 0):');
+  await page.keyboard.press('3'); // self-contained: set via the KEY, not carried over from 2b's click above
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 3, { timeout: 5_000 });
+  check('rating is 3 before clicking the clear control', (await rating()) === 3, await rating());
+  await page.locator('[data-testid="toolbar-star-clear"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().rating === 0, { timeout: 5_000 });
+  check('clicking the clear-rating control sets rating to 0', (await rating()) === 0, await rating());
+  check('toolbar reflects 0 after the click', (await toolbarRatingAttr()) === '0' && (await toolbarFilledStars()) === 0, {
+    attr: await toolbarRatingAttr(),
+    filled: await toolbarFilledStars(),
+  });
+  check('the cleared rating (0) eventually persists to disk too', await waitForDiskRating(0, 10_000), readDiskRating());
+
+  // restore 3 for the sections below, which assume it
+  await page.keyboard.press('3');
   await page.waitForFunction(() => window.__debug.sidecarState().rating === 3, { timeout: 5_000 });
 
   // === 3. isTextEntry guard ===

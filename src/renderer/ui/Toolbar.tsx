@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import type { PingResult } from '../../../shared/ipc';
+import type { PhotoFlag, PingResult } from '../../../shared/ipc';
 import { useAppStore } from '../store/appStore';
 import { BLEND_KIND, CUSTOM_KIND, OPS } from '../engine/graph/ops';
 import { outputName, type AddableKind } from '../engine/graph/graphDoc';
@@ -201,6 +201,39 @@ function CompareStrip() {
 }
 
 /**
+ * "Clear rating" affordance (UX pack, hand-test 2026-07-17 item 2: "setting
+ * rating back to 0 is awkward" — the '0' key already does it, but there was
+ * no mouse path). A slashed star, built inline (no icon dependency): a plain
+ * ☆ outline path with a diagonal line drawn across it, both stroked in
+ * `currentColor` so the muted/hover coloring below is the only place that
+ * needs to change. Sits at the LEFT of the star row (rating-clear reads
+ * before the stars themselves, since it acts on all of them at once).
+ */
+function ClearRatingButton() {
+  const setRating = useAppStore((s) => s.setRating);
+  return (
+    <button
+      type="button"
+      className="star-clear-button"
+      data-testid="toolbar-star-clear"
+      title="Clear rating (0)"
+      onClick={() => setRating(0)}
+    >
+      <svg viewBox="0 0 24 24" width="11" height="11" aria-hidden="true">
+        <path
+          d="M12 2.5l2.6 5.9 6.4.6-4.8 4.3 1.4 6.3L12 16.6l-5.6 3-1.4-6.3-4.8-4.3 6.4-.6z"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinejoin="round"
+        />
+        <line x1="2.5" y1="21.5" x2="21.5" y2="2.5" stroke="currentColor" strokeWidth="1.6" />
+      </svg>
+    </button>
+  );
+}
+
+/**
  * Star-rating control (ratings pack; round-9 fix pack item 3: the stars were
  * display-only, a visible-path violation per DESIGN.md — 1-5/0 keys worked
  * but clicking did nothing). Each star is now its own clickable button:
@@ -209,12 +242,14 @@ function CompareStrip() {
  * to 0 (LR's own click-the-current-star-to-clear convention), matching the
  * '0' key's behavior. Still always renders 5 glyphs (filled up to `rating`,
  * empty past it) so "unrated" reads as visible absence, not a missing
- * control — only the interactivity is new.
+ * control — only the interactivity is new. The clear-rating button (above)
+ * renders FIRST, left of the 5 stars.
  */
 function RatingStars({ rating }: { rating: number }) {
   const setRating = useAppStore((s) => s.setRating);
   return (
     <span className="toolbar-rating" data-testid="toolbar-rating" data-rating={rating} title={`Rating: ${rating}/5 (click a star, or keys 1-5, 0 clears)`}>
+      <ClearRatingButton />
       {Array.from({ length: 5 }, (_, i) => {
         const n = i + 1;
         return (
@@ -231,6 +266,43 @@ function RatingStars({ rating }: { rating: number }) {
         );
       })}
     </span>
+  );
+}
+
+/**
+ * Pick/reject flag glyph, toolbar version (UX pack, hand-test 2026-07-17
+ * item 3: "while editing, the pick/reject state should be visible next to
+ * the rating stars"). Shares its color styling with the Filmstrip's own
+ * per-cell flag glyph (`.flag-glyph--pick`/`.flag-glyph--reject` in
+ * styles.css — one shared rule, not a copy) but adds a third, visible
+ * "unflagged" state (⚐, an outline flag) since a toolbar control must always
+ * show SOMETHING, unlike a filmstrip cell which simply renders nothing for
+ * `flag === null`. Clicking cycles none→pick→reject→none — the same p/x/u
+ * semantics App.tsx's keyboard handler already drives, against the same
+ * `setFlag` action (an explicit look path, never "the current photo"
+ * implicitly — see setFlag's own doc comment); a no-op without an open image
+ * (`currentLookPath` is null before anything has ever been opened).
+ */
+function FlagButton({ flag }: { flag: PhotoFlag | null }) {
+  const currentLookPath = useAppStore((s) => s.currentLookPath);
+  const setFlag = useAppStore((s) => s.setFlag);
+  const cycle = () => {
+    if (!currentLookPath) return;
+    const next: PhotoFlag | null = flag === null ? 'pick' : flag === 'pick' ? 'reject' : null;
+    void setFlag(currentLookPath, next);
+  };
+  const label = flag === 'pick' ? 'Picked' : flag === 'reject' ? 'Rejected' : 'Unflagged';
+  return (
+    <button
+      type="button"
+      className={`toolbar-flag-button flag-glyph${flag ? ` flag-glyph--${flag}` : ' flag-glyph--none'}`}
+      data-testid="toolbar-flag"
+      data-flag={flag ?? 'none'}
+      title={`${label} — click to cycle (keys: p=pick, x=reject, u=unflag)`}
+      onClick={cycle}
+    >
+      {flag === 'pick' ? '⚑' : flag === 'reject' ? '⨯' : '⚐'}
+    </button>
   );
 }
 
@@ -273,6 +345,7 @@ export function Toolbar() {
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
   const sidecarRating = useAppStore((s) => s.sidecarRating);
+  const sidecarFlag = useAppStore((s) => s.sidecarFlag);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
   const showSidecarDiff = useAppStore((s) => s.showSidecarDiff);
   const legacySidecarImportNotice = useAppStore((s) => s.legacySidecarImportNotice);
@@ -578,6 +651,7 @@ export function Toolbar() {
           <>
             <span style={{ color: '#fff', fontWeight: 'bold' }}>{fileName}</span>
             <RatingStars rating={sidecarRating} />
+            <FlagButton flag={sidecarFlag} />
             <span>
               {image.fullWidth}×{image.fullHeight}
             </span>

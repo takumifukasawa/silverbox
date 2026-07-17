@@ -80,6 +80,7 @@ import {
 import { diffLook } from '../engine/look/diffLook';
 import {
   DEFAULT_SETTINGS,
+  PROJECT_MANIFEST_NAME,
   SIDECAR_SUFFIX,
   type CliCheckJob,
   type CliCheckResult,
@@ -359,6 +360,34 @@ interface AppState {
    * true (the strip just renders whatever the playlist already had).
    */
   openFolder(dir: string): Promise<boolean>;
+  /**
+   * Multi-file drop (UX pack, hand-test 2026-07-17 item 1): App.tsx's own
+   * drop handler funnels every N>1-file drop here (a single-file drop keeps
+   * going through `openPathSmart` unchanged — see App.tsx's onDrop doc
+   * comment). Mirrors `openFolder`'s own shape (add-to-playlist, show the
+   * strip, open the first) but for an explicit list of dropped PATHS rather
+   * than one directory's `listImages` scan — each path is added via
+   * `ensureProjectAndAddPhoto` (creating/activating the quick project first
+   * if none is active, same as `openFolder`), `folderDir` is set to the
+   * ACTIVE PROJECT's own directory (there is no single "this folder" for a
+   * multi-drop — `folderDir`'s only remaining job post-project-storage-
+   * migration is gating the strip's visibility + Filmstrip's remount key,
+   * not naming a directory whose raw listing is shown — see its own doc
+   * comment), and `paths[0]` (drop order, not RAW-preference — the OLD
+   * single-open pickDropFile behavior this replaces) opens.
+   *
+   * Edge case (kept deliberately simple/explicit, per the brief): if ANY
+   * dropped path is itself a project.silverbox — either the manifest file
+   * directly, or (the realistic case) a dropped FOLDER that already
+   * contains one — that project wins outright: it opens via
+   * `openProjectByPath`, exactly as a lone project drop would, and every
+   * OTHER dropped path is ignored (a `projectNotice` says so). No attempt is
+   * made to also add the other dropped images afterward, and a project that
+   * fails to open (a corrupt manifest) reports its own error notice and
+   * stops there too — a mixed drop either resolves to "the project", full
+   * stop, or to "all images", never a partial mix of both.
+   */
+  openMultiDrop(paths: string[]): Promise<void>;
   /** ←/→ filmstrip navigation (folder context only): steps to the prev/next sorted entry, clamped at the ends (no wraparound). No-op without a folder context, with no entries, or while an image is already loading. */
   stepFilmstrip(delta: 1 | -1): void;
   /**
@@ -2921,6 +2950,62 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ folderDir: dir, folderEntries: entries });
     if (listed.length > 0) await get().openImageByPath(listed[0]!.path, { keepFolderContext: true });
     return true;
+  },
+
+  async openMultiDrop(paths: string[]) {
+    if (paths.length === 0) return;
+    // Project-wins detection (see this action's own interface doc comment
+    // above): tried against EVERY dropped path, same basename-strip
+    // openPathSmart (App.tsx) uses for a single dropped project.silverbox
+    // file — the realistic case is a dropped FOLDER that already contains
+    // one, which readProjectManifest handles directly (ENOTDIR/ENOENT both
+    // read as "no project here", never a thrown error — see main/index.ts's
+    // own doc comment on that handler; `.catch` here is defensive only).
+    const projectDirCandidates = paths.map((p) =>
+      p.split('/').pop() === PROJECT_MANIFEST_NAME ? p.slice(0, -(PROJECT_MANIFEST_NAME.length + 1)) : p
+    );
+    const manifestTexts = await Promise.all(
+      projectDirCandidates.map((dir) => window.silverbox.readProjectManifest(dir).catch(() => null))
+    );
+    const projectIndex = manifestTexts.findIndex((text) => text !== null);
+    if (projectIndex !== -1) {
+      const opened = await get().openProjectByPath(projectDirCandidates[projectIndex]!);
+      // A failed open already raised its own persistent error notice inside
+      // openProjectByPath — nothing more to do either way: a mixed drop
+      // resolves to "the project" (full stop) or errors outright, never a
+      // partial fallback onto the other dropped paths as images.
+      if (opened) {
+        const ignored = paths.length - 1;
+        if (ignored > 0) {
+          raiseNotice('projectNotice', {
+            kind: 'success',
+            message: `Dropped project.silverbox opened — ${ignored} other dropped file${ignored === 1 ? '' : 's'} ignored.`,
+          });
+        }
+      }
+      return;
+    }
+    // No project among the dropped paths — every one of them is a photo:
+    // add each to the active project's playlist (creating/activating the
+    // quick project first if none is active — same as openFolder's own
+    // rule, reusing ensureProjectAndAddPhoto's identity/dedup logic instead
+    // of re-deriving it here).
+    for (const path of paths) {
+      await ensureProjectAndAddPhoto(path);
+    }
+    const project = get().project;
+    if (!project) return; // defensive only — the loop above always sets one for a non-empty paths list
+    const entries = await buildPlaylistEntries(project);
+    // A slower buildPlaylistEntries resolving after the project changed
+    // again meanwhile must not clobber it (openFolder's own guard, same
+    // reasoning).
+    if (get().project !== project) return;
+    // folderDir gates the strip's visibility (App.tsx) and is Filmstrip's
+    // remount key; there is no single "this folder" for a multi-drop, so
+    // the ACTIVE PROJECT's own directory stands in for it, same as
+    // openProjectByPath's own folderDir assignment just below.
+    set({ folderDir: project.dir, folderEntries: entries });
+    await get().openImageByPath(paths[0]!, { keepFolderContext: true });
   },
 
   async openProjectByPath(dir: string) {

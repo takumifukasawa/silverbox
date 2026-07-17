@@ -30,6 +30,13 @@
  *     + folder B's 2), and folder B's own first (sorted) image opens.
  *  6. A single-file open (the same debug hook every other script uses)
  *     shows no strip at all — folder context is cleared.
+ *  7. Multi-file DROP (UX pack, hand-test 2026-07-17 item 1), driven via a
+ *     CDP-synthesized OS drag (verify-dnd.mjs's own dispatch mechanism, not
+ *     a debug hook — this exercises the real drop path end to end): dropping
+ *     2 fresh files adds BOTH to the active project's playlist (exact +2,
+ *     against the authoritative projectState().photoCount, since the strip
+ *     was hidden — 0 DOM cells — right before this from check 6), shows the
+ *     filmstrip, and opens the FIRST dropped file.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -315,7 +322,58 @@ try {
   check('folder context cleared on a standalone single-file open', afterSingle.folder.dir === null, afterSingle.folder);
   check('no strip element in the DOM', afterSingle.stripPresent === false, afterSingle);
 
-  // === 7. Portrait ARW thumbnail renders portrait, not landscape (round-10
+  // === 7. Multi-file DROP adds all to the playlist, opens the first, shows
+  // the strip (UX pack, hand-test 2026-07-17 item 1) — driven via the SAME
+  // CDP-synthesized OS drag verify-dnd.mjs uses (Input.dispatchDragEvent),
+  // not a debug hook, so this exercises the real App.tsx onDrop → appStore's
+  // openMultiDrop path end to end. Two FRESH hardlinks (never opened before
+  // in this session) so the "+2" delta is unambiguous; the baseline is
+  // projectState().photoCount (the AUTHORITATIVE playlist size), not the
+  // DOM's folderState().entries — check 6 just cleared the strip to 0 DOM
+  // cells, but the active project's playlist still holds the 6 entries
+  // accumulated by checks 1-5 underneath. ===
+  console.log('verify-filmstrip (7. multi-file drop adds all to the playlist, opens the first, shows the strip):');
+  const multiDropDir = mkdtempSync(join(tmpdir(), 'silverbox-filmstrip-multidrop-'));
+  const hDsc8 = join(multiDropDir, 'h_DSC8.ARW');
+  const iDsc9 = join(multiDropDir, 'i_DSC9.JPG');
+  linkSync(ARW_PATH, hDsc8);
+  linkSync(JPG_PATH, iDsc9);
+  try {
+    const photoCountBeforeDrop = await page.evaluate(() => window.__debug.projectState().photoCount);
+    const cdp = await page.context().newCDPSession(page);
+    const box = await page.locator('.canvas-view').boundingBox();
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height / 2;
+    const dragData = { items: [], files: [hDsc8, iDsc9], dragOperationsMask: 1 };
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data: dragData });
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragOver', x, y, data: dragData });
+    await cdp.send('Input.dispatchDragEvent', { type: 'drop', x, y, data: dragData });
+    await page.waitForFunction(
+      (p) => window.__debug?.imageState().status === 'ready' && window.__debug.folderState().currentPath === p,
+      hDsc8,
+      { timeout: 120_000 }
+    );
+    await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length > 0, {
+      timeout: 15_000,
+    });
+    const afterMultiDrop = await page.evaluate(() => ({
+      folder: window.__debug.folderState(),
+      cellCount: document.querySelectorAll('[data-testid="filmstrip-cell"]').length,
+      stripPresent: !!document.querySelector('[data-testid="filmstrip"]'),
+    }));
+    check('the strip is visible after the drop', afterMultiDrop.stripPresent === true, afterMultiDrop);
+    check(
+      'the playlist grew by exactly 2 (both dropped files added, none skipped/deduped)',
+      afterMultiDrop.folder.entries.length === photoCountBeforeDrop + 2,
+      { photoCountBeforeDrop, afterEntries: afterMultiDrop.folder.entries.length }
+    );
+    check('the DOM cell count matches the playlist size', afterMultiDrop.cellCount === afterMultiDrop.folder.entries.length, afterMultiDrop);
+    check('the FIRST dropped file is the one that opened', afterMultiDrop.folder.currentPath === hDsc8, afterMultiDrop.folder);
+  } finally {
+    rmSync(multiDropDir, { recursive: true, force: true });
+  }
+
+  // === 8. Portrait ARW thumbnail renders portrait, not landscape (round-10
   // fix pack item 1) — same fixture convention verify-preview.mjs uses for
   // its portrait overlay checks: an env-overridable path, loud SKIP if the
   // fixture file isn't present on this machine. thumbnailCache.ts's Sony RAW

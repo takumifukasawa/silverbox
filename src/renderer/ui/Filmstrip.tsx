@@ -142,9 +142,11 @@ function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEn
         // Pick/reject glyph (reject-flag pack) — same "read cheaply off the
         // wrapper, don't re-parse here" pattern as the rating span above.
         // Bottom-right so it never collides with the edited-dot (top-right)
-        // or the rating stars (bottom-left).
+        // or the rating stars (bottom-left). Coloring is the shared
+        // .flag-glyph--pick/--reject rule (styles.css) also used by the
+        // toolbar's own flag button (UX pack item 3) — one rule, not a copy.
         <span
-          className={`filmstrip-flag filmstrip-flag--${entry.flag}`}
+          className={`filmstrip-flag flag-glyph flag-glyph--${entry.flag}`}
           data-testid="filmstrip-flag"
           data-flag={entry.flag}
           title={entry.flag === 'pick' ? 'Pick' : 'Reject'}

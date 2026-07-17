@@ -19,6 +19,10 @@
  *     (metadata, not an undoable look edit — same divergence setRating
  *     already has); independent of rating (setting a rating doesn't touch
  *     the flag and vice versa, and rejecting doesn't clear the rating).
+ *  2b. Toolbar flag glyph (UX pack, hand-test 2026-07-17 item 3): reflects
+ *     none/pick/reject next to the rating stars, and clicking it cycles
+ *     none→pick→reject→none (the same setFlag call p/x/u drive) — pushes no
+ *     history entry either, same metadata semantics as the keys.
  *  3. isTextEntry guards it: a focused text input swallows p/x/u.
  *  4. Autosave writes it to disk (absent when unflagged — identity-omission,
  *     never a written `flag: null`); it survives a fresh reopen; an explicit
@@ -244,6 +248,44 @@ try {
   await page.keyboard.press('0');
   await page.waitForFunction(() => window.__debug.sidecarState().rating === 0, { timeout: 5_000 });
   check('clearing the rating does not clear the flag', (await flagState()) === 'reject', await flagState());
+
+  // === 2b. Toolbar flag glyph — reflects state, click cycles none→pick→reject→none ===
+  console.log('verify-flags (2b. the toolbar flag glyph reflects state and its click cycles pick/reject/none):');
+  const toolbarFlagAttr = () => page.$eval('[data-testid="toolbar-flag"]', (el) => el.dataset.flag);
+  check('toolbar flag glyph shows "reject" (state carried over from the p/x/u checks above)', (await toolbarFlagAttr()) === 'reject', await toolbarFlagAttr());
+
+  await page.keyboard.press('u');
+  await page.waitForFunction(() => window.__debug.sidecarState().flag === null, { timeout: 5_000 });
+  check('toolbar flag glyph shows "none" once unflagged', (await toolbarFlagAttr()) === 'none', await toolbarFlagAttr());
+
+  const histBeforeToolbarFlag = await historyState();
+  await page.locator('[data-testid="toolbar-flag"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().flag === 'pick', { timeout: 5_000 });
+  check('clicking the toolbar flag glyph (none) sets pick', (await flagState()) === 'pick', await flagState());
+  check('toolbar reflects pick after the click', (await toolbarFlagAttr()) === 'pick', await toolbarFlagAttr());
+
+  await page.locator('[data-testid="toolbar-flag"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().flag === 'reject', { timeout: 5_000 });
+  check('clicking again (pick) advances to reject', (await flagState()) === 'reject', await flagState());
+  check('toolbar reflects reject after the click', (await toolbarFlagAttr()) === 'reject', await toolbarFlagAttr());
+
+  await page.locator('[data-testid="toolbar-flag"]').click();
+  await page.waitForFunction(() => window.__debug.sidecarState().flag === null, { timeout: 5_000 });
+  check('clicking again (reject) cycles back to none', (await flagState()) === null, await flagState());
+  check('toolbar reflects none after the click', (await toolbarFlagAttr()) === 'none', await toolbarFlagAttr());
+
+  const histAfterToolbarFlag = await historyState();
+  check(
+    'toolbar flag clicks push no history entry either (same metadata semantics as p/x/u)',
+    histAfterToolbarFlag.past === histBeforeToolbarFlag.past && histAfterToolbarFlag.future === histBeforeToolbarFlag.future,
+    { histBeforeToolbarFlag, histAfterToolbarFlag }
+  );
+
+  // restore 'reject' for the sections below, which assume it (via the 'x'
+  // key rather than another toolbar click — keeps both input paths exercised
+  // across the file, same as verify-ratings.mjs's own 2b does).
+  await page.keyboard.press('x');
+  await page.waitForFunction(() => window.__debug.sidecarState().flag === 'reject', { timeout: 5_000 });
 
   // === 3. isTextEntry guard ===
   console.log('verify-flags (3. p/x/u are ignored while a text input is focused):');

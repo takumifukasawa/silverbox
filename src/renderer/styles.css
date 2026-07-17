@@ -110,6 +110,61 @@ button:disabled {
   color: #555;
 }
 
+/* "Clear rating" affordance (UX pack, hand-test 2026-07-17 item 2) — sits
+   left of the 5 stars inside .toolbar-rating, muted by default so it doesn't
+   compete with the stars themselves, brightening on hover as the only
+   discoverability cue it needs. */
+.star-clear-button {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0 4px 0 0;
+  color: #666;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  vertical-align: middle;
+}
+
+.star-clear-button:hover {
+  color: #ccc;
+}
+
+/* Shared pick/reject glyph coloring (reject-flag pack + UX pack item 3):
+   used by BOTH the filmstrip cell overlay (.filmstrip-flag) and the
+   toolbar's clickable flag button (.toolbar-flag-button) below, so "pick"
+   or "reject" always reads as the same color regardless of where it shows
+   up — one shared rule, not a copy per surface. */
+.flag-glyph--pick {
+  color: #6bcb77;
+}
+
+.flag-glyph--reject {
+  color: #e06c75;
+}
+
+/* The toolbar's own flag control (UX pack item 3) — a plain clickable glyph
+   next to the rating stars, cycling none/pick/reject on click. Unlike the
+   filmstrip's read-only overlay glyph, "unflagged" is a real, visible
+   (muted) state here rather than simply not rendering anything. */
+.toolbar-flag-button {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.toolbar-flag-button.flag-glyph--none {
+  color: #666;
+}
+
+.toolbar-flag-button.flag-glyph--none:hover {
+  color: #ccc;
+}
+
 .drop-overlay {
   position: fixed;
   inset: 0;
@@ -537,7 +592,9 @@ button:disabled {
 }
 
 /* Pick/reject glyph (reject-flag pack) — bottom-right, so it never collides
-   with the edited-dot (top-right) or the rating stars (bottom-left). */
+   with the edited-dot (top-right) or the rating stars (bottom-left). Coloring
+   itself is the shared .flag-glyph--pick/--reject rules above (UX pack item
+   3) — this is layout/position only, specific to the filmstrip cell. */
 .filmstrip-flag {
   position: absolute;
   right: 3px;
@@ -545,14 +602,6 @@ button:disabled {
   font-size: 11px;
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
   pointer-events: none;
-}
-
-.filmstrip-flag--pick {
-  color: #6bcb77;
-}
-
-.filmstrip-flag--reject {
-  color: #e06c75;
 }
 
 /* Wraps the main pane and the compare pane (compare pack) side by side —

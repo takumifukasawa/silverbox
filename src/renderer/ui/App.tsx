@@ -8,7 +8,6 @@ import { ExportDialog } from './ExportDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { SidecarDiffDialog } from './SidecarDiffDialog';
 import { useAppStore } from '../store/appStore';
-import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { isBypassableNodeKind } from '../engine/graph/graphDoc';
 import { isTextEntry } from './textEntry';
 import { PROJECT_MANIFEST_NAME } from '../../../shared/ipc';
@@ -27,11 +26,6 @@ declare global {
     /** Verify-harness hook: open a project (a directory containing project.silverbox) bypassing drag-drop. */
     __openProjectByPath: (dir: string) => Promise<void>;
   }
-}
-
-/** Prefer a RAW-named file; else take the first (multi-file drops open one). */
-export function pickDropFile(files: File[]): File | null {
-  return files.find((f) => isRawFileName(f.name)) ?? files[0] ?? null;
 }
 
 /**
@@ -404,18 +398,23 @@ export function App() {
       // no other signal), so a lone drop is ambiguous — openPathSmart (this
       // file's module scope, shared with the file-association `openPath`
       // push below) resolves it: project first, then a plain photo folder,
-      // then a standalone image file. A multi-file drop is unambiguous
-      // (never a folder/project) and keeps today's exact pickDropFile
+      // then a standalone image file. A single-file drop keeps that exact
       // behavior untouched.
       if (files.length === 1) {
         const path = window.silverbox.getPathForFile(files[0]!);
         if (path) void openPathSmart(path);
         return;
       }
-      const file = pickDropFile(files);
-      if (!file) return;
-      const path = window.silverbox.getPathForFile(file);
-      if (path) void useAppStore.getState().openImageByPath(path);
+      // A multi-file drop (UX pack, hand-test 2026-07-17 item 1) — dropping
+      // N image files used to silently open just one (preferring a RAW-named
+      // file, discarding the rest with no feedback at all). openMultiDrop
+      // (appStore.ts) now adds every one of them to the active project's
+      // playlist and shows the filmstrip, opening the first — UNLESS one of
+      // the dropped paths is itself a project.silverbox, in which case that
+      // project wins outright (see openMultiDrop's own doc comment).
+      const paths = files.map((f) => window.silverbox.getPathForFile(f)).filter((p): p is string => !!p);
+      if (paths.length === 0) return;
+      void useAppStore.getState().openMultiDrop(paths);
     };
 
     window.addEventListener('dragenter', onDragEnter);
