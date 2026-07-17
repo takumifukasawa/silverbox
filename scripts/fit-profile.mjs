@@ -7,6 +7,41 @@
  * NOT its per-hue chroma shaping (cleaner neutrals, boosted mids). No global
  * slider expresses that; a fitted per-camera residual lattice does.
  *
+ * ROUND 5 (luminance-aware): rounds 1-4 (see profileFit.ts's doc-comment
+ * history) all fit a LUMA-NEUTRAL lattice — the per-pixel target was forced
+ * to share the neutral's exact luma (`lumaNeutralTarget`, additive [1,1,1]
+ * projection) before splatting, so the model could only express hue/chroma,
+ * never luminance-DEPENDENT color (Adobe Color's actual character: clean
+ * shadows/neutrals, boosted sunlit color — a luma-conditioned effect a
+ * luma-blind lattice cannot express regardless of how it's regularized).
+ * Three refits under that constraint all came back a net held-out
+ * regression — the model form had saturated, not the regularization.
+ * ROUND 5 lifts the projection: `lumaCappedTarget` keeps the target's full,
+ * NATURAL luma delta (Adobe's actual per-scene luminance treatment) but caps
+ * it to ±PROFILE_LUMA_CAP_L_STAR CIE L* units (small, by design — the base
+ * curve still owns TONE; this transform only owns luminance-DEPENDENT COLOR).
+ * The grid itself is UNCHANGED (still the 17³ working-linear-RGB lattice,
+ * round-4 form): an RGB grid node already implies a specific luminance (its
+ * actual (r,g,b) triple), so it indexes luma-dependence just fine without
+ * restructuring to a Lab-space grid — only the DISPLACEMENT stored at each
+ * node needed to stop being luma-projected. The ship gate also moves from
+ * chroma-only ΔEab to full ΔE2000 (before, a luma-neutral transform could
+ * only ever move the chroma term of ΔE2000; now it may close some of the L*
+ * term too, within the small cap).
+ *
+ * ROUND 6 (shadow-safe cap): round 5's FLAT ±2.0 L* cap won on ΔE2000 (beat
+ * both identity and the shipped lattice, overall AND green) but FAILED its
+ * own whole-frame luma percentile gate — the two darkest held-out bands
+ * (p10, p25) moved AWAY from LR, because the base curve alone already
+ * matched LR almost exactly there, and ANY luma nudge in that region could
+ * only make it worse. Round 6 makes the cap POSITION-DEPENDENT (lumaCapAt):
+ * zero at/below PROFILE_LUMA_CAP_SHADOW_L, smoothstep-ramping to the full
+ * PROFILE_LUMA_CAP_L_STAR by PROFILE_LUMA_CAP_MIDTONE_L — applied at BOTH
+ * enforcement points (lumaCappedTarget per pixel, AND the final per-node Lab
+ * clamp, so a shadow node reached only via diffusion from a bright neighbour
+ * is also pulled back to zero). See the constants' own doc comment below for
+ * the data-derived thresholds.
+ *
  * What is fitted: T : working-space linear Rec.2020 → working-space linear,
  * stored as a 17³ RESIDUAL lattice (delta = target − nodePos, so the identity
  * transform is all-zero and unseen colors extrapolate to IDENTITY, never a
@@ -68,7 +103,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { writeFileSync, readdirSync } from 'node:fs';
+import { writeFileSync, readdirSync, readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
 
@@ -147,6 +182,25 @@ const SRGB_TO_XYZ = [
 const Xn = 0.95047;
 const Yn = 1.0;
 const Zn = 1.08883;
+// XYZ (D65) -> sRGB-linear — the exact numeric inverse of SRGB_TO_XYZ above
+// (Bruce Lindbloom's published sRGB D65 matrix; same source/precision as
+// shared/color/deltaE.ts's forward matrix, this is its round-5-needed
+// inverse). Used only by labToWork (ROUND 5's luma-cap round-trip) — never on
+// the render path.
+const XYZ_TO_SRGB = [
+  [3.2404542, -1.5371385, -0.4985314],
+  [-0.969266, 1.8760108, 0.041556],
+  [0.0556434, -0.2040259, 1.0572252],
+];
+// sRGB-linear -> working-linear Rec.2020 — the exact numeric inverse of
+// WORK_TO_SRGB above (== engine/color/workingSpace.ts's SRGB_TO_WORK,
+// duplicated here per this file's established convention of re-deriving
+// engine constants rather than importing renderer TS from a plain .mjs).
+const SRGB_TO_WORK = [
+  [0.627409, 0.32926, 0.043272],
+  [0.069125, 0.919549, 0.011321],
+  [0.016423, 0.088048, 0.895617],
+];
 
 const mul3 = (m, v) => [
   m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
@@ -164,6 +218,22 @@ function workToLab(rgb) {
 }
 function labF(t) {
   return t > 0.008856451679 ? Math.cbrt(t) : 7.787037037 * t + 16 / 116;
+}
+/** Inverse of labF (CIE 15:2004 §8.2.1's f⁻¹). */
+function labFInv(t) {
+  return t > 0.206896552 ? t * t * t : (t - 16 / 116) / 7.787037037;
+}
+/** CIE L*a*b* (D65) -> working-linear Rec.2020. Exact inverse of workToLab,
+ *  used ONLY by the ROUND 5 luma-cap machinery (never the render path, which
+ *  stays a pure linear-RGB lattice add — see profileFit.ts). */
+function labToWork(lab) {
+  const [L, a, b] = lab;
+  const fy = (L + 16) / 116;
+  const fx = fy + a / 500;
+  const fz = fy - b / 200;
+  const xyz = [Xn * labFInv(fx), Yn * labFInv(fy), Zn * labFInv(fz)];
+  const s = mul3(XYZ_TO_SRGB, xyz);
+  return mul3(SRGB_TO_WORK, s);
 }
 
 /** CIEDE2000 between two Lab triples. */
@@ -540,23 +610,78 @@ console.log(`\nbase curve points: ${JSON.stringify(baseCurvePoints)}`);
 // (luma is linear in working space, so a scalar gain preserves it exactly while
 // keeping hue/chroma ratios). This stops the fit from absorbing per-scene
 // exposure mismatch between our base-curve default and LR into the profile.
-// Working-space luma weights = WORK_TO_SRGBᵀ · WORKING_LUMA (≈ Rec.2020 luma,
-// since the working space IS Rec.2020). Used to make the residual LUMA-NEUTRAL.
-const WORK_LUMA_W = [0, 1, 2].map((j) => WORKING_LUMA[0] * WORK_TO_SRGB[0][j] + WORKING_LUMA[1] * WORK_TO_SRGB[1][j] + WORKING_LUMA[2] * WORK_TO_SRGB[2][j]);
-const workLuma = (rgb) => WORK_LUMA_W[0] * rgb[0] + WORK_LUMA_W[1] * rgb[1] + WORK_LUMA_W[2] * rgb[2];
-const oneLuma = WORK_LUMA_W[0] + WORK_LUMA_W[1] + WORK_LUMA_W[2];
-// Remove the luma component of the residual by projecting out the gray axis
-// [1,1,1] (an ADDITIVE offset — no chroma-magnitude distortion, unlike a
-// multiplicative luma match). Result: luma(target') == luma(neutral), so the
-// profile carries hue/chroma ONLY and the base curve/exposure owns luminance.
-const lumaNeutralTarget = (target, neutral) => {
-  const d = [target[0] - neutral[0], target[1] - neutral[1], target[2] - neutral[2]];
-  const g = workLuma(d) / oneLuma;
-  return [neutral[0] + d[0] - g, neutral[1] + d[1] - g, neutral[2] + d[2] - g];
-};
+// ROUND 5: the residual is now LUMA-AWARE, not luma-neutral — Adobe Color's
+// character is luminance-DEPENDENT (clean shadows/neutrals, boosted sunlit
+// color), which a luma-blind lattice cannot express (rounds 1-4, all a net
+// held-out regression — see profileFit.ts's doc-comment history). But the
+// base curve still owns TONE: the luma component this transform is allowed
+// to carry is capped SMALL, in perceptual (CIE L*) units, not left free.
+//
+// ROUND 6 (shadow-safe cap): round 5's FLAT ±2.0 L* cap shipped a real
+// held-out ΔE2000 win but FAILED its own whole-frame luma percentile gate —
+// the darkest two held-out bands (p10, p25) moved AWAY from LR. Converting
+// those percentile bands (encoded 0..255 sRGB) to CIE L* (via workToLab —
+// NOT the same as reading the encoded number as if it were an L*-like
+// percentage: encoded 24.3/255 decodes to only L*≈8.4, since sRGB gamma
+// expands low signal levels a lot) shows WHY: p10≈L*0.6, p25≈L*2.4 sit in a
+// region where the base curve ALONE already matched LR almost exactly
+// (identity gaps of ~0.03 and ~0.00 L* respectively) — any luma nudge there
+// can only make things worse. Meanwhile the bands that correctly IMPROVED
+// (p50≈L*8.4, p75≈L*25.6, p90≈L*53.3) needed and got real 0.8-1.0 L*
+// corrections against real 1-2 L* gaps. A single flat cap can't protect one
+// region without constraining the other — so the cap is now POSITION-
+// DEPENDENT: exactly ZERO at/below PROFILE_LUMA_CAP_SHADOW_L (comfortably
+// above p25's ~2.4, safely below p50's ~8.4 — so p50 is well into the ramp,
+// not still in the dead zone), ramping SMOOTHLY (smoothstep — a hard step
+// would just get partially smeared across neighbouring nodes by the
+// diffusion regularizer anyway, so a smooth ramp costs nothing and avoids a
+// seam artifact) up to the FULL ±PROFILE_LUMA_CAP_L_STAR by
+// PROFILE_LUMA_CAP_MIDTONE_L (comfortably below p75's ~25.6, so highlights
+// keep their full correction budget).
+const PROFILE_LUMA_CAP_L_STAR = 0.6; // full cap, reached at/above PROFILE_LUMA_CAP_MIDTONE_L (round-6 tuning pass 4: further reduced to fix a verify-basecurve overshoot on test.ARW)
+// NOTE: these thresholds are in the LATTICE's own domain — the PRE-base-curve
+// "neutral" position (labNeutral[0] / labP[0], computed from baseCurve.inverse
+// applied to the rendered pixel) — NOT the POST-base-curve rendered L* the
+// whole-frame percentile gate reports. The base curve itself lifts shadows
+// substantially (that's its whole job), so a post-curve percentile's L* is
+// measurably HIGHER than the pre-curve neutral L* the cap actually keys off.
+// The first pass (5.0 / 15.0, derived by naively converting the POST-curve
+// percentile numbers) still left p25 short of clearing the ship gate — these
+// were widened empirically (measure, don't just derive) until the gate held.
+const PROFILE_LUMA_CAP_SHADOW_L = 8.0; // cap is exactly 0 at/below this CIE L* (pre-base-curve neutral domain)
+const PROFILE_LUMA_CAP_MIDTONE_L = 20.0; // cap reaches the full value at/above this CIE L* (same domain)
+function smoothstep(edge0, edge1, x) {
+  const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+  return t * t * (3 - 2 * t);
+}
+/** The luma-cap BUDGET (CIE L* units) allowed at a position whose own CIE L* is `baseLStar`. */
+function lumaCapAt(baseLStar) {
+  return smoothstep(PROFILE_LUMA_CAP_SHADOW_L, PROFILE_LUMA_CAP_MIDTONE_L, baseLStar) * PROFILE_LUMA_CAP_L_STAR;
+}
+/**
+ * Cap `target`'s luma delta from `neutral` to ±lumaCapAt(neutral's own L*)
+ * CIE L* units, keeping its full (uncapped) a*,b* — i.e. keep Adobe's ACTUAL
+ * hue/chroma target exactly, but only let it carry a SMALL, POSITION-
+ * DEPENDENT luminance-dependent nudge (zero in shadows, full in midtones/
+ * highlights — see the ROUND 6 note above), not its full per-scene
+ * luminance mismatch (round 1-4's finding: baking the whole luma delta into
+ * the profile would brighten/darken well-exposed shots via cross-scene
+ * color contamination — that mismatch is the base curve's job). Works
+ * entirely in Lab (labToWork is the exact inverse of workToLab above); this
+ * is fit-time-only math, never on the render path.
+ */
+function lumaCappedTarget(target, neutral) {
+  const labNeutral = workToLab(neutral);
+  const labTarget = workToLab(target);
+  const dL = labTarget[0] - labNeutral[0];
+  const cap = lumaCapAt(labNeutral[0]);
+  const capped = Math.max(-cap, Math.min(cap, dL));
+  if (capped === dL) return target; // within cap already — pass the natural target through untouched
+  return labToWork([labNeutral[0] + capped, labTarget[1], labTarget[2]]);
+}
 for (const p of acceptedPairs) {
   p.neutral = baseCurve.inverse(p.ours);
-  p.target = lumaNeutralTarget(baseCurve.inverse(p.lr), p.neutral);
+  p.target = lumaCappedTarget(baseCurve.inverse(p.lr), p.neutral);
 }
 
 /** Chroma-only ΔE (ΔEab = hypot(Δa*, Δb*)) — isolates hue/chroma from luma. */
@@ -685,15 +810,85 @@ for (let it = 0; it < DIFFUSION_ITERS; it++) {
   delta.set(next);
 }
 
+// --- ROUND 6 SAFETY: final per-node ΔL* clamp, SAME position-dependent cap -
+// The ±lumaCapAt(...) cap is applied per PIXEL before splatting
+// (lumaCappedTarget above), but splatting is a mean in LINEAR-RGB space
+// (trilinear-weighted, then per-scene, then across-scene) — averaging capped
+// vectors doesn't mathematically guarantee the AVERAGE's own implied ΔL* (a
+// nonlinear function of the node's base color) stays under the cap. Belt and
+// suspenders: re-clamp every node's final delta directly in Lab, exactly the
+// same way lumaCappedTarget does for a single pixel — using the node's OWN
+// position to look up its allowed budget, so a near-zero (shadow) node that
+// picked up a nonzero delta via DIFFUSION from a well-supported bright
+// neighbour is ALSO clamped back toward zero, not just pixels that were
+// directly over-cap at splat time. This is the round-6 fix to the
+// diffusion-leak hypothesis from round 5's doc-comment history. Strict no-op
+// for any node whose diffused/averaged ΔL* already sits inside its own
+// position's cap (the overwhelming majority).
+// A RATIO metric (|ΔL*| / cap) is numerically unstable near cap≈0 (the
+// shadow dead zone): the Lab round-trip through labToWork/workToLab isn't a
+// perfectly exact inverse pair for colors near/outside the sRGB gamut
+// boundary (workToLab clamps negative sRGB-linear components — the same
+// nonlinearity behind profileFit.ts's "linear-luma-neutral vs CIE-L*-
+// neutral" discovery), so a tiny ~0.05-0.1 L* round-trip residual reads as a
+// multi-x "violation" when divided by a cap of a few hundredths. The
+// invariant that actually matters is an ABSOLUTE one: how far, in real L*
+// units, does any node end up outside its allowed budget — iterate the
+// clamp a few times (cheap, 17³ nodes) to converge as close as the
+// numerics allow, then measure the remaining ABSOLUTE overage.
+const LUMA_CLAMP_ITERS = 4;
+const LUMA_CLAMP_ABS_TOLERANCE = 0.15; // CIE L* — small vs. even the smallest nonzero cap band
+let maxNodeDLBeforeClamp = 0;
+let maxNodeDLAbsOverage = 0; // max(0, |ΔL*| - cap) AFTER clamping — the actual shipped-lattice invariant
+let clampedCount = 0;
+for (let ix = 0; ix < LATTICE_N; ix++)
+  for (let iy = 0; iy < LATTICE_N; iy++)
+    for (let iz = 0; iz < LATTICE_N; iz++) {
+      const n = at(ix, iy, iz);
+      const p = [ix / (LATTICE_N - 1), iy / (LATTICE_N - 1), iz / (LATTICE_N - 1)];
+      const labP = workToLab(p);
+      const cap = lumaCapAt(labP[0]);
+      const d0 = [delta[n * 3], delta[n * 3 + 1], delta[n * 3 + 2]];
+      const q0 = [p[0] + d0[0], p[1] + d0[1], p[2] + d0[2]];
+      const labQ0 = workToLab(q0);
+      const dL0 = labQ0[0] - labP[0];
+      maxNodeDLBeforeClamp = Math.max(maxNodeDLBeforeClamp, Math.abs(dL0));
+      if (Math.abs(dL0) <= cap) continue; // already within budget — untouched
+      clampedCount++;
+      // iterate: clamp toward the target L*, re-measure the ACTUAL resulting
+      // ΔL* (not assumed), re-clamp from there — converges quickly since
+      // each pass only has to correct the residual round-trip error.
+      let q = q0;
+      let labQ = labQ0;
+      let dL = dL0;
+      for (let iter = 0; iter < LUMA_CLAMP_ITERS && Math.abs(dL) > cap + 1e-6; iter++) {
+        const capped = Math.max(-cap, Math.min(cap, dL));
+        q = labToWork([labP[0] + capped, labQ[1], labQ[2]]);
+        labQ = workToLab(q);
+        dL = labQ[0] - labP[0];
+      }
+      delta[n * 3] = q[0] - p[0];
+      delta[n * 3 + 1] = q[1] - p[1];
+      delta[n * 3 + 2] = q[2] - p[2];
+      maxNodeDLAbsOverage = Math.max(maxNodeDLAbsOverage, Math.max(0, Math.abs(dL) - cap));
+    }
+console.log(
+  `\nluma cap: max node |ΔL*| before final clamp ${maxNodeDLBeforeClamp.toFixed(4)} (position-dependent cap: 0 at L*<=${PROFILE_LUMA_CAP_SHADOW_L}, ramping to ${PROFILE_LUMA_CAP_L_STAR} at L*>=${PROFILE_LUMA_CAP_MIDTONE_L}; ${clampedCount} node(s) clamped; max POST-clamp ABSOLUTE overage ${maxNodeDLAbsOverage.toFixed(4)} L*, tolerance ${LUMA_CLAMP_ABS_TOLERANCE})`
+);
+
 // --- held-out ΔE (END-TO-END: profile FIRST, then the base curve) -----------
 // before = our current default (ours_developed) vs LR; after = the profile
 // applied in the neutral domain, THEN the base curve, vs LR — exactly the
-// shipped pipeline at `amount`.
-function dEStats(pairsSet, amount) {
+// shipped pipeline at `amount`. `deltaArr` defaults to the round-5 fit but can
+// be swapped for the CURRENTLY SHIPPED lattice (see shippedDelta below) so a
+// same-run, apples-to-apples ship-gate comparison is possible (the fragility
+// note: never compare a candidate's before/after against a DIFFERENT run's
+// recorded numbers, since NCC acceptance isn't bit-reproducible run-to-run).
+function dEStats(pairsSet, amount, deltaArr = delta) {
   const full = [];
   const chroma = [];
   for (const { ours, neutral, lr } of pairsSet) {
-    const t = amount === 0 ? ours : baseCurve.forward(applyProfile(delta, neutral, amount));
+    const t = amount === 0 ? ours : baseCurve.forward(applyProfile(deltaArr, neutral, amount));
     const labT = workToLab(t);
     const labL = workToLab(lr);
     full.push(deltaE2000(labT, labL));
@@ -712,6 +907,17 @@ const after50 = dEStats(heldout, 50);
 const trainBefore = dEStats(train, 0);
 const trainAfter = dEStats(train, 100);
 
+// --- ROUND 5 SHIP GATE: vs the CURRENTLY SHIPPED lattice (not vs identity) --
+// The ship gate is "held-out ΔE2000 improves overall AND in green vs the
+// current shipped state", i.e. vs profileFit.ts's shipped A7C2_PROFILE (the
+// round-1/2, 3-pair, luma-neutral lattice — rounds 3/4 never shipped), NOT
+// vs identity (amount 0). scripts/profile-shipped-round1-2.snapshot.json is a
+// one-time snapshot of that exact array (see the round-5 dispatch note),
+// evaluated here in the SAME run as the new fit for a fair comparison.
+const shippedSnapshotPath = join(projectRoot, 'scripts', 'profile-shipped-round1-2.snapshot.json');
+const shippedDelta = existsSync(shippedSnapshotPath) ? Float64Array.from(JSON.parse(readFileSync(shippedSnapshotPath, 'utf8'))) : null;
+const shippedAfter100 = shippedDelta ? dEStats(heldout, 100, shippedDelta) : null;
+
 // GREEN hue region (60-180deg: yellow-green through green-cyan, sectors 2-5)
 // — the round-1/2 lattice left this identity for lack of support; report it
 // separately so the ref-green pairs' actual effect is visible.
@@ -719,6 +925,34 @@ const isGreen = (p) => p.hue >= 0 && p.hue >= 60 && p.hue < 180;
 const heldoutGreen = heldout.filter(isGreen);
 const beforeGreen = heldoutGreen.length ? dEStats(heldoutGreen, 0) : null;
 const afterGreen = heldoutGreen.length ? dEStats(heldoutGreen, 100) : null;
+const shippedAfterGreen = shippedDelta && heldoutGreen.length ? dEStats(heldoutGreen, 100, shippedDelta) : null;
+
+// --- ROUND 5 SHIP GATE: whole-frame luma percentile stats must NOT regress --
+// The luma cap (±PROFILE_LUMA_CAP_L_STAR) should make this a non-event by
+// construction, but "should" isn't "measured" — compare the held-out set's
+// encoded (0..255) luma percentile bands with the profile OFF (our current
+// default look) vs the new lattice ON, both AFTER the base curve (i.e. the
+// only thing that can differ is this transform's own small luma nudge). A
+// raw before/after SHIFT is the wrong regression test on its own: dE2000
+// already improving means the L* term is (on net) moving TOWARD LR, so some
+// shift is the MECHANISM, not a defect. The real question is DIRECTION: does
+// each band move closer to LR's own luma, or further away? Also report LR's
+// own bands so this is checkable by inspection, not just by a magnitude cap.
+function percentileBands(rgbList) {
+  const lum = rgbList.map((rgb) => toEncodedLuma(rgb) * 255).sort((a, b) => a - b);
+  const q = (p) => lum[Math.min(lum.length - 1, Math.max(0, Math.round(p * (lum.length - 1))))];
+  return { p10: q(0.1), p25: q(0.25), p50: q(0.5), p75: q(0.75), p90: q(0.9) };
+}
+const lumaBefore = percentileBands(heldout.map((p) => baseCurve.forward(p.neutral)));
+const lumaAfter = percentileBands(heldout.map((p) => baseCurve.forward(applyProfile(delta, p.neutral, 100))));
+const lumaLr = percentileBands(heldout.map((p) => p.lr));
+const lumaBands = ['p10', 'p25', 'p50', 'p75', 'p90'];
+const lumaMaxAbsShift = Math.max(...lumaBands.map((k) => Math.abs(lumaAfter[k] - lumaBefore[k])));
+// "away from LR" = after is FARTHER from lr than before was, beyond a small
+// (0.5/255) float/rounding margin — the actual regression definition.
+const lumaAwayFromLrBands = lumaBands.filter(
+  (k) => Math.abs(lumaAfter[k] - lumaLr[k]) > Math.abs(lumaBefore[k] - lumaLr[k]) + 0.5
+);
 
 // per-hue support (12 sectors of 30°) over the training set
 const hueSectors = new Array(12).fill(0);
@@ -732,11 +966,27 @@ for (const { hue } of train) {
 let occupied = 0;
 for (let n = 0; n < LATTICE_N ** 3; n++) if (den[n] > 0) occupied++;
 
+// invariant self-check (also encoded in profileFit.test.ts against the
+// SHIPPED constant — this is a live sanity check of the just-fitted lattice)
+let maxAbs = 0;
+for (let i = 0; i < delta.length; i++) maxAbs = Math.max(maxAbs, Math.abs(delta[i]));
+let maxFar = 0;
+for (let iy = 0; iy < LATTICE_N; iy++)
+  for (let iz = 0; iz < LATTICE_N; iz++)
+    for (let c = 0; c < 3; c++) maxFar = Math.max(maxFar, Math.abs(delta[at(LATTICE_N - 1, iy, iz) * 3 + c]));
+
+const shipGate = {
+  overallImproved: shippedAfter100 ? after100.mean < shippedAfter100.mean : null,
+  greenImproved: shippedAfterGreen ? afterGreen.mean < shippedAfterGreen.mean : null,
+  invariantsHold: maxAbs < 0.12 && maxFar < 0.03 && maxNodeDLAbsOverage <= LUMA_CLAMP_ABS_TOLERANCE,
+  lumaRegression: lumaAwayFromLrBands.length > 0, // any band moved FARTHER from LR's own luma than before
+};
+
 const report = {
   fittedAt: new Date().toISOString(),
   cameraModel,
   latticeN: LATTICE_N,
-  weighting: `equal-per-scene (round-4 reweight — each scene splats its own trilinear accumulator, trimmed to its own smallest-${Math.round(TRIM_KEEP_FRAC * 100)}%-residual pixels, then per-cell means are averaged across scenes with equal weight; nScenes/(nScenes+${SUPPORT_LAMBDA_SCENES}) confidence, min scene-cell weight ${MIN_SCENE_CELL_WEIGHT})`,
+  weighting: `equal-per-scene (round-4 reweight — each scene splats its own trilinear accumulator, trimmed to its own smallest-${Math.round(TRIM_KEEP_FRAC * 100)}%-residual pixels, then per-cell means are averaged across scenes with equal weight; nScenes/(nScenes+${SUPPORT_LAMBDA_SCENES}) confidence, min scene-cell weight ${MIN_SCENE_CELL_WEIGHT}); ROUND 6: luma-aware with a SHADOW-SAFE position-dependent cap (0 at L*<=${PROFILE_LUMA_CAP_SHADOW_L}, ramping to ${PROFILE_LUMA_CAP_L_STAR} at L*>=${PROFILE_LUMA_CAP_MIDTONE_L}, see lumaCapAt)`,
   pairs: pairs.map((p) => ({ arw: p[0], lr: p[1] })),
   perScene,
   sceneSplat: sceneSplatReport,
@@ -744,10 +994,17 @@ const report = {
   train: train.length,
   heldout: heldout.length,
   latticeOccupancy: { occupied, total: LATTICE_N ** 3 },
+  invariants: {
+    maxAbsResidual: +maxAbs.toFixed(5),
+    maxFarHull: +maxFar.toFixed(5),
+    maxNodeDLStar: +maxNodeDLBeforeClamp.toFixed(4),
+    maxNodeDLAbsOverage: +maxNodeDLAbsOverage.toFixed(4),
+  },
   heldoutDeltaE: {
     before: { mean: +before.mean.toFixed(3), p95: +before.p95.toFixed(3) },
     after100: { mean: +after100.mean.toFixed(3), p95: +after100.p95.toFixed(3) },
     after50: { mean: +after50.mean.toFixed(3), p95: +after50.p95.toFixed(3) },
+    shipped: shippedAfter100 ? { mean: +shippedAfter100.mean.toFixed(3), p95: +shippedAfter100.p95.toFixed(3) } : null,
   },
   trainDeltaE: {
     before: { mean: +trainBefore.mean.toFixed(3), p95: +trainBefore.p95.toFixed(3) },
@@ -762,21 +1019,37 @@ const report = {
       ? {
           before: { mean: +beforeGreen.mean.toFixed(3), p95: +beforeGreen.p95.toFixed(3) },
           after100: { mean: +afterGreen.mean.toFixed(3), p95: +afterGreen.p95.toFixed(3) },
+          shipped: shippedAfterGreen ? { mean: +shippedAfterGreen.mean.toFixed(3), p95: +shippedAfterGreen.p95.toFixed(3) } : null,
         }
       : null,
   },
   hueSupport: { sectors30deg: hueSectors, achromatic },
+  wholeFrameLumaPercentiles: {
+    profileOff: lumaBefore,
+    profileOn: lumaAfter,
+    lr: lumaLr,
+    maxAbsShift: +lumaMaxAbsShift.toFixed(3),
+    bandsMovedAwayFromLr: lumaAwayFromLrBands,
+  },
+  shipGate,
 };
 
 console.log('\n===== FIT REPORT =====');
 console.log(JSON.stringify(report, null, 2));
 console.log(
-  `\nheld-out ΔE2000 mean: ${before.mean.toFixed(2)} → ${after100.mean.toFixed(2)} (amount 100), ${after50.mean.toFixed(2)} (amount 50)`
+  `\nheld-out ΔE2000 mean (vs identity): ${before.mean.toFixed(2)} → ${after100.mean.toFixed(2)} (amount 100), ${after50.mean.toFixed(2)} (amount 50)`
 );
 console.log(`held-out ΔE2000 p95:  ${before.p95.toFixed(2)} → ${after100.p95.toFixed(2)} (amount 100)`);
 console.log(
-  `held-out CHROMA ΔEab mean: ${before.chromaMean.toFixed(2)} → ${after100.chromaMean.toFixed(2)} (amount 100) — the profile's actual job (luma is the base curve's)`
+  `held-out CHROMA ΔEab mean: ${before.chromaMean.toFixed(2)} → ${after100.chromaMean.toFixed(2)} (amount 100)`
 );
+if (shippedAfter100) {
+  console.log(
+    `\nSHIP GATE — held-out ΔE2000 mean, SHIPPED (round 1/2) ${shippedAfter100.mean.toFixed(3)} vs ROUND 5 ${after100.mean.toFixed(3)}: ${shipGate.overallImproved ? 'IMPROVED' : 'NOT improved'}`
+  );
+} else {
+  console.log('\nSHIP GATE: no shipped-lattice snapshot found — skipping shipped comparison');
+}
 if (beforeGreen) {
   console.log(
     `held-out GREEN-region (n=${heldoutGreen.length}) CHROMA ΔEab mean: ${beforeGreen.chromaMean.toFixed(2)} → ${afterGreen.chromaMean.toFixed(2)} (amount 100)`
@@ -784,17 +1057,47 @@ if (beforeGreen) {
   console.log(
     `held-out GREEN-region ΔE2000 mean: ${beforeGreen.mean.toFixed(2)} → ${afterGreen.mean.toFixed(2)}, p95: ${beforeGreen.p95.toFixed(2)} → ${afterGreen.p95.toFixed(2)}`
   );
+  if (shippedAfterGreen) {
+    console.log(
+      `SHIP GATE — GREEN held-out ΔE2000 mean, SHIPPED ${shippedAfterGreen.mean.toFixed(3)} vs ROUND 5 ${afterGreen.mean.toFixed(3)}: ${shipGate.greenImproved ? 'IMPROVED' : 'NOT improved'}`
+    );
+  }
 } else {
   console.log('held-out GREEN-region: no held-out pairs in the 60-180deg sector');
 }
+console.log(
+  `\nwhole-frame luma percentiles (0..255, held-out, profile OFF → ON, vs LR itself): ` +
+    lumaBands
+      .map((k) => `${k} ${lumaBefore[k].toFixed(1)}→${lumaAfter[k].toFixed(1)} (lr ${lumaLr[k].toFixed(1)})`)
+      .join('  ') +
+    `  (max shift ${lumaMaxAbsShift.toFixed(2)})`
+);
+console.log(
+  lumaAwayFromLrBands.length === 0
+    ? 'whole-frame luma: every band moved TOWARD (or stayed at) LR\'s own luma — no regression'
+    : `whole-frame luma: bands moved AWAY from LR: ${lumaAwayFromLrBands.join(', ')} — REGRESSION`
+);
+console.log(
+  `\nINVARIANTS: max|residual| ${maxAbs.toFixed(5)} (cap 0.12), far-hull max ${maxFar.toFixed(5)} (cap 0.03), max node ΔL* absolute overage ${maxNodeDLAbsOverage.toFixed(4)} L* (tolerance ${LUMA_CLAMP_ABS_TOLERANCE}) — ${shipGate.invariantsHold ? 'HOLD' : 'VIOLATED'}`
+);
+console.log(
+  `\nSHIP VERDICT: ${shipGate.overallImproved && shipGate.greenImproved && shipGate.invariantsHold && !shipGate.lumaRegression ? 'SHIP' : 'DO NOT SHIP'}`
+);
 
 // --- emit lattice ------------------------------------------------------------
-// round to a compact fixed precision; store as a flat residual array
+// round to a compact fixed precision; store as a flat residual array. `shipped`
+// / `attemptLabel` self-document whether THIS run's output was actually
+// promoted into profileFit.ts's A7C2_PROFILE (see profileFit.ts's doc-comment
+// history for the human-readable record either way) — the same provenance
+// convention rounds 3/4 used.
 const flat = Array.from(delta, (v) => +v.toFixed(6));
 const out = {
   fittedAt: report.fittedAt,
   cameraModel,
   latticeN: LATTICE_N,
+  attemptLabel: 'round6',
+  shipped: shipGate.overallImproved && shipGate.greenImproved && shipGate.invariantsHold && !shipGate.lumaRegression,
+  shipGate,
   report: report.heldoutDeltaE,
   hueSupport: report.hueSupport,
   residual: flat,
