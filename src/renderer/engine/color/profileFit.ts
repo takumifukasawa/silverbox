@@ -96,6 +96,45 @@
  * hue disagrees sharply between `ours` and `lr`, not just the tile-level
  * NCC gate) to the ref-green pairs specifically, or hand-pick a smaller,
  * cleaner subset of them rather than all 11.
+ *
+ * ROUND 4 ATTEMPT (lens-ON re-geometry), NOT SHIPPED (2026-07-17): rounds
+ * 1-4-attempt-2 above ALL rendered `ours` with the embedded Sony lens
+ * profile OFF (fit-profile.mjs's own comment called this out deliberately —
+ * the distortion constant was wrong at the time). Two geometry fixes have
+ * since landed on main: accee3f (decode-frame origin/crop, via libraw's
+ * raw_inset_crops) and f9616e2 (DISTORTION_KNOT_SCALE 2^-14 -> 1.1/16384,
+ * fixing a ~9px corner warp). Round 4 re-ran the IDENTICAL round-4-attempt-2
+ * splat method (per-scene equal weighting + trim, unchanged) with ONLY the
+ * fixture flipped to lens ON (SILVERBOX_TEST_LENS_PROFILE_DEFAULT=1 — an
+ * initial pass forgot to actually set this env var, a caught-and-fixed
+ * scripting bug; the numbers below are from the corrected re-run). RESULT:
+ * turning lens correction on transformed the NCC pixel-pairing gate —
+ * 1169/2016 -> 1970/2016 tiles accepted across all 14 scenes (every single
+ * scene improved, most to a perfect 144/144; e.g. DSC00122 62->144, DSC00184
+ * 32->144, DSC00139 28->144) — and total accepted pairs nearly doubled
+ * (2.03M -> 3.42M). Safety invariants still hold comfortably (max |delta|
+ * 0.0051, cap 0.12; far-hull max 0.0045, cap 0.03). The identity-vs-LR
+ * "before" baseline itself dropped sharply too (held-out dE2000 mean 6.96 ->
+ * 3.80, chroma dEab 6.55 -> 3.91) — cleaner geometry alone closes most of
+ * the apparent color gap, confirming a lot of what earlier rounds measured
+ * as "chroma disagreement" was actually geometry/vignetting disagreement.
+ * BUT: held-out CHROMA dEab is STILL a (much smaller) regression at amount
+ * 100, in the SAME direction as every prior round: overall 3.91 -> 4.02
+ * (dE2000 mean 3.80 -> 3.89), green-region (n=417031 held-out pixels) 4.09
+ * -> 4.21 (dE2000 mean 3.79 -> 3.86) — this round's own before/after, per
+ * the fragility note above. DECISION: left at the ORIGINAL (round 1/2,
+ * 3-pair) lattice a third time — the ship gate (chroma dEab must improve
+ * overall AND in green) is not met, even though the regression margin
+ * shrank roughly 4x versus the pre-lens-fix numbers (+0.11-0.12 here vs
+ * +0.45-0.50 with lens off on the same method). scripts/profile-fit.json
+ * holds this round's raw fit. CONCLUSION: the geometry fixes were real and
+ * material — most of rounds 1-3's apparent "green chroma disagreement" was
+ * actually alignment/vignetting noise the NCC gate was accepting anyway —
+ * but a smaller genuine chroma disagreement remains even on clean geometry.
+ * Next attempt: per the round-4-attempt-2 note above, a pixel-level
+ * CA/hue-agreement gate on the ref-green pairs (or hand-picking a cleaner
+ * subset) remains the untried lead, now on a much cleaner geometric base —
+ * the remaining gap is small enough that this may finally close it.
  */
 
 /** Grid nodes per axis. */

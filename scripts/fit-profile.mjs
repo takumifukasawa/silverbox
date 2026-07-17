@@ -15,17 +15,26 @@
  *
  * Method (per docs/brief-bank/profile-fit.md):
  *   1. Render ours at the CURRENT default look (base curve + baseline EV;
- *      sharpen/NR OFF — spatial ops corrupt per-pixel pairing; lens OFF so the
- *      plan keeps a CPU reference AND we never introduce a geometry difference
- *      relative to whatever LR did). Read the developed working-linear buffer
- *      via the developedForFit debug hook. Decode the LR export the SAME way:
- *      open it (identity develop) and read its working-linear buffer — the
- *      JPEG loader already ingests sRGB → working space.
+ *      sharpen/NR OFF — spatial ops corrupt per-pixel pairing; embedded LENS
+ *      correction ON, round 4 — see the SILVERBOX_TEST_LENS_PROFILE_DEFAULT
+ *      note below: LR's own export already corrects from the same Sony
+ *      profile, so rendering ours WITHOUT it is itself a geometry difference
+ *      now that the two prerequisite fixes — accee3f's decode-crop origin fix
+ *      and f9616e2's distortion-constant fix — are on this branch). The plan
+ *      has no CPU reference with the profile on (it's a GPU resample pass,
+ *      like any spatial op) — this fitter never needed one; it only reads
+ *      back GPU pixels via developedForFit. Read the developed working-linear
+ *      buffer via the developedForFit debug hook. Decode the LR export the
+ *      SAME way: open it (identity develop) and read its working-linear
+ *      buffer — the JPEG loader already ingests sRGB → working space.
  *   2. ALIGN: both open at the same preview long edge / 3:2, so their
  *      nearest-downsampled buffers share dims; a size mismatch is bilinear-
- *      resized. Pair only the CENTER crop (distortion/vignette are ~0 there,
- *      robust to any LR lens-correction framing difference) and reject grid
- *      tiles whose local NCC is below threshold (motion / demosaic edges).
+ *      resized. Pair only the CENTER crop (distortion/vignette are now
+ *      corrected on both sides, so the center-crop's role is just to dodge
+ *      any residual border-framing difference, not to dodge an UNcorrected
+ *      warp) and reject grid tiles whose local NCC is below threshold
+ *      (motion / demosaic edges) — see the fit report's NCC-tile acceptance
+ *      rate for the round-4 alignment-quality delta.
  *   3. Splat PER SCENE, then aggregate with EQUAL WEIGHT PER SCENE (round-4
  *      reweight — see profileFit.ts's ROUND 3/4 doc-comment record). Round 3
  *      splatted every accepted PIXEL straight into one global trilinear
@@ -65,8 +74,19 @@ import { _electron as electron } from 'playwright';
 
 process.env.SILVERBOX_TEST = '1'; // windowless / userData isolation
 process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT = '1'; // seed the base curve on fresh ARW opens
-// NB: lens auto-default is left OFF (no SILVERBOX_TEST_LENS_PROFILE_DEFAULT) so
-// the plan keeps a CPU reference and we don't bake a geometry difference in.
+process.env.SILVERBOX_TEST_LENS_PROFILE_DEFAULT = '1'; // ROUND 4: seed the embedded lens profile ON too (see below)
+// ROUND 4: lens auto-default is now ON (SILVERBOX_TEST_LENS_PROFILE_DEFAULT,
+// same lever verify-lensprofile.mjs uses). Rounds 1-3 left this OFF
+// deliberately — the Sony distortion-constant was wrong (fixed by f9616e2)
+// and the decode frame itself was misaligned (fixed by accee3f), so applying
+// lens correction back then would have baked a bad geometric warp into the
+// pixel PAIRING (this fitter aligns ours to the LR export by center-crop +
+// per-tile NCC, then pairs individual pixels — see the Method doc comment).
+// Both fixes are on this branch now; LR's own export already corrects from
+// the same embedded Sony profile, so leaving ours OFF was the actual source
+// of the residual geometric mismatch the NCC gate had to tolerate. Turning it
+// ON here closes that gap — see the fit report's NCC-tile acceptance rate for
+// the before/after alignment-quality delta.
 
 const projectRoot = fileURLToPath(new URL('..', import.meta.url));
 

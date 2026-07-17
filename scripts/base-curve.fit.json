@@ -1,42 +1,42 @@
 {
-  "fittedAt": "2026-07-16T12:59:02.659Z",
+  "fittedAt": "2026-07-17T09:26:21.871Z",
   "baselineExposureEV": 0.5,
   "cameraModel": "ILCE-7CM2",
   "sceneCount": 14,
-  "weighting": "equal-per-scene (CTRL_Q quantile pairs averaged across scenes, not pixel-weighted)",
-  "pooledRms": 6.386,
+  "weighting": "equal-per-scene (CTRL_Q quantile pairs averaged across scenes, SUBJECT-weighted per scene — round 4, see file header)",
+  "pooledRms": 13.683,
   "points": [
     [
       0,
       0
     ],
     [
-      13,
-      18
+      16,
+      25
     ],
     [
-      21,
-      32
+      28,
+      46
     ],
     [
-      33,
-      53
+      45,
+      71
     ],
     [
-      46,
-      77
+      60,
+      91
     ],
     [
-      61,
-      103
+      75,
+      114
     ],
     [
-      85,
-      139
+      96,
+      138
     ],
     [
-      125,
-      186
+      132,
+      175
     ],
     [
       255,
@@ -51,47 +51,47 @@
         "ours": 49.6,
         "jpeg": 83.3
       },
-      "rms": 4.053,
+      "rms": 11.616,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 40.4,
-          "before": 33.7,
-          "after": 38.1,
-          "beforeDelta": -6.7,
-          "afterDelta": -2.4
+          "before": 33.8,
+          "after": 40.1,
+          "beforeDelta": -6.6,
+          "afterDelta": -0.3
         },
         {
           "q": 0.25,
           "jpgTarget": 57.8,
-          "before": 52.3,
-          "after": 55.5,
-          "beforeDelta": -5.5,
-          "afterDelta": -2.3
+          "before": 52.4,
+          "after": 56,
+          "beforeDelta": -5.4,
+          "afterDelta": -1.8
         },
         {
           "q": 0.5,
           "jpgTarget": 83.3,
-          "before": 74.2,
-          "after": 83.4,
+          "before": 74.3,
+          "after": 77.2,
           "beforeDelta": -9,
-          "afterDelta": 0.1
+          "afterDelta": -6
         },
         {
           "q": 0.75,
           "jpgTarget": 118.8,
           "before": 107.7,
-          "after": 118.2,
+          "after": 107.6,
           "beforeDelta": -11.1,
-          "afterDelta": -0.6
+          "afterDelta": -11.2
         },
         {
           "q": 0.9,
           "jpgTarget": 162.3,
           "before": 147.2,
-          "after": 151.5,
+          "after": 136.2,
           "beforeDelta": -15.1,
-          "afterDelta": -10.8
+          "afterDelta": -26
         }
       ]
     },
@@ -102,47 +102,47 @@
         "ours": 58.3,
         "jpeg": 98.5
       },
-      "rms": 2.998,
+      "rms": 12.311,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 25.5,
-          "before": 22.2,
-          "after": 26.3,
+          "before": 22.1,
+          "after": 28.1,
           "beforeDelta": -3.3,
-          "afterDelta": 0.9
+          "afterDelta": 2.6
         },
         {
           "q": 0.25,
           "jpgTarget": 51.3,
-          "before": 48.6,
-          "after": 51.5,
+          "before": 48.5,
+          "after": 52.4,
           "beforeDelta": -2.8,
-          "afterDelta": 0.2
+          "afterDelta": 1.1
         },
         {
           "q": 0.5,
           "jpgTarget": 98.5,
           "before": 87.1,
-          "after": 98.5,
+          "after": 88.6,
           "beforeDelta": -11.4,
-          "afterDelta": 0
+          "afterDelta": -10
         },
         {
           "q": 0.75,
           "jpgTarget": 147.5,
-          "before": 138,
-          "after": 143.9,
-          "beforeDelta": -9.5,
-          "afterDelta": -3.6
+          "before": 137.9,
+          "after": 130,
+          "beforeDelta": -9.6,
+          "afterDelta": -17.5
         },
         {
           "q": 0.9,
           "jpgTarget": 199.5,
-          "before": 193.8,
-          "after": 191.9,
-          "beforeDelta": -5.7,
-          "afterDelta": -7.6
+          "before": 193.6,
+          "after": 175.5,
+          "beforeDelta": -6,
+          "afterDelta": -24.1
         }
       ]
     },
@@ -150,50 +150,50 @@
       "arw": "test-assets/ref-green/DSC00148.ARW",
       "jpg": "test-assets/ref-green/DSC00148.jpg",
       "p50": {
-        "ours": 44.7,
+        "ours": 44.6,
         "jpeg": 70.7
       },
-      "rms": 3.627,
+      "rms": 8.949,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 17.6,
-          "before": 17.7,
-          "after": 20.6,
-          "beforeDelta": 0.1,
-          "afterDelta": 3
+          "before": 17.8,
+          "after": 22.7,
+          "beforeDelta": 0.2,
+          "afterDelta": 5.1
         },
         {
           "q": 0.25,
           "jpgTarget": 37.3,
-          "before": 35.8,
-          "after": 39.8,
-          "beforeDelta": -1.5,
-          "afterDelta": 2.5
+          "before": 35.9,
+          "after": 41.8,
+          "beforeDelta": -1.4,
+          "afterDelta": 4.5
         },
         {
           "q": 0.5,
           "jpgTarget": 70.7,
           "before": 67.5,
-          "after": 74.6,
-          "beforeDelta": -3.2,
-          "afterDelta": 3.8
+          "after": 70.5,
+          "beforeDelta": -3.3,
+          "afterDelta": -0.3
         },
         {
           "q": 0.75,
           "jpgTarget": 120,
-          "before": 112.1,
-          "after": 122.2,
-          "beforeDelta": -7.9,
-          "afterDelta": 2.2
+          "before": 112.3,
+          "after": 111.7,
+          "beforeDelta": -7.7,
+          "afterDelta": -8.2
         },
         {
           "q": 0.9,
           "jpgTarget": 197.6,
           "before": 194.1,
-          "after": 192.2,
-          "beforeDelta": -3.5,
-          "afterDelta": -5.4
+          "after": 176.1,
+          "beforeDelta": -3.4,
+          "afterDelta": -21.5
         }
       ]
     },
@@ -201,50 +201,50 @@
       "arw": "test-assets/ref-green/DSC00157.ARW",
       "jpg": "test-assets/ref-green/DSC00157.jpg",
       "p50": {
-        "ours": 55.9,
+        "ours": 56,
         "jpeg": 94.6
       },
-      "rms": 6.32,
+      "rms": 15.427,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 31.3,
-          "before": 26.1,
-          "after": 31,
-          "beforeDelta": -5.2,
-          "afterDelta": -0.3
+          "before": 26.3,
+          "after": 33,
+          "beforeDelta": -5,
+          "afterDelta": 1.6
         },
         {
           "q": 0.25,
           "jpgTarget": 56.9,
-          "before": 52.3,
-          "after": 55.6,
-          "beforeDelta": -4.5,
-          "afterDelta": -1.3
+          "before": 52.5,
+          "after": 56,
+          "beforeDelta": -4.4,
+          "afterDelta": -0.8
         },
         {
           "q": 0.5,
           "jpgTarget": 94.6,
-          "before": 83.4,
-          "after": 94.6,
-          "beforeDelta": -11.2,
-          "afterDelta": -0.1
+          "before": 83.5,
+          "after": 85.5,
+          "beforeDelta": -11.1,
+          "afterDelta": -9.1
         },
         {
           "q": 0.75,
           "jpgTarget": 159.3,
           "before": 147.4,
-          "after": 151.7,
+          "after": 136.3,
           "beforeDelta": -11.9,
-          "afterDelta": -7.6
+          "afterDelta": -22.9
         },
         {
           "q": 0.9,
           "jpgTarget": 209.7,
           "before": 198.7,
-          "after": 196.8,
+          "after": 181.2,
           "beforeDelta": -11,
-          "afterDelta": -12.9
+          "afterDelta": -28.4
         }
       ]
     },
@@ -252,50 +252,50 @@
       "arw": "test-assets/ref-green/DSC00174.ARW",
       "jpg": "test-assets/ref-green/DSC00174.jpg",
       "p50": {
-        "ours": 49.8,
+        "ours": 49.9,
         "jpeg": 91
       },
-      "rms": 10.991,
+      "rms": 19.535,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 13.8,
-          "before": 11.8,
-          "after": 13.3,
+          "before": 11.9,
+          "after": 15.2,
           "beforeDelta": -2,
-          "afterDelta": -0.6
+          "afterDelta": 1.3
         },
         {
           "q": 0.25,
           "jpgTarget": 34.9,
-          "before": 25.4,
-          "after": 30.2,
-          "beforeDelta": -9.5,
-          "afterDelta": -4.7
+          "before": 25.5,
+          "after": 32.1,
+          "beforeDelta": -9.4,
+          "afterDelta": -2.8
         },
         {
           "q": 0.5,
           "jpgTarget": 91,
-          "before": 74.5,
-          "after": 83.7,
-          "beforeDelta": -16.5,
-          "afterDelta": -7.3
+          "before": 74.6,
+          "after": 77.5,
+          "beforeDelta": -16.4,
+          "afterDelta": -13.5
         },
         {
           "q": 0.75,
           "jpgTarget": 144.9,
-          "before": 119.6,
-          "after": 128.9,
-          "beforeDelta": -25.3,
-          "afterDelta": -16
+          "before": 119.7,
+          "after": 117.6,
+          "beforeDelta": -25.2,
+          "afterDelta": -27.3
         },
         {
           "q": 0.9,
           "jpgTarget": 179.8,
-          "before": 163.7,
-          "after": 164.1,
-          "beforeDelta": -16.1,
-          "afterDelta": -15.8
+          "before": 163.8,
+          "after": 146.9,
+          "beforeDelta": -16,
+          "afterDelta": -33
         }
       ]
     },
@@ -303,50 +303,50 @@
       "arw": "test-assets/ref-green/DSC00184.ARW",
       "jpg": "test-assets/ref-green/DSC00184.jpg",
       "p50": {
-        "ours": 49.1,
+        "ours": 49.2,
         "jpeg": 80.9
       },
-      "rms": 3.913,
+      "rms": 11.567,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 34.4,
-          "before": 27.6,
-          "after": 32.6,
-          "beforeDelta": -6.8,
-          "afterDelta": -1.8
+          "before": 27.8,
+          "after": 34.6,
+          "beforeDelta": -6.6,
+          "afterDelta": 0.3
         },
         {
           "q": 0.25,
           "jpgTarget": 52.7,
-          "before": 48.7,
-          "after": 51.6,
-          "beforeDelta": -4,
-          "afterDelta": -1
+          "before": 48.8,
+          "after": 52.7,
+          "beforeDelta": -3.8,
+          "afterDelta": 0.1
         },
         {
           "q": 0.5,
           "jpgTarget": 80.9,
-          "before": 73.6,
-          "after": 82.5,
-          "beforeDelta": -7.3,
-          "afterDelta": 1.7
+          "before": 73.7,
+          "after": 76.7,
+          "beforeDelta": -7.1,
+          "afterDelta": -4.2
         },
         {
           "q": 0.75,
           "jpgTarget": 136.7,
-          "before": 126.3,
-          "after": 134.5,
-          "beforeDelta": -10.4,
-          "afterDelta": -2.2
+          "before": 126.5,
+          "after": 122.4,
+          "beforeDelta": -10.3,
+          "afterDelta": -14.4
         },
         {
           "q": 0.9,
           "jpgTarget": 204.6,
-          "before": 197.7,
-          "after": 195.8,
-          "beforeDelta": -6.9,
-          "afterDelta": -8.8
+          "before": 197.9,
+          "after": 180.4,
+          "beforeDelta": -6.7,
+          "afterDelta": -24.2
         }
       ]
     },
@@ -357,47 +357,47 @@
         "ours": 39.2,
         "jpeg": 66
       },
-      "rms": 4.74,
+      "rms": 11.685,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 16.8,
           "before": 15.5,
-          "after": 17.7,
+          "after": 19.9,
           "beforeDelta": -1.3,
-          "afterDelta": 0.9
+          "afterDelta": 3.1
         },
         {
           "q": 0.25,
           "jpgTarget": 36,
           "before": 29.3,
-          "after": 34.3,
-          "beforeDelta": -6.6,
-          "afterDelta": -1.7
+          "after": 36.1,
+          "beforeDelta": -6.7,
+          "afterDelta": 0.2
         },
         {
           "q": 0.5,
           "jpgTarget": 66,
           "before": 59.8,
-          "after": 64.4,
+          "after": 62.8,
           "beforeDelta": -6.1,
-          "afterDelta": -1.5
+          "afterDelta": -3.1
         },
         {
           "q": 0.75,
           "jpgTarget": 129.9,
-          "before": 115.7,
-          "after": 125.5,
-          "beforeDelta": -14.2,
-          "afterDelta": -4.5
+          "before": 115.4,
+          "after": 114.3,
+          "beforeDelta": -14.5,
+          "afterDelta": -15.6
         },
         {
           "q": 0.9,
           "jpgTarget": 222.8,
           "before": 211.6,
-          "after": 209.8,
+          "after": 196.8,
           "beforeDelta": -11.3,
-          "afterDelta": -13.1
+          "afterDelta": -26
         }
       ]
     },
@@ -408,47 +408,47 @@
         "ours": 61.3,
         "jpeg": 106.2
       },
-      "rms": 6.619,
+      "rms": 16.296,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 15.7,
           "before": 14.6,
-          "after": 16.6,
-          "beforeDelta": -1.2,
-          "afterDelta": 0.8
+          "after": 18.8,
+          "beforeDelta": -1.1,
+          "afterDelta": 3
         },
         {
           "q": 0.25,
           "jpgTarget": 50.3,
           "before": 45.6,
-          "after": 48.4,
-          "beforeDelta": -4.8,
-          "afterDelta": -1.9
+          "after": 49.9,
+          "beforeDelta": -4.7,
+          "afterDelta": -0.5
         },
         {
           "q": 0.5,
           "jpgTarget": 106.2,
-          "before": 92.1,
-          "after": 103.5,
+          "before": 92,
+          "after": 92.9,
           "beforeDelta": -14.1,
-          "afterDelta": -2.6
+          "afterDelta": -13.3
         },
         {
           "q": 0.75,
           "jpgTarget": 149.1,
-          "before": 133.7,
-          "after": 140.4,
+          "before": 133.6,
+          "after": 127.2,
           "beforeDelta": -15.4,
-          "afterDelta": -8.7
+          "afterDelta": -21.9
         },
         {
           "q": 0.9,
           "jpgTarget": 189.5,
-          "before": 179.4,
-          "after": 177.1,
-          "beforeDelta": -10.1,
-          "afterDelta": -12.4
+          "before": 179.2,
+          "after": 158.9,
+          "beforeDelta": -10.3,
+          "afterDelta": -30.6
         }
       ]
     },
@@ -456,50 +456,50 @@
       "arw": "test-assets/ref-green/DSC02189.ARW",
       "jpg": "test-assets/ref-green/DSC02189.jpg",
       "p50": {
-        "ours": 75,
+        "ours": 74.9,
         "jpeg": 132.2
       },
-      "rms": 11.758,
+      "rms": 22.994,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 48.3,
-          "before": 45.3,
-          "after": 48.2,
-          "beforeDelta": -2.9,
-          "afterDelta": -0.1
+          "before": 45.2,
+          "after": 49.5,
+          "beforeDelta": -3.1,
+          "afterDelta": 1.3
         },
         {
           "q": 0.25,
           "jpgTarget": 72.3,
-          "before": 66.7,
-          "after": 73.5,
-          "beforeDelta": -5.6,
-          "afterDelta": 1.2
+          "before": 66.5,
+          "after": 69.5,
+          "beforeDelta": -5.8,
+          "afterDelta": -2.9
         },
         {
           "q": 0.5,
           "jpgTarget": 132.2,
-          "before": 115.1,
-          "after": 124.9,
-          "beforeDelta": -17.1,
-          "afterDelta": -7.3
+          "before": 114.8,
+          "after": 113.8,
+          "beforeDelta": -17.4,
+          "afterDelta": -18.3
         },
         {
           "q": 0.75,
           "jpgTarget": 171.3,
           "before": 151.5,
-          "after": 154.9,
+          "after": 139,
           "beforeDelta": -19.8,
-          "afterDelta": -16.4
+          "afterDelta": -32.3
         },
         {
           "q": 0.9,
           "jpgTarget": 187.7,
-          "before": 170.2,
-          "after": 169,
-          "beforeDelta": -17.5,
-          "afterDelta": -18.7
+          "before": 170.3,
+          "after": 151.3,
+          "beforeDelta": -17.4,
+          "afterDelta": -36.4
         }
       ]
     },
@@ -507,50 +507,50 @@
       "arw": "test-assets/ref-green/DSC02225.ARW",
       "jpg": "test-assets/ref-green/DSC02225.jpg",
       "p50": {
-        "ours": 63.3,
+        "ours": 63.4,
         "jpeg": 106
       },
-      "rms": 5.496,
+      "rms": 14.216,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 28.1,
           "before": 22.8,
-          "after": 27.1,
+          "after": 28.8,
           "beforeDelta": -5.4,
-          "afterDelta": -1.1
+          "afterDelta": 0.7
         },
         {
           "q": 0.25,
           "jpgTarget": 55.4,
-          "before": 48.4,
-          "after": 51.4,
-          "beforeDelta": -6.9,
-          "afterDelta": -4
+          "before": 48.6,
+          "after": 52.5,
+          "beforeDelta": -6.8,
+          "afterDelta": -2.9
         },
         {
           "q": 0.5,
           "jpgTarget": 106,
-          "before": 95.4,
-          "after": 106.7,
-          "beforeDelta": -10.6,
-          "afterDelta": 0.8
+          "before": 95.5,
+          "after": 96.1,
+          "beforeDelta": -10.5,
+          "afterDelta": -9.9
         },
         {
           "q": 0.75,
           "jpgTarget": 147.8,
           "before": 136.6,
-          "after": 142.8,
-          "beforeDelta": -11.2,
-          "afterDelta": -5.1
+          "after": 129.2,
+          "beforeDelta": -11.3,
+          "afterDelta": -18.7
         },
         {
           "q": 0.9,
           "jpgTarget": 194.6,
-          "before": 183.8,
-          "after": 182,
+          "before": 183.7,
+          "after": 164.1,
           "beforeDelta": -10.9,
-          "afterDelta": -12.6
+          "afterDelta": -30.5
         }
       ]
     },
@@ -558,42 +558,42 @@
       "arw": "test-assets/ref-green/DSC02228.ARW",
       "jpg": "test-assets/ref-green/DSC02228.jpg",
       "p50": {
-        "ours": 50.9,
+        "ours": 51,
         "jpeg": 85.7
       },
-      "rms": 5.521,
+      "rms": 12.118,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 7.8,
           "before": 9,
-          "after": 10,
-          "beforeDelta": 1.2,
-          "afterDelta": 2.2
+          "after": 11.5,
+          "beforeDelta": 1.3,
+          "afterDelta": 3.7
         },
         {
           "q": 0.25,
           "jpgTarget": 26.6,
-          "before": 23.2,
-          "after": 27.6,
-          "beforeDelta": -3.4,
-          "afterDelta": 1
+          "before": 23.3,
+          "after": 29.4,
+          "beforeDelta": -3.3,
+          "afterDelta": 2.9
         },
         {
           "q": 0.5,
           "jpgTarget": 85.7,
-          "before": 76.1,
-          "after": 85.8,
-          "beforeDelta": -9.6,
-          "afterDelta": 0.1
+          "before": 76.2,
+          "after": 79.1,
+          "beforeDelta": -9.5,
+          "afterDelta": -6.7
         },
         {
           "q": 0.75,
           "jpgTarget": 232.6,
-          "before": 219.7,
-          "after": 218.2,
-          "beforeDelta": -13,
-          "afterDelta": -14.5
+          "before": 219.8,
+          "after": 207.6,
+          "beforeDelta": -12.8,
+          "afterDelta": -25.1
         },
         {
           "q": 0.9,
@@ -609,50 +609,50 @@
       "arw": "test-assets/test.ARW",
       "jpg": "test-assets/lr-calib/DSC02993.jpg",
       "p50": {
-        "ours": 60.3,
+        "ours": 60.2,
         "jpeg": 91.4
       },
-      "rms": 6.749,
+      "rms": 9.412,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 37.5,
-          "before": 36.7,
-          "after": 40.5,
-          "beforeDelta": -0.9,
-          "afterDelta": 2.9
+          "before": 36.3,
+          "after": 42.2,
+          "beforeDelta": -1.2,
+          "afterDelta": 4.6
         },
         {
           "q": 0.25,
           "jpgTarget": 51.8,
-          "before": 52.7,
-          "after": 56,
-          "beforeDelta": 0.9,
+          "before": 52.5,
+          "after": 56.1,
+          "beforeDelta": 0.7,
           "afterDelta": 4.2
         },
         {
           "q": 0.5,
           "jpgTarget": 91.4,
-          "before": 90.3,
-          "after": 101.8,
-          "beforeDelta": -1.1,
-          "afterDelta": 10.4
+          "before": 90.2,
+          "after": 91.3,
+          "beforeDelta": -1.2,
+          "afterDelta": -0.1
         },
         {
           "q": 0.75,
           "jpgTarget": 144.9,
-          "before": 145.3,
-          "after": 149.9,
+          "before": 145.2,
+          "after": 134.9,
           "beforeDelta": 0.3,
-          "afterDelta": 5
+          "afterDelta": -10
         },
         {
           "q": 0.9,
           "jpgTarget": 179.5,
-          "before": 180,
-          "after": 177.8,
-          "beforeDelta": 0.5,
-          "afterDelta": -1.7
+          "before": 180.2,
+          "after": 159.9,
+          "beforeDelta": 0.7,
+          "afterDelta": -19.6
         }
       ]
     },
@@ -660,50 +660,50 @@
       "arw": "test-assets/italy/DSC07349.ARW",
       "jpg": "test-assets/lr-calib/DSC07349.jpg",
       "p50": {
-        "ours": 41.7,
+        "ours": 41.8,
         "jpeg": 70.4
       },
-      "rms": 3.637,
+      "rms": 9.314,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 36.1,
-          "before": 26.4,
-          "after": 31.3,
-          "beforeDelta": -9.8,
-          "afterDelta": -4.8
+          "before": 26.6,
+          "after": 33.3,
+          "beforeDelta": -9.5,
+          "afterDelta": -2.8
         },
         {
           "q": 0.25,
           "jpgTarget": 51.1,
-          "before": 44.1,
-          "after": 47,
-          "beforeDelta": -7,
-          "afterDelta": -4.1
+          "before": 44.4,
+          "after": 48.8,
+          "beforeDelta": -6.8,
+          "afterDelta": -2.3
         },
         {
           "q": 0.5,
           "jpgTarget": 70.4,
-          "before": 63.4,
-          "after": 69.1,
-          "beforeDelta": -7,
-          "afterDelta": -1.4
+          "before": 63.6,
+          "after": 66.5,
+          "beforeDelta": -6.8,
+          "afterDelta": -3.9
         },
         {
           "q": 0.75,
           "jpgTarget": 102,
-          "before": 90.3,
-          "after": 101.7,
-          "beforeDelta": -11.8,
-          "afterDelta": -0.3
+          "before": 90.5,
+          "after": 91.5,
+          "beforeDelta": -11.6,
+          "afterDelta": -10.5
         },
         {
           "q": 0.9,
           "jpgTarget": 137.5,
-          "before": 124,
-          "after": 132.6,
-          "beforeDelta": -13.5,
-          "afterDelta": -4.9
+          "before": 124.3,
+          "after": 120.9,
+          "beforeDelta": -13.2,
+          "afterDelta": -16.7
         }
       ]
     },
@@ -714,49 +714,102 @@
         "ours": 11.1,
         "jpeg": 19.4
       },
-      "rms": 5.68,
+      "rms": 6.776,
       "bands": [
         {
           "q": 0.1,
           "jpgTarget": 3.7,
           "before": 3.6,
-          "after": 3.9,
-          "beforeDelta": -0.2,
-          "afterDelta": 0.2
+          "after": 4.5,
+          "beforeDelta": -0.1,
+          "afterDelta": 0.7
         },
         {
           "q": 0.25,
           "jpgTarget": 10.2,
           "before": 8.3,
-          "after": 9.2,
+          "after": 10.6,
           "beforeDelta": -1.9,
-          "afterDelta": -1
+          "afterDelta": 0.4
         },
         {
           "q": 0.5,
           "jpgTarget": 19.4,
           "before": 13.4,
-          "after": 15.2,
-          "beforeDelta": -6,
-          "afterDelta": -4.2
+          "after": 17.2,
+          "beforeDelta": -5.9,
+          "afterDelta": -2.2
         },
         {
           "q": 0.75,
           "jpgTarget": 45.7,
-          "before": 34.5,
-          "after": 38.7,
-          "beforeDelta": -11.2,
-          "afterDelta": -7
+          "before": 34.8,
+          "after": 40.9,
+          "beforeDelta": -10.9,
+          "afterDelta": -4.8
         },
         {
           "q": 0.9,
           "jpgTarget": 89.4,
           "before": 73.4,
-          "after": 82.3,
+          "after": 76.3,
           "beforeDelta": -16,
-          "afterDelta": -7.1
+          "afterDelta": -13
         }
       ]
     }
-  ]
+  ],
+  "subjectCropReport": [
+    {
+      "arw": "test-assets/ref-green/DSC00139.ARW",
+      "n": 7021,
+      "jpgL": 33.91,
+      "beforeL": 33.49,
+      "afterL": 33.92,
+      "beforeDeltaL": -0.42,
+      "afterDeltaL": 0.01,
+      "improved": true
+    },
+    {
+      "arw": "test-assets/ref-green/DSC00174.ARW",
+      "n": 6936,
+      "jpgL": 57.05,
+      "beforeL": 57.25,
+      "afterL": 53.5,
+      "beforeDeltaL": 0.21,
+      "afterDeltaL": -3.54,
+      "improved": false
+    },
+    {
+      "arw": "test-assets/ref-green/DSC00184.ARW",
+      "n": 6987,
+      "jpgL": 73.17,
+      "beforeL": 72.27,
+      "afterL": 67.76,
+      "beforeDeltaL": -0.9,
+      "afterDeltaL": -5.41,
+      "improved": false
+    },
+    {
+      "arw": "test-assets/test.ARW",
+      "n": 7072,
+      "jpgL": 50.81,
+      "beforeL": 51.21,
+      "afterL": 48.81,
+      "beforeDeltaL": 0.4,
+      "afterDeltaL": -1.99,
+      "improved": false
+    },
+    {
+      "arw": "test-assets/italy/DSC03298.ARW",
+      "n": 7021,
+      "jpgL": 14.45,
+      "beforeL": 10.63,
+      "afterL": 12.88,
+      "beforeDeltaL": -3.82,
+      "afterDeltaL": -1.58,
+      "improved": true
+    }
+  ],
+  "subjectCropVerdict": "2/5 scenes improved or held ΔL* vs the shipped curve"
 }
