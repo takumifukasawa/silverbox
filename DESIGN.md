@@ -201,6 +201,23 @@ documents and returns compact results, with heavy per-pixel analysis
 (histograms, scopes) moving into compute shaders — so the main thread's
 only jobs are the UI and the document.
 
+### 11. Camera-faithful geometry — Adobe's is an interpretation, not the reference
+
+Where principle 5 makes Lightroom the reference for develop *feel*,
+geometry answers to the camera alone. The decoded frame IS the
+camera's own embedded recommended crop (Sony's `raw_inset_crops`,
+applied via libraw's `cropbox` before the demosaic) — never libraw's
+own default active-area frame, which can be larger and off-origin from
+what the camera firmware itself intends. Lens corrections (distortion,
+CA, vignetting) are likewise applied from that same file's own
+embedded splines, and validated against that file's in-camera JPEG —
+the one rendering guaranteed to share the shot's own correction data.
+Lightroom/Adobe Classic's geometry is deliberately NOT that reference:
+a direct three-way comparison (camera JPEG vs Lightroom vs Silverbox,
+user-confirmed) showed Adobe's crop and lens-correction geometry
+deviates slightly from the camera's own intent. Silverbox chases the
+camera, not Adobe's reading of it.
+
 ## Non-goals (deliberate, revisitable)
 
 - **No catalog/DAM** — with the word used precisely. Multi-photo WORK is
@@ -235,8 +252,11 @@ Color correction has exactly three layers, each with ONE job; new color
 features must name their layer or be rejected:
 
 1. **Profile** (upstream of everything): the camera's character — the
-   fitted base curve today, the fitted color transform (profile fit)
-   next. Applied as visible default-look state, never hidden.
+   fitted base curve, and (as of calibration round 6) the fitted
+   luminance-aware color transform (profile fit) too. Applied as
+   visible default-look state, never hidden. See COLOR.md's
+   calibration-state section for where each fit stands and what's
+   still open.
 2. **Primary** = the Develop node's interior, deliberately shaped like
    Lightroom's right panel (tone, curves, HSL mixer, grading wheels,
    saturation/vibrance). This surface is FROZEN — LR-refugees' muscle
@@ -310,3 +330,32 @@ ACCELERATORS —
 Audit at adoption: one violation existed — copy/paste develop settings
 was ⌘⇧C/V-only; fixed by adding Copy/Paste entries to the Presets menu
 (the persistent cousin of the same concept).
+
+## Global undo — one timeline for everything (decided 2026-07-17)
+
+Undo is not a per-photo convenience; it is ONE global LIFO timeline
+shared by every photo and every batch action (rating, flag, preset
+apply, develop reset, reset-all, sync). The rationale is the user's,
+verbatim: プロシージャルの意味がないから — the whole point of a
+procedural document (principle 4) is that everything about it reverts,
+so undo cannot stop at whichever photo happens to be open. Two
+consequences follow directly:
+
+- **Cross-photo ⌘Z jumps.** Undoing an entry that belongs to a
+  different, closed photo opens that photo first, then reverts it —
+  the user's own reasoning was 状態や画面が戻ってる必要があるから: undo
+  must restore what's ON SCREEN, not just a file nobody is looking at.
+  Batch entries (sync) have no single photo to jump to, so all of
+  their targets revert in place instead, reported by a completion
+  notice.
+- **Strict LIFO, no cherry-picking.** Entries undo in the order they
+  were made, globally, regardless of which photo they touched — this
+  is what makes "keep working for a few more steps, then undo" safe:
+  nothing later can have silently invalidated an earlier entry's
+  recorded before/after state.
+
+Bounded (~200 entries) and session-scoped for now (no persistence
+across restarts); redo is symmetric and a new operation truncates the
+redo branch. Replaces the old per-open-photo `history: { past, future }`
+graph snapshots (docs/brief-bank/global-undo.md;
+src/renderer/store/undoStack.ts).

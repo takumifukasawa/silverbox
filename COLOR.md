@@ -117,8 +117,64 @@ the reference can be a camera JPEG or any exported rendering. The Effects and
 sharpen slider scales were calibrated in the same session (see the
 LR-calibration constants' doc comments in `developNode.ts`). KNOWN residual
 vs LR: Adobe Color's hue-dependent color character (cleaner neutrals, ~+5%
-chroma on colors) — not reachable with global sliders; the banked "profile
-fit" (a small fitted 3D color transform) is the structural answer.
+chroma on colors) — not reachable with global sliders; the "profile fit" (a
+small fitted 3D color transform) is the structural answer, now shipped (round
+6). See "Calibration state" below for where both fits stand and what's
+still open.
+
+## Calibration state (updated 2026-07-17)
+
+Two independent fitted pieces make up the default look (both keyed off
+`ILCE-7CM2` today, both editable/deletable like any other develop state —
+see DESIGN.md's Profile layer):
+
+- **Base curve** (`engine/color/baseCurve.ts`): still the ORIGINAL round-1/2
+  single-scene fit (DSC02993.ARW vs its Lightroom Classic default export).
+  Two later multi-scene candidates were tried and REJECTED, both by the
+  user's eye rather than by their own numbers — an objective/perception
+  mismatch worth remembering before trusting a whole-frame metric again:
+  round 3 (14 scenes, unweighted whole-frame percentile matching) *won* the
+  headline metric (mean |Δp50| 9.30 → 2.95/255) but lost on subject crops,
+  because unweighted whole-frame pixels are dominated by whatever fills the
+  frame (sky, out-of-focus background) rather than what a viewer looks at;
+  round 4 (the same 14 scenes with a center- and midtone-weighted saliency
+  fix) improved whole-frame agreement on 13/14 scenes but still only won
+  2/5 subject crops. Both attempts and their fit data are preserved
+  (`scripts/fit-base-curve.mjs`'s doc comment, `scripts/base-curve.fit.json`)
+  for the next attempt; the shipped curve is round-1/2.
+- **Profile fit** (`engine/color/profileFit.ts`): the round-6 LUMINANCE-AWARE
+  lattice, shipped. A luma-neutral model form (rounds 1-4) never beat identity
+  on held-out data across four attempts; round 5 lifted the luma-neutral
+  projection and beat identity for the first time but failed its own
+  whole-frame luma percentile gate (a flat cap over-brightened shadows);
+  round 6 made the cap position-dependent (zero in shadows, ramping to a
+  small ceiling by the midtones — `PROFILE_LUMA_CAP_SHADOW_L`/
+  `PROFILE_LUMA_CAP_MIDTONE_L`/`PROFILE_LUMA_CAP_L_STAR`), gated on held-out
+  ΔE2000 (must beat both identity and the previously-shipped lattice) plus
+  three safety invariants (bounded residual, far-hull near-identity,
+  shadow-safe cap). It is the first round in this history to ship a
+  measurable win: held-out ΔE2000 mean 3.80 (identity) → 3.61.
+- **Geometric-contamination lesson**: every profile-fit round through the
+  first round-4 attempt rendered its own side of the comparison with the
+  embedded Sony lens profile OFF, and separately, before `raw_inset_crops`
+  landed, against a decode frame that was off-center from the camera's. Once
+  both geometry fixes shipped and a round was re-run lens-ON, the *baseline*
+  identity-vs-LR chroma disagreement nearly halved on its own (dEab 6.55 →
+  3.91) — most of what earlier rounds were measuring as "Adobe's color
+  character" was actually uncorrected geometry. Any future re-fit MUST run
+  with the lens profile on and the current decode frame, or its numbers are
+  not comparable to round 6's.
+- **Remaining honest gap**: ~3.6 ΔE2000 between Silverbox's shipped default
+  look and Lightroom Classic's, even after the base curve, round-6 profile
+  fit, and both geometry fixes. This residual is read as Adobe Color's house
+  look proper — the part of "what LR does to a RAW" that isn't tone, isn't
+  gross hue/chroma, and isn't a geometry bug, just Adobe's own per-camera
+  color science. Closing it further with a static fitted lattice has
+  repeatedly hit diminishing returns (round 6 is the ceiling of what the
+  luma-aware lattice form can do without new training data or a richer model
+  shape); the next lever is a live, interactive user calibration session
+  (side-by-side against Lightroom, per the Lightroom-reference decision)
+  rather than another offline refit round.
 
 ## Migration plan
 
