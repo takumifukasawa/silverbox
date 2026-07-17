@@ -43,7 +43,7 @@
  *     look.
  */
 import { execFileSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, join, resolve } from 'node:path';
@@ -380,47 +380,128 @@ try {
   check('photoB\'s original adjacent sidecar is left untouched (copy, not move)', existsSync(photoBSidecarPath), photoBSidecarPath);
   check('photoD\'s malformed adjacent sidecar is left untouched', existsSync(photoDSidecarPath), photoDSidecarPath);
 
-  // === 5. Save as project… (MOVE) ===
-  console.log('verify-project2 (5. save as project… — move, quick project emptied, reopen restores the look, title updates):');
+  // === 5. Save as project… (MOVE, with per-file tolerance) ===
+  console.log('verify-project2 (5. save as project… — move, per-file tolerance for a missing/corrupted look, quick project left consistent, reopen restores the look, title updates):');
   // Fake golden PNG for the ARW_PATH row, to prove golden/ files move too.
   const goldenDir = join(quickProjectDir, 'golden');
   mkdirSync(goldenDir, { recursive: true });
   const arwGoldenName = `${basename(ARW_PATH)}.png`;
   writeFileSync(join(goldenDir, arwGoldenName), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
-  // The import in check 4 mutates `project.photos` too — same 300ms
-  // debounce as every other playlist edit — wait for the on-disk manifest to
-  // catch up with the in-memory playlist before using it as the "before"
-  // baseline (photoB's row is the most recent addition).
-  const expectedCountBeforeMove = (await projectState()).photoCount;
-  await waitFor(() => readManifest().photos.length === expectedCountBeforeMove);
-  const beforeMove = readManifest();
-  const photoCountBefore = beforeMove.photos.length;
-
   const destDir = mkdtempSync(join(tmpdir(), 'silverbox-project2-dest-'));
   cleanupPaths.push(destDir);
   const destName = basename(destDir);
 
-  const saveAsResult = await saveQuickProjectAs(destDir);
-  check('saveQuickProjectAs succeeds', saveAsResult.ok === true, saveAsResult);
+  // NG fix pack (CRITICAL — "Save as project… fails and fails SILENTLY"):
+  // main's moveProjectFiles used to abort the WHOLE batch on the first
+  // ENOENT — which a real user hit because a playlist row can belong to a
+  // photo that was only ever OPENED, never edited (autosave writes a look
+  // only on a dirty session). Add exactly that row here: open a fresh photo
+  // and never touch it — it lands on the playlist with a derived look name,
+  // but no file exists yet at quickDir/looks/<name>.json.
+  const neverEditedDir = mkdtempSync(join(tmpdir(), 'silverbox-project2-neveredited-'));
+  cleanupPaths.push(neverEditedDir);
+  const neverEditedPath = join(neverEditedDir, 'never-edited.ARW');
+  writeFileSync(neverEditedPath, readFileSync(ARW_PATH));
+  const neverEditedLook = `${basename(neverEditedPath)}.json`;
+  await openAndWait(neverEditedPath); // adds the playlist row WITHOUT ever writing a look file
 
-  check('every look moved out of the quick project (no longer in quickDir/looks/)', beforeMove.photos.every((p) => !existsSync(join(quickProjectDir, 'looks', p.look))), null);
-  check('every look landed in the destination project', beforeMove.photos.every((p) => existsSync(join(destDir, 'looks', p.look))), null);
+  // A second new row whose look file DOES exist but cannot be moved (a
+  // corrupted/unreadable look, per the brief's "chmod 000 or a directory in
+  // its place" — a directory pre-seeded at the DESTINATION path is the
+  // reliable cross-platform way to force rename() to fail with EISDIR,
+  // since permissions on the source file alone don't block a same-
+  // filesystem rename()).
+  const corruptedDir = mkdtempSync(join(tmpdir(), 'silverbox-project2-corrupted-'));
+  cleanupPaths.push(corruptedDir);
+  const corruptedPath = join(corruptedDir, 'corrupted.ARW');
+  writeFileSync(corruptedPath, readFileSync(ARW_PATH));
+  const corruptedLook = `${basename(corruptedPath)}.json`;
+  await openAndWait(corruptedPath);
+  await setEv(0.81);
+  await save(); // a real look file now exists at quickDir/looks/corrupted.ARW.json
+  mkdirSync(join(destDir, 'looks', corruptedLook), { recursive: true }); // pre-seed the trap
+
+  // The import in check 4 (and the two rows just added) mutate
+  // `project.photos` too — same 300ms debounce as every other playlist edit
+  // — wait for the on-disk manifest to catch up with the in-memory playlist
+  // before using it as the "before" baseline.
+  const expectedCountBeforeMove = (await projectState()).photoCount;
+  await waitFor(() => readManifest().photos.length === expectedCountBeforeMove);
+  const beforeMove = readManifest();
+  const photoCountBefore = beforeMove.photos.length;
+  // Excluded from the BULK "every look moved/landed" assertions below —
+  // these two rows are deliberately special-cased (no look to move; a look
+  // that fails to move) and get their own dedicated checks instead.
+  const specialLooks = new Set([neverEditedLook, corruptedLook]);
+  const ordinaryPhotos = beforeMove.photos.filter((p) => !specialLooks.has(p.look));
+
+  const saveAsResult = await saveQuickProjectAs(destDir);
+  check('saveQuickProjectAs succeeds even with a missing-look row and a failed-move row', saveAsResult.ok === true, saveAsResult);
+
+  check('every ORDINARY look moved out of the quick project (no longer in quickDir/looks/)', ordinaryPhotos.every((p) => !existsSync(join(quickProjectDir, 'looks', p.look))), null);
+  check('every ORDINARY look landed in the destination project', ordinaryPhotos.every((p) => existsSync(join(destDir, 'looks', p.look))), null);
   check('the golden PNG moved alongside its look', existsSync(join(destDir, 'golden', arwGoldenName)) && !existsSync(join(goldenDir, arwGoldenName)), null);
 
+  check('the never-edited row has no look file in EITHER project (there never was one)', !existsSync(join(quickProjectDir, 'looks', neverEditedLook)) && !existsSync(join(destDir, 'looks', neverEditedLook)), null);
+  // Note: destDir/looks/<corruptedLook> ALREADY EXISTS at this point — it's
+  // the pre-seeded trap DIRECTORY this check planted on purpose (a real
+  // file can't rename() over an existing directory, EISDIR — see this
+  // check's setup above). So "the move never happened" is proven by the
+  // quick-project copy still being a plain FILE (untouched) and the
+  // destination path STILL being that same directory (never overwritten by
+  // the look's actual content) — not by the destination path being absent.
+  const quickCorruptedStat = statSync(join(quickProjectDir, 'looks', corruptedLook));
+  const destCorruptedStat = statSync(join(destDir, 'looks', corruptedLook));
+  check(
+    'the corrupted-look row stays behind in the quick project as a real file, and its dest-side trap directory is untouched',
+    quickCorruptedStat.isFile() && destCorruptedStat.isDirectory(),
+    { quickIsFile: quickCorruptedStat.isFile(), destIsDirectory: destCorruptedStat.isDirectory() }
+  );
+
   const quickManifestAfter = readManifest();
-  check("the quick project's manifest is emptied to zero rows", Array.isArray(quickManifestAfter.photos) && quickManifestAfter.photos.length === 0, quickManifestAfter);
+  check(
+    "the quick project's manifest is emptied down to exactly the FAILED row (not zero, not aborted-partial)",
+    Array.isArray(quickManifestAfter.photos) && quickManifestAfter.photos.length === 1 && quickManifestAfter.photos[0]?.look === corruptedLook,
+    quickManifestAfter
+  );
 
   await waitFor(() => existsSync(join(destDir, 'project.silverbox')));
   const destManifest = JSON.parse(readFileSync(join(destDir, 'project.silverbox'), 'utf8'));
-  check("the new project's manifest carries every moved row", Array.isArray(destManifest.photos) && destManifest.photos.length === photoCountBefore, destManifest);
+  check(
+    "the new project's manifest carries every MIGRATED row (every row except the one that failed to move)",
+    Array.isArray(destManifest.photos) && destManifest.photos.length === photoCountBefore - 1,
+    destManifest
+  );
+  check('the never-edited row DID migrate to the new project (missingLook is not a failure)', destManifest.photos.some((p) => p.look === neverEditedLook), destManifest.photos);
+  check('the corrupted-look row did NOT migrate to the new project', !destManifest.photos.some((p) => p.look === corruptedLook), destManifest.photos);
   check("the new project's name is the destination folder's own basename", destManifest.name === destName, destManifest.name);
+
+  const noticeAfterSaveAs = await page.locator('[data-testid="project-notice"]').textContent();
+  check(
+    'the completion notice reports missing-look and failed counts (NG1: this used to fail silently)',
+    (noticeAfterSaveAs ?? '').includes('1 no look yet') && (noticeAfterSaveAs ?? '').includes('1 failed'),
+    noticeAfterSaveAs
+  );
+  const noticeKindAfterSaveAs = await page.locator('.toolbar-hotreload-notice[data-project-notice-kind]').getAttribute('data-project-notice-kind');
+  check('a completion notice with a failure is kind "error" (persistent, not auto-dismissed)', noticeKindAfterSaveAs === 'error', noticeKindAfterSaveAs);
 
   const projAfterMove = await projectState();
   check('the active project switched to the destination dir', projAfterMove.dir === destDir, projAfterMove);
   check('the active project name matches the destination basename', projAfterMove.name === destName, projAfterMove);
   const titleAfterMove = await page.title();
   check('the title bar reflects the new project name', titleAfterMove.includes(destName), titleAfterMove);
+  // corruptedPath (its look failed to move) is still the CANVAS's open photo
+  // at this point (opened+saved right before the move, nothing opened
+  // since) — currentLookPath must stay pointed at the OLD quick-project
+  // location, since that's genuinely where the file still is; repointing it
+  // at the (never-created) destDir path would leave the open session
+  // watching/saving to a path with nothing there.
+  check(
+    "the currently-open (failed-to-move) photo's currentLookPath stays in the QUICK project, not repointed at destDir",
+    projAfterMove.currentLookPath === join(quickProjectDir, 'looks', corruptedLook),
+    projAfterMove.currentLookPath
+  );
 
   // Reopen the NEW project from disk (simulates a relaunch) and confirm a
   // known edit survives the move: ARW_PATH was row 0, edited to ev 0.5 in
@@ -445,6 +526,56 @@ try {
   check("reopening the new project restores ARW_PATH's edited look (ev 0.5)", (await devEv()) === 0.5, await devEv());
   const titleAfterReopen = await page.title();
   check('the title bar still reflects the new project name after reopening', titleAfterReopen.includes(destName), titleAfterReopen);
+
+  // === 6. NG2 fix pack — notice dismiss (✕) lifecycle ===
+  console.log('verify-project2 (6. NG2 — a persistent (error-kind) project-notice is dismissable via ✕):');
+  // A corrupt-manifest openProjectByPath (same shape verify-project.mjs's
+  // own check already exercises) raises an 'error'-kind projectNotice
+  // WITHOUT touching whichever project is currently active on a parse
+  // failure (`return false` right after raiseNotice) — decoupled from any
+  // playlist-row bookkeeping left over from the checks above, unlike
+  // reusing an existing row would be.
+  const corruptProjectDir = mkdtempSync(join(tmpdir(), 'silverbox-project2-corruptmanifest-'));
+  cleanupPaths.push(corruptProjectDir);
+  writeFileSync(join(corruptProjectDir, 'project.silverbox'), '{ not json', 'utf8');
+  await page.evaluate((dir) => {
+    void window.__openProjectByPath(dir);
+  }, corruptProjectDir);
+  await page.waitForSelector('[data-testid="project-notice"]', { timeout: 5_000 });
+  const dismissNoticeKind = await page.locator('.toolbar-hotreload-notice[data-project-notice-kind]').getAttribute('data-project-notice-kind');
+  check('a corrupt-manifest project-notice is kind "error"', dismissNoticeKind === 'error', dismissNoticeKind);
+  await page.locator('[data-testid="project-notice-dismiss"]').click();
+  check('clicking ✕ clears the notice immediately (NG2: notices used to only clear via a NEWER notice replacing them)', (await page.locator('[data-testid="project-notice"]').count()) === 0, null);
+
+  // === 7. NG3 fix pack — refreshPlaylistStatus surfaces a renamed CURRENT photo ===
+  console.log('verify-project2 (7. NG3 — an externally renamed CURRENT photo is surfaced, not silent; clears once it resolves again):');
+  const ng3Dir = mkdtempSync(join(tmpdir(), 'silverbox-project2-ng3-'));
+  cleanupPaths.push(ng3Dir);
+  const ng3OrigPath = join(ng3Dir, 'ng3.ARW');
+  writeFileSync(ng3OrigPath, readFileSync(ARW_PATH));
+  await openAndWait(ng3OrigPath);
+  const missingState = () => page.evaluate(() => window.__debug.currentPhotoMissingState());
+  check('no missing notice while the file is still where it was opened from', (await missingState()) === null, await missingState());
+
+  // Simulate an external rename WHILE the photo is open (main/index.ts's own
+  // fs.watch only covers the SIDECAR, never the photo file itself — this is
+  // exactly the "missing status only computes on project/folder open" gap).
+  const ng3RenamedPath = join(ng3Dir, 'ng3-renamed.ARW');
+  renameSync(ng3OrigPath, ng3RenamedPath);
+  // window focus regain is App.tsx's real trigger; drive the same store
+  // action directly (native window-manager focus events aren't drivable
+  // from Playwright) — see refreshPlaylistStatus's own doc comment.
+  await page.evaluate(() => window.__debug.refreshPlaylistStatus());
+  await waitFor(async () => (await missingState()) !== null);
+  check('refreshPlaylistStatus surfaces the current photo as missing after an external rename', typeof (await missingState()) === 'string' && (await missingState()).includes('missing'), await missingState());
+  const missingNoticeText = await page.locator('[data-testid="current-photo-missing-notice"]').textContent();
+  check('the toolbar shows the current-photo-missing notice', (missingNoticeText ?? '').includes('missing'), missingNoticeText);
+
+  // Move it back (simulating the fix) and confirm the SAME refresh clears it.
+  renameSync(ng3RenamedPath, ng3OrigPath);
+  await page.evaluate(() => window.__debug.refreshPlaylistStatus());
+  await waitFor(async () => (await missingState()) === null);
+  check('the missing notice clears once the file resolves again', (await missingState()) === null, null);
 } finally {
   await app.close();
 }

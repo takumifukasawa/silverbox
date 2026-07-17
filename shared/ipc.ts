@@ -198,6 +198,24 @@ export interface FolderImageEntry {
   missing: boolean;
 }
 
+/**
+ * Per-file outcome of moveProjectFiles (NG fix pack — "Save as project…"
+ * used to abort the whole batch on the first row with no look file to
+ * move). `moved` and `missingLook` are both counts because the CALLER
+ * (appStore.ts's saveQuickProjectAs) treats them identically for playlist
+ * migration purposes — only `failed` needs the individual look names, since
+ * those rows stay behind in the source project and the reason is worth
+ * showing.
+ */
+export interface MoveProjectFilesResult {
+  /** Looks (and, where present, their golden/ PNG) that physically moved. */
+  moved: number;
+  /** Rows with no look file at all yet (an opened-but-never-edited photo) — the row still migrates, there's just nothing to rename. */
+  missingLook: number;
+  /** Looks that exist but could not be moved (permissions, an unreadable file, …) — the row stays in the SOURCE project untouched. */
+  failed: { name: string; reason: string }[];
+}
+
 export interface SilverboxApi {
   ping(): Promise<PingResult>;
   /**
@@ -295,8 +313,21 @@ export interface SilverboxApi {
    * Manifest writes are NOT this call's job — the renderer writes both
    * projects' manifests itself through writeProjectManifest, same as every
    * other playlist mutation; this is purely the filesystem move.
+   *
+   * NG fix pack (per-file tolerance — a real user hit an ENOENT that aborted
+   * the WHOLE batch mid-way, because a playlist row can be a photo that was
+   * only ever OPENED, never edited: autosave writes a look only on a dirty
+   * session, so that row simply has no file at `<srcDir>/looks/<name>.json`
+   * yet): a look with nothing to move is `missingLook`, not a thrown error —
+   * the row itself still migrates (appStore.ts's saveQuickProjectAs treats
+   * `missingLook` the same as `moved`, since there's no file left behind
+   * either way). Only a genuinely unexpected per-file error (permissions, a
+   * directory where a file should be, …) lands in `failed`, and even then
+   * every OTHER file in the batch still gets its own attempt — this call
+   * never throws for a single file's problem, only for something
+   * batch-level (e.g. `destDir` itself can't be created).
    */
-  moveProjectFiles(srcDir: string, destDir: string, lookNames: string[]): Promise<void>;
+  moveProjectFiles(srcDir: string, destDir: string, lookNames: string[]): Promise<MoveProjectFilesResult>;
   /**
    * Arm the main-process sidecar watcher for `path` (sidecar hot-reload —
    * the AI-editing loop). Re-armed on every image open; each call tears down

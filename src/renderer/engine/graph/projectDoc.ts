@@ -16,7 +16,7 @@ export const PROJECT_SCHEMA_VERSION = 1;
 
 /** One playlist row: a photo and the look filename that holds its develop history. */
 export interface ProjectPhoto {
-  /** Photo location — relative to the project dir when possible (see relativizeProjectPath), absolute for an out-of-tree photo; resolve with resolveProjectPath. */
+  /** Photo location — relative to the project dir when the photo lives INSIDE it, absolute when it doesn't (see relativizeProjectPath); resolve with resolveProjectPath, which also still accepts an older `../`-style relative path written before this policy. */
   path: string;
   /** Filename inside `looks/` (see deriveLookName) — a bare filename, never a path. */
   look: string;
@@ -149,12 +149,20 @@ export function resolveProjectPath(projectDir: string, path: string): string {
 
 /**
  * Inverse of resolveProjectPath: express `absPath` relative to `projectDir`
- * (the "relative preferred" half of the manifest's `path` contract — see
- * ProjectPhoto's doc comment) when both are absolute POSIX paths, `..`-ing up
- * to their common ancestor (always findable — every POSIX path shares at
- * least `/`). Falls back to `absPath` unchanged when either side isn't
- * absolute (not this app's supported platform shape, but a safe no-op
- * either way).
+ * when — and only when — `absPath` lives INSIDE `projectDir` (never escapes
+ * it via `..`); an out-of-tree photo is stored ABSOLUTE instead (NG fix
+ * pack, project-storage path policy: a `../../Documents/…`-style relative
+ * path is fragile the moment the project folder itself moves, since every
+ * `..` is counted from the project dir's OWN location, not the photo's — an
+ * absolute path has no such dependency). Always forward slashes (POSIX
+ * throughout — the renderer has no `node:path`). Falls back to `absPath`
+ * unchanged when either side isn't absolute (not this app's supported
+ * platform shape, but a safe no-op either way).
+ *
+ * `resolveProjectPath` (above) is unaffected and deliberately still accepts
+ * a `..`-relative `path` — this is a WRITE-side policy change only; a
+ * manifest written by an older Silverbox (or hand-authored with `../`) keeps
+ * resolving exactly as before (read-side compat, docs/sidecar-spec.md §2).
  */
 export function relativizeProjectPath(projectDir: string, absPath: string): string {
   if (!projectDir.startsWith('/') || !absPath.startsWith('/')) return absPath;
@@ -162,7 +170,7 @@ export function relativizeProjectPath(projectDir: string, absPath: string): stri
   const fileParts = splitPosix(absPath);
   let common = 0;
   while (common < dirParts.length && common < fileParts.length && dirParts[common] === fileParts[common]) common++;
-  const ups = dirParts.length - common;
-  const rel = [...Array(ups).fill('..'), ...fileParts.slice(common)].join('/');
+  if (common < dirParts.length) return absPath; // escapes projectDir — store absolute, not a fragile ../..
+  const rel = fileParts.slice(common).join('/');
   return rel.length > 0 ? rel : '.';
 }

@@ -22,6 +22,7 @@ import {
   type DenoiseRunRequest,
   type DenoiseRunResult,
   type FolderImageEntry,
+  type MoveProjectFilesResult,
   type OpenImageDialogResult,
   type PhotoFlag,
   type PingResult,
@@ -512,9 +513,22 @@ function registerIpc(): void {
   // the renderer writes both (the new project's + the emptied quick
   // project's) through the existing projectWrite handler above, same as
   // every other playlist mutation.
+  //
+  // NG fix pack (per-file tolerance, CRITICAL — "Save as project… fails and
+  // fails SILENTLY"): a playlist row can belong to a photo that was only
+  // ever OPENED, never edited — autosave writes a look file only on a dirty
+  // session (docs/brief-bank/project-storage.md), so that row's
+  // `<srcDir>/looks/<name>.json` may simply not exist. The OLD handler
+  // called `rename()` unconditionally and let the first such ENOENT throw
+  // out of the whole loop, aborting mid-batch — the destination ended up
+  // with a `looks/` directory but no manifest, and Quick was left half-
+  // migrated with zero user-visible feedback. Every look now gets its own
+  // independent attempt and outcome (`moved` / `missingLook` / `failed` —
+  // see MoveProjectFilesResult's doc comment); one look's problem never
+  // stops any other look's move.
   ipcMain.handle(
     IPC.moveProjectFiles,
-    async (_ev, srcDir: unknown, destDir: unknown, lookNames: unknown): Promise<void> => {
+    async (_ev, srcDir: unknown, destDir: unknown, lookNames: unknown): Promise<MoveProjectFilesResult> => {
       if (typeof srcDir !== 'string' || typeof destDir !== 'string') {
         throw new Error('moveProjectFiles: srcDir/destDir must be strings');
       }
@@ -536,13 +550,42 @@ function registerIpc(): void {
           await rm(src, { force: true });
         }
       };
+      let moved = 0;
+      let missingLook = 0;
+      const failed: { name: string; reason: string }[] = [];
       for (const name of lookNames as string[]) {
-        await moveOne(join(srcDir, 'looks', name), join(destDir, 'looks', name));
+        const lookSrc = join(srcDir, 'looks', name);
+        const lookDest = join(destDir, 'looks', name);
+        try {
+          await stat(lookSrc);
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+            // Opened-but-never-edited photo — nothing to move, but the row
+            // itself still migrates (the renderer's job, not this handler's).
+            missingLook++;
+            continue;
+          }
+          // Some other stat failure (e.g. permissions) is just as much a
+          // per-file problem as a failed rename below — report it the same
+          // way rather than letting it escape and abort the batch.
+          failed.push({ name, reason: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+        try {
+          await moveOne(lookSrc, lookDest);
+        } catch (err) {
+          failed.push({ name, reason: err instanceof Error ? err.message : String(err) });
+          continue;
+        }
+        moved++;
         // Golden renders (`--check`/`--update` with `--project` —
         // CliCheckJob.projectDir's doc comment): `<projectDir>/golden/
         // <look-name>.png`, look-name = the look's own filename with `.json`
         // dropped. Moved alongside its look, if one exists, so a `--check`
-        // run against the NEW project location still has its baseline.
+        // run against the NEW project location still has its baseline. This
+        // is best-effort — the look itself already moved successfully, so a
+        // golden-move hiccup (rare: it's a stat-gated, already-mkdir'd
+        // rename) is logged, not counted against the row's own outcome.
         const goldenName = `${name.replace(/\.json$/, '')}.png`;
         const goldenSrc = join(srcDir, 'golden', goldenName);
         try {
@@ -550,9 +593,14 @@ function registerIpc(): void {
         } catch {
           continue; // no golden for this look — nothing to move
         }
-        await mkdir(join(destDir, 'golden'), { recursive: true });
-        await moveOne(goldenSrc, join(destDir, 'golden', goldenName));
+        try {
+          await mkdir(join(destDir, 'golden'), { recursive: true });
+          await moveOne(goldenSrc, join(destDir, 'golden', goldenName));
+        } catch (err) {
+          console.warn(`moveProjectFiles: could not move golden render for ${name}:`, err);
+        }
       }
+      return { moved, missingLook, failed };
     }
   );
 

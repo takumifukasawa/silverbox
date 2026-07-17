@@ -111,6 +111,10 @@ declare global {
       importSidecarsFromFolder(dir: string): Promise<{ imported: number; skippedExisting: number; skippedUnreadable: number }>;
       /** Verify-only: "Save as project…" (Quick project → real project, MOVE) without native dialogs. */
       saveQuickProjectAs(destDir: string): Promise<{ ok: true } | { ok: false; message: string }>;
+      /** NG3 fix pack: re-run projectPhotosStatus + the current-photo-missing check without waiting for a real window-focus event — see appStore.ts's refreshPlaylistStatus. */
+      refreshPlaylistStatus(): Promise<void>;
+      /** NG3 fix pack: the CURRENTLY OPEN photo's own "file is missing" notice, or null — see appStore.ts's currentPhotoMissingNotice. */
+      currentPhotoMissingState(): string | null;
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
       thumbnailRevocations(): string[];
       /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
@@ -1128,6 +1132,12 @@ export function CanvasView() {
       },
       saveQuickProjectAs(destDir) {
         return useAppStore.getState().saveQuickProjectAs(destDir);
+      },
+      refreshPlaylistStatus() {
+        return useAppStore.getState().refreshPlaylistStatus();
+      },
+      currentPhotoMissingState() {
+        return useAppStore.getState().currentPhotoMissingNotice;
       },
       thumbnailRevocations() {
         return [...thumbnailRevocationLog()];

@@ -56,7 +56,11 @@ MyProject/
 - **The app never writes into photo folders.** Every write Silverbox makes
   lands inside the active project's own directory. Photos themselves are
   never copied or moved into the project — the manifest just points at them
-  (relative path preferred, absolute for an out-of-tree photo).
+  (relative path when the photo lives inside the project directory, absolute
+  when it doesn't — an out-of-tree relative path would depend on how far the
+  project folder itself later moves, so it is never written; a manifest from
+  an older Silverbox with a `../`-style out-of-tree path still resolves, and
+  is normalized to absolute the next time the manifest is rewritten).
 - A project with no explicit home yet (opening a photo with nothing active)
   lands in the **Quick project**, a real folder at a fixed, visible,
   settings-overridable location (default `~/Silverbox/Quick/`) — never an
@@ -81,7 +85,7 @@ Source of truth: `src/renderer/engine/graph/projectDoc.ts`
   "name": "Italy 2026",
   "photos": [
     { "path": "DSC001.ARW", "look": "DSC001.ARW.json" },
-    { "path": "../elsewhere/DSC900.ARW", "look": "DSC900.ARW.json" }
+    { "path": "/elsewhere/DSC900.ARW", "look": "DSC900.ARW.json" }
   ]
 }
 ```
@@ -91,7 +95,7 @@ Source of truth: `src/renderer/engine/graph/projectDoc.ts`
 | `schemaVersion` | `1` (the only value accepted today) | Manifest format version. |
 | `name` | non-empty string | Project display name (title bar, "Save as project…" default). |
 | `photos` | array of `{ path, look }` | The playlist: every photo this project knows about, and which `looks/` file holds its develop history. |
-| `photos[].path` | string | Photo location. **Relative-to-the-project-dir preferred** (the common in-tree case); an absolute path is legal for a photo living outside the project (see `resolveProjectPath`/`relativizeProjectPath`). `.`/`..` segments resolve manually (the renderer has no `node:path` — contextIsolation). |
+| `photos[].path` | string | Photo location. **Relative-to-the-project-dir when the photo lives inside it** (the common in-tree case); **absolute when it doesn't** — a photo outside the project is never stored as a `../`-relative path (see `relativizeProjectPath`'s doc comment for why: it would depend on how far the project folder itself later moves). `resolveProjectPath` still accepts an older `../`-style relative path for a photo outside the project (read-side compat only — a manifest written by this policy or later never produces one; `.`/`..` segments resolve manually, the renderer has no `node:path` — contextIsolation). |
 | `photos[].look` | string | A **bare filename** inside `looks/` — never a path, never containing a `/`. |
 
 **Unknown-field preservation promise**: any wrapper-level key the parser

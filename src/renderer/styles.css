@@ -347,6 +347,14 @@ button:disabled {
   gap: 6px;
 }
 
+/* Shared notice ✕ (NG2 fix pack, dismissNotice) — a compact icon button
+   alongside whatever action button(s) a notice already offers, not a
+   full-width toolbar button. */
+.toolbar-hotreload-notice > button[aria-label='Dismiss'] {
+  padding: 2px 6px;
+  line-height: 1;
+}
+
 .toolbar button.active {
   background: #4a6b9a;
   border-color: #6a9fe8;

@@ -88,6 +88,7 @@ import {
   type CliRenderJob,
   type CliRenderResult,
   type FolderImageEntry,
+  type MoveProjectFilesResult,
   type PhotoFlag,
   type PresetSummary,
   type Settings,
@@ -106,6 +107,9 @@ interface GraphHistory {
 }
 
 const HISTORY_LIMIT = 100;
+
+/** NG2 fix pack — see raiseNotice's doc comment: how long a 'success'-kind dismissable notice stays visible before auto-clearing. */
+const NOTICE_AUTO_EXPIRE_MS = 8000;
 
 const emptyHistory = (): GraphHistory => ({ past: [], future: [], lastCoalesceKey: null });
 
@@ -168,13 +172,20 @@ interface AppState {
    */
   openProjectByPath(dir: string): Promise<boolean>;
   /**
-   * Toolbar banner for a FAILED openProjectByPath (unreadable directory or a
-   * project.silverbox that doesn't parse) — "fail soft, never crash": the
-   * app just doesn't switch projects, but the user gets told why instead of
-   * silent nothing. Cleared at the START of every openProjectByPath attempt
-   * (a fresh try — including a fixed/retried one — deserves a clean slate).
+   * Toolbar banner for project-level outcomes: a FAILED openProjectByPath
+   * (unreadable directory or a project.silverbox that doesn't parse), a
+   * completion report from importSidecarsFromFolder/saveQuickProjectAs, or a
+   * scanFolderForRelink "no match" — "fail soft, never crash": the app just
+   * doesn't do the thing, but the user gets told why instead of silent
+   * nothing. `kind: 'success'` (a clean completion, nothing needs the user's
+   * attention) auto-clears after ~8s via raiseNotice's shared lifecycle (NG2
+   * fix pack — the reported bug was exactly this notice staying forever);
+   * `kind: 'error'` persists until dismissed (Toolbar's ✕, `dismissNotice`)
+   * or superseded by a fresh attempt. Cleared at the START of every
+   * openProjectByPath attempt (a fresh try — including a fixed/retried one —
+   * deserves a clean slate).
    */
-  projectNotice: string | null;
+  projectNotice: { kind: 'success' | 'error'; message: string } | null;
   /**
    * Absolute path of the CURRENT photo's look/sidecar file — inside the
    * active project's `looks/` for an ordinary interactive open, or the
@@ -193,7 +204,9 @@ interface AppState {
    * on disk — the app opens with defaults rather than silently treating
    * that file as live state (one source of truth per photo), and offers
    * this one-click import instead. Cleared on every image open and once
-   * imported.
+   * imported. Never auto-expires (an offer the user hasn't acted on yet is
+   * not a "success" — see raiseNotice's doc comment) — dismissable via
+   * Toolbar's ✕ (`dismissNotice`), same as projectNotice/relinkMismatchNotice.
    */
   legacySidecarImportNotice: { imagePath: string; sidecarPath: string; lookPath: string } | null;
   /**
@@ -213,7 +226,8 @@ interface AppState {
    * and appending the photo to the playlist. Originals untouched (a copy,
    * never a move). Returns the completion counts (also surfaced as
    * `projectNotice`, same banner the toolbar already shows for other project
-   * notices — no new modal framework).
+   * notices — no new modal framework); `kind: 'error'` (persistent) when
+   * anything came back unreadable, `'success'` (~8s auto-clear) otherwise.
    */
   importSidecarsFromFolder(dir: string): Promise<{ imported: number; skippedExisting: number; skippedUnreadable: number }>;
   /**
@@ -224,9 +238,20 @@ interface AppState {
    * sidecarHotReloadNotice already established, no new modal framework).
    * The Toolbar's "Relink anyway" button re-calls relinkPhoto with
    * `force: true` using these exact fields. Cleared on every successful
-   * relink and whenever a fresh relink attempt starts.
+   * relink and whenever a fresh relink attempt starts. Never auto-expires
+   * (an unresolved mismatch needs a decision, not a timeout) — dismissable
+   * via Toolbar's ✕ (`dismissNotice`).
    */
   relinkMismatchNotice: { playlistIndex: number; newPath: string; message: string } | null;
+  /**
+   * Toolbar ✕ button for projectNotice/relinkMismatchNotice/
+   * legacySidecarImportNotice (NG2 fix pack — "one shared mechanism, not
+   * four copies"): always just nulls `field`, regardless of what's in it
+   * right now. The other half of the lifecycle — a 'success' projectNotice's
+   * own ~8s auto-clear — lives in raiseNotice, not here (this is ONLY the
+   * manual-dismiss path).
+   */
+  dismissNotice(field: 'projectNotice' | 'relinkMismatchNotice' | 'legacySidecarImportNotice'): void;
   /**
    * Relink (Missing photos, stage 3): point playlist row `playlistIndex` at
    * `newPath` — the Filmstrip's "Relink…" button's answer to the native file
@@ -290,6 +315,34 @@ interface AppState {
    * playlist doesn't own photos, they can come from anywhere).
    */
   folderEntries: FolderImageEntry[];
+  /**
+   * NG3 fix pack ("renaming an OPEN photo's file shows nothing"): missing-
+   * photo status used to be computed only on project/folder open — an
+   * externally renamed/moved/deleted CURRENT photo showed nothing at all
+   * until the next open. Set by refreshPlaylistStatus (below) when the
+   * playlist's freshly-rechecked status says the CURRENTLY OPEN photo no
+   * longer resolves; cleared the moment it resolves again, or when a
+   * different image opens (openImageByPath resets it unconditionally, same
+   * as the other per-image notices).
+   */
+  currentPhotoMissingNotice: string | null;
+  /**
+   * Re-run projectPhotosStatus (the existing per-cell IPC join — see
+   * buildPlaylistEntries) against the active project's WHOLE playlist and
+   * refresh `folderEntries` (only while a strip is actually showing —
+   * `folderDir !== null`, preserving folderEntries' own "empty when
+   * folderDir is null" invariant) — then check whether the CURRENTLY OPEN
+   * photo is among the rows that came back missing, setting/clearing
+   * `currentPhotoMissingNotice` accordingly. This is the ONE shared refresh
+   * relinkPhoto/importSidecarsFromFolder/saveQuickProjectAs all call after
+   * their own playlist mutation (rather than each re-deriving `entries`
+   * itself), and what App.tsx's window-focus listener calls too (NG3: "an
+   * externally renamed photo shows its missing cell within one alt-tab") —
+   * a plain missing-cell repaint reuses the SAME status a real relink action
+   * needs anyway, so one IPC round trip serves both. No-op without an
+   * active project.
+   */
+  refreshPlaylistStatus(): Promise<void>;
   /**
    * List every image in `dir` (no recursion — see main's listImages),
    * EXTEND the active project's playlist with whichever of them aren't on
@@ -2412,6 +2465,32 @@ export const useAppStore = create<AppState>((set, get) => {
     return window.silverbox.projectPhotosStatus(project.dir, photos);
   };
 
+  /**
+   * Shared notice lifecycle (NG2 fix pack — "one shared mechanism, not four
+   * copies"): every SET site for projectNotice/relinkMismatchNotice/
+   * legacySidecarImportNotice should call this instead of a bare
+   * `set({ field: value })`. For a `{ kind: 'success' }` projectNotice (a
+   * clean completion — nothing needs the user's attention) it schedules an
+   * ~8s auto-clear, guarded by reference identity so a NEWER notice that
+   * superseded it before the timer fires is never clobbered — the exact
+   * by-reference check connectNotice/spotsCapNotice each used to do inline,
+   * generalized here rather than copied a third and fourth time. Anything
+   * without `kind: 'success'` (an 'error' projectNotice, or
+   * relinkMismatchNotice/legacySidecarImportNotice, neither of which carries
+   * a `kind` at all) never auto-clears — `dismissNotice` (the Toolbar's ✕)
+   * is the only way to close it early, besides whatever supersedes it.
+   */
+  const raiseNotice = <K extends 'projectNotice' | 'relinkMismatchNotice' | 'legacySidecarImportNotice'>(
+    field: K,
+    value: NonNullable<AppState[K]>
+  ): void => {
+    set({ [field]: value } as Pick<AppState, K>);
+    if (!('kind' in value) || value.kind !== 'success') return;
+    setTimeout(() => {
+      if (get()[field] === value) set({ [field]: null } as Pick<AppState, K>);
+    }, NOTICE_AUTO_EXPIRE_MS);
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -2426,6 +2505,7 @@ export const useAppStore = create<AppState>((set, get) => {
   relinkMismatchNotice: null,
   folderDir: null,
   folderEntries: [],
+  currentPhotoMissingNotice: null,
   openingPreview: null,
   graph: defaultGraphDoc(),
   graphDirty: false,
@@ -2533,7 +2613,18 @@ export const useAppStore = create<AppState>((set, get) => {
     // image opening must never inherit a stale "still decoding settings"
     // chip left behind by an in-flight reloadImageForSettings its own
     // `finally` hasn't run yet.
-    set({ imageStatus: 'loading', fileName, imagePath: path, imageError: null, previewLook: null, settingsReloading: false });
+    set({
+      imageStatus: 'loading',
+      fileName,
+      imagePath: path,
+      imageError: null,
+      previewLook: null,
+      settingsReloading: false,
+      // NG3 fix pack ("renaming an OPEN photo's file shows nothing"): a
+      // fresh open — success or failure — always belongs to a DIFFERENT
+      // photo than whatever refreshPlaylistStatus last flagged missing.
+      currentPhotoMissingNotice: null,
+    });
     try {
       const bytes = await session.guard(window.silverbox.readFile(path));
       // Embedded-preview-first opening: slice the camera JPEG OUT of `bytes`
@@ -2772,6 +2863,24 @@ export const useAppStore = create<AppState>((set, get) => {
     await get().openImageByPath(result.path);
   },
 
+  async refreshPlaylistStatus() {
+    const project = get().project;
+    if (!project) return;
+    const entries = await buildPlaylistEntries(project);
+    if (get().project !== project) return; // superseded by a project/folder switch meanwhile
+    // folderEntries' own "empty when folderDir is null" invariant (see its
+    // doc comment) — only repaint the strip while one is actually showing;
+    // the missing-CURRENT-photo check below runs regardless.
+    if (get().folderDir !== null) set({ folderEntries: entries });
+    const imagePath = get().imagePath;
+    const currentEntry = imagePath ? entries.find((e) => e.path === imagePath) : undefined;
+    if (currentEntry?.missing) {
+      set({ currentPhotoMissingNotice: 'photo file is missing — relink from the filmstrip' });
+    } else if (get().currentPhotoMissingNotice) {
+      set({ currentPhotoMissingNotice: null });
+    }
+  },
+
   async openFolder(dir: string) {
     // Project-storage migration (stage 1): "open a folder" now means EXTEND
     // the active project's playlist with this folder's images (create/
@@ -2822,7 +2931,7 @@ export const useAppStore = create<AppState>((set, get) => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`openProjectByPath: could not read a project manifest at ${dir}:`, err);
-      set({ projectNotice: `could not open project at ${dir}: ${message}` });
+      raiseNotice('projectNotice', { kind: 'error', message: `could not open project at ${dir}: ${message}` });
       return false;
     }
     if (text === null) return false;
@@ -2832,7 +2941,10 @@ export const useAppStore = create<AppState>((set, get) => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       console.warn(`openProjectByPath: ignoring a malformed project manifest at ${dir}:`, err);
-      set({ projectNotice: `project.silverbox at ${dir} is corrupt, not opened: ${message}` });
+      raiseNotice('projectNotice', {
+        kind: 'error',
+        message: `project.silverbox at ${dir} is corrupt, not opened: ${message}`,
+      });
       return false;
     }
     // Same flush-before-drop as openImageByPath's own cancelAutosaveTimer
@@ -4539,7 +4651,10 @@ export const useAppStore = create<AppState>((set, get) => {
     try {
       sidecarPaths = await window.silverbox.listSidecarFiles(dir);
     } catch (err) {
-      set({ projectNotice: `could not read ${dir}: ${err instanceof Error ? err.message : String(err)}` });
+      raiseNotice('projectNotice', {
+        kind: 'error',
+        message: `could not read ${dir}: ${err instanceof Error ? err.message : String(err)}`,
+      });
       return { imported: 0, skippedExisting: 0, skippedUnreadable: 0 };
     }
     let photos = project.photos;
@@ -4584,14 +4699,18 @@ export const useAppStore = create<AppState>((set, get) => {
       imported++;
     }
     if (photos !== project.photos) set({ project: { ...project, photos } });
-    set({
-      projectNotice: `imported ${imported} look${imported === 1 ? '' : 's'} (${skippedExisting} skipped: already in project, ${skippedUnreadable} unreadable)`,
+    // 'error' (persistent) when anything came back unreadable — that's
+    // worth the user's attention, not a clean completion; 'success' (~8s
+    // auto-clear) otherwise. NG2 fix pack: this is the notice that used to
+    // stay on screen forever.
+    raiseNotice('projectNotice', {
+      kind: skippedUnreadable > 0 ? 'error' : 'success',
+      message: `imported ${imported} look${imported === 1 ? '' : 's'} (${skippedExisting} skipped: already in project, ${skippedUnreadable} unreadable)`,
     });
-    const current = get().project;
-    if (current) {
-      const entries = await buildPlaylistEntries(current);
-      if (get().project === current) set({ folderEntries: entries });
-    }
+    // NG3 fix pack: one shared refresh (folderEntries repaint + the
+    // CURRENT photo's own missing check), not another one-off
+    // buildPlaylistEntries call.
+    await get().refreshPlaylistStatus();
     return { imported, skippedExisting, skippedUnreadable };
   },
 
@@ -4617,12 +4736,10 @@ export const useAppStore = create<AppState>((set, get) => {
       }
     }
     if (existing?.fingerprint && existing.fingerprint !== newFingerprint && !force) {
-      set({
-        relinkMismatchNotice: {
-          playlistIndex,
-          newPath,
-          message: `${newPath.split('/').pop() ?? newPath}: fingerprint differs — relink anyway?`,
-        },
+      raiseNotice('relinkMismatchNotice', {
+        playlistIndex,
+        newPath,
+        message: `${newPath.split('/').pop() ?? newPath}: fingerprint differs — relink anyway?`,
       });
       return 'mismatch';
     }
@@ -4645,12 +4762,13 @@ export const useAppStore = create<AppState>((set, get) => {
       );
       await window.silverbox.writeSidecar(lookPath, content);
     }
-    const current = get().project;
-    if (current) {
-      const entries = await buildPlaylistEntries(current);
-      if (get().project === current) set({ folderEntries: entries });
-    }
+    // NG3 fix pack: shared refresh, see refreshPlaylistStatus's doc comment.
+    await get().refreshPlaylistStatus();
     return 'relinked';
+  },
+
+  dismissNotice(field) {
+    set({ [field]: null } as Pick<AppState, typeof field>);
   },
 
   async scanFolderForRelink(playlistIndex, dir) {
@@ -4671,7 +4789,7 @@ export const useAppStore = create<AppState>((set, get) => {
     const basenameHint = row.path.split('/').pop() ?? row.path;
     const candidate = await window.silverbox.scanFolderForRelink(dir, basenameHint, expectedFingerprint);
     if (candidate === null) {
-      set({ projectNotice: `no matching photo found in ${dir}` });
+      raiseNotice('projectNotice', { kind: 'error', message: `no matching photo found in ${dir}` });
       return 'no-match';
     }
     // main already did whatever verification is possible this round trip —
@@ -4691,12 +4809,27 @@ export const useAppStore = create<AppState>((set, get) => {
       return { ok: false, message: 'destination cannot be inside the Quick project' };
     }
     const lookNames = project.photos.map((p) => p.look);
+    let moveResult: MoveProjectFilesResult;
     try {
-      await window.silverbox.moveProjectFiles(project.dir, destDir, lookNames);
+      moveResult = await window.silverbox.moveProjectFiles(project.dir, destDir, lookNames);
     } catch (err) {
+      // A per-FILE problem no longer throws here (main/index.ts's
+      // moveProjectFiles now tolerates a missing/unreadable look — see its
+      // own doc comment) — this catch is left for something batch-level
+      // (destDir itself unwritable, an IPC-layer failure, …), which really
+      // does mean nothing moved and nothing should be touched here.
       return { ok: false, message: `could not move project files: ${err instanceof Error ? err.message : String(err)}` };
     }
-    const newPhotos: ProjectPhoto[] = project.photos.map((p) => ({
+    // NG fix pack (CRITICAL — "Save as project… fails and fails SILENTLY"):
+    // a row whose look had NO file to move (`missingLook`, an opened-but-
+    // never-edited photo) still migrates — there's nothing left behind in
+    // srcDir either way. Only a row whose look genuinely FAILED to move
+    // (`failed`) stays put in the Quick project, so neither manifest ever
+    // ends up pointing at a file that isn't where it says.
+    const failedNames = new Set(moveResult.failed.map((f) => f.name));
+    const migratedPhotos = project.photos.filter((p) => !failedNames.has(p.look));
+    const stayBehindPhotos = project.photos.filter((p) => failedNames.has(p.look));
+    const newPhotos: ProjectPhoto[] = migratedPhotos.map((p) => ({
       path: relativizeProjectPath(destDir, resolveProjectPath(project.dir, p.path)),
       look: p.look,
     }));
@@ -4714,27 +4847,47 @@ export const useAppStore = create<AppState>((set, get) => {
     set({ project: newProject, folderDir: destDir });
     // Quick's OWN manifest is no longer covered by the debounced playlist-
     // save subscriber (bottom of this file) once `project` points elsewhere
-    // — emptied here, immediately, rather than left stale on disk.
-    const emptiedQuick: ProjectManifest = {
+    // — written here, immediately, rather than left stale on disk. Rows that
+    // failed to move STAY on Quick's playlist (their look is still there) —
+    // this is no longer always an empty manifest, see stayBehindPhotos above.
+    const remainingQuick: ProjectManifest = {
       schemaVersion: PROJECT_SCHEMA_VERSION,
       name: project.name,
-      photos: [],
+      photos: stayBehindPhotos,
       ...(project.unknown ? { unknown: project.unknown } : {}),
     };
-    await window.silverbox.writeProjectManifest(quickDir, serializeProjectManifest(emptiedQuick));
-    const entries = await buildPlaylistEntries(newProject);
-    if (get().project === newProject) set({ folderEntries: entries });
+    await window.silverbox.writeProjectManifest(quickDir, serializeProjectManifest(remainingQuick));
+    // NG3 fix pack: shared refresh, see refreshPlaylistStatus's doc comment.
+    await get().refreshPlaylistStatus();
     // The currently open photo's look lived at `<quickDir>/looks/<name>` —
     // repoint currentLookPath/the hot-reload watch at its NEW home (same
     // filename, new project dir) so the open session isn't left watching a
-    // path that no longer exists.
+    // path that no longer exists. Skipped when THIS row is one that failed
+    // to move — its look is still sitting at the OLD path, which is exactly
+    // where currentLookPath already points, so leaving it alone is correct.
     const lookPrefix = `${project.dir}/looks/`;
     const curLookPath = get().currentLookPath;
     if (curLookPath && curLookPath.startsWith(lookPrefix)) {
-      const newLookPath = `${destDir}/looks/${curLookPath.slice(lookPrefix.length)}`;
-      set({ currentLookPath: newLookPath });
-      void window.silverbox.watchSidecar(newLookPath);
+      const curLookName = curLookPath.slice(lookPrefix.length);
+      if (!failedNames.has(curLookName)) {
+        const newLookPath = `${destDir}/looks/${curLookName}`;
+        set({ currentLookPath: newLookPath });
+        void window.silverbox.watchSidecar(newLookPath);
+      }
     }
+    // Completion notice (NG2 fix pack lifecycle — see raiseNotice): a clean
+    // move (nothing missing, nothing failed) is 'success' and auto-clears;
+    // anything the user should look at (a failed row) is 'error' and stays
+    // until dismissed. Reuses `projectNotice`, same banner every other
+    // project-op completion already surfaces through (no new modal
+    // framework) — this is also the fix for "surfaces nothing on failure".
+    const parts = [`moved ${moveResult.moved}`];
+    if (moveResult.missingLook > 0) parts.push(`${moveResult.missingLook} no look yet`);
+    if (moveResult.failed.length > 0) parts.push(`${moveResult.failed.length} failed`);
+    raiseNotice('projectNotice', {
+      kind: moveResult.failed.length > 0 ? 'error' : 'success',
+      message: `saved as project "${name}": ${parts.join(', ')}`,
+    });
     return { ok: true };
   },
 
@@ -4922,10 +5075,21 @@ useAppStore.subscribe((state) => {
     // follows via useAppStore.getState().
     const p = useAppStore.getState().project;
     if (!p) return;
+    // NG fix pack (path policy migration): every manifest rewrite is a free
+    // chance to bring an older row's `path` in line with the current policy
+    // (relative only when it's actually inside `p.dir`, absolute otherwise —
+    // see relativizeProjectPath's doc comment) — resolve-then-relativize is a
+    // no-op for a row already in the current shape, and turns a pre-migration
+    // `../../…` row absolute the next time this project is touched at all
+    // (doc-is-truth, harmless either way).
+    const photos = p.photos.map((row) => ({
+      ...row,
+      path: relativizeProjectPath(p.dir, resolveProjectPath(p.dir, row.path)),
+    }));
     const manifest: ProjectManifest = {
       schemaVersion: 1,
       name: p.name,
-      photos: p.photos,
+      photos,
       ...(p.unknown ? { unknown: p.unknown } : {}),
     };
     void window.silverbox.writeProjectManifest(p.dir, serializeProjectManifest(manifest));

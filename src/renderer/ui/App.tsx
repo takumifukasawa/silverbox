@@ -320,6 +320,20 @@ export function App() {
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, []);
 
+  // NG3 fix pack ("renaming an OPEN photo's file shows nothing"):
+  // missing-photo status was only ever (re)computed on project/folder open —
+  // an externally renamed/moved/deleted photo showed no cue until the next
+  // open. Regaining window focus (alt-tabbing back after fixing/renaming a
+  // file in Finder, the common real case) is a cheap, no-fs-watcher-required
+  // moment to re-run the SAME projectPhotosStatus join the filmstrip already
+  // uses — see appStore.ts's refreshPlaylistStatus (also called after
+  // relink/import/save-as, which mutate the playlist directly).
+  useEffect(() => {
+    const onFocus = () => void useAppStore.getState().refreshPlaylistStatus();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
+
   // Headless CLI renderer (main/index.ts's `--render` mode): register the
   // job listener, then tell main we're ready — main holds the job until this
   // fires, so there is no race against React mounting (registering the IPC

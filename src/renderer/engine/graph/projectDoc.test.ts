@@ -93,14 +93,29 @@ describe('resolveProjectPath / relativizeProjectPath', () => {
     expect(resolveProjectPath(projectDir, '/elsewhere/DSC900.ARW')).toBe('/elsewhere/DSC900.ARW');
   });
 
-  it('relativizes an absolute path under a common ancestor', () => {
-    expect(relativizeProjectPath(projectDir, '/Users/x/Silverbox/photos/DSC001.ARW')).toBe('../photos/DSC001.ARW');
+  it('relativizes a path INSIDE the project dir', () => {
     expect(relativizeProjectPath(projectDir, '/Users/x/Silverbox/Quick/other/DSC.ARW')).toBe('other/DSC.ARW');
   });
 
-  it('resolve/relativize round-trip', () => {
+  it('stores a path that ESCAPES the project dir absolute, not as a fragile ../..', () => {
+    expect(relativizeProjectPath(projectDir, '/Users/x/Silverbox/photos/DSC001.ARW')).toBe(
+      '/Users/x/Silverbox/photos/DSC001.ARW'
+    );
+  });
+
+  it('resolve/relativize round-trip (in-tree)', () => {
+    const abs = '/Users/x/Silverbox/Quick/other/DSC.ARW';
+    const rel = relativizeProjectPath(projectDir, abs);
+    expect(resolveProjectPath(projectDir, rel)).toBe(abs);
+  });
+
+  it('resolve/relativize round-trip (out-of-tree, stored absolute)', () => {
     const abs = '/Users/x/Silverbox/photos/DSC001.ARW';
     const rel = relativizeProjectPath(projectDir, abs);
     expect(resolveProjectPath(projectDir, rel)).toBe(abs);
+  });
+
+  it('resolveProjectPath still accepts an older ../-style relative path (read-side compat)', () => {
+    expect(resolveProjectPath(projectDir, '../photos/DSC001.ARW')).toBe('/Users/x/Silverbox/photos/DSC001.ARW');
   });
 });

@@ -269,6 +269,7 @@ export function Toolbar() {
   const graph = useAppStore((s) => s.graph);
   const history = useAppStore((s) => s.history);
   const sidecarNotice = useAppStore((s) => s.sidecarNotice);
+  const currentPhotoMissingNotice = useAppStore((s) => s.currentPhotoMissingNotice);
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
   const sidecarRating = useAppStore((s) => s.sidecarRating);
@@ -278,6 +279,7 @@ export function Toolbar() {
   const importLegacySidecar = useAppStore((s) => s.importLegacySidecar);
   const projectNotice = useAppStore((s) => s.projectNotice);
   const relinkMismatchNotice = useAppStore((s) => s.relinkMismatchNotice);
+  const dismissNotice = useAppStore((s) => s.dismissNotice);
   const relinkPhoto = useAppStore((s) => s.relinkPhoto);
   const saveGraph = useAppStore((s) => s.saveGraph);
   const undo = useAppStore((s) => s.undo);
@@ -476,13 +478,23 @@ export function Toolbar() {
           // instead. Same "button as a sibling of the ellipsis span, not
           // nested inside it" layout as the hot-reload notice above (its
           // own doc comment explains why: a clipped ancestor swallows
-          // pointer events).
+          // pointer events). NG2 fix pack: now dismissable (✕) like every
+          // other notice in this group — via the shared `dismissNotice`
+          // action, not a one-off local clear.
           <span className="toolbar-hotreload-notice">
             <span className="toolbar-warn" data-testid="legacy-sidecar-notice" title="An old adjacent sidecar exists for this photo but is not the active project's look">
               legacy sidecar found — not applied
             </span>
             <button onClick={() => void importLegacySidecar()} data-testid="import-legacy-sidecar-button">
               Import sidecar
+            </button>
+            <button
+              onClick={() => dismissNotice('legacySidecarImportNotice')}
+              data-testid="legacy-sidecar-notice-dismiss"
+              title="Dismiss"
+              aria-label="Dismiss"
+            >
+              ✕
             </button>
           </span>
         )}
@@ -491,6 +503,7 @@ export function Toolbar() {
           // `fingerprint` that disagrees with the candidate the user just
           // picked — reusing the same notice+button pattern as the
           // hot-reload/legacy-sidecar notices above (no new modal framework).
+          // NG2 fix pack: dismissable (✕) via the shared `dismissNotice`.
           <span className="toolbar-hotreload-notice">
             <span className="toolbar-warn" data-testid="relink-mismatch-notice" title={relinkMismatchNotice.message}>
               {relinkMismatchNotice.message}
@@ -501,16 +514,50 @@ export function Toolbar() {
             >
               Relink anyway
             </button>
+            <button
+              onClick={() => dismissNotice('relinkMismatchNotice')}
+              data-testid="relink-mismatch-notice-dismiss"
+              title="Dismiss"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
           </span>
         )}
         {projectNotice && (
-          <span className="toolbar-warn" data-testid="project-notice" title={projectNotice}>
-            {projectNotice}
+          // NG2 fix pack ("imported N looks" notice never dismissed): a
+          // 'success' projectNotice (a clean completion) already auto-clears
+          // after ~8s via appStore.ts's raiseNotice; an 'error' one (a failed
+          // open, a corrupt manifest, a "no match" scan, or any completion
+          // report with a real failure in it) stays until this ✕ is clicked.
+          // Same "button as a sibling of the ellipsis span" layout as the
+          // notices above, for the same clipped-ancestor reason.
+          <span className="toolbar-hotreload-notice" data-project-notice-kind={projectNotice.kind}>
+            <span className="toolbar-warn" data-testid="project-notice" title={projectNotice.message}>
+              {projectNotice.message}
+            </span>
+            <button
+              onClick={() => dismissNotice('projectNotice')}
+              data-testid="project-notice-dismiss"
+              title="Dismiss"
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
           </span>
         )}
         {sidecarNotice && (
           <span className="toolbar-warn" data-testid="sidecar-notice" title={sidecarNotice}>
             {sidecarNotice}
+          </span>
+        )}
+        {currentPhotoMissingNotice && (
+          // NG3 fix pack: the CURRENTLY OPEN photo's file no longer resolves
+          // (refreshPlaylistStatus, appStore.ts) — surfaced here rather than
+          // silence, since a standalone single-file open has no filmstrip
+          // cell to show a missing badge on at all.
+          <span className="toolbar-warn" data-testid="current-photo-missing-notice" title={currentPhotoMissingNotice}>
+            {currentPhotoMissingNotice}
           </span>
         )}
         {spotsCapNotice && (
