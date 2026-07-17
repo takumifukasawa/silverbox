@@ -112,6 +112,13 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.presetSaveFamilies = Array.isArray(src.presetSaveFamilies)
     ? src.presetSaveFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.presetSaveFamilies;
+  // Multi-select sync (docs/brief-bank/multi-select-sync.md): last-used Sync…
+  // dialog family checkboxes — same shape-only validation as
+  // presetSaveFamilies just above (semantic filtering of unknown ids happens
+  // at presetFamilies.ts's isKnownFamilyId, not here).
+  result.syncFamilies = Array.isArray(src.syncFamilies)
+    ? src.syncFamilies.filter((id): id is string => typeof id === 'string')
+    : DEFAULT_SETTINGS.syncFamilies;
   return result as unknown as Settings;
 }
 

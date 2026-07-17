@@ -119,10 +119,22 @@ export function App() {
         // surface that must win this keystroke instead (type="number"
         // inputs, Monaco's shader editor); no other control in the app
         // binds bare digit keys, so there is nothing else to collide with.
+        // Multi-select (docs/brief-bank/multi-select-sync.md): fans out over
+        // the whole filmstrip selection when 2+ are selected — each
+        // per-photo write pushes its OWN undo entry (LIFO handles the
+        // batch-of-singles naturally; no combined entry). Degrades to
+        // "just the canvas photo" for free when nothing else is selected
+        // (filmstripSelection is empty then).
         if (isTextEntry(ev.target)) return;
-        if (useAppStore.getState().imageStatus !== 'ready') return;
+        const s = useAppStore.getState();
+        if (s.imageStatus !== 'ready') return;
         ev.preventDefault();
-        useAppStore.getState().setRating(Number(ev.key));
+        const rating = Number(ev.key);
+        void s.setRating(rating);
+        for (const path of s.filmstripSelection) {
+          const lookPath = s.lookPathForPhoto(path);
+          if (lookPath) void s.setRating(rating, lookPath);
+        }
       }
       if (!cmd && !ev.altKey && !ev.shiftKey && (ev.key === 'p' || ev.key === 'x' || ev.key === 'u')) {
         // Pick/reject/unflag (reject-flag pack, docs/brief-bank/reject-
@@ -131,19 +143,22 @@ export function App() {
         // playbook.md's shortcut notes + this file's/CanvasView.tsx's own key
         // handlers) — none of p/x/u collided with anything ('m'=bypass,
         // 'y'=compare, 'c'=crop, ⇧⌘R=reset, '['/']'=spot radius, digits
-        // 0-5=rating). Acts on the CANVAS photo ONLY for now — whole-
-        // selection fan-out is deferred until multi-select itself exists
-        // (see the brief's scope note); setFlag itself already takes an
-        // explicit look path rather than reaching for "the current photo"
-        // internally, so multi-select can call it per-photo later without
-        // touching this action. Independent of rating (LR-consistent):
-        // never clears/is cleared by the 1-5/0 keys above.
+        // 0-5=rating). Multi-select fan-out (same shape as the rating keys
+        // above): setFlag already takes an explicit look path rather than
+        // reaching for "the current photo" internally, so this calls it once
+        // for the canvas photo and once per OTHER selected playlist entry.
+        // Independent of rating (LR-consistent): never clears/is cleared by
+        // the 1-5/0 keys above.
         if (isTextEntry(ev.target)) return;
         const s = useAppStore.getState();
         if (s.imageStatus !== 'ready' || !s.currentLookPath) return;
         ev.preventDefault();
         const flag = ev.key === 'p' ? 'pick' : ev.key === 'x' ? 'reject' : null;
         void s.setFlag(s.currentLookPath, flag);
+        for (const path of s.filmstripSelection) {
+          const lookPath = s.lookPathForPhoto(path);
+          if (lookPath) void s.setFlag(lookPath, flag);
+        }
       }
       if (cmd && !ev.altKey && (ev.key.toLowerCase() === 'z' || ev.key.toLowerCase() === 'y')) {
         // don't steal undo from text fields (Monaco has its own undo stack)
@@ -223,6 +238,11 @@ export function App() {
         // other modal canvas tool above — no in-progress gesture to tear
         // down (compare has none), just flip the flag off.
         useAppStore.getState().setCompareMode(false);
+      }
+      if (ev.key === 'Escape' && useAppStore.getState().filmstripSelection.length > 0) {
+        // Multi-select (docs/brief-bank/multi-select-sync.md): Esc collapses
+        // back to single-select, same as a plain click on any cell.
+        useAppStore.getState().setFilmstripSelection([]);
       }
       if (ev.key === 'Escape' && useAppStore.getState().inspectNodeId !== null) {
         // Inspect mode (per-node-preview pack, tier 2): same "just flip the

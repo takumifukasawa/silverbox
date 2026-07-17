@@ -63,6 +63,7 @@ import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { SpotBrushCursor } from './SpotBrushCursor';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
+import type { PresetFamilyId } from '../engine/graph/presetFamilies';
 import { isTextEntry } from './textEntry';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
@@ -157,8 +158,8 @@ declare global {
        * the "any playlist entry" seam multi-select will use later.
        */
       setFlag(lookPath: string, flag: 'pick' | 'reject' | null): Promise<void>;
-      /** Verify-only convenience: drives the SAME store action the toolbar stars / 1-5/0 keys do. */
-      setRating(rating: number): void;
+      /** Verify-only convenience: drives the SAME store action the toolbar stars / 1-5/0 keys do. `lookPath` (multi-select fan-out) defaults to the canvas photo when omitted. */
+      setRating(rating: number, lookPath?: string): Promise<void>;
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
       /** Sidecar visual diff dialog state (git-native completion brief §1) — see appStore.ts's sidecarDiffDialog. */
@@ -207,6 +208,8 @@ declare global {
       exportLutState(): { count: number; paths: string[]; skipped: string[] } | null;
       /** Verify-only: deterministic store-level wiring for test setup (the drag-to-wire UI itself is ms13's coverage). */
       connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
+      /** Verify-only: the "+ Radial" toolbar button's own store action (default-centered mask + develop + blend, one undo entry) — lets a script build a graph with real STRUCTURAL (masks) content without driving the canvas draw gesture (multi-select-sync.md's structural-family skip-counting check needs a primary with a real mask node). */
+      addLocalAdjustment(): void;
       /**
        * Verify-only: select a node by id (or null to deselect) without
        * clicking its React Flow DOM element — NodeEditorPanel's `fitView`
@@ -229,15 +232,25 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
-      /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null for kinds that don't carry one yet (sync/arrange — no producer in v1). */
+      /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null for kinds that don't carry one (a batch entry — sync — carries `targets` instead, plain `arrange`'s single project-scoped target aside; `targets` is null for every non-batch kind). */
       undoStackState(): {
-        undo: { kind: string; label: string; target: string | null }[];
-        redo: { kind: string; label: string; target: string | null }[];
+        undo: { kind: string; label: string; target: string | null; targets: string[] | null }[];
+        redo: { kind: string; label: string; target: string | null; targets: string[] | null }[];
       };
       /** Verify-only convenience: drives the SAME store action ⌘Z/the toolbar button do. */
       undo(): Promise<void>;
       /** Verify-only convenience: drives the SAME store action ⌘⇧Z/the toolbar button do. */
       redo(): Promise<void>;
+      /**
+       * Multi-select (docs/brief-bank/multi-select-sync.md): the PRIMARY
+       * (whichever photo is open — `imagePath`) plus the SECONDARY-selected
+       * paths (`filmstripSelection`, never including the primary itself).
+       */
+      filmstripSelectionState(): { primary: string | null; secondary: string[] };
+      /** Verify-only convenience: drives the ⌘/⇧-click selection machinery directly — replaces the SECONDARY selection wholesale (see appStore.ts's setFilmstripSelection doc comment; `imagePath` is filtered out automatically). */
+      setFilmstripSelection(paths: string[]): void;
+      /** "Sync…" (multi-select-sync.md): drives the SAME store action the toolbar's Sync… button (via FamilyScopeDialog's confirm) does — copies `families` from the primary's live graph to every secondary-selected look. */
+      syncSelection(families: PresetFamilyId[]): Promise<void>;
       setGeometry(geo: GeometryParams): void;
       geometryState(): GeometryParams;
       setLens(lens: LensParams): void;
@@ -1367,8 +1380,8 @@ export function CanvasView() {
         return useAppStore.getState().setFlag(lookPath, flag);
       },
       /** Verify-only convenience: drives the SAME store action the toolbar stars / 1-5/0 keys do — used by verify-undo.mjs's bounded-depth check to push many distinct entries fast. */
-      setRating(rating) {
-        return useAppStore.getState().setRating(rating);
+      setRating(rating, lookPath) {
+        return useAppStore.getState().setRating(rating, lookPath);
       },
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {
@@ -1455,6 +1468,9 @@ export function CanvasView() {
       connectEdge(source, target, targetHandle) {
         useAppStore.getState().connectEdge(source, target, targetHandle);
       },
+      addLocalAdjustment() {
+        useAppStore.getState().addLocalAdjustment();
+      },
       selectNode(id) {
         useAppStore.getState().selectNode(id);
       },
@@ -1509,6 +1525,7 @@ export function CanvasView() {
           kind: e.kind,
           label: e.label,
           target: 'target' in e ? e.target : null,
+          targets: 'targets' in e ? e.targets : null,
         });
         return { undo: stack.undo.map(summarize), redo: stack.redo.map(summarize) };
       },
@@ -1517,6 +1534,16 @@ export function CanvasView() {
       },
       redo() {
         return useAppStore.getState().redo();
+      },
+      filmstripSelectionState() {
+        const s = useAppStore.getState();
+        return { primary: s.imagePath, secondary: s.filmstripSelection };
+      },
+      setFilmstripSelection(paths) {
+        useAppStore.getState().setFilmstripSelection(paths);
+      },
+      syncSelection(families) {
+        return useAppStore.getState().syncSelection(families);
       },
       scopeState() {
         const s = useAppStore.getState();

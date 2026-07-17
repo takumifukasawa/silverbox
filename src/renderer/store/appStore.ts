@@ -12,6 +12,7 @@ import {
   type GraphEntryKind,
   type GraphUndoEntry,
   type RatingUndoEntry,
+  type SyncUndoEntry,
   type UndoEntry,
   type UndoStackState,
 } from './undoStack';
@@ -90,6 +91,7 @@ import {
   buildScopedLook,
   isKnownFamilyId,
   mergeScopedLook,
+  structuralFamilyCompatible,
   type PresetFamilyId,
 } from '../engine/graph/presetFamilies';
 import { diffLook } from '../engine/look/diffLook';
@@ -318,6 +320,76 @@ interface AppState {
    */
   folderEntries: FolderImageEntry[];
   /**
+   * Multi-select + sync (docs/brief-bank/multi-select-sync.md): filmstrip
+   * cells ⌘/⇧-selected ALONGSIDE the primary — session state only, never
+   * persisted, absolute playlist paths. The PRIMARY (LR's "most selected",
+   * the photo actually open in the canvas) is always `imagePath` itself and
+   * is deliberately NOT stored in this array — Filmstrip.tsx's existing
+   * `current` prop (`entry.path === imagePath`) already renders it
+   * distinctly, so this is the SECONDARY membership only; total selection
+   * size (the toolbar's "N selected" badge / the Sync… button's 2+ gate) is
+   * `imagePath ? filmstripSelection.length + 1 : filmstripSelection.length`.
+   * Cleared by Esc (App.tsx) or a plain click (Filmstrip.tsx's own
+   * click handler) — both collapse back to single-select, today's unchanged
+   * behavior.
+   */
+  filmstripSelection: string[];
+  /**
+   * ⇧-click's range anchor: the last PLAIN-clicked filmstrip path (LR
+   * muscle memory — "⇧-click extends a range from the last plain-clicked
+   * cell"). Untouched by ⌘/⇧-clicks themselves; only a plain click moves it.
+   */
+  filmstripSelectionAnchor: string | null;
+  /**
+   * Replace the SECONDARY selection wholesale — the verify-harness hook
+   * (`setFilmstripSelection(paths)`, driven via `window.__debug`) and the
+   * real ⌘-click/⇧-click handlers both funnel through this. `imagePath` is
+   * filtered out of `paths` automatically (it's always the implicit
+   * primary — see this field's own doc comment above).
+   */
+  setFilmstripSelection(paths: string[]): void;
+  /** ⌘-click: toggle one path's secondary-selection membership. A no-op for `imagePath` itself — the primary can't be toggled OUT of the selection, it's always in it by virtue of being open. */
+  toggleFilmstripSelection(path: string): void;
+  /** Plain click (Filmstrip.tsx): move the range anchor to `path` ahead of opening it — a SEPARATE call from `setFilmstripSelection([])` (both fire together from the click handler) so a verify script or a future caller can move the anchor without also touching the selection. */
+  setFilmstripSelectionAnchor(path: string | null): void;
+  /**
+   * ⇧-click: replace the secondary selection with the INCLUSIVE range from
+   * `filmstripSelectionAnchor` (falling back to `imagePath` when no anchor
+   * has been set yet this session) to `path`, walked over `order` — the
+   * filmstrip's own currently-VISIBLE path list (so a range never silently
+   * reaches through a cell hidden by the ★n+/pick-reject filters). Falls
+   * back to selecting just `path` alone if either end can't be found in
+   * `order` (a stale anchor from a since-filtered-out cell, say).
+   */
+  rangeSelectFilmstrip(path: string, order: string[]): void;
+  /**
+   * Resolve a playlist photo's absolute path to its own look/sidecar file
+   * (`<project>/looks/<name>`) — App.tsx's rating/flag key fan-out uses this
+   * to turn `filmstripSelection`'s photo paths into the explicit look paths
+   * `setRating`/`setFlag` take. `null` without an active project or a
+   * matching playlist row (defensive; every real caller only ever passes a
+   * path drawn from the current project's own `folderEntries`).
+   */
+  lookPathForPhoto(photoPath: string): string | null;
+  /**
+   * "Sync…" (docs/brief-bank/multi-select-sync.md): copy `families` FROM the
+   * PRIMARY's live graph TO every SECONDARY-selected look, via the exact
+   * same applyLook/preset merge machinery (mergeScopedLook) preset-apply
+   * already uses — never opens a target, writes each one directly through
+   * the explicit-look-path seam (same shape as setFlag's "any other look"
+   * branch). A target with no look yet is seeded exactly like a fresh open
+   * (seedDefaultLook) before the families are merged onto it, so the file
+   * this creates is never a bare default doc. Structural families (masks/
+   * spots/custom-nodes) are skipped PER TARGET when that target's own chain
+   * isn't structurally compatible (presetFamilies.ts's
+   * structuralFamilyCompatible) — counted in the completion notice, never
+   * grafted in a way that would leave an orphaned node. Pushes ONE
+   * SyncUndoEntry (per-target before/after look contents) onto the global
+   * undo stack; a completion `projectNotice` reports counts. No-op without
+   * an open primary, an active project, or any secondary selected.
+   */
+  syncSelection(families: PresetFamilyId[]): Promise<void>;
+  /**
    * NG3 fix pack ("renaming an OPEN photo's file shows nothing"): missing-
    * photo status used to be computed only on project/folder open — an
    * externally renamed/moved/deleted CURRENT photo showed nothing at all
@@ -481,15 +553,23 @@ interface AppState {
    */
   sidecarRating: number;
   /**
-   * Set (1-5) or clear (0) the current image's rating — the toolbar's star
-   * display and App.tsx's 1-5/0 key handler both call this. Marks the doc
-   * dirty (autosave's own subscribe watches sidecarRating in addition to
-   * `graph` — see the bottom of this file) and pushes a `'rating'` undo
-   * entry (see this field's own doc comment — global-undo decision 2
-   * supersedes the old "ratings never undo" contract). No-op without an
-   * open image.
+   * Set (1-5) or clear (0) a photo's rating — the toolbar's star display and
+   * App.tsx's 1-5/0 key handler both call this for the CANVAS photo
+   * (`lookPath` omitted); the same key handler fans out over the whole
+   * filmstrip selection when 2+ are selected by passing each OTHER selected
+   * look's path explicitly (multi-select-sync.md: "each per-photo change
+   * pushes its own undo entry") — same explicit-look-path shape `setFlag`
+   * already uses, extended here to match. Omitted/matching `currentLookPath`
+   * rides the existing in-memory + autosave pipeline (marks graphDirty,
+   * pushes a `'rating'` undo entry targeting the open photo — global-undo
+   * decision 2, superseding the old "ratings never undo" contract);
+   * otherwise reads/patches/writes that OTHER look file directly off disk
+   * (mirroring setFlag's own OTHER-look branch), pushing a `'rating'` entry
+   * targeting THAT photo's path so ⌘Z jumps to it before reverting. No-op
+   * without an open image (when `lookPath` is omitted) or without a
+   * resolvable project photo (when it's given).
    */
-  setRating(rating: number): void;
+  setRating(rating: number, lookPath?: string): Promise<void>;
   /**
    * Pick/reject flag (reject-flag pack, docs/brief-bank/reject-flag.md):
    * sidecar WRAPPER metadata about the PHOTO, same shape as sidecarRating
@@ -502,20 +582,21 @@ interface AppState {
   sidecarFlag: PhotoFlag | null;
   /**
    * Set ('pick'/'reject') or clear (null) a photo's flag — App.tsx's p/x/u
-   * key handler calls this for the CANVAS photo (multi-select flagging is
-   * deferred until multi-select itself exists — see the brief's scope
-   * note). Deliberately takes an explicit `lookPath`, not "the current
-   * photo" implicitly: when `lookPath` IS the open canvas photo
-   * (`currentLookPath`), this rides the same in-memory + autosave pipeline
-   * `setRating` uses (marks graphDirty, pushes a `'flag'` undo entry — same
-   * global-undo decision 2 as rating, superseding the old "flags never
-   * undo" contract); otherwise it reads/patches/writes that OTHER look file
-   * directly off disk (mirroring relinkPhoto's own read-patch-write shape;
-   * this OTHER-photo branch has no active caller yet — see the brief's
-   * multi-select fan-out note — so it stays outside the undo stack for now),
-   * since that photo isn't necessarily open/decoded at all. This is the seam a future
-   * multi-select fan-out calls per selected playlist entry without any
-   * change to this action's signature.
+   * key handler calls this for the CANVAS photo, fanning out over the whole
+   * filmstrip selection when 2+ are selected (multi-select-sync.md: "each
+   * per-photo change pushes its own undo entry"). Deliberately takes an
+   * explicit `lookPath`, not "the current photo" implicitly: when `lookPath`
+   * IS the open canvas photo (`currentLookPath`), this rides the same
+   * in-memory + autosave pipeline `setRating` uses (marks graphDirty, pushes
+   * a `'flag'` undo entry — global-undo decision 2, superseding the old
+   * "flags never undo" contract); otherwise it reads/patches/writes that
+   * OTHER look file directly off disk (mirroring relinkPhoto's own
+   * read-patch-write shape), since that photo isn't necessarily
+   * open/decoded at all — ALSO pushing a `'flag'` entry targeting that
+   * OTHER photo's path (resolved via the active project's playlist), so
+   * ⌘Z on a fan-out entry JUMPS to it before reverting, same as any other
+   * per-photo entry. This is the seam multi-select's key fan-out calls per
+   * selected playlist entry without any change to this action's signature.
    */
   setFlag(lookPath: string, flag: PhotoFlag | null): Promise<void>;
   /** Unrecognized wrapper-level sidecar keys (DESIGN §9 passthrough) — round-tripped verbatim on save. */
@@ -2611,6 +2692,61 @@ export const useAppStore = create<AppState>((set, get) => {
     });
   };
 
+  /**
+   * Batch sync undo/redo (multi-select-sync.md, global-undo decision 1's
+   * BATCH carve-out — "no single photo to show, revert all targets in
+   * place"): write `graphs[photoPath]` back to each target's OWN look file,
+   * preserving whatever else that file's wrapper metadata reads on disk
+   * RIGHT NOW (rating/flag/photo/fingerprint/unknown/createdAt) — same
+   * read-patch-write shape setFlag's "any other look" branch uses, just
+   * looped over N targets. All-or-nothing: if ANY target's file can't be
+   * read/parsed (missing, mid-relink, corrupted), NOTHING is written —
+   * `undo`/`redo` treat that as BLOCKED (decision 1's "not silently
+   * skipped, not applied blind"), the same spirit as a single-photo entry's
+   * missing-file guard, just checked for every target before committing any
+   * of them.
+   */
+  const applySyncEntryGraphs = async (
+    targets: string[],
+    graphs: Record<string, GraphDoc>
+  ): Promise<{ ok: true } | { ok: false; failedTarget: string }> => {
+    const project = get().project;
+    if (!project) return { ok: false, failedTarget: targets[0] ?? '' };
+    const writes: { lookPath: string; content: string }[] = [];
+    for (const photoPath of targets) {
+      const row = findPlaylistPhoto(project, photoPath);
+      const targetGraph = graphs[photoPath];
+      if (!row || !targetGraph) return { ok: false, failedTarget: photoPath };
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let text: string | null;
+      try {
+        text = await window.silverbox.readSidecar(lookPath);
+      } catch {
+        return { ok: false, failedTarget: photoPath };
+      }
+      if (text === null) return { ok: false, failedTarget: photoPath };
+      let parsed: SidecarDoc;
+      try {
+        parsed = parseGraphDoc(text);
+      } catch {
+        return { ok: false, failedTarget: photoPath };
+      }
+      const content = serializeGraphDoc(
+        targetGraph,
+        parsed.source ?? null,
+        parsed.createdAt ?? null,
+        parsed.unknown,
+        parsed.rating,
+        parsed.photo,
+        parsed.fingerprint,
+        parsed.flag
+      );
+      writes.push({ lookPath, content });
+    }
+    for (const w of writes) await window.silverbox.writeSidecar(w.lookPath, w.content);
+    return { ok: true };
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -2625,6 +2761,8 @@ export const useAppStore = create<AppState>((set, get) => {
   relinkMismatchNotice: null,
   folderDir: null,
   folderEntries: [],
+  filmstripSelection: [],
+  filmstripSelectionAnchor: null,
   currentPhotoMissingNotice: null,
   openingPreview: null,
   graph: defaultGraphDoc(),
@@ -4002,11 +4140,30 @@ export const useAppStore = create<AppState>((set, get) => {
         set((s) => ({ sidecarFlag: entry.before, graphDirty: true, undoStack: moveTopToRedo(s.undoStack, { ...entry, after }) }));
         return;
       }
-      case 'sync':
+      case 'sync': {
+        const result = await applySyncEntryGraphs(entry.targets, entry.before);
+        if (!result.ok) {
+          blockUndoRedo('undo', entry.label, result.failedTarget);
+          return;
+        }
+        set((s) => ({ undoStack: moveTopToRedo(s.undoStack, entry) }));
+        // Not a JUMP (decision 1's BATCH carve-out: no single photo to show)
+        // — but if the CURRENTLY open photo happens to be one of the
+        // targets (e.g. the user opened it via the filmstrip sometime after
+        // the sync ran), its in-memory graph would otherwise silently
+        // diverge from the look file just reverted on disk. Re-opening the
+        // SAME path (no navigation, nothing new becomes visible) keeps
+        // memory and disk consistent for that one edge case.
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        return;
+      }
       case 'arrange':
         // Type + dispatch designed (global-undo brief) but no producer in v1
-        // yet (Sync/Arrange haven't landed) — nothing can ever push one of
-        // these onto the stack today, so this branch never actually runs.
+        // yet (Arrange hasn't landed) — nothing can ever push one of these
+        // onto the stack today, so this branch never actually runs.
         return;
     }
   },
@@ -4054,7 +4211,20 @@ export const useAppStore = create<AppState>((set, get) => {
         set((s) => ({ sidecarFlag: entry.after ?? null, graphDirty: true, undoStack: moveTopToUndo(s.undoStack, entry) }));
         return;
       }
-      case 'sync':
+      case 'sync': {
+        if (entry.after === undefined) return; // defensive: syncSelection always populates `after` eagerly (unlike photo-edit entries, both sides are known synchronously at push time)
+        const result = await applySyncEntryGraphs(entry.targets, entry.after);
+        if (!result.ok) {
+          blockUndoRedo('redo', entry.label, result.failedTarget);
+          return;
+        }
+        set((s) => ({ undoStack: moveTopToUndo(s.undoStack, entry) }));
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        return;
+      }
       case 'arrange':
         return;
     }
@@ -4758,28 +4928,87 @@ export const useAppStore = create<AppState>((set, get) => {
     }
   },
 
-  setRating(rating) {
+  async setRating(rating, lookPath) {
     const s = get();
-    // no image open: nothing to rate, and no sidecar to eventually write it to
-    if (!s.imagePath) return;
     const next = sanitizeRating(rating);
-    if (next === s.sidecarRating) return; // e.g. pressing the same star twice — nothing changed, nothing to save
-    // Global-undo (docs/brief-bank/global-undo.md, decision 2): rating IS in
-    // the undoable scope now — pushes a 'rating' entry onto the SAME global
-    // stack every graph edit uses (see AppState.sidecarRating's doc comment;
-    // this supersedes the old "ratings never undo" contract). graphDirty:true
-    // still marks the doc dirty so autosave persists it (the bottom-of-file
-    // autosave subscribe watches sidecarRating in addition to `graph` for
-    // exactly this reason — a rating-only change never touches `graph` itself).
-    const entry: RatingUndoEntry = {
-      seq: nextUndoSeq(),
-      at: Date.now(),
-      kind: 'rating',
-      label: `Set rating to ${next}`,
-      target: s.imagePath,
-      before: s.sidecarRating,
-    };
-    set((st) => ({ sidecarRating: next, graphDirty: true, undoStack: pushUndoEntry(st.undoStack, entry) }));
+    if (lookPath === undefined || lookPath === s.currentLookPath) {
+      // The CANVAS photo: update the live in-memory state and let the
+      // ordinary autosave/⌘S pipeline persist it.
+      if (!s.imagePath) return; // no image open: nothing to rate, and no sidecar to eventually write it to
+      if (next === s.sidecarRating) return; // e.g. pressing the same star twice — nothing changed, nothing to save
+      // Global-undo (docs/brief-bank/global-undo.md, decision 2): rating IS
+      // in the undoable scope now — pushes a 'rating' entry onto the SAME
+      // global stack every graph edit uses (see AppState.sidecarRating's
+      // doc comment; this supersedes the old "ratings never undo"
+      // contract). graphDirty:true still marks the doc dirty so autosave
+      // persists it (the bottom-of-file autosave subscribe watches
+      // sidecarRating in addition to `graph` for exactly this reason — a
+      // rating-only change never touches `graph` itself).
+      const entry: RatingUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'rating',
+        label: `Set rating to ${next}`,
+        target: s.imagePath,
+        before: s.sidecarRating,
+      };
+      set((st) => ({ sidecarRating: next, graphDirty: true, undoStack: pushUndoEntry(st.undoStack, entry) }));
+      return;
+    }
+    // Any OTHER look file — the explicit-look-path seam multi-select's key
+    // fan-out uses, same shape as setFlag's own OTHER-look branch (see its
+    // doc comment for the owner-photo-path resolution this mirrors exactly).
+    const project = s.project;
+    const ownerRow = project?.photos.find((p) => `${project.dir}/looks/${p.look}` === lookPath);
+    const ownerPhotoPath = project && ownerRow ? resolveProjectPath(project.dir, ownerRow.path) : null;
+
+    let existingText: string | null = null;
+    try {
+      existingText = await window.silverbox.readSidecar(lookPath);
+    } catch (err) {
+      console.warn(`setRating: could not read ${lookPath}:`, err);
+      return;
+    }
+    let before: number;
+    let content: string;
+    if (existingText === null) {
+      before = 0;
+      if (next === 0) return; // nothing to clear, nothing to save — don't create a bare look file for a no-op
+      content = serializeGraphDoc(defaultGraphDoc(), null, null, undefined, next);
+    } else {
+      let parsed: SidecarDoc;
+      try {
+        parsed = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`setRating: ${lookPath} is unreadable by this build, leaving it untouched:`, err);
+        return;
+      }
+      before = parsed.rating;
+      if (before === next) return; // no-op, nothing to save
+      content = serializeGraphDoc(
+        parsed.graph,
+        parsed.source ?? null,
+        parsed.createdAt ?? null,
+        parsed.unknown,
+        next,
+        parsed.photo,
+        parsed.fingerprint,
+        parsed.flag
+      );
+    }
+    await window.silverbox.writeSidecar(lookPath, content);
+    if (ownerPhotoPath) {
+      const entry: RatingUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'rating',
+        label: `Set rating to ${next}`,
+        target: ownerPhotoPath,
+        before,
+        after: next,
+      };
+      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    }
   },
 
   async setFlag(lookPath, flag) {
@@ -4811,11 +5040,21 @@ export const useAppStore = create<AppState>((set, get) => {
       set((st) => ({ sidecarFlag: next, graphDirty: true, undoStack: pushUndoEntry(st.undoStack, entry) }));
       return;
     }
-    // Any OTHER look file — the seam a future multi-select fan-out uses: a
+    // Any OTHER look file — the explicit-look-path seam multi-select's
+    // rating/flag key fan-out uses (docs/brief-bank/multi-select-sync.md): a
     // direct read-patch-write against ITS OWN file, independent of whatever
     // graph happens to be in memory right now (mirrors relinkPhoto's own
     // read-patch-write shape above), since that photo isn't necessarily
-    // open/decoded at all.
+    // open/decoded at all. Resolves the OWNING photo path (for the undo
+    // entry's `target`, which ⌘Z jumps to) via the active project's
+    // playlist row whose `look` filename matches `lookPath` — every real
+    // caller only ever passes a path drawn from that same playlist, so this
+    // always resolves; the write still happens even without a project/match
+    // (defensive), just without an undo entry (nothing sane to jump to).
+    const project = get().project;
+    const ownerRow = project?.photos.find((p) => `${project.dir}/looks/${p.look}` === lookPath);
+    const ownerPhotoPath = project && ownerRow ? resolveProjectPath(project.dir, ownerRow.path) : null;
+
     let existingText: string | null = null;
     try {
       existingText = await window.silverbox.readSidecar(lookPath);
@@ -4823,32 +5062,247 @@ export const useAppStore = create<AppState>((set, get) => {
       console.warn(`setFlag: could not read ${lookPath}:`, err);
       return;
     }
+    let before: PhotoFlag | null;
+    let content: string;
     if (existingText === null) {
+      before = null;
+      if (next === null) return; // nothing to clear, nothing to save — don't create a bare look file for a no-op
       // No look yet for this photo — write a fresh minimal one carrying
       // just the flag (same shape presetDoc.ts's captureLook round-trip
       // already produces for a document with no per-photo metadata yet).
-      const content = serializeGraphDoc(defaultGraphDoc(), null, null, undefined, 0, undefined, undefined, next ?? undefined);
-      await window.silverbox.writeSidecar(lookPath, content);
-      return;
+      content = serializeGraphDoc(defaultGraphDoc(), null, null, undefined, 0, undefined, undefined, next);
+    } else {
+      let parsed: SidecarDoc;
+      try {
+        parsed = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`setFlag: ${lookPath} is unreadable by this build, leaving it untouched:`, err);
+        return;
+      }
+      before = parsed.flag ?? null;
+      if (before === next) return; // no-op, nothing to save
+      content = serializeGraphDoc(
+        parsed.graph,
+        parsed.source ?? null,
+        parsed.createdAt ?? null,
+        parsed.unknown,
+        parsed.rating,
+        parsed.photo,
+        parsed.fingerprint,
+        next ?? undefined
+      );
     }
-    let parsed: SidecarDoc;
-    try {
-      parsed = parseGraphDoc(existingText);
-    } catch (err) {
-      console.warn(`setFlag: ${lookPath} is unreadable by this build, leaving it untouched:`, err);
-      return;
-    }
-    const content = serializeGraphDoc(
-      parsed.graph,
-      parsed.source ?? null,
-      parsed.createdAt ?? null,
-      parsed.unknown,
-      parsed.rating,
-      parsed.photo,
-      parsed.fingerprint,
-      next ?? undefined
-    );
     await window.silverbox.writeSidecar(lookPath, content);
+    if (ownerPhotoPath) {
+      const entry: FlagUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'flag',
+        label: next === 'pick' ? 'Pick' : next === 'reject' ? 'Reject' : 'Unflag',
+        target: ownerPhotoPath,
+        before,
+        after: next,
+      };
+      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    }
+  },
+
+  setFilmstripSelection(paths) {
+    set((s) => ({ filmstripSelection: Array.from(new Set(paths.filter((p) => p !== s.imagePath))) }));
+  },
+
+  toggleFilmstripSelection(path) {
+    set((s) => {
+      if (path === s.imagePath) return {}; // the primary can't be toggled out — see this field's own doc comment
+      const has = s.filmstripSelection.includes(path);
+      return { filmstripSelection: has ? s.filmstripSelection.filter((p) => p !== path) : [...s.filmstripSelection, path] };
+    });
+  },
+
+  setFilmstripSelectionAnchor(path) {
+    set({ filmstripSelectionAnchor: path });
+  },
+
+  rangeSelectFilmstrip(path, order) {
+    set((s) => {
+      const anchor = s.filmstripSelectionAnchor ?? s.imagePath;
+      const anchorIndex = anchor ? order.indexOf(anchor) : -1;
+      const clickedIndex = order.indexOf(path);
+      if (anchorIndex === -1 || clickedIndex === -1) {
+        return { filmstripSelection: path === s.imagePath ? [] : [path] };
+      }
+      const [lo, hi] = anchorIndex <= clickedIndex ? [anchorIndex, clickedIndex] : [clickedIndex, anchorIndex];
+      return { filmstripSelection: order.slice(lo, hi + 1).filter((p) => p !== s.imagePath) };
+    });
+  },
+
+  lookPathForPhoto(photoPath) {
+    const project = get().project;
+    if (!project) return null;
+    const row = findPlaylistPhoto(project, photoPath);
+    return row ? `${project.dir}/looks/${row.look}` : null;
+  },
+
+  async syncSelection(families) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+    const targets = s.filmstripSelection.filter((p) => p !== primaryPath);
+    if (targets.length === 0) return; // the toolbar button is gated on 2+ selected; stay defensive if driven directly (verify hooks)
+
+    const checkedFamilies = new Set(families);
+    // geometry needs the UN-stripped graph — same conditional savePreset's
+    // own scoped-look branch uses (presetFamilies.ts's pickDevelopFamilies/
+    // buildScopedLook doc comments); captureLook only clears the input
+    // node's geometry, so every other family is unaffected either way.
+    const primaryLook = checkedFamilies.has('geometry') ? s.graph : captureLook(s.graph);
+    const structuralFamilies = (['masks', 'spots', 'custom-nodes'] as const).filter((f) => checkedFamilies.has(f));
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    const skippedByFamily: Record<string, number> = {};
+    let errorCount = 0;
+
+    for (const photoPath of targets) {
+      const row = findPlaylistPhoto(project, photoPath);
+      if (!row) {
+        errorCount++;
+        continue;
+      }
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null = null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`syncSelection: could not read ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+
+      let baseGraph: GraphDoc;
+      let meta: {
+        source: SidecarSource | null;
+        createdAt: string | null;
+        unknown: Record<string, unknown> | undefined;
+        rating: number;
+        photo: string | undefined;
+        fingerprint: string | undefined;
+        flag: PhotoFlag | undefined;
+      };
+      if (existingText !== null) {
+        let parsed: SidecarDoc;
+        try {
+          parsed = parseGraphDoc(existingText);
+        } catch (err) {
+          console.warn(`syncSelection: ${lookPath} is unreadable by this build, skipping:`, err);
+          errorCount++;
+          continue;
+        }
+        baseGraph = parsed.graph;
+        meta = {
+          source: parsed.source ?? null,
+          createdAt: parsed.createdAt ?? null,
+          unknown: parsed.unknown,
+          rating: parsed.rating,
+          photo: parsed.photo,
+          fingerprint: parsed.fingerprint,
+          flag: parsed.flag,
+        };
+      } else {
+        // No look yet — seed it exactly like a fresh open would (mechanism
+        // note: "the seeded default when absent — same seeding as a fresh
+        // open of that photo"), THEN merge the checked families onto it, so
+        // the file this sync creates is never a bare default doc.
+        try {
+          const bytes = await window.silverbox.readFile(photoPath);
+          const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
+          const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
+          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
+            usedSidecar: false,
+            kind,
+            testFlags: window.silverbox.testFlags,
+          }).graph;
+          const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
+          meta = {
+            source: {
+              fileName: photoPath.split('/').pop() ?? photoPath,
+              ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+              kind,
+            },
+            createdAt: new Date().toISOString(),
+            unknown: undefined,
+            rating: 0,
+            photo: relativizeProjectPath(project.dir, photoPath),
+            fingerprint,
+            flag: undefined,
+          };
+        } catch (err) {
+          console.warn(`syncSelection: could not decode ${photoPath} to seed a fresh look:`, err);
+          errorCount++;
+          continue;
+        }
+      }
+
+      // Per-target structural skip-counting: a develop family always merges
+      // cleanly (pickDevelopFamilies is pure scalar/array param data); only
+      // the three graph-shaped families can be structurally incompatible
+      // with THIS target's own chain (presetFamilies.ts's
+      // structuralFamilyCompatible — same by-id rule graftStructuralFamily
+      // itself uses, checked read-only here first).
+      const effectiveFamilies = new Set(checkedFamilies);
+      for (const fam of structuralFamilies) {
+        if (!structuralFamilyCompatible(baseGraph, primaryLook, fam)) {
+          effectiveFamilies.delete(fam);
+          skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
+        }
+      }
+
+      const mergedGraph = structuredClone(mergeScopedLook(baseGraph, primaryLook, effectiveFamilies));
+      const content = serializeGraphDoc(
+        mergedGraph,
+        meta.source,
+        meta.createdAt,
+        meta.unknown,
+        meta.rating,
+        meta.photo,
+        meta.fingerprint,
+        meta.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`syncSelection: could not write ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      before[photoPath] = structuredClone(baseGraph);
+      after[photoPath] = mergedGraph;
+    }
+
+    const writtenTargets = Object.keys(after);
+    if (writtenTargets.length > 0) {
+      const entry: SyncUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'sync',
+        label: `Sync ${families.join(', ')} to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}`,
+        targets: writtenTargets,
+        before,
+        after,
+      };
+      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+      await get().refreshPlaylistStatus();
+    }
+
+    const skipParts = Object.entries(skippedByFamily).map(([fam, n]) => `${fam} on ${n} (incompatible chain)`);
+    const skipSuffix = skipParts.length > 0 ? `; skipped ${skipParts.join(', ')}` : '';
+    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 ? 'error' : 'success',
+      message: `synced ${families.length} famil${families.length === 1 ? 'y' : 'ies'} to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}${skipSuffix}${errorSuffix}`,
+    });
   },
 
   async saveGraph() {

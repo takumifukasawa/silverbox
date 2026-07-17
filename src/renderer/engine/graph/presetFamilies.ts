@@ -315,6 +315,40 @@ function graftStructuralFamily(
 }
 
 /**
+ * Sync's own skip-detection (docs/brief-bank/multi-select-sync.md: "the
+ * target has a structurally compatible default chain; otherwise that family
+ * is skipped for that photo and counted in the report notice"). Read-only
+ * INSPECTION of the exact same by-id matching rule graftStructuralFamily
+ * above already uses — not a second merge implementation: `true` when
+ * `source` carries no nodes of this family at all (nothing to graft, so
+ * trivially not a skip); `false` when grafting would leave at least one of
+ * the family's own nodes with an edge to an anchor (an 'in'/'out'/blend id,
+ * whatever the chain calls it) that doesn't exist in `target` — exactly the
+ * case where graftStructuralFamily's own `allIds.has(...)` filter would drop
+ * that edge, leaving the grafted node orphaned (present in the file, but
+ * unreachable from any output). `target`/`source` are compared by NODE ID
+ * only, same as the graft itself — two docs that both descend from the same
+ * seeded default chain (the common case) line up; a hand-built custom graph
+ * with renamed/renumbered ids is the "structurally incompatible" case this
+ * exists to catch.
+ */
+export function structuralFamilyCompatible(
+  target: GraphDoc,
+  source: GraphDoc,
+  family: Extract<PresetFamilyId, 'masks' | 'spots' | 'custom-nodes'>
+): boolean {
+  const srcNodes = source.nodes.filter((n) => structuralFamilyOf(n.kind) === family);
+  if (srcNodes.length === 0) return true;
+  const srcIds = new Set(srcNodes.map((n) => n.id));
+  const targetIds = new Set(target.nodes.map((n) => n.id));
+  const relevantEdges = source.edges.filter((e) => srcIds.has(e.source) || srcIds.has(e.target));
+  return relevantEdges.every((e) => {
+    const other = srcIds.has(e.source) ? e.target : e.source;
+    return srcIds.has(other) || targetIds.has(other);
+  });
+}
+
+/**
  * Apply-time transform: merge only `families` FROM `look` ONTO `graph`
  * (the currently open document) — everything not checked stays exactly as
  * it already was open, never reset toward `look`'s own values for that

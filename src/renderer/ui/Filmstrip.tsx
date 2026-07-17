@@ -3,6 +3,8 @@ import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
 import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
 import { MAX_RATING } from '../engine/graph/graphDoc';
+import { FamilyScopeDialog } from './FamilyScopeDialog';
+import type { PresetFamilyId } from '../engine/graph/presetFamilies';
 
 /**
  * Missing-photo placeholder cell (project-storage migration §"Missing
@@ -70,11 +72,34 @@ function MissingFilmstripCell({ entry, playlistIndex }: { entry: FolderImageEntr
  * caps how many run at once regardless). A `missing` entry renders as
  * MissingFilmstripCell instead (its own relink affordances) — see that
  * component's doc comment.
+ *
+ * Multi-select (docs/brief-bank/multi-select-sync.md): plain click keeps
+ * today's unchanged behavior (open + collapse the selection); ⌘-click
+ * toggles this cell's SECONDARY membership without opening it; ⇧-click
+ * extends a range from the last plain-clicked cell to this one, over
+ * `visibleOrder` (the strip's own currently-visible path list, so a range
+ * never reaches through a cell hidden by the ★n+/pick-reject filters).
  */
-function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEntry; current: boolean; playlistIndex: number }) {
+function FilmstripCell({
+  entry,
+  current,
+  secondary,
+  playlistIndex,
+  visibleOrder,
+}: {
+  entry: FolderImageEntry;
+  current: boolean;
+  secondary: boolean;
+  playlistIndex: number;
+  visibleOrder: string[];
+}) {
   const cellRef = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState<string | null>(null);
   const openImageByPath = useAppStore((s) => s.openImageByPath);
+  const toggleFilmstripSelection = useAppStore((s) => s.toggleFilmstripSelection);
+  const rangeSelectFilmstrip = useAppStore((s) => s.rangeSelectFilmstrip);
+  const setFilmstripSelection = useAppStore((s) => s.setFilmstripSelection);
+  const setFilmstripSelectionAnchor = useAppStore((s) => s.setFilmstripSelectionAnchor);
 
   useEffect(() => {
     const el = cellRef.current;
@@ -103,11 +128,27 @@ function FilmstripCell({ entry, current, playlistIndex }: { entry: FolderImageEn
     <button
       ref={cellRef}
       type="button"
-      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}`}
+      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}${secondary ? ' filmstrip-cell--secondary-selected' : ''}`}
       data-testid="filmstrip-cell"
       data-path={entry.path}
+      data-selected={current || secondary ? 'true' : undefined}
       title={entry.name}
-      onClick={() => void openImageByPath(entry.path, { keepFolderContext: true })}
+      onClick={(ev) => {
+        if (ev.metaKey || ev.ctrlKey) {
+          toggleFilmstripSelection(entry.path);
+          return;
+        }
+        if (ev.shiftKey) {
+          rangeSelectFilmstrip(entry.path, visibleOrder);
+          return;
+        }
+        // Plain click (unchanged behavior): open it, collapse any
+        // multi-select back to single, and move the ⇧-click range anchor
+        // here (LR muscle memory).
+        setFilmstripSelection([]);
+        setFilmstripSelectionAnchor(entry.path);
+        void openImageByPath(entry.path, { keepFolderContext: true });
+      }}
     >
       {url && (
         // Rejected cells dim the THUMBNAIL only (reject-flag pack,
@@ -231,6 +272,13 @@ function FlagFilter({ value, onChange }: { value: FlagFilterValue; onChange: (va
 export function Filmstrip() {
   const folderEntries = useAppStore((s) => s.folderEntries);
   const imagePath = useAppStore((s) => s.imagePath);
+  const fileName = useAppStore((s) => s.fileName);
+  // Multi-select (docs/brief-bank/multi-select-sync.md): SECONDARY paths
+  // only — the primary is `imagePath` itself (see this field's own doc
+  // comment in appStore.ts).
+  const filmstripSelection = useAppStore((s) => s.filmstripSelection);
+  const syncSelection = useAppStore((s) => s.syncSelection);
+  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   // ★n+ filter (ratings pack): strip-local view state, reset to "All" every
   // time this component remounts (a fresh folder — see the doc comment
   // above on `key={dir}`), never persisted.
@@ -263,17 +311,62 @@ export function Filmstrip() {
     [indexedEntries, minRating, flagFilter]
   );
 
+  // ⇧-click's range order — the currently VISIBLE path list, so a range
+  // never silently reaches through a cell hidden by either filter above.
+  const visibleOrder = useMemo(() => visibleEntries.map(({ entry }) => entry.path), [visibleEntries]);
+  const secondarySelected = useMemo(() => new Set(filmstripSelection), [filmstripSelection]);
+  // "N selected" (multi-select-sync.md's toolbar badge): the primary
+  // (imagePath) counts once, plus every secondary — filmstripSelection never
+  // contains imagePath itself (see appStore.ts's own invariant), so no dedup
+  // is needed here.
+  const totalSelectedCount = (imagePath ? 1 : 0) + filmstripSelection.length;
+  const primaryName = fileName ?? 'the current photo';
+
   return (
     <div className="filmstrip-wrap" data-testid="filmstrip-wrap">
       <div className="filmstrip-toolbar">
+        {totalSelectedCount >= 2 && (
+          <span className="filmstrip-selection-count" data-testid="filmstrip-selection-count">
+            {totalSelectedCount} selected
+          </span>
+        )}
+        <button
+          type="button"
+          className="filmstrip-sync-button"
+          data-testid="filmstrip-sync-button"
+          disabled={totalSelectedCount < 2}
+          title="Copy checked develop families from the current photo to every other selected photo (undoable — ⌘Z)"
+          onClick={() => setSyncDialogOpen(true)}
+        >
+          Sync…
+        </button>
         <RatingFilter value={minRating} onChange={setMinRating} />
         <FlagFilter value={flagFilter} onChange={setFlagFilter} />
       </div>
       <div className="filmstrip" data-testid="filmstrip">
         {visibleEntries.map(({ entry, playlistIndex }) => (
-          <FilmstripCell key={entry.path} entry={entry} current={entry.path === imagePath} playlistIndex={playlistIndex} />
+          <FilmstripCell
+            key={entry.path}
+            entry={entry}
+            current={entry.path === imagePath}
+            secondary={secondarySelected.has(entry.path)}
+            playlistIndex={playlistIndex}
+            visibleOrder={visibleOrder}
+          />
         ))}
       </div>
+      <FamilyScopeDialog
+        open={syncDialogOpen}
+        title="Sync…"
+        targetDescription={`Copy from "${primaryName}" to ${filmstripSelection.length} other photo${filmstripSelection.length === 1 ? '' : 's'} (⌘Z reverts all of them):`}
+        settingsKey="syncFamilies"
+        confirmLabel="Sync"
+        onCancel={() => setSyncDialogOpen(false)}
+        onConfirm={(families: PresetFamilyId[]) => {
+          setSyncDialogOpen(false);
+          void syncSelection(families);
+        }}
+      />
     </div>
   );
 }

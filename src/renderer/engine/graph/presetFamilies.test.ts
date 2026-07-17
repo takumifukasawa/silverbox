@@ -53,6 +53,12 @@ describe('DEFAULT_SETTINGS.presetSaveFamilies stays pinned to DEFAULT_CHECKED_FA
   });
 });
 
+describe('DEFAULT_SETTINGS.syncFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
+  it('multi-select-sync.md\'s Sync… dialog starts with the same defaults as the preset Save dialog', () => {
+    expect(DEFAULT_SETTINGS.syncFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
+  });
+});
+
 describe('isKnownFamilyId', () => {
   it('accepts every id in the shared list, rejects anything else', () => {
     for (const id of ALL_FAMILY_IDS) expect(isKnownFamilyId(id)).toBe(true);

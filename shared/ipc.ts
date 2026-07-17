@@ -864,6 +864,20 @@ export interface Settings {
    * so the two can never silently drift apart.
    */
   presetSaveFamilies: string[];
+  /**
+   * Multi-select sync (docs/brief-bank/multi-select-sync.md): last-used
+   * family checkbox state in the Sync… dialog — the SAME FamilyScopeDialog
+   * component as presetSaveFamilies above (see its own doc comment for why
+   * this is a plain `string[]`, not `PresetFamilyId[]`, and why an unknown
+   * id round-trips rather than being dropped). A separate field from
+   * presetSaveFamilies on purpose: a "which families define my saved preset"
+   * habit and a "which families do I usually push to other photos" habit
+   * are different questions, so remembering them independently matches how
+   * a user actually uses the two dialogs. Pinned equal to
+   * presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS by the same test that
+   * already pins presetSaveFamilies.
+   */
+  syncFamilies: string[];
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -882,6 +896,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // effects / detail) — pinned equal by a unit test, see this field's doc
   // comment.
   presetSaveFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
+  // Same default set as presetSaveFamilies above (also pinned to
+  // presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS) — a fresh install's Sync
+  // dialog starts checked exactly like the Save-preset dialog does.
+  syncFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */
