@@ -41,10 +41,21 @@ const OPEN_SETTINGS = { useCameraWb: true, outputBps: 16, outputColor: DECODE_OU
  * cropbox spanning the FULL `raw_width`×`raw_height` all cap out at
  * `iwidth`×`iheight`, so those pixels are not recoverable through any
  * exposed API). DSC03298 (portrait) has no such shortfall and lands on
- * camera-exact dims. `computeCropbox` below clamps to what's actually
- * decodable, so DSC02993 comes out ~0.6%/0.7% smaller than the camera's
- * 4608×3072 (4580×3050) with the origin still correctly aligned — a real,
- * documented libraw-wasm limitation, not a logic bug in this file.
+ * camera-exact dims.
+ *
+ * round-12 CENTER-PRESERVING clamp: the original fix here trimmed only the
+ * unavailable side (kept `cleft`/`ctop` as-is, shrank `cwidth`/`cheight` to
+ * fit) — dims-close, but it leaves the decoded frame's CENTER offset from
+ * the camera/LR frame's center by ~half the shortfall on each axis (~13,11px
+ * for DSC02993), which reads as a real position shift in side-by-side
+ * comparisons. `computeCropbox` below instead trims the SAME amount off
+ * BOTH sides of an overflowing axis (about the camera crop's own center,
+ * `cleft + cwidth/2`), so the decoded frame's center lands exactly on the
+ * camera crop's center — at the cost of 2× the shortfall in lost extent
+ * instead of 1× (DSC02993: 4608×3072 → 4552×3028, ~1.2%/1.4% smaller, vs.
+ * ~0.6%/0.7% for the old one-sided trim). Center alignment beats a few extra
+ * columns for both comparisons and real use. The no-shortfall path (DSC03298
+ * and other full-frame shots) is untouched — byte-identical to before.
  */
 export function computeCropbox(meta: LibRawMetadata): [number, number, number, number] | null {
   const crop = meta.raw_inset_crops?.[0];
@@ -55,10 +66,19 @@ export function computeCropbox(meta: LibRawMetadata): [number, number, number, n
   const iw = meta.iwidth ?? 0;
   const ih = meta.iheight ?? 0;
   if (iw <= 0 || ih <= 0 || cleft >= iw || ctop >= ih) return null;
-  const w = Math.min(cwidth, iw - cleft);
-  const h = Math.min(cheight, ih - ctop);
+  // Trim the SAME amount off both sides of an axis that overflows the
+  // decodable [0, iw)/[0, ih) range, rather than just the far side, so the
+  // clamped frame's center exactly matches the camera crop's center. Zero
+  // overflow ⇒ zero trim ⇒ [cleft, ctop, cwidth, cheight] unchanged (the
+  // no-shortfall path stays byte-identical to before this fix).
+  const overflowX = Math.max(0, cleft + cwidth - iw);
+  const overflowY = Math.max(0, ctop + cheight - ih);
+  const left = cleft + overflowX;
+  const top = ctop + overflowY;
+  const w = cwidth - 2 * overflowX;
+  const h = cheight - 2 * overflowY;
   if (w <= 0 || h <= 0) return null;
-  return [cleft, ctop, w, h];
+  return [left, top, w, h];
 }
 
 /**

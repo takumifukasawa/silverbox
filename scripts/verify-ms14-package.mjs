@@ -72,10 +72,10 @@ try {
   }, ARW_PATH);
   await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
   const state = await page.evaluate(() => window.__debug.imageState());
-  // round-11 decode-frame fix: 4580×3050 (raw_inset_crops-clamped), not the
+  // round-11 decode-frame fix: 4552×3028 (raw_inset_crops-clamped), not the
   // old too-large/off-origin 4624×3080 — see librawDecoder.ts's
   // computeCropbox doc comment.
-  check('packaged app decodes the ARW', state.fullWidth === 4580 && state.fullHeight === 3050, state);
+  check('packaged app decodes the ARW', state.fullWidth === 4552 && state.fullHeight === 3028, state);
 
   const gpu = await page.evaluate(() => window.__debug.readbackMean());
   const cpu = await page.evaluate(() => window.__debug.cpuReferenceMean());

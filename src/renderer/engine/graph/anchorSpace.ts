@@ -41,7 +41,8 @@
  * "which decode frame was this authored against" marker to compensate with,
  * and the shift amount varies per shot, so no automatic migration is
  * applied (see docs/sidecar-spec.md §4.3). Affected looks need a manual
- * nudge after reopening once.
+ * nudge after reopening once. (The clamped-shot frame's dims changed again
+ * in the round-12 center-preserving-clamp follow-up — same policy applies.)
  */
 import { rot } from './cropFit';
 import type { GeometryParams } from './graphDoc';

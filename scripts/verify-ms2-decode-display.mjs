@@ -66,12 +66,12 @@ try {
   check('RAW decode succeeds', rawState.status === 'ready', rawState);
   // round-11 decode-frame fix: libraw's own default 4624×3080 decode was too
   // large AND off-origin vs the camera JPEG — applying the camera-embedded
-  // raw_inset_crops recommendation (librawDecoder.ts) lands on 4580×3050 for
+  // raw_inset_crops recommendation (librawDecoder.ts) lands on 4552×3028 for
   // this file (libraw's own internal "active area" falls a few px short of
   // the crop it reports — see librawDecoder.ts's computeCropbox doc comment
   // for the full libraw-wasm-limitation writeup; verify-ms0-decode.mjs
   // covers this at the decoder level directly).
-  check('RAW full size is 4580×3050', rawState.fullWidth === 4580 && rawState.fullHeight === 3050, rawState);
+  check('RAW full size is 4552×3028', rawState.fullWidth === 4552 && rawState.fullHeight === 3028, rawState);
   check(
     'RAW preview long edge is 2560',
     Math.max(rawState.width, rawState.height) === 2560,
@@ -79,7 +79,7 @@ try {
   );
   check(
     'RAW preview keeps aspect ratio',
-    Math.abs(rawState.width / rawState.height - 4580 / 3050) < 0.01,
+    Math.abs(rawState.width / rawState.height - 4552 / 3028) < 0.01,
     rawState.width / rawState.height
   );
 

@@ -43,7 +43,7 @@ export const LENS_PROFILE_MAX_KNOTS = 16;
  * m=1.10 on the existing 2^-14 constant — independently confirmed per scene
  * (corner spread 1.00-1.41px at m=1.10 vs 8.6-8.9px at the old m=1.0), not
  * merely a joint average. (DSC02993/test was excluded from the fit: its
- * render doesn't match the camera JPEG's crop dims exactly — 4580x3050 vs
+ * render doesn't match the camera JPEG's crop dims exactly — 4552x3028 vs
  * 4608x3072 — an unrelated confound, not evidence against this constant.)
  */
 export const DISTORTION_KNOT_SCALE = 1.1 / 16384; // empirically-fit multiplier (m=1.10) on 2^-14

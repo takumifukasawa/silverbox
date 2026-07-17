@@ -113,17 +113,17 @@ try {
   // large AND off-origin vs the camera JPEG/LR export (4608×3072, different
   // origin) — see librawDecoder.ts's computeCropbox doc comment. Applying
   // the camera-embedded raw_inset_crops recommendation via libraw's cropbox
-  // lands on 4580×3050 for this file specifically: libraw's own iwidth/
+  // lands on 4552×3028 for this file specifically: libraw's own iwidth/
   // iheight (its internal "active area") falls 28 columns / 22 rows short of
   // the crop libraw itself reports, a libraw-wasm limitation (not
   // recoverable through any exposed API — verified against imageData(),
   // rawImageData(), and a cropbox spanning the full raw_width×raw_height).
-  check('width is 4580', r.width === 4580, r.width);
-  check('height is 3050', r.height === 3050, r.height);
+  check('width is 4552', r.width === 4552, r.width);
+  check('height is 3028', r.height === 3028, r.height);
   check('colors is 3 (RGB)', r.colors === 3, r.colors);
   check('bits is 16', r.bits === 16, r.bits);
   check('data is Uint16Array', r.dataCtor === 'Uint16Array', r.dataCtor);
-  check('data length is W*H*3', r.dataLength === 4580 * 3050 * 3, r.dataLength);
+  check('data length is W*H*3', r.dataLength === 4552 * 3028 * 3, r.dataLength);
   check('pixel samples span a real range', r.sample.min < r.sample.max && r.sample.max > 0, r.sample);
   check(
     'camMul has 4 finite entries',

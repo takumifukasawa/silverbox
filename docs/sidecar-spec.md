@@ -255,7 +255,10 @@ field recording which decode frame a look was authored against, and the
 shift is per-shot (depends on that file's own `raw_inset_crops`), so there is
 no safe automatic migration: `SIDECAR_SCHEMA_VERSION` was **not** bumped for
 this, and no compensation is applied on load. Affected looks need their
-spots/masks manually nudged back into place after reopening once.
+spots/masks manually nudged back into place after reopening once. The
+clamped-shot decode frame changed dimensions again in the round-12
+center-preserving-clamp follow-up (`computeCropbox`'s doc comment) — same
+no-silent-migration policy, no new field, no version bump.
 
 ### 4.4 Bypass
 
