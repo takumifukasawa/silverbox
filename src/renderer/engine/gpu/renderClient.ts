@@ -73,6 +73,10 @@ function routeMessage(ev: MessageEvent<RenderWorkerResponse>): void {
     activeClient?.handleDenoiseNodeReady(msg.nodeId);
     return;
   }
+  if (msg.type === 'framePresented') {
+    activeClient?.handleFramePresented(msg.gen);
+    return;
+  }
   const entry = pending.get(msg.reqId);
   if (!entry) return;
   pending.delete(msg.reqId);
@@ -109,6 +113,8 @@ export class RenderWorkerClient {
   private onDenoiseNodeReady: ((nodeId: string) => void) | null = null;
   /** initCompare is idempotent per client instance (transferControlToOffscreen can only run once per canvas element) — mirrors the constructor's own one-shot transfer. */
   private compareInitialized = false;
+  /** Flicker fix: registered by CanvasView.tsx to learn when the MAIN surface has actually presented a given gen — see renderProtocol.ts's 'framePresented' doc comment. */
+  private onFramePresented: ((gen: number) => void) | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const w = getWorker();
@@ -192,6 +198,15 @@ export class RenderWorkerClient {
   /** Current generation — CanvasView's debounced stats/scope consumers compare a response's gen against this. */
   currentGen(): number {
     return this.gen;
+  }
+
+  /** Flicker fix: registers the handler CanvasView.tsx's reveal gate calls on every 'framePresented' — see renderProtocol.ts's doc comment. */
+  setFramePresentedHandler(fn: (gen: number) => void): void {
+    this.onFramePresented = fn;
+  }
+
+  handleFramePresented(gen: number): void {
+    this.onFramePresented?.(gen);
   }
 
   setImage(image: PreparedImage): void {

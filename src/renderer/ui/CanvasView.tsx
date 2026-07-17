@@ -315,6 +315,8 @@ declare global {
       denoiseRunCount(): Promise<number>;
       /** Verify-only: cumulative count of render() calls posted to the render worker — used to prove a node drag doesn't re-post per mouse-move (#pointer-drag-lag). */
       renderPostCount(): number;
+      /** Verify-only: the flicker-fix reveal gate's state (presented/target gens, whether a switch is currently pending, + suppressed-reveal count) — see CanvasView.tsx's revealGenRef doc comment. */
+      flickerGateState(): { presented: number; reveal: number; pendingSwitch: boolean; suppressedRevealCount: number };
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
       presetsState(): import('../../../shared/ipc').PresetSummary[];
       /** Save the current graph as a whole-look preset named `name` (mirrors PresetsMenu's "Save"). */
@@ -397,6 +399,78 @@ export function CanvasView() {
   // only, and `view` (below) is applied to BOTH canvases' transforms.
   const compareCanvasRef = useRef<HTMLCanvasElement>(null);
   const lastImageRef = useRef<unknown>(null);
+  // --- Flicker fix (NG investigation, 2026-07-17: "A flashes back mid-switch") ---
+  //
+  // Repro (confirmed with timestamped instrumentation before this fix):
+  // openImageByPath's final `set()` flips imageStatus to 'ready' with the NEW
+  // image the INSTANT its own async work (readFile/loadImage/sidecar) resolves
+  // — a synchronous store commit. overlayVisible below used to be driven by
+  // imageStatus alone, so the very next paint un-hides `.canvas-viewport`,
+  // exposing the transferred <canvas> element's CURRENT backing store — which
+  // still shows whatever the render WORKER last actually drew (the OLD
+  // image), because the worker's own round trip for the new image (postMessage
+  // hop + setImage's texture upload + setGraph + render()'s device.queue.submit)
+  // hasn't completed yet. The result: the embedded preview (B) shows first
+  // during 'loading', then A's stale frame reappears for a beat the moment
+  // 'ready' lands, then B's real render finally overwrites it — exactly the
+  // "B briefly → A flashes back → B settles" hand-test report.
+  //
+  // Fix, v1 (INSUFFICIENT — caught by the pool-contention run of
+  // verify-view.mjs, kept here as a note so nobody reintroduces it): gating
+  // the reveal on `presentedGen < revealGenRef.current`, where BOTH were only
+  // ever updated inside the image-switch EFFECT, still had a one-commit hole.
+  // React runs effects strictly AFTER the render that triggers them commits
+  // and paints; the render that flips `imageStatus` to 'ready' (image now B)
+  // computes `overlayVisible` using whatever `revealGenRef.current` a PRIOR,
+  // already-satisfied switch left behind — the CURRENT switch's own effect
+  // hasn't run yet to arm a new, not-yet-satisfied threshold. On an idle
+  // machine that render→commit→effect sequence completes faster than
+  // anything can observe it; under real contention (three pooled Electron
+  // instances) it doesn't, and the container got revealed on that first
+  // 'ready' commit against a stale, already-satisfied threshold — B's own
+  // frame still hadn't presented.
+  //
+  // Fix, v2 (this one): arm the gate SYNCHRONOUSLY DURING RENDER, not in an
+  // effect, so the very commit that flips `imageStatus` to 'ready' already
+  // sees it active — the documented React pattern for "adjust state when a
+  // prop changes, before this render commits" (comparing against a ref in the
+  // render body, calling setState immediately if it differs — see
+  // `pendingSwitch` below, armed near `overlayVisible`). `revealGenRef` (armed
+  // to Number.MAX_SAFE_INTEGER the instant a switch is detected, so a stale
+  // in-flight 'framePresented' from the OLD image can never satisfy it before
+  // the real target is known) is then given its REAL value by the ordinary
+  // image-switch effect once it actually posts the new image's render() call.
+  // `pendingSwitch` itself is only ever cleared by the 'framePresented'
+  // handler once `gen >= revealGenRef.current` — never derived at render
+  // time — so there is no window where a re-render could reveal the
+  // container against a threshold that hasn't been reached yet.
+  //
+  // `suppressedRevealCountRef` is verify-only bookkeeping (see
+  // __debug.flickerGateState below) — it never gates anything itself.
+  const revealGenRef = useRef(0);
+  // Render-owned "have we already reacted to this `image` reference" check —
+  // separate from `lastImageRef` (effect-owned, decides whether to call
+  // client.setImage/render) precisely because the two must fire at DIFFERENT
+  // times: this one arms `pendingSwitch` synchronously during render (see
+  // the arm site near `overlayVisible`); `lastImageRef` still gates the
+  // effect's own imperative work below.
+  const revealCheckImageRef = useRef<unknown>(null);
+  const [pendingSwitch, setPendingSwitch] = useState(false);
+  // Mirrors `pendingSwitch` for the __debug getter below (same reasoning as
+  // presentedGenRef just below: that getter lives inside a mount-only
+  // effect and would otherwise close over whatever `pendingSwitch` was AT
+  // MOUNT TIME — always false — forever).
+  const pendingSwitchRef = useRef(false);
+  // The highest gen the worker has confirmed presented — a REF, not state:
+  // nothing needs a re-render just because this changed (pendingSwitch's own
+  // setState already triggers the one re-render that matters, right when it
+  // clears). A state variable here would force a re-render on every single
+  // rendered frame, including ordinary slider edits that have nothing to do
+  // with a switch — exactly the per-drag-frame re-render cost
+  // renderPostCount's own doc comment (#pointer-drag-lag) already flags as a
+  // fragile spot elsewhere in this file. Read by the __debug getter below.
+  const presentedGenRef = useRef(0);
+  const suppressedRevealCountRef = useRef(0);
   // Async GPU failures (device loss etc.) live in the store (see task
   // #45/worker-error-surfacing) so the render worker's out-of-band 'error'
   // message reaches the UI the same way a pre-worker GraphRenderer rejection
@@ -843,11 +917,40 @@ export function CanvasView() {
           );
         });
         client.setDenoiseNodeReadyHandler(() => useAppStore.getState().bumpDenoiseNodeRev());
+        // Flicker fix: the only signal that the MAIN surface's canvas
+        // backing store now reflects `gen`, not whatever it drew before —
+        // see this component's revealGenRef doc comment and
+        // renderProtocol.ts's 'framePresented'.
+        client.setFramePresentedHandler((gen) => {
+          presentedGenRef.current = gen;
+          // The ONLY place pendingSwitch is cleared — see this component's
+          // revealGenRef doc comment for why deriving it at render time
+          // instead (`presentedGen < revealGenRef.current`) had a hole. This
+          // handler is registered ONCE (client construction, above), so it
+          // must never close over the `pendingSwitch` VALUE (permanently
+          // stale at whatever it was at mount) — `revealGenRef` is a ref
+          // (always read live) and `setPendingSwitch(false)` is React's
+          // stable setter, so both are safe to close over here; calling
+          // setPendingSwitch(false) when it's ALREADY false (every ordinary,
+          // non-switch frame — ONLY the `gen >= revealGenRef.current` test
+          // gates this call, always true once any switch has settled) is a
+          // no-op React bails out of without a re-render, so this costs
+          // nothing on the hot per-edit path.
+          if (gen >= revealGenRef.current) {
+            pendingSwitchRef.current = false;
+            setPendingSwitch(false);
+          }
+        });
         clientRef.current = client;
         useAppStore.getState().setRenderer(client);
       }
       const client = clientRef.current;
-      if (lastImageRef.current !== image) {
+      // Flicker fix: captured BEFORE lastImageRef is updated below — this is
+      // "did the image actually change this pass", the same test the reveal
+      // gate needs (see the client.render() call further down, which stamps
+      // revealGenRef to the gen of the render() THIS switch produces).
+      const isImageSwitch = lastImageRef.current !== image;
+      if (isImageSwitch) {
         client.setImage(image);
         lastImageRef.current = image;
       }
@@ -914,6 +1017,16 @@ export function CanvasView() {
         overlayMaskNodeId: maskOverlay && selectedMaskNode ? selectedMaskNode.id : null,
         inspectNodeId,
       });
+      // Flicker fix: THIS render() call is the one that will draw the new
+      // image for the first time — give the gate (already armed at render
+      // time, see `pendingSwitch`'s arm site near `overlayVisible`) its REAL
+      // target gen, replacing the Number.MAX_SAFE_INTEGER placeholder so the
+      // 'framePresented' handler can actually clear it once this gen lands.
+      // Ordinary (non-switch) render passes leave revealGenRef alone — no
+      // pending switch to arm a target for, and pendingSwitch is already
+      // false, so gating every edit's render behind a fresh ack would just
+      // add latency for no reason (the canvas already shows the right image).
+      if (isImageSwitch) revealGenRef.current = client.currentGen();
       setGpuError(null);
       // Compare view (compare pack): mirrors the render() call above onto the
       // SECOND canvas/GraphRenderer (renderWorker.ts's initCompare/compareRender)
@@ -1562,6 +1675,31 @@ export function CanvasView() {
       renderPostCount() {
         return clientRef.current?.renderPostCount ?? 0;
       },
+      /**
+       * Flicker fix (verify-only): the reveal gate's own state — `presented`
+       * is the highest gen the worker has confirmed actually landed in the
+       * canvas's backing store ('framePresented'); `reveal` is the gen the
+       * CURRENT (or most recently settled) switch is/was waiting on —
+       * Number.MAX_SAFE_INTEGER while a switch is pending but the real
+       * target isn't known yet; `pendingSwitch` is the actual gate
+       * (authoritative — see this component's revealGenRef doc comment for
+       * why it's set at render time, not derived from `presented`/`reveal`);
+       * `suppressedRevealCount` counts commits where imageStatus was already
+       * 'ready' but `pendingSwitch` alone was still keeping the canvas
+       * hidden. Used by verify-view.mjs to assert the mechanism actually
+       * engages across an A→B switch, since polling readbackMean can't see
+       * this gap (it always re-renders fresh from whatever's currently
+       * loaded — see graphRenderer.ts's readbackMean doc comment — rather
+       * than sampling what the canvas is presently showing).
+       */
+      flickerGateState() {
+        return {
+          presented: presentedGenRef.current,
+          reveal: revealGenRef.current,
+          pendingSwitch: pendingSwitchRef.current,
+          suppressedRevealCount: suppressedRevealCountRef.current,
+        };
+      },
       presetsState() {
         return useAppStore.getState().presets;
       },
@@ -1867,7 +2005,36 @@ export function CanvasView() {
     window.addEventListener('pointerup', onUp);
   };
 
-  const overlayVisible = imageStatus !== 'ready' || gpuError !== null;
+  // Flicker fix: arm `pendingSwitch` SYNCHRONOUSLY DURING RENDER, not in an
+  // effect — see revealGenRef's doc comment near this component's other refs
+  // for why an effect-only arm left a one-commit hole under contention. This
+  // is the documented React pattern for reacting to a changed value BEFORE
+  // this render commits: compare against a ref, and if it differs, update
+  // the ref and call the state setter right here (React discards this
+  // render's output and immediately re-runs the component with the new state
+  // — nothing from this pass ever paints — see
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders).
+  if (revealCheckImageRef.current !== image) {
+    revealCheckImageRef.current = image;
+    // Unknown real target yet — the image-switch effect below hasn't run to
+    // post the new render() call. MAX_SAFE_INTEGER (not 0) so a stale
+    // in-flight 'framePresented' from the OLD image can never satisfy this
+    // switch's gate before its real target is known (see the effect's own
+    // `revealGenRef.current = client.currentGen()` assignment).
+    revealGenRef.current = Number.MAX_SAFE_INTEGER;
+    pendingSwitchRef.current = true;
+    if (!pendingSwitch) setPendingSwitch(true);
+  }
+  const overlayVisible = imageStatus !== 'ready' || gpuError !== null || pendingSwitch;
+  // Verify-only bookkeeping (__debug.suppressedRevealCount): counts actual
+  // commits where the gate was the ONLY thing keeping the canvas hidden
+  // (imageStatus already 'ready', no GPU error) — an effect, not inline in
+  // the render body, so React StrictMode's dev-only double-render never
+  // double-counts it.
+  const readyButPending = imageStatus === 'ready' && gpuError === null && pendingSwitch;
+  useEffect(() => {
+    if (readyButPending) suppressedRevealCountRef.current++;
+  }, [readyButPending]);
   // Compare view (compare pack): resolve which mode the compare pane is
   // showing, for the badge label only (the render effect above computes the
   // SAME thing to drive the actual compareRender call — kept as two small

@@ -224,4 +224,18 @@ export type RenderWorkerResponse =
       data: ArrayBuffer;
     }
   /** In-engine ML denoise: a result was already cached for this node's current content hash — same role as 'externalNodeReady'. */
-  | { type: 'denoiseNodeReady'; nodeId: string };
+  | { type: 'denoiseNodeReady'; nodeId: string }
+  /**
+   * Flicker fix (NG investigation, 2026-07-17 "A flashes back mid-switch"):
+   * posted right after the MAIN surface's renderer.render() actually submits
+   * a frame for `gen` — the only signal the main thread has that whatever is
+   * now sitting in the transferred canvas's backing store reflects THIS
+   * gen's doc/image, not an older one. CanvasView.tsx's overlayVisible uses
+   * it to keep the canvas hidden across an image switch until the frame it
+   * is about to reveal has actually landed, instead of trusting imageStatus
+   * alone (which flips to 'ready' the instant the STORE commit lands, well
+   * before the worker's async setGraph()/render() round trip for the new
+   * image has drawn anything). See renderWorker.ts's 'render' handler for
+   * the post site and CanvasView.tsx's revealGenRef for the consumer.
+   */
+  | { type: 'framePresented'; gen: number };

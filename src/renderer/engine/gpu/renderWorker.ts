@@ -358,6 +358,12 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
             ? plan.steps.findIndex((s) => s.nodeId === msg.overlayMaskNodeId)
             : -1;
           renderer.render(overlayStepIndex >= 0 ? overlayStepIndex : null);
+          // Flicker fix: this IS the moment `gen`'s frame actually lands in
+          // the canvas's backing store — see renderProtocol.ts's
+          // 'framePresented' doc comment for why the main thread needs this
+          // (it has no other way to tell "the switch's own frame is up" from
+          // "imageStatus just says ready").
+          post({ type: 'framePresented', gen });
           // External-tool hook node (task #41): fire-and-forget scan for any
           // 'external' steps in THIS plan — see GraphRenderer.checkExternalNodes'
           // doc comment. Never awaited (readback+hash is cheap but not free;
