@@ -516,7 +516,7 @@ struct LensProfile {
 }
 @group(0) @binding(3) var<uniform> prof: LensProfile;
 
-const PROF_DIST_SCALE = ${DISTORTION_KNOT_SCALE}; // 2^-14
+const PROF_DIST_SCALE = ${DISTORTION_KNOT_SCALE}; // empirically-fit 1.1 * 2^-14, see DISTORTION_KNOT_SCALE's doc comment
 const PROF_CA_SCALE = ${CA_KNOT_SCALE};           // 2^-21
 
 fn comp(v: vec4f, m: i32) -> f32 {

@@ -24,8 +24,29 @@
 /** Max knots per curve — the WGSL uniform caps the tables at this (Sony ships 11). */
 export const LENS_PROFILE_MAX_KNOTS = 16;
 
-/** Distortion knot scale: g = 1 + 2^-14 · f(...). */
-export const DISTORTION_KNOT_SCALE = 1 / 16384; // 2^-14
+/**
+ * Distortion knot scale: g = 1 + DISTORTION_KNOT_SCALE · f(...).
+ *
+ * NOT the textbook 2^-14 — that constant (the original guess, kept working
+ * for over a dozen milestones because its error is small near frame center)
+ * left a systematic corner mismatch against ground truth. Decisive offline
+ * experiment (remap-vs-camera-JPEG NCC field, see the distortion-application
+ * investigation): swept knot abscissa (r / r² / height-fraction), gain
+ * direction (forward / inverse-solve / additive), and normalizer definition
+ * across DSC03298 + three more same-lens (FE 24mm F2.8 G) scenes with
+ * dims-exact render-vs-camera-JPEG geometry (DSC07349, DSC04260, DSC09305).
+ * Every structural alternative was WORSE than the forward/r/edge-max shape
+ * already here (inverse-solve in particular is ruled out by two orders of
+ * magnitude — its predicted corner delta is 300-600px against an observed
+ * ~9px residual). The residual instead collapsed to the ~1-1.4px NCC noise
+ * floor on ALL FOUR dims-exact scenes at the SAME free-fit multiplier
+ * m=1.10 on the existing 2^-14 constant — independently confirmed per scene
+ * (corner spread 1.00-1.41px at m=1.10 vs 8.6-8.9px at the old m=1.0), not
+ * merely a joint average. (DSC02993/test was excluded from the fit: its
+ * render doesn't match the camera JPEG's crop dims exactly — 4580x3050 vs
+ * 4608x3072 — an unrelated confound, not evidence against this constant.)
+ */
+export const DISTORTION_KNOT_SCALE = 1.1 / 16384; // empirically-fit multiplier (m=1.10) on 2^-14
 /** CA knot scale: g = 1 + 2^-21 · f(...), no s normalization. */
 export const CA_KNOT_SCALE = 1 / 2097152; // 2^-21
 

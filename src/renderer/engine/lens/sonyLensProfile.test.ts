@@ -167,10 +167,10 @@ describe('correction math', () => {
     expect(evalLinearSpline(k, 5)).toBe(30);
   });
 
-  it('distortion gain is 1 at center and ~0.944 at the corner', () => {
+  it('distortion gain is 1 at center and ~0.938 at the corner', () => {
     expect(distortionGain(EXPECTED.distortion, 0)).toBe(1);
-    // corner knot -918 · 2^-14 = -0.05603 ⇒ g ≈ 0.94397
-    expect(distortionGain(EXPECTED.distortion, 1)).toBeCloseTo(0.94397, 4);
+    // corner knot -918 · (1.1 * 2^-14) = -0.06163 ⇒ g ≈ 0.93837 (see DISTORTION_KNOT_SCALE's doc comment)
+    expect(distortionGain(EXPECTED.distortion, 1)).toBeCloseTo(0.93837, 4);
   });
 
   it('distortion normalizer s is ≥ every gain sampled on the edges', () => {
