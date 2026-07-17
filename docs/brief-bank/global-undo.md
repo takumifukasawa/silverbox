@@ -42,12 +42,16 @@ every batch action. An entry is:
 ## Semantics decisions — USER MUST CONFIRM these five
 
 1. **⌘Z on an entry belonging to a DIFFERENT photo (not open):**
-   PROPOSED: undo it IN PLACE — write the restored look straight to
-   disk (same seam setFlag uses), do NOT switch the visible photo;
-   show a transient notice "Undid: Exposure +0.3 on DSC001". Rationale:
-   switching photos under the user's feet is disorienting; the
-   git-native model means a look file write IS the undo. ALTERNATIVE
-   (LR-ish): jump to that photo first. どちらが好みか。
+   **DECIDED (user, 2026-07-18): (b) JUMP — open that photo first, then
+   revert.** User's reasoning: "状態や画面が戻ってる必要があるから" —
+   undo must restore the visible state, not just the file. Sequencing:
+   openImageByPath(target) completes (session/epoch machinery as-is) →
+   apply the entry's before-state → dirty → normal autosave path.
+   BATCH entries (sync, N targets): no single photo to show — do NOT
+   jump; revert all target looks in place + completion notice listing
+   them (the source photo may be jumped to if it is itself a target).
+   If the target photo's file is missing (relink pending), the undo is
+   BLOCKED with a notice (not silently skipped, not applied blind).
 2. **Scope of "everything":** PROPOSED v1 includes graph edits, WB/
    curve/spot/mask edits, rating/flag, sync batches, Arrange, preset
    apply, develop reset, reset-all. EXCLUDES file-system operations
