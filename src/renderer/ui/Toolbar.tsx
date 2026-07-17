@@ -339,7 +339,7 @@ export function Toolbar() {
   const graphDirty = useAppStore((s) => s.graphDirty);
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const graph = useAppStore((s) => s.graph);
-  const history = useAppStore((s) => s.history);
+  const undoStack = useAppStore((s) => s.undoStack);
   const sidecarNotice = useAppStore((s) => s.sidecarNotice);
   const currentPhotoMissingNotice = useAppStore((s) => s.currentPhotoMissingNotice);
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
@@ -408,10 +408,26 @@ export function Toolbar() {
           </span>
         )}
       </button>
-      <button onClick={undo} disabled={history.past.length === 0} data-testid="undo-button" title="Undo (⌘Z)">
+      <button
+        onClick={() => void undo()}
+        disabled={undoStack.undo.length === 0}
+        data-testid="undo-button"
+        title={
+          // Global-undo (docs/brief-bank/global-undo.md, decision 5): no
+          // native Edit-menu on this app (see src/main/index.ts — the default
+          // Electron menu is used, no custom Menu.setApplicationMenu) to hang
+          // "Undo <label>" off of, so the tooltip is the surface instead.
+          undoStack.undo.length > 0 ? `Undo ${undoStack.undo[undoStack.undo.length - 1]!.label} (⌘Z)` : 'Undo (⌘Z)'
+        }
+      >
         ↩︎
       </button>
-      <button onClick={redo} disabled={history.future.length === 0} data-testid="redo-button" title="Redo (⌘⇧Z)">
+      <button
+        onClick={() => void redo()}
+        disabled={undoStack.redo.length === 0}
+        data-testid="redo-button"
+        title={undoStack.redo.length > 0 ? `Redo ${undoStack.redo[0]!.label} (⌘⇧Z)` : 'Redo (⌘⇧Z)'}
+      >
         ↪︎
       </button>
       {/* Round-11 fix pack item 2 ("presetsの中にあるべきじゃない気がする"): "reset all

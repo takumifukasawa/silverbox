@@ -157,6 +157,8 @@ declare global {
        * the "any playlist entry" seam multi-select will use later.
        */
       setFlag(lookPath: string, flag: 'pick' | 'reject' | null): Promise<void>;
+      /** Verify-only convenience: drives the SAME store action the toolbar stars / 1-5/0 keys do. */
+      setRating(rating: number): void;
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
       /** Sidecar visual diff dialog state (git-native completion brief §1) — see appStore.ts's sidecarDiffDialog. */
@@ -227,6 +229,15 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
+      /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null for kinds that don't carry one yet (sync/arrange — no producer in v1). */
+      undoStackState(): {
+        undo: { kind: string; label: string; target: string | null }[];
+        redo: { kind: string; label: string; target: string | null }[];
+      };
+      /** Verify-only convenience: drives the SAME store action ⌘Z/the toolbar button do. */
+      undo(): Promise<void>;
+      /** Verify-only convenience: drives the SAME store action ⌘⇧Z/the toolbar button do. */
+      redo(): Promise<void>;
       setGeometry(geo: GeometryParams): void;
       geometryState(): GeometryParams;
       setLens(lens: LensParams): void;
@@ -1355,6 +1366,10 @@ export function CanvasView() {
       setFlag(lookPath, flag) {
         return useAppStore.getState().setFlag(lookPath, flag);
       },
+      /** Verify-only convenience: drives the SAME store action the toolbar stars / 1-5/0 keys do — used by verify-undo.mjs's bounded-depth check to push many distinct entries fast. */
+      setRating(rating) {
+        return useAppStore.getState().setRating(rating);
+      },
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {
         return useAppStore.getState().sidecarHotReloadNotice;
@@ -1479,8 +1494,29 @@ export function CanvasView() {
         return useAppStore.getState().histogram;
       },
       historyState() {
-        const h = useAppStore.getState().history;
-        return { past: h.past.length, future: h.future.length };
+        // Global-undo (docs/brief-bank/global-undo.md): `history` is gone —
+        // `undoStack` is the ONE shared timeline for every photo/kind now.
+        // Kept as `{past, future}` COUNTS for back-compat with existing
+        // verify scripts (verify-editing.mjs, verify-exportsettings.mjs,
+        // verify-flags.mjs, verify-ratings.mjs) — see undoStackState() below
+        // for the full per-entry detail (kind/label/target) verify-undo.mjs needs.
+        const stack = useAppStore.getState().undoStack;
+        return { past: stack.undo.length, future: stack.redo.length };
+      },
+      undoStackState() {
+        const stack = useAppStore.getState().undoStack;
+        const summarize = (e: (typeof stack.undo)[number]) => ({
+          kind: e.kind,
+          label: e.label,
+          target: 'target' in e ? e.target : null,
+        });
+        return { undo: stack.undo.map(summarize), redo: stack.redo.map(summarize) };
+      },
+      undo() {
+        return useAppStore.getState().undo();
+      },
+      redo() {
+        return useAppStore.getState().redo();
       },
       scopeState() {
         const s = useAppStore.getState();

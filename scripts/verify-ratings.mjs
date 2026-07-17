@@ -1,17 +1,21 @@
 /**
  * Sidecar-resident ratings verify (docs/brief-bank/compare-view-and-ratings.md,
  * "Ratings" half). `rating: 0..5` lives on the sidecar WRAPPER (metadata about
- * the PHOTO, next to `createdAt`) — not inside `graph` — so setting it never
- * pushes a develop-history entry, unlike every other edit in this app. It
- * still marks the doc dirty (autosave persists it, same debounce as any other
- * edit) and flows through hot-reload/the filmstrip/the headless CLI exactly
- * like the rest of the sidecar wrapper does.
+ * the PHOTO, next to `createdAt`) — not inside `graph`. It marks the doc
+ * dirty (autosave persists it, same debounce as any other edit) and flows
+ * through hot-reload/the filmstrip/the headless CLI exactly like the rest of
+ * the sidecar wrapper does. Global-undo (docs/brief-bank/global-undo.md,
+ * decision 2) put rating IN the undoable scope: setting it pushes a
+ * `'rating'` entry onto the SAME global stack every graph edit uses (a
+ * dedicated kind, not a develop-history entry — see appStore.ts's
+ * setRating) — this supersedes an earlier "ratings never undo" contract this
+ * file used to check.
  *
  * Checks:
  *  1. A fresh open (no sidecar) is unrated (0), toolbar shows it.
  *  2. Keys 1-5 set / 0 clears the rating; the toolbar reflects it; it marks
- *     graphDirty but pushes NO history entry (deliberate divergence from
- *     every other graph mutation — see appStore.ts's setRating).
+ *     graphDirty AND pushes exactly one undo entry per real change (global-
+ *     undo decision 2 — see appStore.ts's setRating).
  *  2c. The toolbar's clear-rating button (UX pack, hand-test 2026-07-17
  *     item 2 — a mouse path for what the '0' key already does): set to 3 via
  *     the key, click clears it to 0, and the disk eventually reflects it too.
@@ -201,8 +205,12 @@ try {
   check('toolbar shows data-rating="0"', (await toolbarRatingAttr()) === '0', await toolbarRatingAttr());
   check('toolbar shows 0 filled stars', (await toolbarFilledStars()) === 0, await toolbarFilledStars());
 
-  // === 2. Keys 1-5 set / 0 clears; marks dirty; NOT a history entry ===
-  console.log('verify-ratings (2. keys 1-5/0 set/clear the rating; marks the doc dirty; pushes no history entry):');
+  // === 2. Keys 1-5 set / 0 clears; marks dirty; ONE undo entry per change ===
+  // Global-undo (docs/brief-bank/global-undo.md, decision 2): rating is now
+  // IN the undoable scope — setRating pushes a 'rating' entry onto the same
+  // stack every graph edit uses. This supersedes the "pushes no history
+  // entry" contract this section used to check.
+  console.log('verify-ratings (2. keys 1-5/0 set/clear the rating; marks the doc dirty; each change is its own undo entry):');
   const histBefore = await historyState();
   await page.keyboard.press('4');
   await page.waitForFunction(() => window.__debug.sidecarState().rating === 4, { timeout: 5_000 });
@@ -227,8 +235,8 @@ try {
 
   const histAfterRatingEdits = await historyState();
   check(
-    'none of the rating edits above pushed a history entry',
-    histAfterRatingEdits.past === histBefore.past && histAfterRatingEdits.future === histBefore.future,
+    'the 3 real rating changes above (4, 2, 0) each pushed their own undo entry — the no-op "9" keystroke pushed none',
+    histAfterRatingEdits.past === histBefore.past + 3 && histAfterRatingEdits.future === 0,
     { histBefore, histAfterRatingEdits }
   );
 
@@ -248,8 +256,8 @@ try {
   check('clicking star 3 again (== current rating) clears it to 0 (LR-style toggle)', (await rating()) === 0, await rating());
   const histAfterStarClick = await historyState();
   check(
-    'star clicks push no history entry either (same metadata-not-a-look-edit semantics as the 1-5/0 keys)',
-    histAfterStarClick.past === histBeforeStarClick.past && histAfterStarClick.future === histBeforeStarClick.future,
+    'each star click pushed its own undo entry too (same undoable-metadata semantics as the 1-5/0 keys — global-undo decision 2)',
+    histAfterStarClick.past === histBeforeStarClick.past + 2 && histAfterStarClick.future === 0,
     { histBeforeStarClick, histAfterStarClick }
   );
 

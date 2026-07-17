@@ -1,5 +1,20 @@
 import { create } from 'zustand';
 import { OpenSession, StaleOpenError } from './openSession';
+import {
+  emptyUndoStackState,
+  moveTopToRedo,
+  moveTopToUndo,
+  nextUndoSeq,
+  peekRedo,
+  peekUndo,
+  pushUndoEntry,
+  type FlagUndoEntry,
+  type GraphEntryKind,
+  type GraphUndoEntry,
+  type RatingUndoEntry,
+  type UndoEntry,
+  type UndoStackState,
+} from './undoStack';
 import { loadImage } from '../engine/decoder/imageLoader';
 import { isRawFileName } from '../engine/decoder/librawDecoder';
 import { extractSonyEmbeddedPreview } from '../engine/lens/sonyLensProfile';
@@ -97,22 +112,8 @@ import {
 
 export type ImageStatus = 'idle' | 'loading' | 'ready' | 'error';
 
-interface GraphHistory {
-  past: GraphDoc[];
-  future: GraphDoc[];
-  /**
-   * Coalescing tag of the edit that produced the newest `past` entry —
-   * consecutive edits with the same tag (one slider drag) share one entry.
-   */
-  lastCoalesceKey: string | null;
-}
-
-const HISTORY_LIMIT = 100;
-
 /** NG2 fix pack — see raiseNotice's doc comment: how long a 'success'-kind dismissable notice stays visible before auto-clearing. */
 const NOTICE_AUTO_EXPIRE_MS = 8000;
-
-const emptyHistory = (): GraphHistory => ({ past: [], future: [], lastCoalesceKey: null });
 
 /**
  * The active project's in-memory bookkeeping (project-storage migration,
@@ -446,7 +447,17 @@ interface AppState {
   /** Strided RGB samples for Wave/Parade/Vec, fetched only outside 'histogram' mode. */
   scopeSamples: ScopeSamples | null;
   setScopeSamples(samples: ScopeSamples | null): void;
-  history: GraphHistory;
+  /**
+   * Global undo (docs/brief-bank/global-undo.md): ONE LIFO timeline shared by
+   * every photo and every batch action — replaces the old per-open-photo
+   * `history: { past, future }` GraphDoc arrays entirely (`undo()`/`redo()`
+   * below dispatch per entry `kind`, jumping to a different photo first when
+   * an entry targets one that isn't open — see their own doc comments).
+   * Session-scoped, bounded (see undoStack.ts's UNDO_STACK_LIMIT) — never
+   * reset on an image switch/open (see openImageByPath), unlike the old
+   * per-photo `history` this replaces.
+   */
+  undoStack: UndoStackState;
   /** Yellow toolbar notice when a sidecar existed but could not be used. */
   sidecarNotice: string | null;
   /**
@@ -461,11 +472,11 @@ interface AppState {
   sidecarCreatedAt: string | null;
   /**
    * Star rating 0..5 (ratings pack): sidecar WRAPPER metadata about the
-   * PHOTO, not the look — lives next to sidecarCreatedAt, not in `graph`, so
-   * rating a photo never pushes a develop-history entry (setRating below is
-   * the only writer, and it deliberately skips pushHistory — a documented
-   * divergence from every other graph mutation in this store, all of which
-   * DO push history). 0 = unrated; reset to 0 on every image open before a
+   * PHOTO, not the look — lives next to sidecarCreatedAt, not in `graph`.
+   * Global-undo (docs/brief-bank/global-undo.md, decision 2): rating IS now
+   * in the undoable scope — setRating below pushes a `'rating'` entry onto
+   * the SAME global stack every graph edit uses, just keyed by this field
+   * instead of `graph`. 0 = unrated; reset to 0 on every image open before a
    * sidecar (if any) restores it, same as sidecarCreatedAt.
    */
   sidecarRating: number;
@@ -473,9 +484,10 @@ interface AppState {
    * Set (1-5) or clear (0) the current image's rating — the toolbar's star
    * display and App.tsx's 1-5/0 key handler both call this. Marks the doc
    * dirty (autosave's own subscribe watches sidecarRating in addition to
-   * `graph` — see the bottom of this file) but is NOT a history entry: see
-   * this field's own doc comment for why ratings deliberately don't undo
-   * like every other graph edit. No-op without an open image.
+   * `graph` — see the bottom of this file) and pushes a `'rating'` undo
+   * entry (see this field's own doc comment — global-undo decision 2
+   * supersedes the old "ratings never undo" contract). No-op without an
+   * open image.
    */
   setRating(rating: number): void;
   /**
@@ -495,11 +507,13 @@ interface AppState {
    * note). Deliberately takes an explicit `lookPath`, not "the current
    * photo" implicitly: when `lookPath` IS the open canvas photo
    * (`currentLookPath`), this rides the same in-memory + autosave pipeline
-   * `setRating` uses (marks graphDirty, no history entry — flags are
-   * metadata, not an undoable look edit, same reasoning as rating);
-   * otherwise it reads/patches/writes that OTHER look file directly off
-   * disk (mirroring relinkPhoto's own read-patch-write shape), since that
-   * photo isn't necessarily open/decoded at all. This is the seam a future
+   * `setRating` uses (marks graphDirty, pushes a `'flag'` undo entry — same
+   * global-undo decision 2 as rating, superseding the old "flags never
+   * undo" contract); otherwise it reads/patches/writes that OTHER look file
+   * directly off disk (mirroring relinkPhoto's own read-patch-write shape;
+   * this OTHER-photo branch has no active caller yet — see the brief's
+   * multi-select fan-out note — so it stays outside the undo stack for now),
+   * since that photo isn't necessarily open/decoded at all. This is the seam a future
    * multi-select fan-out calls per selected playlist entry without any
    * change to this action's signature.
    */
@@ -1071,8 +1085,20 @@ interface AppState {
   exportLut(path?: string): Promise<void>;
   /** Set after a successful exportLut — file count, their paths, and any color ops the LUT could not capture. */
   exportLutInfo: { count: number; paths: string[]; skipped: string[] } | null;
-  undo(): void;
-  redo(): void;
+  /**
+   * Undo the top entry of the global stack (docs/brief-bank/global-undo.md).
+   * Async now: an entry belonging to a DIFFERENT (not currently open) photo
+   * JUMPS — `openImageByPath`s that photo first (decision 1: "状態や画面が
+   * 戻ってる必要があるから" — undo must restore the visible state, not just
+   * the file), THEN applies the entry's `before` value and rides the normal
+   * dirty-or-direct-write path (decision 4). If the target file is missing
+   * (relink pending), the undo is BLOCKED — a `projectNotice` explains why,
+   * and the entry stays on the stack untouched (not silently skipped, not
+   * applied blind). A no-op with an empty stack.
+   */
+  undo(): Promise<void>;
+  /** Redo — symmetric with `undo()` above (same jump/block semantics, reversed direction). */
+  redo(): Promise<void>;
   /** `<userData>/settings.json`, loaded at boot; DEFAULT_SETTINGS until that IPC round-trip resolves. */
   settings: Settings;
   /** Merge `partial` into the persisted settings via IPC; updates local state with the sanitized result. */
@@ -1400,16 +1426,38 @@ function clearOpeningPreview(state: Pick<AppState, 'openingPreview'>): { opening
   return { openingPreview: null };
 }
 
-/** History advance for a graph mutation; `key` coalesces slider-drag runs. */
-function pushHistory(s: AppState, key: string | null): { history: GraphHistory } {
-  const coalesce = key !== null && key === s.history.lastCoalesceKey;
-  return {
-    history: {
-      past: coalesce ? s.history.past : [...s.history.past.slice(-(HISTORY_LIMIT - 1)), s.graph],
-      future: [],
-      lastCoalesceKey: key,
-    },
+/**
+ * Global-undo stack advance for a graph mutation (docs/brief-bank/
+ * global-undo.md) — the direct successor of the old per-photo `pushHistory`
+ * (whole-`GraphDoc` `past`/`future` arrays): `key` still coalesces a slider-
+ * drag run into ONE entry, exactly as before, but the entry itself now lands
+ * on the GLOBAL stack, tagged with the currently open photo (`target`) and a
+ * `kind`/`label` pair the undo/redo dispatcher and the tooltip surface use.
+ * No-op (leaves the stack untouched) if no image is open — every call site
+ * below only ever runs while one is, so this is defensive, not load-bearing.
+ */
+function pushHistory(
+  s: AppState,
+  key: string | null,
+  opts?: { kind?: GraphEntryKind; label?: string }
+): { undoStack: UndoStackState } {
+  const target = s.imagePath;
+  if (!target) return { undoStack: s.undoStack };
+  const kind = opts?.kind ?? 'photo-edit';
+  const label = opts?.label ?? 'Edit';
+  const top = peekUndo(s.undoStack);
+  const coalesce = key !== null && top?.kind === kind && top.target === target && top.coalesceKey === key;
+  if (coalesce) return { undoStack: { ...s.undoStack, redo: [] } };
+  const entry: GraphUndoEntry = {
+    seq: nextUndoSeq(),
+    at: Date.now(),
+    kind,
+    label,
+    target,
+    before: s.graph,
+    coalesceKey: key,
   };
+  return { undoStack: pushUndoEntry(s.undoStack, entry) };
 }
 
 export function isJpegFileName(name: string): boolean {
@@ -1609,7 +1657,12 @@ function buildLocalAdjustmentPatch(s: AppState, shape?: MaskShape): Partial<AppS
   addEdge(maskId, blendId, 'mask');
   addEdge(blendId, activeOutput.id);
 
-  return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: maskId };
+  return {
+    ...pushHistory(s, null, { label: 'Add local adjustment' }),
+    graph: scratch,
+    graphDirty: true,
+    selectedNodeId: maskId,
+  };
 }
 
 /** Default brush radius for a fresh spot (task #50): ~1.5% of the max output dimension. */
@@ -1839,12 +1892,18 @@ function mergeLookWithCurrentGeometry(currentGraph: GraphDoc, look: GraphDoc): G
  * Apply a captured look to `s`'s CURRENT graph (mergeLookWithCurrentGeometry
  * above), as one undo entry (pushHistory's `null` = its own discrete entry,
  * coalescing nothing). This is the entire body of pasteDevelopSettings;
- * applyPreset (the preset "Apply" action) shares it unchanged, so paste and
- * preset-apply are one implementation with one merge semantics.
+ * applyParsedPreset's whole-look branch shares it unchanged, so paste and
+ * preset-apply are one implementation with one merge semantics — `opts`
+ * distinguishes the two only for the undo entry's kind/label (global-undo
+ * decision: preset-apply is its own entry kind, distinct from a plain paste).
  */
-function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: GraphDoc } {
+function applyLook(
+  s: AppState,
+  look: GraphDoc,
+  opts: { kind?: GraphEntryKind; label: string } = { label: 'Paste develop settings' }
+): Partial<AppState> & { graph: GraphDoc } {
   const graph = mergeLookWithCurrentGeometry(s.graph, look);
-  return { ...pushHistory(s, null), graph, graphDirty: true };
+  return { ...pushHistory(s, null, opts), graph, graphDirty: true };
 }
 
 /**
@@ -1855,13 +1914,16 @@ function applyLook(s: AppState, look: GraphDoc): Partial<AppState> & { graph: Gr
  * scoped preset merges ONLY its checked, KNOWN families onto the CURRENT
  * graph (presetFamilies.ts's mergeScopedLook) — everything else on `s.graph`
  * is left untouched, never reset toward `parsed.look`'s own values. Like
- * applyLook, this is one undo entry (pushHistory's `null`).
+ * applyLook, this is one undo entry (pushHistory's `null`) — kind
+ * 'preset-apply' either way (global-undo decision: preset apply is its own
+ * labeled entry kind, not a generic photo-edit).
  */
 function applyParsedPreset(s: AppState, parsed: ParsedPreset): Partial<AppState> & { graph: GraphDoc } {
-  if (!parsed.includes) return applyLook(s, parsed.look);
+  const opts: { kind: GraphEntryKind; label: string } = { kind: 'preset-apply', label: 'Apply preset' };
+  if (!parsed.includes) return applyLook(s, parsed.look, opts);
   const families = new Set(parsed.includes.filter(isKnownFamilyId));
   const graph = structuredClone(mergeScopedLook(s.graph, parsed.look, families));
-  return { ...pushHistory(s, null), graph, graphDirty: true };
+  return { ...pushHistory(s, null, opts), graph, graphDirty: true };
 }
 
 /**
@@ -1921,7 +1983,7 @@ async function readAndParseSidecar(
 function applyExternalGraph(s: AppState, parsed: SidecarDoc, rawText: string): Partial<AppState> & { graph: GraphDoc } {
   const graph = parsed.graph;
   return {
-    ...pushHistory(s, null),
+    ...pushHistory(s, null, { label: 'Reload from disk' }),
     graph,
     graphDirty: false,
     selectedNodeId: graph.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
@@ -1997,7 +2059,7 @@ export const useAppStore = create<AppState>((set, get) => {
       mirrorShaderArtifactSet(nodeId, artifact);
       if (now.code.src !== src || now.code.lastValidSrc !== src) {
         set((s) => ({
-          ...(opts.history ? pushHistory(s, null) : {}),
+          ...(opts.history ? pushHistory(s, null, { label: 'Edit shader source' }) : {}),
           graph: withShader(s.graph, nodeId, (p) => ({ ...p, code: { src, lastValidSrc: src } })),
           graphDirty: true,
         }));
@@ -2520,6 +2582,35 @@ export const useAppStore = create<AppState>((set, get) => {
     }, NOTICE_AUTO_EXPIRE_MS);
   };
 
+  /**
+   * Global-undo jump (docs/brief-bank/global-undo.md, decision 1): make
+   * `target` the open photo, awaiting the SAME `openImageByPath` every other
+   * open goes through (flush-on-switch, OpenSession epoch, sidecar read —
+   * "session/epoch machinery as-is", per the brief's sequencing). A no-op
+   * (returns `true` immediately, no reopen at all) when `target` is already
+   * the open, ready photo — undoing/redoing an entry for the CURRENTLY open
+   * photo must feel exactly like it always has, no flush/reset of anything.
+   * Returns `false` when the jump didn't land (missing file, or a real open
+   * racing it) — `undo`/`redo` treat that as BLOCKED: the entry stays on its
+   * stack, untouched, and a notice explains why.
+   */
+  const ensurePhotoOpenForUndo = async (target: string): Promise<boolean> => {
+    const before = get();
+    if (before.imagePath === target && before.imageStatus === 'ready') return true;
+    await before.openImageByPath(target, { keepFolderContext: true });
+    const after = get();
+    return after.imagePath === target && after.imageStatus === 'ready';
+  };
+
+  /** BLOCKED undo/redo notice (decision 1's missing-file carve-out) — reuses the same dismissable banner projectNotice already renders elsewhere. */
+  const blockUndoRedo = (action: 'undo' | 'redo', label: string, target: string): void => {
+    const name = target.split('/').pop() ?? target;
+    raiseNotice('projectNotice', {
+      kind: 'error',
+      message: `could not ${action} "${label}" — ${name} could not be opened (missing file? relink it from the filmstrip, then try again)`,
+    });
+  };
+
   return {
   imageStatus: 'idle',
   image: null,
@@ -2553,7 +2644,7 @@ export const useAppStore = create<AppState>((set, get) => {
   histogram: null,
   scopeMode: 'histogram',
   scopeSamples: null,
-  history: emptyHistory(),
+  undoStack: emptyUndoStackState(),
   sidecarNotice: null,
   sidecarUnreadable: false,
   sidecarCreatedAt: null,
@@ -2836,7 +2927,11 @@ export const useAppStore = create<AppState>((set, get) => {
         // CanvasView's effect once it re-runs against the new `graph`.
         imageNodeSourceThumbs: {},
         inspectNodeId: null,
-        history: emptyHistory(),
+        // Global undo (docs/brief-bank/global-undo.md): deliberately NOT
+        // reset here — `undoStack` is the store's ONE global timeline, not
+        // per-photo state; entries for whatever photo was open before this
+        // switch (or a jump-undo's own target) must survive it. This is the
+        // one field of this whole commit that this open must NEVER touch.
         shaderErrors: {},
         sidecarNotice,
         sidecarUnreadable,
@@ -3093,7 +3188,7 @@ export const useAppStore = create<AppState>((set, get) => {
   // sections (e.g. 'basic.ev') for Develop nodes.
   updateNodeParam(nodeId, key, value) {
     set((s) => ({
-      ...pushHistory(s, `param:${nodeId}:${key}`),
+      ...pushHistory(s, `param:${nodeId}:${key}`, { label: `Adjust ${key.split('.').pop()}` }),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => {
@@ -3120,7 +3215,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const develop = structuredClone(node.develop ?? defaultDevelopParams());
       develop.bw.enabled = enabled;
       return {
-        ...pushHistory(s, `param:${nodeId}:bw.enabled`),
+        ...pushHistory(s, `param:${nodeId}:bw.enabled`, { label: 'Toggle black & white' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)),
@@ -3135,7 +3230,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const node = s.graph.nodes.find((n) => n.id === nodeId);
       if (!node || !isBypassableNodeKind(node.kind)) return {};
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: 'Toggle bypass' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, disabled: n.disabled ? undefined : true } : n)),
@@ -3147,7 +3242,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   moveNode(nodeId, position) {
     set((s) => ({
-      ...pushHistory(s, `move:${nodeId}`),
+      ...pushHistory(s, `move:${nodeId}`, { label: 'Move node' }),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, position } : n)),
@@ -3174,7 +3269,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const id = nextId(g, 'output');
         const node: GraphNode = { id, kind: 'output', position: { x: out.position.x, y: out.position.y + 140 } };
         return {
-          ...pushHistory(s, null),
+          ...pushHistory(s, null, { label: 'Add output node' }),
           graph: { ...g, nodes: [...g.nodes, node] },
           graphDirty: true,
           selectedNodeId: id,
@@ -3196,7 +3291,7 @@ export const useAppStore = create<AppState>((set, get) => {
           image: defaultImageParams(),
         };
         return {
-          ...pushHistory(s, null),
+          ...pushHistory(s, null, { label: 'Add image node' }),
           graph: { ...g, nodes: [...g.nodes, node] },
           graphDirty: true,
           selectedNodeId: id,
@@ -3249,7 +3344,12 @@ export const useAppStore = create<AppState>((set, get) => {
         addEdge(inEdge.source, id);
       }
       addEdge(id, out.id);
-      return { ...pushHistory(s, null), graph: scratch, graphDirty: true, selectedNodeId: id };
+      return {
+        ...pushHistory(s, null, { label: `Add ${kind} node` }),
+        graph: scratch,
+        graphDirty: true,
+        selectedNodeId: id,
+      };
     });
   },
 
@@ -3266,7 +3366,7 @@ export const useAppStore = create<AppState>((set, get) => {
         const outputs = g.nodes.filter((n) => n.kind === 'output');
         if (outputs.length < 2) return {};
         return {
-          ...pushHistory(s, null),
+          ...pushHistory(s, null, { label: 'Remove output node' }),
           graph: {
             ...g,
             nodes: g.nodes.filter((n) => n.id !== nodeId),
@@ -3323,7 +3423,7 @@ export const useAppStore = create<AppState>((set, get) => {
       // thumbnail fallback, in case a removed node was kind 'image'.
       const { [nodeId]: _prunedThumb, ...imageNodeSourceThumbs } = s.imageNodeSourceThumbs;
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: `Remove ${node.kind} node` }),
         graph: scratch,
         graphDirty: true,
         selectedNodeId: s.selectedNodeId === nodeId ? null : s.selectedNodeId,
@@ -3358,7 +3458,7 @@ export const useAppStore = create<AppState>((set, get) => {
         rejected = err instanceof Error ? err.message : String(err);
         return {};
       }
-      return { ...pushHistory(s, null), graph, graphDirty: true, connectNotice: null };
+      return { ...pushHistory(s, null, { label: 'Connect nodes' }), graph, graphDirty: true, connectNotice: null };
     });
     if (rejected) {
       set({ connectNotice: rejected });
@@ -3372,7 +3472,7 @@ export const useAppStore = create<AppState>((set, get) => {
     set((s) => {
       if (!s.graph.edges.some((e) => e.id === edgeId)) return {};
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: 'Disconnect nodes' }),
         graph: { ...s.graph, edges: s.graph.edges.filter((e) => e.id !== edgeId) },
         graphDirty: true,
       };
@@ -3392,7 +3492,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const node = s.graph.nodes.find((n) => n.id === nodeId);
       if (!node || node.kind !== 'output') return {};
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Rename output' }),
         graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, name } : n)) },
         graphDirty: true,
       };
@@ -3409,7 +3509,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const sanitized = sanitizeExportOverrides(overrides, nodeId);
       const nextExport = Object.keys(sanitized).length > 0 ? sanitized : undefined;
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit export settings' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, export: nextExport } : n)),
@@ -3426,7 +3526,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const mask = node.mask ?? defaultMaskParams();
       const clamped = clampMaskShape(shape);
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit mask shape' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) =>
@@ -3491,7 +3591,7 @@ export const useAppStore = create<AppState>((set, get) => {
       }
       if (result === null) return {};
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: 'Add spot' }),
         graph: result.graph,
         graphDirty: true,
         selectedNodeId: result.nodeId,
@@ -3516,7 +3616,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!current) return {};
       const next = clampSpot({ ...current, ...patch });
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Move spot' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) =>
@@ -3535,7 +3635,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const list = node.spots?.spots ?? [];
       if (index < 0 || index >= list.length) return {};
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: 'Remove spot' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) =>
@@ -3554,7 +3654,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!node || node.kind !== SPOTS_KIND) return {};
       const clamped = spots.slice(0, SPOTS_CAP).map(clampSpot);
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit spots' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, spots: { spots: clamped } } : n)),
@@ -3575,7 +3675,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const node = s.graph.nodes.find((n) => n.id === nodeId);
       if (!node || node.kind !== IMAGE_KIND) return {};
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Set image source' }),
         graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, image: { path } } : n)) },
         graphDirty: true,
         // A path edit invalidates whatever "missing" verdict the OLD path
@@ -3614,7 +3714,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!node || node.kind !== EXTERNAL_KIND) return {};
       const prevEncoded = node.external?.encoded ?? defaultExternalParams().encoded;
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit external command' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, external: { command, encoded: prevEncoded } } : n)),
@@ -3635,7 +3735,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!node || node.kind !== EXTERNAL_KIND) return {};
       const prevCommand = node.external?.command ?? '';
       return {
-        ...pushHistory(s, null),
+        ...pushHistory(s, null, { label: 'Edit external command' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, external: { command: prevCommand, encoded } } : n)),
@@ -3709,7 +3809,7 @@ export const useAppStore = create<AppState>((set, get) => {
       const node = s.graph.nodes.find((n) => n.id === nodeId);
       if (!node || node.kind !== DENOISE_KIND) return {};
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Adjust denoise strength' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, denoise: { strength } } : n)),
@@ -3776,7 +3876,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {
     set((s) => ({
-      ...pushHistory(s, coalesceKey),
+      ...pushHistory(s, coalesceKey, { label: 'Adjust develop' }),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => {
@@ -3799,7 +3899,7 @@ export const useAppStore = create<AppState>((set, get) => {
     const sanitized = sanitizeCurvePoints(points);
     if (!sanitized) return;
     set((s) => ({
-      ...pushHistory(s, `curve:${nodeId}:${channel}:${session}`),
+      ...pushHistory(s, `curve:${nodeId}:${channel}:${session}`, { label: `Edit tone curve (${channel})` }),
       graph: {
         ...s.graph,
         nodes: s.graph.nodes.map((n) => {
@@ -3819,7 +3919,7 @@ export const useAppStore = create<AppState>((set, get) => {
     if (shader.params.some((p) => p.name === def.name)) return `param "${def.name}" already exists`;
     if (![def.min, def.max, def.default].every(Number.isFinite) || def.min > def.max) return 'invalid range';
     set((s) => ({
-      ...pushHistory(s, null),
+      ...pushHistory(s, null, { label: 'Add shader parameter' }),
       graph: withShader(s.graph, nodeId, (p) => ({
         ...p,
         params: [...p.params, { ...def, value: def.default }],
@@ -3835,7 +3935,7 @@ export const useAppStore = create<AppState>((set, get) => {
   removeShaderParam(nodeId, name) {
     if (!getShader(get().graph, nodeId)) return;
     set((s) => ({
-      ...pushHistory(s, null),
+      ...pushHistory(s, null, { label: 'Remove shader parameter' }),
       graph: withShader(s.graph, nodeId, (p) => ({ ...p, params: p.params.filter((x) => x.name !== name) })),
       graphDirty: true,
     }));
@@ -3845,7 +3945,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   updateShaderParam(nodeId, name, value) {
     set((s) => ({
-      ...pushHistory(s, `shaderparam:${nodeId}:${name}`),
+      ...pushHistory(s, `shaderparam:${nodeId}:${name}`, { label: `Adjust shader parameter "${name}"` }),
       graph: withShader(s.graph, nodeId, (p) => ({
         ...p,
         params: p.params.map((x) => (x.name === name ? { ...x, value } : x)),
@@ -3854,47 +3954,110 @@ export const useAppStore = create<AppState>((set, get) => {
     }));
   },
 
-  undo() {
-    set((s) => {
-      const prev = s.history.past.at(-1);
-      if (!prev) return {};
-      return {
-        graph: prev,
-        history: {
-          past: s.history.past.slice(0, -1),
-          future: [s.graph, ...s.history.future],
-          lastCoalesceKey: null,
-        },
-        graphDirty: true,
-        selectedNodeId: prev.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
-        // a jump can change (or shorten) any spots node's list — a stale
-        // index would either point at the wrong spot or past the end
-        selectedSpotIndex: null,
-      };
-    });
-    // a jump may restore shader sources whose artifacts are stale
-    shaderEpoch++;
-    revalidateShaders(get().graph);
+  async undo() {
+    const entry = peekUndo(get().undoStack);
+    if (!entry) return;
+    switch (entry.kind) {
+      case 'photo-edit':
+      case 'preset-apply':
+      case 'develop-reset':
+      case 'reset-all': {
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('undo', entry.label, entry.target);
+          return;
+        }
+        // Current graph == this entry's `after` (LIFO invariant — see
+        // undoStack.ts's file doc comment): nothing else could have touched
+        // this same photo without ITSELF being a later, still-undone entry.
+        const after = get().graph;
+        set((s) => ({
+          graph: entry.before,
+          graphDirty: true,
+          selectedNodeId: entry.before.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+          // a jump (or just a different graph) can change/shorten any spots
+          // node's list — a stale index would point at the wrong spot or past the end
+          selectedSpotIndex: null,
+          undoStack: moveTopToRedo(s.undoStack, { ...entry, after }),
+        }));
+        // a jump may restore shader sources whose artifacts are stale
+        shaderEpoch++;
+        revalidateShaders(get().graph);
+        return;
+      }
+      case 'rating': {
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('undo', entry.label, entry.target);
+          return;
+        }
+        const after = get().sidecarRating;
+        set((s) => ({ sidecarRating: entry.before, graphDirty: true, undoStack: moveTopToRedo(s.undoStack, { ...entry, after }) }));
+        return;
+      }
+      case 'flag': {
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('undo', entry.label, entry.target);
+          return;
+        }
+        const after = get().sidecarFlag;
+        set((s) => ({ sidecarFlag: entry.before, graphDirty: true, undoStack: moveTopToRedo(s.undoStack, { ...entry, after }) }));
+        return;
+      }
+      case 'sync':
+      case 'arrange':
+        // Type + dispatch designed (global-undo brief) but no producer in v1
+        // yet (Sync/Arrange haven't landed) — nothing can ever push one of
+        // these onto the stack today, so this branch never actually runs.
+        return;
+    }
   },
 
-  redo() {
-    set((s) => {
-      const next = s.history.future[0];
-      if (!next) return {};
-      return {
-        graph: next,
-        history: {
-          past: [...s.history.past, s.graph],
-          future: s.history.future.slice(1),
-          lastCoalesceKey: null,
-        },
-        graphDirty: true,
-        selectedNodeId: next.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
-        selectedSpotIndex: null,
-      };
-    });
-    shaderEpoch++;
-    revalidateShaders(get().graph);
+  async redo() {
+    const entry = peekRedo(get().undoStack);
+    if (!entry) return;
+    switch (entry.kind) {
+      case 'photo-edit':
+      case 'preset-apply':
+      case 'develop-reset':
+      case 'reset-all': {
+        if (entry.after === undefined) return; // defensive: undo() always populates `after` before an entry reaches the redo stack
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('redo', entry.label, entry.target);
+          return;
+        }
+        const after = entry.after;
+        set((s) => ({
+          graph: after,
+          graphDirty: true,
+          selectedNodeId: after.nodes.some((n) => n.id === s.selectedNodeId) ? s.selectedNodeId : null,
+          selectedSpotIndex: null,
+          undoStack: moveTopToUndo(s.undoStack, entry),
+        }));
+        shaderEpoch++;
+        revalidateShaders(get().graph);
+        return;
+      }
+      case 'rating': {
+        if (entry.after === undefined) return;
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('redo', entry.label, entry.target);
+          return;
+        }
+        set((s) => ({ sidecarRating: entry.after!, graphDirty: true, undoStack: moveTopToUndo(s.undoStack, entry) }));
+        return;
+      }
+      case 'flag': {
+        if (entry.after === undefined) return;
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('redo', entry.label, entry.target);
+          return;
+        }
+        set((s) => ({ sidecarFlag: entry.after ?? null, graphDirty: true, undoStack: moveTopToUndo(s.undoStack, entry) }));
+        return;
+      }
+      case 'sync':
+      case 'arrange':
+        return;
+    }
   },
 
   setRenderer(renderer) {
@@ -3986,7 +4149,7 @@ export const useAppStore = create<AppState>((set, get) => {
       testFlags: window.silverbox.testFlags,
     });
     set((s2) => ({
-      ...pushHistory(s2, null),
+      ...pushHistory(s2, null, { kind: 'reset-all', label: 'Reset all edits' }),
       graph,
       graphDirty: true,
       // Selection + modal tools, same fields deactivateOtherTools groups as
@@ -4027,7 +4190,7 @@ export const useAppStore = create<AppState>((set, get) => {
     const seededDevelop = seededGraph.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop;
     if (!seededDevelop) return;
     set((s2) => ({
-      ...pushHistory(s2, null),
+      ...pushHistory(s2, null, { kind: 'develop-reset', label: 'Reset develop' }),
       graph: {
         ...s2.graph,
         nodes: s2.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop: structuredClone(seededDevelop) } : n)),
@@ -4145,7 +4308,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!inputNode) return {};
       const geometry = clampGeometry(geo);
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit crop / straighten' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === inputNode.id ? { ...n, geometry } : n)),
@@ -4161,7 +4324,7 @@ export const useAppStore = create<AppState>((set, get) => {
       if (!inputNode) return {};
       const lens = clampLens(lensParams);
       return {
-        ...pushHistory(s, coalesceKey),
+        ...pushHistory(s, coalesceKey, { label: 'Edit lens correction' }),
         graph: {
           ...s.graph,
           nodes: s.graph.nodes.map((n) => (n.id === inputNode.id ? { ...n, lens } : n)),
@@ -4596,32 +4759,56 @@ export const useAppStore = create<AppState>((set, get) => {
   },
 
   setRating(rating) {
+    const s = get();
     // no image open: nothing to rate, and no sidecar to eventually write it to
-    if (!get().imagePath) return;
+    if (!s.imagePath) return;
     const next = sanitizeRating(rating);
-    if (next === get().sidecarRating) return; // e.g. pressing the same star twice — nothing changed, nothing to save
-    // Deliberately NOT pushHistory: a rating is per-photo metadata, not an
-    // undoable look edit (see AppState.sidecarRating's doc comment) — this
-    // is the one graph-adjacent mutation in this store that skips it.
-    // graphDirty:true still marks the doc dirty so autosave persists it (the
-    // bottom-of-file autosave subscribe watches sidecarRating in addition to
-    // `graph` for exactly this reason — a rating-only change never touches
-    // `graph` itself).
-    set({ sidecarRating: next, graphDirty: true });
+    if (next === s.sidecarRating) return; // e.g. pressing the same star twice — nothing changed, nothing to save
+    // Global-undo (docs/brief-bank/global-undo.md, decision 2): rating IS in
+    // the undoable scope now — pushes a 'rating' entry onto the SAME global
+    // stack every graph edit uses (see AppState.sidecarRating's doc comment;
+    // this supersedes the old "ratings never undo" contract). graphDirty:true
+    // still marks the doc dirty so autosave persists it (the bottom-of-file
+    // autosave subscribe watches sidecarRating in addition to `graph` for
+    // exactly this reason — a rating-only change never touches `graph` itself).
+    const entry: RatingUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'rating',
+      label: `Set rating to ${next}`,
+      target: s.imagePath,
+      before: s.sidecarRating,
+    };
+    set((st) => ({ sidecarRating: next, graphDirty: true, undoStack: pushUndoEntry(st.undoStack, entry) }));
   },
 
   async setFlag(lookPath, flag) {
     const next = sanitizeFlag(flag ?? undefined) ?? null;
     // The CANVAS photo (today's only caller — App.tsx's p/x/u keys): update
     // the live in-memory state and let the ordinary autosave/⌘S pipeline
-    // persist it, same "metadata, not an undoable look edit" contract
-    // setRating already has (no pushHistory) — see AppState.sidecarFlag's
-    // own doc comment for why this branches on the EXPLICIT `lookPath`
-    // argument matching `currentLookPath` rather than assuming "the current
-    // photo" implicitly.
+    // persist it. Global-undo (decision 2): pushes a 'flag' entry onto the
+    // SAME global stack rating does (see AppState.sidecarFlag's own doc
+    // comment for why this branches on the EXPLICIT `lookPath` argument
+    // matching `currentLookPath` rather than assuming "the current photo"
+    // implicitly).
     if (lookPath === get().currentLookPath) {
-      if (next === get().sidecarFlag) return; // no-op, nothing to save
-      set({ sidecarFlag: next, graphDirty: true });
+      const s = get();
+      if (next === s.sidecarFlag) return; // no-op, nothing to save
+      if (!s.imagePath) {
+        // Defensive only: currentLookPath implies an open photo in every real
+        // caller, but without one there's no `target` to tag the entry with.
+        set({ sidecarFlag: next, graphDirty: true });
+        return;
+      }
+      const entry: FlagUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'flag',
+        label: next === 'pick' ? 'Pick' : next === 'reject' ? 'Reject' : 'Unflag',
+        target: s.imagePath,
+        before: s.sidecarFlag,
+      };
+      set((st) => ({ sidecarFlag: next, graphDirty: true, undoStack: pushUndoEntry(st.undoStack, entry) }));
       return;
     }
     // Any OTHER look file — the seam a future multi-select fan-out uses: a

@@ -224,9 +224,14 @@ try {
 
   // ---------------------------------------------------------------------
   console.log('verify-presets (2. reset + apply via the UI -> readbackMean matches, ONE undo entry):');
-  await openAndWait(ARW_PATH); // no sidecar, autosave off -> fresh default graph, empty history
+  await openAndWait(ARW_PATH); // no sidecar, autosave off -> fresh default graph
   check('reopen reset the graph to the default (no extra node)', (await graphState()).nodes.length === 3, await graphState());
-  check('history is empty right after reopening', JSON.stringify(await historyState()) === '{"past":0,"future":0}', await historyState());
+  // Global-undo (docs/brief-bank/global-undo.md): the undo stack is now a
+  // SESSION-WIDE timeline, not per-photo — reopening a photo no longer wipes
+  // it (section 1's edits above are still sitting on it). Baseline the
+  // COUNTS here instead of asserting empty, and compare every later check in
+  // this section against this baseline rather than an absolute 0/1.
+  const historyAtReset = await historyState();
   const beforeApplyMean = await gpuMean();
 
   await openPresetsMenu();
@@ -248,7 +253,11 @@ try {
     editedMean,
   });
   const historyAfterApply = await historyState();
-  check('applying is exactly ONE undo entry', historyAfterApply.past === 1 && historyAfterApply.future === 0, historyAfterApply);
+  check(
+    'applying is exactly ONE undo entry',
+    historyAfterApply.past === historyAtReset.past + 1 && historyAfterApply.future === 0,
+    { historyAtReset, historyAfterApply }
+  );
 
   // ---------------------------------------------------------------------
   console.log('verify-presets (3. Cmd+Z after apply restores the pre-apply render):');
@@ -259,7 +268,12 @@ try {
     meanAfterUndo,
     beforeApplyMean,
   });
-  check('undo also rolled back the history counters', JSON.stringify(await historyState()) === '{"past":0,"future":1}', await historyState());
+  const historyAfterUndo = await historyState();
+  check(
+    'undo also rolled back the history counters',
+    historyAfterUndo.past === historyAtReset.past && historyAfterUndo.future === historyAtReset.future + 1,
+    { historyAtReset, historyAfterUndo }
+  );
 
   // redo back to the applied state so subsequent sections see a consistent baseline
   await page.keyboard.press('Meta+Shift+z');
@@ -328,14 +342,15 @@ try {
   await saveWithFamilies('Crop Test', WHOLE_LOOK_MINUS_GEOMETRY);
   await waitForCondition(() => page.evaluate(() => window.__debug.presetsState().some((p) => p.name === 'Crop Test')));
 
-  await openAndWait(ARW_PATH); // reopen: back to identity geometry, empty history
+  await openAndWait(ARW_PATH); // reopen: back to identity geometry (global-undo: the stack itself is untouched by a reopen — see section 2's own note)
   const geometryBeforeApply = await geometryState();
   check('reopening reset the geometry back to identity', geometryBeforeApply.crop.w === 1 && geometryBeforeApply.angle === 0, geometryBeforeApply);
+  const historyBeforeCropApply = await historyState();
 
   await openPresetsMenu();
   await selectPresetRow('Crop Test');
   await page.locator('[data-testid="preset-apply"]').click();
-  await waitForCondition(() => page.evaluate(() => window.__debug.historyState().past === 1));
+  await waitForCondition(() => page.evaluate((n) => window.__debug.historyState().past === n, historyBeforeCropApply.past + 1));
   const geometryAfterApply = await geometryState();
   check(
     'applying the preset left the input node\'s geometry untouched (still identity, NOT the crop active when it was saved)',

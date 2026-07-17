@@ -149,8 +149,12 @@ export function App() {
         // don't steal undo from text fields (Monaco has its own undo stack)
         if (isTextEntry(ev.target)) return;
         ev.preventDefault();
-        if (ev.shiftKey) useAppStore.getState().redo();
-        else useAppStore.getState().undo();
+        // Global-undo (docs/brief-bank/global-undo.md): undo()/redo() are
+        // async now (a cross-photo entry JUMPS — awaits openImageByPath
+        // before reverting) — fire-and-forget here, same as every other
+        // async store action this handler kicks off without awaiting.
+        if (ev.shiftKey) void useAppStore.getState().redo();
+        else void useAppStore.getState().undo();
       }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'm') {
         // Node bypass toggle (Resolve calls this "mute"). Round-11 fix pack

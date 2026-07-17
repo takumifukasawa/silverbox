@@ -148,6 +148,7 @@ const ALL_SCRIPTS = [
   { name: 'bypass', file: 'verify-bypass.mjs' },
   { name: 'project', file: 'verify-project.mjs' },
   { name: 'project2', file: 'verify-project2.mjs' },
+  { name: 'undo', file: 'verify-undo.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

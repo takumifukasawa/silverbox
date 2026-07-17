@@ -22,6 +22,7 @@ import { useAppStore } from './appStore';
 import { defaultGraphDoc, DEVELOP_KIND, type GraphDoc } from '../engine/graph/graphDoc';
 import { defaultDevelopParams } from '../engine/graph/developNode';
 import type { PreparedImage } from '../engine/decoder/decodeWorker';
+import { emptyUndoStackState } from './undoStack';
 
 (globalThis as unknown as { window: unknown }).window = {
   silverbox: {
@@ -61,8 +62,12 @@ describe('appStore.resetDevelopNode', () => {
       imageStatus: 'ready',
       image: fakeImage,
       fileName: 'test.jpg', // isRawFileName -> false: the RAW-only base-curve/lens-profile seeding never engages, keeping the expected reset shape simple (flat defaultDevelopParams()).
+      // Global-undo (docs/brief-bank/global-undo.md): pushHistory now tags
+      // every entry with the open photo's path (`imagePath`) — without one,
+      // resetDevelopNode's undo entry would silently never get pushed at all.
+      imagePath: '/fake/test.jpg',
       graph: twoDevelopGraph(),
-      history: { past: [], future: [], lastCoalesceKey: null },
+      undoStack: emptyUndoStackState(),
       graphDirty: false,
     });
   });
@@ -90,10 +95,11 @@ describe('appStore.resetDevelopNode', () => {
     const devId = graphBefore.nodes.find((n) => n.kind === DEVELOP_KIND && n.id !== 'dev2')!.id;
 
     useAppStore.getState().resetDevelopNode(devId);
-    const { history } = useAppStore.getState();
-    expect(history.past).toHaveLength(1);
-    expect(history.past[0]).toBe(graphBefore);
-    expect(history.future).toHaveLength(0);
+    const { undoStack } = useAppStore.getState();
+    expect(undoStack.undo).toHaveLength(1);
+    expect(undoStack.undo[0]!.kind).toBe('develop-reset');
+    expect((undoStack.undo[0] as { before: GraphDoc }).before).toBe(graphBefore);
+    expect(undoStack.redo).toHaveLength(0);
   });
 
   it('is a no-op without a ready image', () => {
@@ -103,7 +109,7 @@ describe('appStore.resetDevelopNode', () => {
 
     useAppStore.getState().resetDevelopNode(devId);
     expect(useAppStore.getState().graph).toBe(graphBefore);
-    expect(useAppStore.getState().history.past).toHaveLength(0);
+    expect(useAppStore.getState().undoStack.undo).toHaveLength(0);
   });
 
   it('is a no-op for a non-develop node id', () => {
@@ -112,7 +118,7 @@ describe('appStore.resetDevelopNode', () => {
 
     useAppStore.getState().resetDevelopNode(inputId);
     expect(useAppStore.getState().graph).toBe(graphBefore);
-    expect(useAppStore.getState().history.past).toHaveLength(0);
+    expect(useAppStore.getState().undoStack.undo).toHaveLength(0);
   });
 
   it('is a no-op for an unknown node id', () => {

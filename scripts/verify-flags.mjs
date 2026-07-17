@@ -8,21 +8,25 @@
  * underlying store action (`setFlag`) takes an EXPLICIT look path rather than
  * reaching for "the current photo" internally, so a later multi-select
  * fan-out can call it per selected photo without any change to its
- * signature — section 6 below exercises exactly that seam directly.
+ * signature — section 6 below exercises exactly that seam directly. Global-
+ * undo (docs/brief-bank/global-undo.md, decision 2) put flag IN the undoable
+ * scope for the CANVAS-photo path: setFlag pushes a `'flag'` entry onto the
+ * SAME global stack every graph edit uses — this supersedes an earlier
+ * "flags never undo" contract this file used to check.
  *
  * Checks:
  *  1. A fresh open (no sidecar) is unflagged (null), sidecarState() reflects
  *     it — p/x/u were audited against the round-8-13 keyboard map (App.tsx's
  *     own doc comment on the p/x/u handler) before landing, so this script
  *     doesn't re-litigate that; it exercises the bindings themselves.
- *  2. p/x/u set/clear the flag; marks graphDirty but pushes NO history entry
- *     (metadata, not an undoable look edit — same divergence setRating
- *     already has); independent of rating (setting a rating doesn't touch
- *     the flag and vice versa, and rejecting doesn't clear the rating).
+ *  2. p/x/u set/clear the flag; marks graphDirty AND pushes exactly one undo
+ *     entry per real change (global-undo decision 2 — see appStore.ts's
+ *     setFlag); independent of rating (setting a rating doesn't touch the
+ *     flag and vice versa, and rejecting doesn't clear the rating).
  *  2b. Toolbar flag glyph (UX pack, hand-test 2026-07-17 item 3): reflects
  *     none/pick/reject next to the rating stars, and clicking it cycles
- *     none→pick→reject→none (the same setFlag call p/x/u drive) — pushes no
- *     history entry either, same metadata semantics as the keys.
+ *     none→pick→reject→none (the same setFlag call p/x/u drive) — each click
+ *     is its own undo entry too, same as the keys.
  *  3. isTextEntry guards it: a focused text input swallows p/x/u.
  *  4. Autosave writes it to disk (absent when unflagged — identity-omission,
  *     never a written `flag: null`); it survives a fresh reopen; an explicit
@@ -216,8 +220,8 @@ try {
   console.log('verify-flags (1. a fresh open — no sidecar — is unflagged):');
   check('fresh open has flag null', (await flagState()) === null, await flagState());
 
-  // === 2. p/x/u set/clear the flag; marks dirty; NOT a history entry; independent of rating ===
-  console.log('verify-flags (2. p/x/u set/clear the flag; marks the doc dirty; pushes no history entry; independent of rating):');
+  // === 2. p/x/u set/clear the flag; marks dirty; ONE undo entry per change; independent of rating ===
+  console.log('verify-flags (2. p/x/u set/clear the flag; marks the doc dirty; each change is its own undo entry; independent of rating):');
   const histBefore = await historyState();
   await page.keyboard.press('p');
   await page.waitForFunction(() => window.__debug.sidecarState().flag === 'pick', { timeout: 5_000 });
@@ -234,8 +238,12 @@ try {
 
   const histAfterFlagEdits = await historyState();
   check(
-    'none of the flag edits above pushed a history entry',
-    histAfterFlagEdits.past === histBefore.past && histAfterFlagEdits.future === histBefore.future,
+    // Global-undo (docs/brief-bank/global-undo.md, decision 2): flag is now
+    // IN the undoable scope — each of the 3 real changes above (pick, reject,
+    // unflag) pushes its own 'flag' undo entry (supersedes the old "flags
+    // never undo" contract this check used to assert the opposite of).
+    'each of the 3 flag edits above pushed its own undo entry',
+    histAfterFlagEdits.past === histBefore.past + 3 && histAfterFlagEdits.future === 0,
     { histBefore, histAfterFlagEdits }
   );
 
@@ -276,8 +284,8 @@ try {
 
   const histAfterToolbarFlag = await historyState();
   check(
-    'toolbar flag clicks push no history entry either (same metadata semantics as p/x/u)',
-    histAfterToolbarFlag.past === histBeforeToolbarFlag.past && histAfterToolbarFlag.future === histBeforeToolbarFlag.future,
+    'each toolbar flag click pushed its own undo entry too (same undoable-metadata semantics as p/x/u — global-undo decision 2)',
+    histAfterToolbarFlag.past === histBeforeToolbarFlag.past + 3 && histAfterToolbarFlag.future === 0,
     { histBeforeToolbarFlag, histAfterToolbarFlag }
   );
 
