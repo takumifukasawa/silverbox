@@ -64,6 +64,34 @@ following. Three candidate models:
   heaviest UI (every slider needs a follow/override state). Position:
   refine (A) into (C) only where real usage demands it, not up front.
 
+## The UE Material / Material Instance mapping (user, 2026-07-18)
+
+「UEのマテリアルとマテリアルインスタンス的な考え方かなぁ。シェーディング
+本体と、パラメーターを上書きするやつ。でもスタンプで消したりとかした後に、
+シェーディング本体を上書きするとどうなる？」— the analogy holds precisely,
+and the stamp question answers itself through it:
+
+- Material = the shared look (default parameter values, maybe structure).
+  Material Instance = the photo's sparse override set; editing the parent
+  flows into every non-overridden slot. This is model (A)/(C) above with
+  a production-proven precedent.
+- UE instances CANNOT change the graph — parameters only — and that's
+  exactly why it doesn't collapse. Translated here: **spots/masks/custom
+  nodes are NOT part of the look; they're photo-anchored LOCAL structure
+  composed downstream of the link.** The codebase already says so twice:
+  anchor space stores spot/mask coords in the photo's own pixel frame
+  (meaningless on another photo), and the preset-family split already
+  quarantines them as 'structural', default-unchecked. So "stamp, then
+  update the look body" simply doesn't conflict — the body's changes
+  arrive through the parameter layer; local stamps live downstream
+  untouched (UE: swap the material, the decals stay).
+- Two real edge cases remain: **sensor dust** (the one legitimate
+  shared-structure demand — same spot on every frame; LR's spot-sync
+  exists for it; solve as explicit opt-in structure sharing, never
+  default) and **orphaned overrides** (the body removes/reshapes a
+  family the photo overrode — UE silently drops; our non-destructive
+  stance says the fork survives as local).
+
 ## Interim ladder (pragmatic, already decided or cheap)
 
 1. Now: explicit Sync button only; Auto Sync is removal-candidate
