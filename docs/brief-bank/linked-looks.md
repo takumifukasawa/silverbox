@@ -85,12 +85,33 @@ and the stamp question answers itself through it:
   update the look body" simply doesn't conflict — the body's changes
   arrive through the parameter layer; local stamps live downstream
   untouched (UE: swap the material, the decals stay).
-- Two real edge cases remain: **sensor dust** (the one legitimate
-  shared-structure demand — same spot on every frame; LR's spot-sync
-  exists for it; solve as explicit opt-in structure sharing, never
-  default) and **orphaned overrides** (the body removes/reshapes a
-  family the photo overrode — UE silently drops; our non-destructive
-  stance says the fork survives as local).
+- Two real edge cases remain: **sensor dust** (see the next section —
+  the user found the deeper shape of it) and **orphaned overrides**
+  (the body removes/reshapes a family the photo overrode — UE silently
+  drops; our non-destructive stance says the fork survives as local).
+
+## Dust is an ORTHOGONAL axis, not a look variant (user, 2026-07-18)
+
+「同じ環境下だけど固定のゴミがある場合とない場合がある。そういうときに
+プリセットを増やさないといけなくなる」— exactly: baking dust spots into
+the look multiplies presets by dust-state (look × dust = variant
+explosion). Dust is equipment-state REPAIR, not aesthetics — a separate
+axis that must compose, not fork the preset:
+
+- **Today's answer (already shippable with landed machinery):** keep
+  spots OUT of look presets (structural families are default-unchecked
+  — already the case); dust handling = select the affected frames,
+  Sync with ONLY the spots family checked. Frames without the dust
+  simply aren't selected. One look preset, ever.
+- **Linked-world answer:** a photo carries MULTIPLE orthogonal links —
+  `look` (aesthetics) + `repair set` (dust) attached/detached
+  independently. Composition instead of variants; the core node-based
+  argument again.
+- **And dust may not even deserve a LINK:** sensor dust never changes
+  retroactively, so following-semantics buys nothing — a one-shot
+  "stamp sheet" copy is the honest weight class. Aperture-dependent
+  visibility means per-frame application judgment is needed anyway, so
+  fully-automatic following would be wrong even if cheap.
 
 ## Interim ladder (pragmatic, already decided or cheap)
 
