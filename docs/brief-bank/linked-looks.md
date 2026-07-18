@@ -181,6 +181,33 @@ third kind (frame-anchored one-shot watermark/border, say) would slot
 into the same grid without new architecture — but nothing beyond the
 two is planned or needed.
 
+## The third axis: SCOPE (user: 「マテリアルはプロジェクト間で再利用して
+いて欲しい感じもありつつ、repairは別にいらなそう」)
+
+Cross-project reuse wants a global library — but cross-project
+FOLLOWING would break the project's self-containedness (copy the
+project folder elsewhere → look missing; git history incomplete via
+external reference) and would let a library edit retroactively change
+FINISHED projects' renders. Both violate the git-native stance. The
+resolution:
+
+> **Following stops at the project boundary; reuse crosses it by COPY
+> (vendoring).** Library = template store; using a library look COPIES
+> it into the project, and all linking/publish thereafter is closed
+> within the project (Blender append-vs-link, UE migrate). The reverse
+> is explicit too: "publish this look to the library" updates the
+> template — past projects never move.
+
+Repair sheets: no library (user instinct, endorsed). Strictly dust is a
+BODY × TIME-RANGE property, not a project one — but dust states drift,
+stale sheets mislead, and make-and-discard within a session is the
+honest weight class. The vendoring mechanics would fit them later if
+ever wanted; no reason to pre-build.
+
+Final taxonomy: look = {parameter-space anchor, following via publish,
+follow-within-project / copy-across}; repair sheet = {physical-sensor
+anchor, one-shot, project-local only}.
+
 ## Interim ladder (pragmatic, already decided or cheap)
 
 1. Now: explicit Sync button only; Auto Sync is removal-candidate
