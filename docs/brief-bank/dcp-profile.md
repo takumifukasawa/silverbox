@@ -58,6 +58,19 @@ falls to demosaic/WB-scaling differences (likely well under 1 dE2000).
 It also generalizes: ANY DCP works (camera-matching profiles, film
 emulations people own), not just Adobe Color.
 
+## Layering decision (user discussion 2026-07-18)
+
+In DCP mode the profile's embedded tone curve applies INSIDE the
+profile stage (hidden, LR-identical layering — the user's visible
+tone curve starts flat on top), because the DCP curve is defined in
+a specific space and surfacing it as editable points would break
+exact reproduction. Builtin mode keeps today's visible seeded curve.
+The user connected the dots himself: "profileの中にトーンカーブを
+埋め込めば構造的には同じ". Geometry counterpart noted: Adobe also
+ships LCP (Lens Correction Profile) files — if an "LR-geometry mode"
+is ever wanted, reading the LCP is the principled route (not scaling
+our spline); camera-faithful stays the default regardless.
+
 ## Open questions for the user
 
 1. Priority vs the live calibration session (this likely SUPERSEDES
