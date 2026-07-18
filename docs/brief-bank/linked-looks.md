@@ -1,6 +1,10 @@
 # Design seed: linked looks (references, not copies)
 
-Status: SEED — not scheduled, not decided. Written 2026-07-18 while the
+Status: SEED — **implementation gated on an EXPLICIT user GO** (user,
+2026-07-18: 「この話はちゃんと結論がついてから実装にGOする感じにしようね」).
+No agent may be dispatched on this brief, and no part of it may be built
+piecemeal inside other features, until the user says GO — however
+complete the design below looks. Written 2026-07-18 while the
 user weighed whether sync should exist at all: 「そもそも、ノードベースを
 重視するならsyncしたいときとそうじゃないときがあるだろうしなぁ、むずいね」.
 That instinct is the whole brief: in a node-based system, cross-photo
