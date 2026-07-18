@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
 import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
-import { MAX_RATING } from '../engine/graph/graphDoc';
+import { describeExportOverridesRaw, MAX_RATING } from '../engine/graph/graphDoc';
 import { FamilyScopeDialog } from './FamilyScopeDialog';
 import type { PresetFamilyId } from '../engine/graph/presetFamilies';
 
@@ -111,6 +111,11 @@ function FilmstripCell({
   // direction it opened, since clipping applies to the ancestor's bounding
   // box on every side, not just the one the popup happened to overflow past.
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
+  // Virtual-copy count badge popover (docs/brief-bank/virtual-copy.md) — same
+  // fixed-position-anchored-to-the-pointer pattern as `menuPos` above, kept
+  // as its own state since the two can't both be open (Remove's context menu
+  // is right-click only; this is hover/click on the badge itself).
+  const [outputPopoverPos, setOutputPopoverPos] = useState<{ x: number; y: number } | null>(null);
   const openImageByPath = useAppStore((s) => s.openImageByPath);
   const toggleFilmstripSelection = useAppStore((s) => s.toggleFilmstripSelection);
   const rangeSelectFilmstrip = useAppStore((s) => s.rangeSelectFilmstrip);
@@ -197,6 +202,33 @@ function FilmstripCell({
       {entry.hasLook && (
         <span className="filmstrip-edited-dot" data-testid="filmstrip-edited-dot" title="Has a saved look" />
       )}
+      {entry.outputCount > 1 && (
+        // Virtual-copy count badge (docs/brief-bank/virtual-copy.md) — the
+        // ONLY badge in the top-left corner (edited-dot is top-right, rating
+        // is bottom-left, flag is bottom-right — see those badges' own
+        // comments). Informational only: hover/click shows a popover listing
+        // each output's name + export-override badge (reuses
+        // describeExportOverridesRaw); no open-a-specific-output action here
+        // (opening a photo always opens the whole doc — picking which output
+        // previews/exports happens via the existing OutputSelector once
+        // it's open, unchanged). A nested interactive span (not a <button>,
+        // which can't nest inside this cell's own <button>) — stopPropagation
+        // keeps a badge click/hover from also opening the photo.
+        <span
+          className="filmstrip-output-badge"
+          data-testid="filmstrip-output-badge"
+          title={`${entry.outputCount} outputs (virtual copies) — hover/click for names`}
+          onMouseEnter={(ev) => setOutputPopoverPos({ x: ev.clientX, y: ev.clientY })}
+          onMouseLeave={() => setOutputPopoverPos(null)}
+          onClick={(ev) => {
+            ev.preventDefault();
+            ev.stopPropagation();
+            setOutputPopoverPos((p) => (p ? null : { x: ev.clientX, y: ev.clientY }));
+          }}
+        >
+          {entry.outputCount}
+        </span>
+      )}
       {entry.rating > 0 && (
         // Tiny rating indicator (ratings pack) — read cheaply off the
         // sidecar wrapper by main's listImages handler (see shared/ipc.ts's
@@ -248,6 +280,28 @@ function FilmstripCell({
             </button>
           </div>
         </>
+      )}
+      {outputPopoverPos && entry.outputs && (
+        <div
+          className="add-node-menu-list filmstrip-output-popover"
+          data-testid="filmstrip-output-popover"
+          style={{ position: 'fixed', left: outputPopoverPos.x, top: outputPopoverPos.y, transform: 'translateY(-100%)' }}
+          onMouseLeave={() => setOutputPopoverPos(null)}
+        >
+          {entry.outputs.map((o, i) => {
+            const badge = describeExportOverridesRaw(o);
+            return (
+              <div key={i} className="filmstrip-output-popover-row" data-testid="filmstrip-output-popover-row">
+                <span className="filmstrip-output-popover-name">{o.name}</span>
+                {badge && (
+                  <span className="filmstrip-output-popover-badge" data-testid="filmstrip-output-popover-badge">
+                    {badge}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );

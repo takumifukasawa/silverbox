@@ -227,15 +227,35 @@ export function stripStructuralFamilies(graph: GraphDoc, families: ReadonlySet<P
  * captureLook) unless the `geometry` family is checked, in which case the
  * caller passes the UN-stripped graph instead — see appStore.ts's
  * savePreset for exactly which one it hands in.
+ *
+ * `scope` (virtual-copy.md's multi-output preset-scoping fix): when given,
+ * every node id OUTSIDE it is dropped before anything else runs — a preset
+ * saved from a 2+-output doc captures ONLY the active output's own chain
+ * (appStore.ts computes `scope` via `reachableToOutput`, the ACTIVE-output
+ * resolution this module deliberately stays ignorant of — see this file's
+ * own top doc comment). Omitted/`null` (every existing caller before this
+ * fix, and any single-output doc) leaves `graph` untouched, bit-identical to
+ * today's behavior.
  */
-export function buildScopedLook(graph: GraphDoc, families: ReadonlySet<PresetFamilyId>): GraphDoc {
-  const nodes: GraphNode[] = graph.nodes.map((n) => {
+export function buildScopedLook(
+  graph: GraphDoc,
+  families: ReadonlySet<PresetFamilyId>,
+  scope?: ReadonlySet<string> | null
+): GraphDoc {
+  const scoped = scope
+    ? {
+        ...graph,
+        nodes: graph.nodes.filter((n) => scope.has(n.id)),
+        edges: graph.edges.filter((e) => scope.has(e.source) && scope.has(e.target)),
+      }
+    : graph;
+  const nodes: GraphNode[] = scoped.nodes.map((n) => {
     if (n.kind === DEVELOP_KIND && n.develop) {
       return { ...n, develop: pickDevelopFamilies(n.develop, defaultDevelopParams(), families) };
     }
     return { ...n };
   });
-  return stripStructuralFamilies({ ...graph, nodes }, families);
+  return stripStructuralFamilies({ ...scoped, nodes }, families);
 }
 
 // --- apply-time merge ---------------------------------------------------------
@@ -259,23 +279,36 @@ export function buildScopedLook(graph: GraphDoc, families: ReadonlySet<PresetFam
  * stale direct edge is dropped, or `graph` would end up with two edges
  * feeding B (buildPlan's "needs exactly one input" rejects that). This is
  * the exact mirror, run in reverse, of stripStructuralFamilies' own splice.
+ *
+ * `scope` (virtual-copy.md's multi-output preset-scoping fix): when given,
+ * an EXISTING node is only eligible to be replaced in place, or to anchor a
+ * newly-grafted node's edge, when its id is in scope — an out-of-scope
+ * node's id happening to collide with one of `look`'s own family-node ids
+ * (the "wrong copy by id" hazard the brief documents) must never graft onto
+ * it. A brand-new grafted node's own (never-colliding) id is always eligible
+ * regardless of scope.
  */
 function graftStructuralFamily(
   graph: GraphDoc,
   look: GraphDoc,
-  family: Extract<PresetFamilyId, 'masks' | 'spots' | 'custom-nodes'>
+  family: Extract<PresetFamilyId, 'masks' | 'spots' | 'custom-nodes'>,
+  scope?: ReadonlySet<string> | null
 ): GraphDoc {
+  const inScope = (id: string) => !scope || scope.has(id);
   const srcNodes = look.nodes.filter((n) => structuralFamilyOf(n.kind) === family);
   if (srcNodes.length === 0) return graph;
   const currentIds = new Set(graph.nodes.map((n) => n.id));
   const srcById = new Map(srcNodes.map((n) => [n.id, n]));
   const nodes = graph.nodes.map((n) => {
-    const replacement = structuralFamilyOf(n.kind) === family ? srcById.get(n.id) : undefined;
+    const replacement = structuralFamilyOf(n.kind) === family && inScope(n.id) ? srcById.get(n.id) : undefined;
     return replacement ? structuredClone(replacement) : n;
   });
   const newNodeIds = new Set(srcNodes.filter((n) => !currentIds.has(n.id)).map((n) => n.id));
   const grafted = srcNodes.filter((n) => newNodeIds.has(n.id)).map((n) => structuredClone(n));
-  const allIds = new Set([...nodes.map((n) => n.id), ...grafted.map((n) => n.id)]);
+  const allIds = new Set([
+    ...graph.nodes.filter((n) => inScope(n.id)).map((n) => n.id),
+    ...grafted.map((n) => n.id),
+  ]);
   const lookById = new Map(look.nodes.map((n) => [n.id, n]));
   const edgeKey = (e: { source: string; target: string; targetHandle?: string }) => `${e.source}>${e.target}:${e.targetHandle ?? ''}`;
 
@@ -359,16 +392,34 @@ export function structuralFamilyCompatible(
  * typically descend from the same seeded default chain, so 'dev' lines up
  * on both sides); a `graph` Develop node with no id match in `look` is left
  * untouched rather than guessed at.
+ *
+ * `scope` (virtual-copy.md's multi-output preset-scoping fix): when given,
+ * a Develop/input node in `graph` is only eligible to be updated when its id
+ * is in scope — on a 2+-output doc this keeps a scoped apply/paste/sync from
+ * silently updating whichever copy's Develop node happens to share an id
+ * with `look`'s (the brief's documented "wrong copy by id" hazard) instead
+ * of the one actually reachable from the active output; a Develop node
+ * outside `scope` is left alone, exactly as if it belonged to a different
+ * photo. Threaded into graftStructuralFamily for the same reason. Omitted/
+ * `null` (every existing caller before this fix, and any single-output doc,
+ * where only one Develop node is ever reachable so scoping changes nothing)
+ * leaves this bit-identical to today's behavior.
  */
-export function mergeScopedLook(graph: GraphDoc, look: GraphDoc, families: ReadonlySet<PresetFamilyId>): GraphDoc {
+export function mergeScopedLook(
+  graph: GraphDoc,
+  look: GraphDoc,
+  families: ReadonlySet<PresetFamilyId>,
+  scope?: ReadonlySet<string> | null
+): GraphDoc {
+  const inScope = (id: string) => !scope || scope.has(id);
   const nodes = graph.nodes.map((n) => {
     if (n.kind === DEVELOP_KIND) {
-      if (!n.develop) return n;
+      if (!n.develop || !inScope(n.id)) return n;
       const srcNode = look.nodes.find((ln) => ln.id === n.id && ln.kind === DEVELOP_KIND);
       if (!srcNode?.develop) return n;
       return { ...n, develop: pickDevelopFamilies(srcNode.develop, n.develop, families) };
     }
-    if (n.kind === 'input' && families.has('geometry')) {
+    if (n.kind === 'input' && families.has('geometry') && inScope(n.id)) {
       const srcInput = look.nodes.find((ln) => ln.kind === 'input');
       if (srcInput?.geometry) return { ...n, geometry: structuredClone(srcInput.geometry) };
     }
@@ -376,7 +427,7 @@ export function mergeScopedLook(graph: GraphDoc, look: GraphDoc, families: Reado
   });
   let merged: GraphDoc = { ...graph, nodes };
   for (const fam of ['masks', 'spots', 'custom-nodes'] as const) {
-    if (families.has(fam)) merged = graftStructuralFamily(merged, look, fam);
+    if (families.has(fam)) merged = graftStructuralFamily(merged, look, fam, scope);
   }
   return merged;
 }

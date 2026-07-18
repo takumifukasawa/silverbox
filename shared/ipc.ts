@@ -168,6 +168,24 @@ export type OpenImageDialogResult = { canceled: true } | { canceled: false; path
 export type PhotoFlag = 'pick' | 'reject';
 
 /**
+ * One output node's name + raw export-override fields (virtual-copy.md's
+ * filmstrip count-badge popover) — same field shape as graphDoc.ts's
+ * `ExportOverrides`, duplicated here rather than imported for the same reason
+ * `ExportMetadataPolicy`/`ExportColorSpace` already live in this file: main's
+ * projectPhotosStatus handler reads these straight off a look file's raw
+ * JSON (extractWrapperMeta) without importing renderer engine code. The
+ * renderer formats them into a badge string via graphDoc.ts's
+ * `describeExportOverridesRaw` (reused, not reimplemented).
+ */
+export interface FolderImageOutputMeta {
+  name: string;
+  quality?: number;
+  maxDim?: number | null;
+  metadata?: ExportMetadataPolicy;
+  colorSpace?: ExportColorSpace;
+}
+
+/**
  * One entry in the filmstrip (ROADMAP "Folder filmstrip" — nothing here is
  * written anywhere, it's recomputed every time the strip refreshes).
  * Post-project-storage-migration (stage 1), the strip renders the ACTIVE
@@ -211,6 +229,21 @@ export interface FolderImageEntry {
    * relink UI is stage 3; here it's display-only.
    */
   missing: boolean;
+  /**
+   * Number of `output`-kind nodes in this photo's saved look (virtual-copy.md
+   * — the filmstrip's virtual-copy count badge), read cheaply off the same
+   * wrapper JSON as `rating`/`flag` (extractWrapperMeta in src/main/index.ts),
+   * no new I/O. Defaults to 1 (a fresh/no-look photo's implicit single
+   * output, same as a brand-new defaultGraphDoc()) so the badge only appears
+   * once a photo's ON-DISK graph actually has 2+.
+   */
+  outputCount: number;
+  /**
+   * Present only when `outputCount > 1`: each output's name + raw export-
+   * override fields, in the graph's own node order — feeds the count badge's
+   * hover/click popover (informational only; see FolderImageOutputMeta).
+   */
+  outputs?: FolderImageOutputMeta[];
 }
 
 /**

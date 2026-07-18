@@ -154,6 +154,7 @@ const ALL_SCRIPTS = [
   { name: 'autosync', file: 'verify-autosync.mjs' },
   { name: 'lookextract', file: 'verify-lookextract.mjs' },
   { name: 'dcp', file: 'verify-dcp.mjs' },
+  { name: 'virtualcopy', file: 'verify-virtualcopy.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

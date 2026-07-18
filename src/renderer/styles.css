@@ -689,6 +689,54 @@ button:disabled {
   pointer-events: none;
 }
 
+/* Virtual-copy count badge (docs/brief-bank/virtual-copy.md) — top-left, the
+   one corner the edited-dot (top-right)/rating (bottom-left)/flag
+   (bottom-right) badges above don't already occupy. Unlike those, this one is
+   interactive (hover/click opens the names popover below), so it needs real
+   `pointer-events` and a bit of padding to make it an easy hover/tap target. */
+.filmstrip-output-badge {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  min-width: 12px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(106, 159, 232, 0.85);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+/* Popover listing each output's name + export-override badge (reuses
+   `.add-node-menu-list`'s box styling, same `position:fixed`-anchored-to-the-
+   pointer pattern as `.filmstrip-cell-menu` — see that rule's own comment for
+   why `position:fixed` is required here, not `.add-node-menu-list`'s default
+   `position:absolute`). Informational only — its rows are plain text, not
+   buttons. */
+.filmstrip-output-popover-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: #d4d4d4;
+  white-space: nowrap;
+}
+
+.filmstrip-output-popover-name {
+  font-weight: 600;
+}
+
+.filmstrip-output-popover-badge {
+  color: #999;
+  font-size: 10px;
+}
+
 /* Wraps the main pane and the compare pane (compare pack) side by side —
    occupies the exact same box .canvas-viewport used to alone (absolute
    inset:0 inside .canvas-view, position:relative), so CropOverlay/

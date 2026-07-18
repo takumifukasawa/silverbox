@@ -127,3 +127,147 @@ describe('appStore.resetDevelopNode', () => {
     expect(useAppStore.getState().graph).toBe(graphBefore);
   });
 });
+
+/**
+ * Unit tier (vitest) for the virtual-copy pack (docs/brief-bank/virtual-
+ * copy.md): "Duplicate output" (the creation gesture) and the multi-output
+ * scoping fix for whole-look paste/apply (appStore.ts's applyLook — the
+ * PRIVATE replaceActiveChainWithLook helper, only reachable through the
+ * public pasteDevelopSettings action, same "test the action, not the
+ * internals" discipline resetDevelopNode's own tests above already follow).
+ * These are the store-level "2-output adversarial case" checks the brief
+ * calls for; presetFamilies.test.ts covers the pure mergeScopedLook/
+ * buildScopedLook `scope` parameter directly.
+ */
+describe('appStore.duplicateOutput', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      imageStatus: 'ready',
+      image: fakeImage,
+      fileName: 'test.jpg',
+      imagePath: '/fake/test.jpg',
+      graph: defaultGraphDoc(),
+      activeOutputId: null,
+      undoStack: emptyUndoStackState(),
+      graphDirty: false,
+    });
+  });
+
+  it("clones the active output's own chain with fresh ids, sharing the same input node, and selects + activates the new output", () => {
+    const before = useAppStore.getState().graph;
+    useAppStore.getState().duplicateOutput();
+    const after = useAppStore.getState().graph;
+
+    const outputs = after.nodes.filter((n) => n.kind === 'output');
+    expect(outputs).toHaveLength(2);
+    const clone = outputs.find((n) => n.id !== 'out')!;
+    expect(clone.name).toBe('main copy');
+
+    // exactly one shared input node — never cloned
+    expect(after.nodes.filter((n) => n.kind === 'input')).toHaveLength(1);
+
+    // the clone's own Develop node is a FRESH id, distinct from 'dev'
+    const cloneDevEdge = after.edges.find((e) => e.target === clone.id)!;
+    expect(cloneDevEdge.source).not.toBe('dev');
+    const cloneDev = after.nodes.find((n) => n.id === cloneDevEdge.source)!;
+    expect(cloneDev.kind).toBe(DEVELOP_KIND);
+    expect(cloneDev.develop).toEqual(before.nodes.find((n) => n.id === 'dev')!.develop); // exact clone at creation time
+
+    // both chains reconnect from the SAME shared input
+    expect(after.edges.some((e) => e.source === 'in' && e.target === 'dev')).toBe(true);
+    expect(after.edges.some((e) => e.source === 'in' && e.target === cloneDevEdge.source)).toBe(true);
+
+    // the ORIGINAL chain's own nodes/edges are completely untouched
+    expect(after.nodes.find((n) => n.id === 'dev')).toBe(before.nodes.find((n) => n.id === 'dev'));
+    expect(after.nodes.find((n) => n.id === 'out')).toBe(before.nodes.find((n) => n.id === 'out'));
+
+    expect(useAppStore.getState().activeOutputId).toBe(clone.id);
+    expect(useAppStore.getState().selectedNodeId).toBe(clone.id);
+    expect(useAppStore.getState().undoStack.undo).toHaveLength(1);
+    expect(useAppStore.getState().undoStack.undo[0]!.label).toBe('Duplicate output');
+  });
+
+  it('dedupes the clone name against every existing output name', () => {
+    useAppStore.getState().duplicateOutput(); // 'out' -> clone named "main copy", now active
+    useAppStore.getState().duplicateOutput(); // duplicating the (now-active) clone -> "main copy copy"... but from 'main copy' this time
+    const names = useAppStore
+      .getState()
+      .graph.nodes.filter((n) => n.kind === 'output')
+      .map((n) => n.name ?? 'main');
+    expect(new Set(names).size).toBe(names.length); // every name distinct — no silent collision
+  });
+
+  it('is a no-op without a matching output (defensive — every valid doc has one, so this only guards a malformed graph)', () => {
+    useAppStore.setState({ graph: { version: 1, nodes: [], edges: [] } });
+    const before = useAppStore.getState().graph;
+    useAppStore.getState().duplicateOutput();
+    expect(useAppStore.getState().graph).toBe(before);
+    expect(useAppStore.getState().undoStack.undo).toHaveLength(0);
+  });
+});
+
+describe('appStore.pasteDevelopSettings — multi-output scoping fix (virtual-copy.md)', () => {
+  beforeEach(() => {
+    useAppStore.setState({
+      imageStatus: 'ready',
+      image: fakeImage,
+      fileName: 'test.jpg',
+      imagePath: '/fake/test.jpg',
+      graph: defaultGraphDoc(),
+      activeOutputId: null,
+      undoStack: emptyUndoStackState(),
+      graphDirty: false,
+      developClipboard: null,
+    });
+  });
+
+  it('on a single-output doc, still wholesale-replaces the graph — bit-identical to before this feature (the common-case regression bar)', () => {
+    const clip: GraphDoc = {
+      ...defaultGraphDoc(),
+      nodes: defaultGraphDoc().nodes.map((n) => (n.kind === DEVELOP_KIND ? { ...n, develop: { ...defaultDevelopParams(), basic: { ...defaultDevelopParams().basic, ev: 1.1 } } } : n)),
+    };
+    useAppStore.setState({ developClipboard: clip });
+    useAppStore.getState().pasteDevelopSettings();
+    const after = useAppStore.getState().graph;
+    expect(after.nodes.find((n) => n.kind === DEVELOP_KIND)!.develop!.basic.ev).toBe(1.1);
+    expect(useAppStore.getState().undoStack.undo).toHaveLength(1);
+  });
+
+  it('on a 2-output doc, paste replaces ONLY the active chain — the OTHER output keeps byte-identical node ids/params (the confirmed-real data-loss hazard this brief fixes)', () => {
+    useAppStore.getState().duplicateOutput(); // 'out' (dev) + a clone output (active), sharing 'in'
+    const cloneOutId = useAppStore.getState().activeOutputId!;
+    const beforePaste = useAppStore.getState().graph;
+    const originalDevBefore = beforePaste.nodes.find((n) => n.id === 'dev')!;
+    const originalOutBefore = beforePaste.nodes.find((n) => n.id === 'out')!;
+
+    const clip: GraphDoc = {
+      version: 1,
+      nodes: [
+        { id: 'in', kind: 'input', position: { x: 0, y: 0 } },
+        { id: 'dev', kind: DEVELOP_KIND, position: { x: 0, y: 0 }, develop: { ...defaultDevelopParams(), basic: { ...defaultDevelopParams().basic, ev: 0.66 } } },
+        { id: 'out', kind: 'output', position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { id: 'e0', source: 'in', target: 'dev' },
+        { id: 'e1', source: 'dev', target: 'out' },
+      ],
+    };
+    useAppStore.setState({ developClipboard: clip });
+    useAppStore.getState().pasteDevelopSettings();
+    const after = useAppStore.getState().graph;
+
+    // the untouched ORIGINAL chain: byte-identical content (applyLook's
+    // multi-output branch structuredClone's its whole return value — same
+    // defensive-copy discipline mergeLookWithCurrentGeometry's own
+    // single-output path already uses — so this is content equality, not
+    // object identity).
+    expect(after.nodes.find((n) => n.id === 'dev')).toEqual(originalDevBefore);
+    expect(after.nodes.find((n) => n.id === 'out')).toEqual(originalOutBefore);
+    expect(after.nodes.filter((n) => n.kind === 'output')).toHaveLength(2); // paste never deletes the inactive output
+
+    // the ACTIVE (clone) chain picked up the pasted settings, on a FRESH id (never literally 'dev')
+    const activeOutEdge = after.edges.find((e) => e.target === cloneOutId)!;
+    const activeDev = after.nodes.find((n) => n.id === activeOutEdge.source)!;
+    expect(activeDev.develop!.basic.ev).toBe(0.66);
+  });
+});

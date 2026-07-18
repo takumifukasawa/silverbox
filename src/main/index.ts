@@ -21,7 +21,10 @@ import {
   type ExternalToolResult,
   type DenoiseRunRequest,
   type DenoiseRunResult,
+  type ExportColorSpace,
+  type ExportMetadataPolicy,
   type FolderImageEntry,
+  type FolderImageOutputMeta,
   type MoveProjectFilesResult,
   type OpenImageDialogResult,
   type PhotoFlag,
@@ -58,29 +61,64 @@ const isCliRenderMode = RENDER_FLAG_INDEX !== -1;
 const cliArgv = isCliRenderMode ? process.argv.slice(RENDER_FLAG_INDEX + 1) : [];
 
 /**
- * Best-effort star-rating + pick/reject-flag extraction from a sidecar's raw
- * JSON text (ratings pack, generalized by the reject-flag pack,
- * docs/brief-bank/reject-flag.md) — never throws: malformed JSON, a missing
- * `rating`/`flag` key, or an out-of-range/invalid value all sanitize quietly
- * to 0/`null` (unrated/unflagged). This is deliberately NOT the renderer's
+ * Best-effort star-rating + pick/reject-flag + output-count extraction from a
+ * sidecar's raw JSON text (ratings pack, generalized by the reject-flag pack,
+ * docs/brief-bank/reject-flag.md, and again by virtual-copy.md's filmstrip
+ * count badge) — never throws: malformed JSON, a missing key, or an out-of-
+ * range/invalid value all sanitize quietly (unrated/unflagged/single-output)
+ * rather than reject the whole read. This is deliberately NOT the renderer's
  * full parseGraphDoc/graphDoc.ts (that module pulls in the whole engine
  * graph — ops, Develop, custom shaders — and throws on anything its own
  * schema migration doesn't understand); projectPhotosStatus needs exactly
- * these two wrapper-level values, cheaply, for every photo on the playlist,
- * so it stays a tiny standalone JSON.parse here in main instead of importing
+ * these cheap wrapper-level values, for every photo on the playlist, so it
+ * stays a tiny standalone JSON.parse here in main instead of importing
  * renderer code into the main process. (Formerly `extractSidecarRating`,
  * rating-only — generalized in place rather than duplicated, since every
- * caller already reads both fields off the same parsed wrapper object.)
+ * caller already reads these fields off the same parsed wrapper object.)
+ *
+ * `outputCount`/`outputs` read `graph.nodes` for `type === 'output'` entries
+ * — the on-disk field name (see graphDoc.ts's serializeGraphDoc, which writes
+ * a node's `kind` as `type`). A doc with no recognizable output node at all
+ * (badly malformed, or read before this field existed) still counts as the
+ * implicit single output every valid doc has, so the filmstrip badge never
+ * appears for that case. `outputs` (raw name + export-override fields, same
+ * shape as graphDoc.ts's ExportOverrides — see FolderImageOutputMeta) is only
+ * populated once `outputCount > 1`, matching the badge's own gating.
  */
-function extractWrapperMeta(raw: string): { rating: number; flag: PhotoFlag | null } {
+function extractWrapperMeta(raw: string): {
+  rating: number;
+  flag: PhotoFlag | null;
+  outputCount: number;
+  outputs?: FolderImageOutputMeta[];
+} {
   try {
-    const wrapper = JSON.parse(raw) as { rating?: unknown; flag?: unknown };
+    const wrapper = JSON.parse(raw) as {
+      rating?: unknown;
+      flag?: unknown;
+      graph?: { nodes?: unknown };
+    };
     const r = wrapper.rating;
     const rating = typeof r === 'number' && Number.isFinite(r) ? Math.min(5, Math.max(0, Math.round(r))) : 0;
     const flag = wrapper.flag === 'pick' || wrapper.flag === 'reject' ? wrapper.flag : null;
-    return { rating, flag };
+    const rawNodes = Array.isArray(wrapper.graph?.nodes) ? (wrapper.graph!.nodes as Array<Record<string, unknown>>) : [];
+    const outputNodes = rawNodes.filter((n) => n && typeof n === 'object' && n.type === 'output');
+    const outputCount = outputNodes.length > 0 ? outputNodes.length : 1;
+    const outputs: FolderImageOutputMeta[] | undefined =
+      outputCount > 1
+        ? outputNodes.map((n) => {
+            const exp = (n.export ?? {}) as Record<string, unknown>;
+            return {
+              name: typeof n.name === 'string' && n.name.trim() !== '' ? n.name.trim() : 'main',
+              ...(typeof exp.quality === 'number' ? { quality: exp.quality } : {}),
+              ...('maxDim' in exp ? { maxDim: exp.maxDim as number | null } : {}),
+              ...(typeof exp.metadata === 'string' ? { metadata: exp.metadata as ExportMetadataPolicy } : {}),
+              ...(typeof exp.colorSpace === 'string' ? { colorSpace: exp.colorSpace as ExportColorSpace } : {}),
+            };
+          })
+        : undefined;
+    return { rating, flag, outputCount, outputs };
   } catch {
-    return { rating: 0, flag: null };
+    return { rating: 0, flag: null, outputCount: 1 };
   }
 }
 
@@ -332,7 +370,9 @@ function registerIpc(): void {
       if (!IMAGE_EXTENSIONS.includes(ext)) continue;
       const path = join(dir, dirent.name);
       const st = await stat(path);
-      entries.push({ name: dirent.name, path, hasLook: false, mtimeMs: st.mtimeMs, rating: 0, flag: null, missing: false });
+      // outputCount: 1 — same "no look yet" implicit-single-output default
+      // extractWrapperMeta uses; this handler never reads a look at all.
+      entries.push({ name: dirent.name, path, hasLook: false, mtimeMs: st.mtimeMs, rating: 0, flag: null, missing: false, outputCount: 1 });
     }
     // Filename order, not mtime: hardlinked test fixtures (the verify suite's
     // own isolation trick — see run-verify.mjs) share one inode and so an
@@ -471,16 +511,28 @@ function registerIpc(): void {
         let hasLook = false;
         let rating = 0;
         let flag: PhotoFlag | null = null;
+        let outputCount = 1;
+        let outputs: FolderImageOutputMeta[] | undefined;
         try {
           const text = await readFile(join(dir, 'looks', p.look), 'utf8');
           hasLook = true;
-          ({ rating, flag } = extractWrapperMeta(text));
+          ({ rating, flag, outputCount, outputs } = extractWrapperMeta(text));
         } catch {
           // no look yet, or unreadable — same "not edited, not rated/
-          // flagged" fallback the pre-migration listImages handler used to
-          // compute.
+          // flagged, single implicit output" fallback the pre-migration
+          // listImages handler used to compute.
         }
-        out.push({ name: basename(p.path), path: p.path, hasLook, mtimeMs, rating, flag, missing });
+        out.push({
+          name: basename(p.path),
+          path: p.path,
+          hasLook,
+          mtimeMs,
+          rating,
+          flag,
+          missing,
+          outputCount,
+          ...(outputs ? { outputs } : {}),
+        });
       }
       return out;
     }

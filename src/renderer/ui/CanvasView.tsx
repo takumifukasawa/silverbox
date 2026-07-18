@@ -92,6 +92,9 @@ declare global {
           rating: number;
           flag: 'pick' | 'reject' | null;
           missing: boolean;
+          /** virtual-copy.md's filmstrip count badge — see FolderImageEntry.outputCount's own doc comment. */
+          outputCount: number;
+          outputs?: import('../../../shared/ipc').FolderImageOutputMeta[];
         }[];
         currentPath: string | null;
       };
@@ -353,12 +356,14 @@ declare global {
       flickerGateState(): { presented: number; reveal: number; pendingSwitch: boolean; suppressedRevealCount: number };
       /** Develop presets (task #37): `<userData>/presets/*.json` summaries currently in the store. */
       presetsState(): import('../../../shared/ipc').PresetSummary[];
-      /** Save the current graph as a whole-look preset named `name` (mirrors PresetsMenu's "Save"). */
-      savePreset(name: string): Promise<void>;
+      /** Save the current graph as a preset named `name` (mirrors PresetsMenu's "Save"); `families` scopes it (FamilyScopeDialog's checked ids) — omitted = the historical whole-look shape. */
+      savePreset(name: string, families?: PresetFamilyId[]): Promise<void>;
       /** Apply a saved preset by slug (mirrors PresetsMenu's "Apply") — one undo entry. */
       applyPreset(slug: string): Promise<void>;
       /** Delete a saved preset by slug (mirrors PresetsMenu's "Delete"). */
       deletePreset(slug: string): Promise<void>;
+      /** Selected output node id (virtual-copy.md) — appStore.ts's activeOutputId; null = the doc's first output (activeOutputNode's own fallback rule). */
+      activeOutputIdState(): string | null;
     };
   }
 }
@@ -1288,6 +1293,9 @@ export function CanvasView() {
             rating: e.rating,
             flag: e.flag,
             missing: e.missing,
+            // virtual-copy.md's filmstrip count badge — see FolderImageEntry's own doc comment.
+            outputCount: e.outputCount,
+            outputs: e.outputs,
           })),
           currentPath: s.imagePath,
         };
@@ -1824,14 +1832,17 @@ export function CanvasView() {
       presetsState() {
         return useAppStore.getState().presets;
       },
-      savePreset(name) {
-        return useAppStore.getState().savePreset(name);
+      savePreset(name, families) {
+        return useAppStore.getState().savePreset(name, families);
       },
       applyPreset(slug) {
         return useAppStore.getState().applyPreset(slug);
       },
       deletePreset(slug) {
         return useAppStore.getState().deletePreset(slug);
+      },
+      activeOutputIdState() {
+        return useAppStore.getState().activeOutputId;
       },
     };
     return () => {

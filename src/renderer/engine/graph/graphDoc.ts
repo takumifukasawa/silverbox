@@ -216,12 +216,15 @@ export function resolveExportSettings(node: GraphNode | undefined, fallbacks: Ex
 }
 
 /**
- * Compact badge text for the export dialog's output-selector rows (e.g.
- * "q80 · 2048px"); null when the node carries no overrides at all. Only the
- * fields actually overridden appear, in a fixed order.
+ * Core of describeExportOverrides, decoupled from GraphNode (virtual-copy.md,
+ * filmstrip count-badge popover): main's projectPhotosStatus handler reads a
+ * CLOSED look's raw `export` fields straight off JSON (it can't import this
+ * module — see extractWrapperMeta's own doc comment in src/main/index.ts) and
+ * ships them to the renderer as shared/ipc.ts's FolderImageOutputMeta, which
+ * mirrors ExportOverrides' field shape exactly so it can be formatted here,
+ * reusing the SAME badge text every export-dialog row already shows.
  */
-export function describeExportOverrides(node: GraphNode | undefined): string | null {
-  const e = node?.export;
+export function describeExportOverridesRaw(e: ExportOverrides | null | undefined): string | null {
   if (!e) return null;
   const parts: string[] = [];
   if (e.quality !== undefined) parts.push(`q${e.quality}`);
@@ -229,6 +232,15 @@ export function describeExportOverrides(node: GraphNode | undefined): string | n
   if (e.metadata !== undefined) parts.push(`exif:${e.metadata}`);
   if (e.colorSpace !== undefined) parts.push(e.colorSpace);
   return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+/**
+ * Compact badge text for the export dialog's output-selector rows (e.g.
+ * "q80 · 2048px"); null when the node carries no overrides at all. Only the
+ * fields actually overridden appear, in a fixed order.
+ */
+export function describeExportOverrides(node: GraphNode | undefined): string | null {
+  return describeExportOverridesRaw(node?.export);
 }
 
 /**

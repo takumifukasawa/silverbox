@@ -966,6 +966,19 @@ interface AppState {
   arrangeNodes(positions: Record<string, { x: number; y: number }>): boolean;
   addOpNode(kind: AddableKind): void;
   removeOpNode(nodeId: string): void;
+  /**
+   * "Duplicate output" (docs/brief-bank/virtual-copy.md — the everyday
+   * virtual-copy creation gesture): clones the ACTIVE output's own upstream
+   * chain (every node reachable from it, minus the doc's single shared
+   * 'input' node — never cloned) with fresh ids, wires the clone's root(s)
+   * to the SAME source(s) the original chain started from, and appends a new
+   * output node (name `"<active's name> copy"`, deduplicated against every
+   * existing output name) wired to the clone's tail. One undo entry (default
+   * kind 'photo-edit'); selects the new output node and makes it active —
+   * the "just added, now editing it" convention addOpNode already follows
+   * for every other kind. No-op if the doc somehow has no output at all.
+   */
+  duplicateOutput(): void;
   /** Rewire an input: replaces whatever currently feeds (target, handle). */
   connectEdge(source: string, target: string, targetHandle?: 'a' | 'b' | 'mask'): void;
   /** Delete an edge (allowed to break the path — the preview passes through). */
@@ -2037,6 +2050,103 @@ function reachableToOutput(graph: GraphDoc, outputId: string): Set<string> {
 }
 
 /**
+ * Node-id scope for the multi-output preset/paste/sync scoping fixes
+ * (docs/brief-bank/virtual-copy.md): every id reachable from `activeOutputId`
+ * (falling back to the doc's first output when null/missing — the same rule
+ * activeOutputNode always applies), fed straight into presetFamilies.ts's
+ * mergeScopedLook/buildScopedLook `scope` parameter (that module stays pure
+ * and ignorant of "which output is active" — this is where that resolution
+ * happens, per the brief). Always computed, even for a single-output doc
+ * (where `reachableToOutput` trivially covers every node), so every call
+ * site shares one code path instead of branching on `outputs.length`.
+ */
+function chainScope(graph: GraphDoc, activeOutputId: string | null): Set<string> {
+  const out = activeOutputNode(graph, activeOutputId);
+  return out ? reachableToOutput(graph, out.id) : new Set(graph.nodes.map((n) => n.id));
+}
+
+/** `doc` restricted to exactly the node ids in `ids` (nodes AND edges) — the standalone single-chain extraction the multi-output scoping fixes share. */
+function restrictToChain(doc: GraphDoc, ids: ReadonlySet<string>): GraphDoc {
+  return {
+    ...doc,
+    nodes: doc.nodes.filter((n) => ids.has(n.id)),
+    edges: doc.edges.filter((e) => ids.has(e.source) && ids.has(e.target)),
+  };
+}
+
+/**
+ * Multi-output whole-look apply/paste fix (virtual-copy.md — "the real
+ * hazard" the brief ships alongside "Duplicate output"): applyLook's old
+ * mergeLookWithCurrentGeometry wholesale-replaces `graph.nodes`/`edges`,
+ * which on a 2+-output doc silently deletes every output besides whatever
+ * `look` itself contains. This instead removes ONLY the active output's own
+ * chain — reachableToOutput minus the doc's single shared 'input' node,
+ * which is NEVER removed or replaced (every output's chain shares the one
+ * input/geometry — see duplicateOutput's own "minus the input node" carve-
+ * out for the same reasoning) — and splices in `look`'s own corresponding
+ * chain (fresh ids, so they can never collide with an untouched sibling
+ * copy's own ids) between the shared input and the doc's (unmoved, un-
+ * renamed) active output node. Every other output's nodes/edges never enter
+ * `removeIds` at all, so they come out byte-identical by construction. Only
+ * reached when the CURRENT graph has 2+ outputs — applyLook's own fast path
+ * (mergeLookWithCurrentGeometry, unchanged) covers <= 1 output, staying
+ * bit-identical to today's behavior for the overwhelming common case.
+ */
+function replaceActiveChainWithLook(graph: GraphDoc, look: GraphDoc, activeOutputId: string | null): GraphDoc {
+  const inputNode = graph.nodes.find((n) => n.kind === 'input');
+  const activeOut = activeOutputNode(graph, activeOutputId);
+  if (!inputNode || !activeOut) return graph;
+
+  const reach = reachableToOutput(graph, activeOut.id);
+  const removeIds = new Set(reach);
+  removeIds.delete(activeOut.id);
+  removeIds.delete(inputNode.id);
+
+  const lookOutput = look.nodes.find((n) => n.kind === 'output');
+  const lookInput = look.nodes.find((n) => n.kind === 'input');
+  if (!lookOutput) return graph; // defensive — parseGraphDoc's own guard rejects any doc with zero outputs
+
+  const lookReach = reachableToOutput(look, lookOutput.id);
+  const chainIds = new Set(lookReach);
+  chainIds.delete(lookOutput.id);
+  if (lookInput) chainIds.delete(lookInput.id);
+
+  let scratch: GraphDoc = {
+    ...graph,
+    nodes: graph.nodes.filter((n) => !removeIds.has(n.id)),
+    edges: graph.edges.filter((e) => !removeIds.has(e.source) && !removeIds.has(e.target) && e.target !== activeOut.id),
+  };
+
+  const idMap = new Map<string, string>();
+  for (const n of look.nodes) {
+    if (!chainIds.has(n.id)) continue;
+    const prefix = n.kind === DEVELOP_KIND ? 'dev' : n.kind;
+    const freshId = nextId(scratch, prefix);
+    idMap.set(n.id, freshId);
+    scratch = { ...scratch, nodes: [...scratch.nodes, { ...structuredClone(n), id: freshId }] };
+  }
+
+  const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+    const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+    scratch = { ...scratch, edges: [...scratch.edges, edge] };
+  };
+  for (const e of look.edges) {
+    const srcIn = chainIds.has(e.source);
+    const tgtIn = chainIds.has(e.target);
+    if (srcIn && tgtIn) {
+      addEdge(idMap.get(e.source)!, idMap.get(e.target)!, e.targetHandle);
+    } else if (!srcIn && tgtIn && lookInput && e.source === lookInput.id) {
+      // edge FROM look's own input TO the chain's root — reconnect from the shared graph input node instead
+      addEdge(inputNode.id, idMap.get(e.target)!, e.targetHandle);
+    } else if (srcIn && !tgtIn && e.target === lookOutput.id) {
+      // edge FROM the chain's tail TO look's own output — reconnect to the graph's own active output node instead
+      addEdge(idMap.get(e.source)!, activeOut.id, e.targetHandle);
+    }
+  }
+  return scratch;
+}
+
+/**
  * The spots node "in the active chain" (spec: edits target the FIRST one
  * found, in doc.nodes array order, that's upstream of the active output) —
  * null when none exists yet, in which case commitSpot auto-inserts one.
@@ -2225,20 +2335,32 @@ function mergeLookWithCurrentGeometry(currentGraph: GraphDoc, look: GraphDoc): G
 }
 
 /**
- * Apply a captured look to `s`'s CURRENT graph (mergeLookWithCurrentGeometry
- * above), as one undo entry (pushHistory's `null` = its own discrete entry,
- * coalescing nothing). This is the entire body of pasteDevelopSettings;
- * applyParsedPreset's whole-look branch shares it unchanged, so paste and
- * preset-apply are one implementation with one merge semantics — `opts`
- * distinguishes the two only for the undo entry's kind/label (global-undo
- * decision: preset-apply is its own entry kind, distinct from a plain paste).
+ * Apply a captured look to `s`'s CURRENT graph, as one undo entry
+ * (pushHistory's `null` = its own discrete entry, coalescing nothing). This
+ * is the entire body of pasteDevelopSettings; applyParsedPreset's whole-look
+ * branch shares it unchanged, so paste and preset-apply are one
+ * implementation with one merge semantics — `opts` distinguishes the two
+ * only for the undo entry's kind/label (global-undo decision: preset-apply
+ * is its own entry kind, distinct from a plain paste).
+ *
+ * Single-output docs (`outputs.length <= 1`, the overwhelming common case)
+ * use mergeLookWithCurrentGeometry unchanged — bit-identical to before this
+ * feature existed. A 2+-output doc instead goes through
+ * replaceActiveChainWithLook (virtual-copy.md's scoping fix): the OLD
+ * wholesale-replace here used to silently delete every output besides
+ * whatever `look` itself contained — a real data-loss hazard the brief
+ * documents as CONFIRMED REAL, not cosmetic.
  */
 function applyLook(
   s: AppState,
   look: GraphDoc,
   opts: { kind?: GraphEntryKind; label: string } = { label: 'Paste develop settings' }
 ): Partial<AppState> & { graph: GraphDoc } {
-  const graph = mergeLookWithCurrentGeometry(s.graph, look);
+  const outputs = s.graph.nodes.filter((n) => n.kind === 'output');
+  const graph =
+    outputs.length <= 1
+      ? mergeLookWithCurrentGeometry(s.graph, look)
+      : structuredClone(replaceActiveChainWithLook(s.graph, look, s.activeOutputId));
   return { ...pushHistory(s, null, opts), graph, graphDirty: true };
 }
 
@@ -2246,19 +2368,24 @@ function applyLook(
  * Preset scoping's apply-time branch (appStore.ts's applyPreset): a
  * whole-look preset (`parsed.includes` absent) goes through applyLook
  * unchanged — bit-for-bit the historical behavior, so every preset saved
- * before this feature existed keeps applying exactly as it always did. A
- * scoped preset merges ONLY its checked, KNOWN families onto the CURRENT
- * graph (presetFamilies.ts's mergeScopedLook) — everything else on `s.graph`
- * is left untouched, never reset toward `parsed.look`'s own values. Like
- * applyLook, this is one undo entry (pushHistory's `null`) — kind
- * 'preset-apply' either way (global-undo decision: preset apply is its own
- * labeled entry kind, not a generic photo-edit).
+ * before this feature existed keeps applying exactly as it always did
+ * (applyLook's own fork covers the multi-output case now too). A scoped
+ * preset merges ONLY its checked, KNOWN families onto the CURRENT graph
+ * (presetFamilies.ts's mergeScopedLook), scoped to the nodes reachable from
+ * `activeOutputId` (virtual-copy.md — chainScope) so a 2+-output doc's
+ * inactive copy is never touched even if its Develop node's id happens to
+ * collide with `parsed.look`'s own; everything else on `s.graph` is left
+ * untouched, never reset toward `parsed.look`'s own values. Like applyLook,
+ * this is one undo entry (pushHistory's `null`) — kind 'preset-apply' either
+ * way (global-undo decision: preset apply is its own labeled entry kind, not
+ * a generic photo-edit).
  */
 function applyParsedPreset(s: AppState, parsed: ParsedPreset): Partial<AppState> & { graph: GraphDoc } {
   const opts: { kind: GraphEntryKind; label: string } = { kind: 'preset-apply', label: 'Apply preset' };
   if (!parsed.includes) return applyLook(s, parsed.look, opts);
   const families = new Set(parsed.includes.filter(isKnownFamilyId));
-  const graph = structuredClone(mergeScopedLook(s.graph, parsed.look, families));
+  const scope = chainScope(s.graph, s.activeOutputId);
+  const graph = structuredClone(mergeScopedLook(s.graph, parsed.look, families, scope));
   return { ...pushHistory(s, null, opts), graph, graphDirty: true };
 }
 
@@ -3982,6 +4109,90 @@ export const useAppStore = create<AppState>((set, get) => {
     });
   },
 
+  duplicateOutput() {
+    set((s) => {
+      const g = s.graph;
+      const out = activeOutputNode(g, s.activeOutputId);
+      if (!out) return {};
+      const inputNode = g.nodes.find((n) => n.kind === 'input');
+
+      // Everything upstream of the active output EXCEPT the doc's single
+      // shared input node — every output's chain shares the one input/
+      // geometry (setGeometry/setLens/computeOutputDims all assume exactly
+      // one 'input' kind node), so it's never cloned; the clone reconnects
+      // to the SAME input node below instead.
+      const reach = reachableToOutput(g, out.id);
+      const cloneIds = new Set(reach);
+      cloneIds.delete(out.id);
+      if (inputNode) cloneIds.delete(inputNode.id);
+      if (cloneIds.size === 0) return {}; // nothing upstream to clone — shouldn't happen for any output with a real chain
+
+      let scratch: GraphDoc = g;
+      const idMap = new Map<string, string>();
+      for (const n of g.nodes) {
+        if (!cloneIds.has(n.id)) continue;
+        // Same fresh-id scheme buildLocalAdjustmentPatch already uses for
+        // its own dev/mask/blend triple (nextId keyed by the node's own
+        // kind, 'dev' for Develop).
+        const prefix = n.kind === DEVELOP_KIND ? 'dev' : n.kind;
+        const freshId = nextId(scratch, prefix);
+        idMap.set(n.id, freshId);
+        const clone: GraphNode = {
+          ...structuredClone(n),
+          id: freshId,
+          position: { x: n.position.x + 40, y: n.position.y + 220 },
+        };
+        scratch = { ...scratch, nodes: [...scratch.nodes, clone] };
+      }
+
+      const addEdge = (source: string, target: string, targetHandle?: 'a' | 'b' | 'mask') => {
+        const edge = { id: nextId(scratch, 'e'), source, target, ...(targetHandle ? { targetHandle } : {}) };
+        scratch = { ...scratch, edges: [...scratch.edges, edge] };
+      };
+      // Clone every edge strictly AMONG the cloned set 1:1; an edge feeding
+      // the clone's root from OUTSIDE it (the shared input, or whatever else
+      // the active chain actually starts from) reconnects to that SAME,
+      // untouched source rather than a clone of it.
+      for (const e of g.edges) {
+        const tgtCloned = idMap.get(e.target);
+        if (!tgtCloned) continue;
+        const srcCloned = idMap.get(e.source);
+        addEdge(srcCloned ?? e.source, tgtCloned, e.targetHandle);
+      }
+
+      const tailEdge = g.edges.find((e) => e.target === out.id);
+      const tailId = tailEdge ? idMap.get(tailEdge.source) : undefined;
+      if (!tailId) return {};
+
+      // Name dedupe: same sanitize-and-suffix convention suffixExportPath/
+      // slugifyPresetName already use (sanitizeToken) — here just a plain
+      // "already taken" bump since output names aren't filesystem tokens.
+      const baseName = `${outputName(out)} copy`;
+      const existingNames = new Set(g.nodes.filter((n) => n.kind === 'output').map((n) => outputName(n)));
+      let name = baseName;
+      for (let i = 2; existingNames.has(name); i++) name = `${baseName} ${i}`;
+
+      // Same outX + offset layout convention addOpNode's 'output' branch uses.
+      const newOutId = nextId(scratch, 'output');
+      const newOutNode: GraphNode = {
+        id: newOutId,
+        kind: 'output',
+        position: { x: out.position.x, y: out.position.y + 140 },
+        name,
+      };
+      scratch = { ...scratch, nodes: [...scratch.nodes, newOutNode] };
+      addEdge(tailId, newOutId);
+
+      return {
+        ...pushHistory(s, null, { label: 'Duplicate output' }),
+        graph: scratch,
+        graphDirty: true,
+        selectedNodeId: newOutId,
+        activeOutputId: newOutId,
+      };
+    });
+  },
+
   connectNotice: null,
   graphBroken: false,
 
@@ -4952,7 +5163,12 @@ export const useAppStore = create<AppState>((set, get) => {
   async savePreset(name, families) {
     const trimmed = name.trim();
     if (!trimmed) return;
-    const { graph } = get();
+    const { graph, activeOutputId } = get();
+    // Multi-output scoping fix (virtual-copy.md): a preset always represents
+    // ONE develop chain — on a 2+-output doc it must capture only the ACTIVE
+    // output's own chain, never an amalgam of independent copies. No-op on a
+    // single-output doc (chainScope covers the whole graph there).
+    const scope = chainScope(graph, activeOutputId);
     const baseSlug = slugifyPresetName(trimmed);
     const list = await window.silverbox.presetsList();
     // Same DISPLAY NAME as an existing preset = the update path (reuse its
@@ -4994,15 +5210,19 @@ export const useAppStore = create<AppState>((set, get) => {
     let look: GraphDoc;
     let includesOut: string[] | undefined;
     if (families !== undefined) {
-      look = buildScopedLook(families.includes('geometry') ? graph : captureLook(graph), new Set(families));
+      look = buildScopedLook(families.includes('geometry') ? graph : captureLook(graph), new Set(families), scope);
       const priorUnknown = existingIncludes?.filter((id) => !isKnownFamilyId(id)) ?? [];
       includesOut = [...families, ...priorUnknown];
     } else if (existingIncludes !== undefined) {
       const priorKnown = existingIncludes.filter(isKnownFamilyId);
-      look = buildScopedLook(priorKnown.includes('geometry') ? graph : captureLook(graph), new Set(priorKnown));
+      look = buildScopedLook(priorKnown.includes('geometry') ? graph : captureLook(graph), new Set(priorKnown), scope);
       includesOut = existingIncludes;
     } else {
-      look = captureLook(graph);
+      // Legacy whole-look save (no family dialog at all, predates preset
+      // scoping) — still narrowed to the active chain on a 2+-output doc,
+      // same reasoning as the two scoped branches above (a no-op on a
+      // single-output doc).
+      look = restrictToChain(captureLook(graph), scope);
       includesOut = undefined;
     }
     const content = serializePreset(trimmed, look, createdAt, unknownFields, includesOut);
@@ -5038,14 +5258,34 @@ export const useAppStore = create<AppState>((set, get) => {
   previewLook: null,
 
   setPreviewLook(look) {
-    set((s) => ({ previewLook: look ? mergeLookWithCurrentGeometry(s.graph, look) : null }));
+    set((s) => {
+      if (!look) return { previewLook: null };
+      // Same applyLook fork (virtual-copy.md): a 2+-output doc previews
+      // exactly what an actual paste/apply would produce (this getter's own
+      // doc-comment contract) — the old unconditional wholesale-replace
+      // would have previewed every OTHER output vanishing too.
+      const outputs = s.graph.nodes.filter((n) => n.kind === 'output');
+      const preview =
+        outputs.length <= 1
+          ? mergeLookWithCurrentGeometry(s.graph, look)
+          : replaceActiveChainWithLook(s.graph, look, s.activeOutputId);
+      return { previewLook: preview };
+    });
   },
 
   previewParsedPreset(parsed) {
     set((s) => {
-      const merged = parsed.includes
-        ? mergeScopedLook(s.graph, parsed.look, new Set(parsed.includes.filter(isKnownFamilyId)))
-        : parsed.look;
+      if (!parsed.includes) {
+        // Whole-look preview: the exact fork applyLook/setPreviewLook use.
+        const outputs = s.graph.nodes.filter((n) => n.kind === 'output');
+        const preview =
+          outputs.length <= 1
+            ? mergeLookWithCurrentGeometry(s.graph, parsed.look)
+            : replaceActiveChainWithLook(s.graph, parsed.look, s.activeOutputId);
+        return { previewLook: preview };
+      }
+      const scope = chainScope(s.graph, s.activeOutputId);
+      const merged = mergeScopedLook(s.graph, parsed.look, new Set(parsed.includes.filter(isKnownFamilyId)), scope);
       return { previewLook: mergeLookWithCurrentGeometry(s.graph, merged) };
     });
   },
@@ -5793,7 +6033,15 @@ export const useAppStore = create<AppState>((set, get) => {
     // own scoped-look branch uses (presetFamilies.ts's pickDevelopFamilies/
     // buildScopedLook doc comments); captureLook only clears the input
     // node's geometry, so every other family is unaffected either way.
-    const primaryLook = checkedFamilies.has('geometry') ? s.graph : captureLook(s.graph);
+    // Multi-output scoping fix (virtual-copy.md): once the PRIMARY (this
+    // open doc) has 2+ outputs, "the primary's live graph" means "the
+    // primary's ACTIVE-output chain" — restricted here via chainScope/
+    // restrictToChain so a structural graft below never pulls in the
+    // inactive copy's own masks/spots/custom nodes (a no-op on a
+    // single-output primary, where the scope covers the whole graph).
+    const primaryScope = chainScope(s.graph, s.activeOutputId);
+    const rawPrimaryLook = checkedFamilies.has('geometry') ? s.graph : captureLook(s.graph);
+    const primaryLook = restrictToChain(rawPrimaryLook, primaryScope);
     const structuralFamilies = (['masks', 'spots', 'custom-nodes'] as const).filter((f) => checkedFamilies.has(f));
 
     const before: Record<string, GraphDoc> = {};
@@ -5895,7 +6143,12 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
 
-      const mergedGraph = structuredClone(mergeScopedLook(baseGraph, primaryLook, effectiveFamilies));
+      // Target-side scoping fix (virtual-copy.md): a TARGET photo isn't open,
+      // so there's no live activeOutputId for it — default to its own first
+      // output, the same "activeOutputId ?? first" fallback rule
+      // activeOutputNode always applies (chainScope with `null`).
+      const targetScope = chainScope(baseGraph, null);
+      const mergedGraph = structuredClone(mergeScopedLook(baseGraph, primaryLook, effectiveFamilies, targetScope));
       const content = serializeGraphDoc(
         mergedGraph,
         meta.source,

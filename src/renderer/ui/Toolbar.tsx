@@ -16,9 +16,17 @@ import { PresetsMenu } from './PresetsMenu';
  * auto-wired and selected (one undo entry); kind 'output' is special — a new
  * output node lands disconnected (named outputs, spec §6) rather than
  * hijacking the existing one; rewire it freely afterwards.
+ *
+ * "Duplicate output" (docs/brief-bank/virtual-copy.md) sits right next to
+ * the blank 'output' entry: the everyday virtual-copy gesture (clones the
+ * active output's own chain, ready to edit independently) vs. 'output's
+ * from-scratch/advanced path (lands disconnected, shares nothing). Always
+ * enabled while any output exists — even a single-output doc can duplicate
+ * itself to create its second.
  */
 function AddNodeMenu() {
   const addOpNode = useAppStore((s) => s.addOpNode);
+  const duplicateOutput = useAppStore((s) => s.duplicateOutput);
   const [open, setOpen] = useState(false);
   const kinds: AddableKind[] = [
     CUSTOM_KIND,
@@ -56,6 +64,16 @@ function AddNodeMenu() {
                 {kind === CUSTOM_KIND ? 'customShader' : kind}
               </button>
             ))}
+            <button
+              data-testid="add-node-duplicate-output"
+              title="Clone the active output's own chain into a new, independently-editable output (virtual copy)"
+              onClick={() => {
+                duplicateOutput();
+                setOpen(false);
+              }}
+            >
+              duplicate output
+            </button>
           </div>
         </>
       )}
