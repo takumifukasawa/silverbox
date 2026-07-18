@@ -12,6 +12,18 @@ export interface CameraColorInfo {
   camMul: [number, number, number, number];
   /** Camera-RGB → CIE XYZ matrix; rows are R/G/B/(G2), only the top 3x3 is used. */
   camXyz: number[][];
+  /**
+   * libraw's own `rgb_cam`: the LITERAL matrix libraw's `convert_to_rgb()`
+   * composes with the output-colorspace table to turn the camera-native,
+   * as-shot-WB'd, demosaiced RGB into the decoded pixel (→ linear sRGB D65 —
+   * see engine/color/dcp/pipeline.ts's `exactCameraFromWorkingMatrix` doc
+   * comment for the full derivation/provenance). Absent for inputs libraw
+   * didn't expose it for (older builds, some formats); callers fall back to
+   * the `camXyz`-based approximation. Only the top 3x3 (R/G/B columns) is
+   * used — rows/columns beyond the demosaiced channel count (`colors`,
+   * always 3 here) are libraw-internal padding.
+   */
+  rgbCam?: number[][];
   /** Sensor black level. */
   black: number;
   /** Sensor saturation (white) level. */

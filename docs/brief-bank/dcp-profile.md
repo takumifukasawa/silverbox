@@ -1,20 +1,72 @@
 # Brief: DCP camera-profile loading (the direct route to Adobe Color)
 
-Status: STAGE 1 LANDED 2026-07-18 (parser + DNG §6 pipeline +
+Status: STAGE 2 LANDED 2026-07-18 (exact camera-native reconstruction;
+see below). STAGE 1 LANDED 2026-07-18 (parser + DNG §6 pipeline +
 `profile.source: 'dcp'` + verify-dcp fixture suite + minimal UI; the
 DCP result is baked into the SAME 17³ residual-lattice shape the
 builtin profile uses, so GPU/CPU parity is inherited).
-KNOWN LIMITATION (Stage 2, the real remaining work): the pipeline
-needs true camera-native RGB, but our decoder gets linear Rec.2020
-straight from libraw — Stage 1 approximates the inverse via
-whiteBalance.ts's camXyz, which is NOT libraw's actual rgb_cam
-normalization. Smoke test against the real Sony ILCE-7CM2 Adobe
-Standard DCP: parses cleanly, but renders with a large systematic
-green cast — DO NOT judge Adobe-Color fidelity on Stage 1. Stage 2 =
-replicate libraw's rgb_cam derivation (or expose sensor-native RGB
-from the decoder) so the reconstruction is exact; the green cast is
-the signature of that gap (WB-scale mismatch in camera space), not a
-table/matrix bug (fixture golden math passes).
+
+STAGE 2 (root cause + fix): Stage 1's `cameraNativeFromWorking`
+inverted the decoded working-space pixel through `camXyz` (the raw
+XYZ→camera matrix) — no per-channel WB scaling, and the wrong
+row-normalization convention — which is NOT the matrix libraw actually
+applies. Per LibRaw's own `cam_xyz_coeff` (`src/utils/utils_dcraw.cpp`,
+read from the public LibRaw GitHub source — no LibRaw code copied),
+libraw builds `cam_rgb = cam_xyz · xyz_rgb` (camera-from-sRGB D65),
+row-normalizes it (implicitly folding in the as-shot WB — that
+normalization factor IS `pre_mul`), then sets `rgb_cam =
+pseudoinverse(cam_rgb_normalized)` — i.e. `rgb_cam` maps the ALREADY
+WB'd, demosaiced camera-native RGB to linear sRGB D65, and
+`convert_to_rgb()` composes it with the output-colorspace table
+(`out_cam = out_rgb[outputColor-1] · rgb_cam`) before applying it per
+pixel. libraw-wasm exposes this exact `rgb_cam` matrix via
+`color_data.rgb_cam` (typed as always-present, but empirically
+`undefined` for at least this decode path — the code treats it as
+optional and falls back cleanly). Threading it through (decoder →
+`CameraColorInfo.rgbCam` → `WbModel.rgbCam` → DCP pipeline's new
+`exactCameraFromWorkingMatrix`, which inverts `rgb_cam` composed with
+the known sRGB↔Rec.2020 boundary matrices) recovers the EXACT
+camera-native, as-shot-WB'd RGB libraw's own pipeline produced — not a
+second approximating model. `camXyz`-based reconstruction
+(`approxCameraFromWorkingMatrix`) is kept as the fallback for when the
+decoder doesn't expose `rgb_cam`.
+
+BUG CAUGHT DURING VALIDATION (fixed same pass): the first
+implementation wired `rgbCam` through `RawDecoder`/`whiteBalance.ts`
+correctly but missed ONE call site — `appStore.ts`'s `seedDefaultLook`
+built its own `WbMeta` object literal (`{camMul, camXyz}`) instead of
+passing `image.color` through, silently dropping `rgbCam` and making
+Stage 2 always fall back to the Stage-1 approximation. Caught by a
+real-DCP smoke render showing Stage 1 and Stage 2 producing
+BIT-IDENTICAL output (impossible if the exact path were engaged);
+traced with a temporary console probe (removed before landing) and
+fixed by passing `rgbCam: image.color?.rgbCam` through.
+
+SMOKE RESULT against the real, locally-installed Sony ILCE-7CM2 Adobe
+Standard DCP (test-assets/test.ARW vs test-assets/lr-calib/DSC02993.jpg,
+NCC-gated center-crop ΔE2000, base curve + lens correction seeded on
+both sides — see the render report for full methodology): the green
+cast is GONE (Stage 1 meanΔE2000 20.6, systematically green/blue-starved
+RGB≈44/84/12 in the crude whole-crop check; Stage 2 meanΔE2000 7.8,
+RGB≈85/77/32 — R/G balanced). Stage 2's 7.8 lands statistically ON PAR
+with identity (7.6) and the shipped builtin round-6 lattice (7.8) in
+THIS measurement — a dramatic fix (Stage 1 was ~2.7x WORSE than doing
+nothing), but NOT the hoped-for "well under 2" dramatic win over
+identity; all three numbers here also sit well above COLOR.md's
+harness-measured ~3.8/~3.6 (this script's own methodology — JPEG-domain
+comparison, no true sub-pixel registration, single coarse NCC gate — is
+cruder than fit-profile.mjs's held-out/sub-pixel-aligned harness, and
+the offset looks roughly CONSTANT across identity/builtin/dcp, so the
+RELATIVE finding — reconstruction fix closes the gap to our own
+baseline — is the reliable takeaway, not the absolute number). The
+remaining gap to a possible sub-identity DCP result is attributable to
+Stage 1's OTHER documented simplifications (ColorMatrix/
+CameraCalibration+AnalogBalance composition, 2-point linear illuminant
+interpolation, ProfileToneCurve's piecewise-linear/sRGB-domain
+approximation) — unchanged by this pass, still open work. A rerun of
+the REAL fit-profile.mjs-style harness (developedForFit, held-out
+split, true NCC sub-pixel alignment) against DCP mode is the natural
+follow-up for a citable headline number.
 (Originally DESIGNED 2026-07-18, from the user's own insight:
 "adobecolorが公開されてたら全く同じようには理論的にはできるよね" —
 and it effectively IS available locally.)

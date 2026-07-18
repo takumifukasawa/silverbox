@@ -28,6 +28,13 @@
  *     chosen asShotTempK (mired-halfway between the fixture's two
  *     illuminants → fraction 0.5, hand-checkable) and that changing it to
  *     the two anchors reproduces each illuminant's own HueSatMap exactly.
+ *  2b. Camera-native reconstruction (Stage 2 — see dcp-profile.md's status
+ *     block): a synthetic camera-native RGB pushed FORWARD through a known
+ *     `rgb_cam` (simulating exactly what libraw's own convert_to_rgb() would
+ *     have produced as our decoded working-space pixel) round-trips EXACTLY
+ *     back through `exactCameraFromWorkingMatrix`'s inverse; the `camXyz`
+ *     fallback route (`approxCameraFromWorkingMatrix`) and the picker
+ *     (`cameraFromWorkingMatrix`) are checked against each other too.
  *  3. Malformed-file error paths: a plain TIFF/DNG (magic 42, no "RC"
  *     marker), a truncated file, and a bad byte-order mark all throw
  *     DcpParseError with an actionable message.
@@ -93,7 +100,23 @@ try {
   rmSync(bundleWorkDir, { recursive: true, force: true });
 }
 
-const { parseDcp, DcpParseError, renderDcpPixel, illuminantFraction, XYZ_D65_TO_REC2020 } = dcp;
+const {
+  parseDcp,
+  DcpParseError,
+  renderDcpPixel,
+  illuminantFraction,
+  REC2020_TO_XYZ_D65,
+  exactCameraFromWorkingMatrix,
+  approxCameraFromWorkingMatrix,
+  cameraFromWorkingMatrix,
+  mulMat3Mat3,
+} = dcp;
+
+const IDENTITY_MAT3 = [
+  [1, 0, 0],
+  [0, 1, 0],
+  [0, 0, 1],
+];
 
 // === 1. parser round-trip on the fixture ====================================
 console.log('verify-dcp (parser round-trip on the fixture):');
@@ -178,11 +201,6 @@ function mulMV(m, v) {
     m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
   ];
 }
-const REC2020_TO_XYZ_D65_REF = [
-  [0.636958, 0.1446169, 0.168881],
-  [0.2627002, 0.6779981, 0.0593017],
-  [0.0, 0.0280727, 1.0609851],
-];
 const PROPHOTO_TO_XYZ_D50_REF = [
   [0.7977605, 0.1351858, 0.0313493],
   [0.2880711, 0.7118432, 0.0000857],
@@ -307,7 +325,7 @@ function evalCurveRef(points, x) {
   }
   return last[1];
 }
-function referenceRenderDcpPixel(d, workingRgb, camXyzD65, asShotTempK) {
+function referenceRenderDcpPixel(d, workingRgb, cameraFromWorking, asShotTempK) {
   const cct1 = 2856; // StdA — the fixture's own CalibrationIlluminant1
   const cct2 = 6504; // D65 — CalibrationIlluminant2
   const mired1 = 1e6 / cct1;
@@ -323,8 +341,10 @@ function referenceRenderDcpPixel(d, workingRgb, camXyzD65, asShotTempK) {
     [fmFlat[3], fmFlat[4], fmFlat[5]],
     [fmFlat[6], fmFlat[7], fmFlat[8]],
   ];
-  const xyzD65 = mulMV(REC2020_TO_XYZ_D65_REF, workingRgb);
-  const cameraRgb = mulMV(camXyzD65, xyzD65);
+  // camera-native reconstruction is now a single precomposed matrix — see
+  // pipeline.ts's cameraNativeFromWorking (this golden-math check passes
+  // IDENTITY below, same no-op trick as before, just one step instead of two).
+  const cameraRgb = mulMV(cameraFromWorking, workingRgb);
   const xyzD50 = mulMV(camToXyz, cameraRgb);
   const prophotoLin = mulMV(XYZ_D50_TO_PROPHOTO_REF, xyzD50);
   let [h, s, v] = rgbToHsvRef(prophotoLin);
@@ -361,20 +381,85 @@ function referenceRenderDcpPixel(d, workingRgb, camXyzD65, asShotTempK) {
   return workingOut.map((c) => c * gain);
 }
 
-// The test input: cameraXyzD65 = the EXACT numeric inverse of REC2020_TO_XYZ_D65
-// (the production module's own exported constant) makes cameraNativeFromWorking
-// a pure round trip (cameraRgb === workingRgb to float precision) — this
+// The test input: cameraFromWorking = IDENTITY makes cameraNativeFromWorking a
+// pure pass-through (cameraRgb === workingRgb to float precision) — this
 // sidesteps needing a plausible synthetic camera matrix while still exercising
-// the real reconstruction code path, not skipping it.
+// the real reconstruction code path (a plain mat×vec through production code),
+// not skipping it. The reconstruction MATH itself (rgb_cam inversion) is
+// checked independently in section 2b below.
 const TEST_WORKING_RGB = [0.6, 0.35, 0.2];
-const golden = referenceRenderDcpPixel(parsed, TEST_WORKING_RGB, XYZ_D65_TO_REC2020, HALFWAY_TEMP_K);
-const actual = renderDcpPixel(parsed, TEST_WORKING_RGB, XYZ_D65_TO_REC2020, HALFWAY_TEMP_K);
+const golden = referenceRenderDcpPixel(parsed, TEST_WORKING_RGB, IDENTITY_MAT3, HALFWAY_TEMP_K);
+const actual = renderDcpPixel(parsed, TEST_WORKING_RGB, IDENTITY_MAT3, HALFWAY_TEMP_K);
 const maxAbsDiff = Math.max(...golden.map((v, i) => Math.abs(v - actual[i])));
 check('renderDcpPixel matches the independent reference within 1e-6', maxAbsDiff < 1e-6, { golden, actual, maxAbsDiff });
 check('the DCP pipeline actually moves the pixel (not an accidental identity)', maxAbsDiff >= 0 && Math.max(...actual.map((v, i) => Math.abs(v - TEST_WORKING_RGB[i]))) > 0.05, {
   actual,
   input: TEST_WORKING_RGB,
 });
+
+// === 2b. camera-native reconstruction (Stage 2 exactness) ===================
+console.log('\nverify-dcp (Stage 2: exact rgb_cam-based camera-native reconstruction):');
+
+// A synthetic, well-conditioned "rgb_cam" (camera(WB'd)-native -> sRGB D65) —
+// OUR own numbers (no Adobe content), just needs to be invertible and not the
+// identity, so the round trip genuinely exercises matrix inversion + compose.
+const SYNTH_RGB_CAM = [
+  [1.62, -0.48, -0.06],
+  [-0.1, 1.4, -0.18],
+  [0.02, -0.32, 1.62],
+];
+// sRGB(linear D65) -> Rec.2020(linear D65) — engine/color/workingSpace.ts's
+// SRGB_TO_WORK, transcribed here (this script bundles engine/color/dcp/ only,
+// not workingSpace.ts) purely to CONSTRUCT the forward simulation below (what
+// libraw + our decoder would have produced); the inversion under test is 100%
+// production code (exactCameraFromWorkingMatrix), so this transcription isn't
+// part of what's being verified, only of the fixture setup.
+const SRGB_TO_WORK_REF = [
+  [0.627409, 0.32926, 0.043272],
+  [0.069125, 0.919549, 0.011321],
+  [0.016423, 0.088048, 0.895617],
+];
+const SYNTH_CAMERA_RGB = [0.42, 0.55, 0.3]; // a plausible camera-native, as-shot-WB'd triplet
+// Simulate exactly what libraw's convert_to_rgb() + our decoder would hand
+// back: workingRgb = SRGB_TO_WORK · rgb_cam · cameraRgb (pipeline.ts's own
+// doc comment derives this composition from LibRaw's cam_xyz_coeff).
+const simulatedWorkingRgb = mulMV(SRGB_TO_WORK_REF, mulMV(SYNTH_RGB_CAM, SYNTH_CAMERA_RGB));
+const exactMatrix = exactCameraFromWorkingMatrix(SYNTH_RGB_CAM);
+const recoveredCameraRgb = mulMV(exactMatrix, simulatedWorkingRgb);
+const reconstructDiff = Math.max(...recoveredCameraRgb.map((v, i) => Math.abs(v - SYNTH_CAMERA_RGB[i])));
+// Tolerance set by SRGB_TO_WORK_REF's own stored precision (6 decimal places),
+// not by the reconstruction math (a plain double-precision matrix inverse) —
+// still 100x tighter than the engine's 1/255 GPU-vs-CPU parity gate.
+check(
+  'a known camera-native RGB pushed through a known rgb_cam round-trips exactly via exactCameraFromWorkingMatrix',
+  reconstructDiff < 1e-5,
+  { recoveredCameraRgb, expected: SYNTH_CAMERA_RGB, reconstructDiff }
+);
+
+// Fallback path (no rgb_cam — e.g. JPEG, or an older decoder build): the
+// approx route must still be the documented Stage-1 formula, and the picker
+// must select exact/approx correctly by rgbCam's presence.
+const SYNTH_CAM_XYZ = [
+  [0.9, -0.2, 0.05],
+  [-0.15, 1.1, 0.03],
+  [0.02, -0.25, 1.05],
+];
+const approxMatrix = approxCameraFromWorkingMatrix(SYNTH_CAM_XYZ);
+const approxRef = mulMat3Mat3(SYNTH_CAM_XYZ, REC2020_TO_XYZ_D65);
+const approxDiff = Math.max(...approxMatrix.flat().map((v, i) => Math.abs(v - approxRef.flat()[i])));
+check('approxCameraFromWorkingMatrix matches camXyz · REC2020_TO_XYZ_D65 (the documented Stage-1 formula)', approxDiff < 1e-12, {
+  approxMatrix,
+  approxRef,
+  approxDiff,
+});
+
+const pickedExact = cameraFromWorkingMatrix(SYNTH_RGB_CAM, SYNTH_CAM_XYZ);
+const pickedExactDiff = Math.max(...pickedExact.flat().map((v, i) => Math.abs(v - exactMatrix.flat()[i])));
+check('cameraFromWorkingMatrix picks the exact route when rgbCam is present', pickedExactDiff < 1e-12, { pickedExactDiff });
+
+const pickedApprox = cameraFromWorkingMatrix(null, SYNTH_CAM_XYZ);
+const pickedApproxDiff = Math.max(...pickedApprox.flat().map((v, i) => Math.abs(v - approxMatrix.flat()[i])));
+check('cameraFromWorkingMatrix falls back to the approx route when rgbCam is null', pickedApproxDiff < 1e-12, { pickedApproxDiff });
 
 // === 3. malformed-file error paths ==========================================
 console.log('\nverify-dcp (malformed-file error paths):');

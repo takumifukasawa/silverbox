@@ -175,6 +175,22 @@ see DESIGN.md's Profile layer):
   shape); the next lever is a live, interactive user calibration session
   (side-by-side against Lightroom, per the Lightroom-reference decision)
   rather than another offline refit round.
+- **DCP camera-profile route** (`docs/brief-bank/dcp-profile.md`) — the
+  structural alternative to another statistical refit round: execute the
+  user's own Adobe DCP directly instead of imitating its output. Stage 1
+  (parser + DNG §6 pipeline) shipped 2026-07-18; Stage 2 (2026-07-18) fixed
+  Stage 1's camera-native RGB reconstruction, which had been inverting the
+  wrong (unnormalized, WB-blind) matrix and rendered real Adobe DCPs with a
+  severe green cast — now exact (inverts libraw's own `rgb_cam`). A smoke
+  measurement against the real Sony ILCE-7CM2 Adobe Standard DCP (see
+  dcp-profile.md's status block for the full numbers/methodology) confirms
+  the green cast is gone and DCP mode now lands ON PAR with identity/round-6
+  in that (cruder-than-this-harness) measurement — not yet the clear win
+  over ~3.6 this route is expected to eventually deliver; the remaining gap
+  is Stage 1's OTHER documented simplifications (CameraCalibration/
+  AnalogBalance, illuminant interpolation, tone-curve domain), not this
+  pass's reconstruction fix. Not the default (`profile.source` stays
+  `'builtin'`) pending a rigorous same-harness re-measurement.
 
 ## Migration plan
 

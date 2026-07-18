@@ -48,11 +48,21 @@ export interface WbModel {
   /**
    * XYZ (D65) → camera matrix (libraw's `cam_xyz`, or the Rec.2020 fallback —
    * see `pickCamXyz`). Exposed for the DCP profile pipeline
-   * (engine/color/dcp/pipeline.ts's `cameraNativeFromWorking`), which inverts
-   * this SAME conversion to approximate camera-native RGB from a decoded
-   * working-space pixel — no separate matrix, so both consumers always agree.
+   * (engine/color/dcp/pipeline.ts's `approxCameraFromWorkingMatrix`), which
+   * inverts this SAME conversion as its FALLBACK camera-native reconstruction
+   * — used only when `rgbCam` (below) is unavailable — no separate matrix, so
+   * both consumers always agree.
    */
   camXyz: number[][];
+  /**
+   * libraw's own `rgb_cam` (camera-native, as-shot-WB'd RGB → sRGB D65), when
+   * the decoder exposed one — see CameraColorInfo.rgbCam's doc comment and
+   * dcp/pipeline.ts's `exactCameraFromWorkingMatrix`, which is the EXACT
+   * (not approximating) camera-native reconstruction this enables. `null`
+   * when absent (e.g. JPEG, or a decoder build without the field) — the DCP
+   * pipeline then falls back to the `camXyz`-based approximation above.
+   */
+  rgbCam: Mat3 | null;
 }
 
 /** Tint slider units per unit Δuv (DNG order of magnitude). */
@@ -285,6 +295,8 @@ export interface WbMeta {
   camMul?: number[];
   /** XYZ→camera matrix, 4x3 from libraw (first 3 rows used). */
   camXyz?: number[][];
+  /** libraw's `rgb_cam`, 3x4 (first 3 columns used) — see WbModel.rgbCam's doc comment. */
+  rgbCam?: number[][];
 }
 
 function pickCamXyz(meta: WbMeta): Mat3 {
@@ -302,6 +314,27 @@ function pickCamXyz(meta: WbMeta): Mat3 {
 }
 
 /**
+ * Validate + extract the top 3x3 (R/G/B columns) of libraw's `rgb_cam`, the
+ * matrix the DCP pipeline's EXACT camera-native reconstruction inverts (see
+ * WbModel.rgbCam's doc comment). `null` when absent, malformed, or singular
+ * (mirrors `pickCamXyz`'s own guards) — callers fall back to the `camXyz`
+ * approximation in that case.
+ */
+function pickRgbCam(meta: WbMeta): Mat3 | null {
+  const m = meta.rgbCam;
+  if (
+    !Array.isArray(m) ||
+    m.length < 3 ||
+    !m.slice(0, 3).every((row) => Array.isArray(row) && row.length >= 3 && row.slice(0, 3).every(Number.isFinite))
+  ) {
+    return null;
+  }
+  const top = m.slice(0, 3).map((row) => row.slice(0, 3));
+  if (!top.some((row) => row.some((v) => v !== 0)) || !invertMat3(top)) return null;
+  return top;
+}
+
+/**
  * Build the per-image WB model. Never throws: missing / degenerate metadata
  * falls back to "camera = Rec.2020 (the working space), neutral = D65" (as-shot
  * ≈ 6500 K; D65 sits slightly green of the locus, so tint lands mildly
@@ -309,6 +342,7 @@ function pickCamXyz(meta: WbMeta): Mat3 {
  */
 export function createWbModel(meta: WbMeta): WbModel {
   const camXyz = pickCamXyz(meta);
+  const rgbCam = pickRgbCam(meta);
 
   // camera response of the scene illuminant ∝ 1/cam_mul (G-normalized)
   let neutral: Vec3 = [1, 1, 1];
@@ -338,6 +372,7 @@ export function createWbModel(meta: WbMeta): WbModel {
       return [m[0] / mAsShot[0], 1, m[2] / mAsShot[2]];
     },
     camXyz,
+    rgbCam,
   };
 }
 

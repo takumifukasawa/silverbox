@@ -2,15 +2,16 @@
  * DNG 1.7 spec, chapter 6 ("Mapping Camera Color Space to CIE XYZ Space") +
  * the profile-rendering chapter (HueSatMap / LookTable / ProfileToneCurve) —
  * executed against a `ParsedDcp` (parser.ts). Every stage below cites the
- * spec concept it implements; where this Stage-1 implementation simplifies
- * or approximates, the simplification is called out explicitly (see also the
- * "camera-native RGB reconstruction" doc comment below, the single biggest
- * one — the render report enumerates all of them).
+ * spec concept it implements; where this implementation simplifies or
+ * approximates, the simplification is called out explicitly (see also the
+ * "camera-native RGB reconstruction" doc comments below — the render report
+ * enumerates the rest).
  *
  * Pipeline, camera-native RGB in → working-space (linear Rec.2020, D65) RGB out:
  *
  *   1. reconstruct camera-native, as-shot-white-balanced RGB from the
- *      working-space pixel (see `cameraNativeFromWorking`'s doc comment)
+ *      working-space pixel (see `exactCameraFromWorkingMatrix` /
+ *      `approxCameraFromWorkingMatrix`'s doc comments)
  *   2. illuminant-interpolate ForwardMatrix (or invert ColorMatrix) by the
  *      shot's own CCT → camera RGB × M → XYZ (D50)                    [§6]
  *   3. XYZ (D50) → linear ProPhoto RGB (matrices.ts)
@@ -28,9 +29,11 @@
  *  10. BaselineExposureOffset: a final 2^offset gain on the result
  */
 import { srgbDecode, srgbEncode } from '../srgb';
+import { WORK_TO_SRGB } from '../workingSpace';
 import {
   BRADFORD_D50_TO_D65,
   invertMat3,
+  mulMat3Mat3,
   mulMat3Vec3,
   PROPHOTO_TO_XYZ_D50,
   REC2020_TO_XYZ_D65,
@@ -102,27 +105,76 @@ export function cameraToXyzD50Matrix(dcp: ParsedDcp, fraction: number): Mat3 {
 }
 
 /**
- * Reconstruct an approximate camera-native, as-shot-white-balanced RGB from
- * a WORKING-SPACE (linear Rec.2020, D65) pixel.
+ * STAGE 2 — exact camera-native RGB reconstruction (replaces the Stage-1
+ * approximation below). Root cause of the Stage-1 green cast: it inverted
+ * our Rec.2020 working pixel through `camXyz` (XYZ→camera), a matrix libraw
+ * never actually applies to a WB'd, demosaiced pixel — it skipped the WB
+ * scaling entirely and used the wrong normalization convention. The fix is
+ * to invert the LITERAL matrix libraw used instead.
  *
- * STAGE-1 APPROXIMATION (see the render report for the full rationale): the
- * DNG spec's ColorMatrix/ForwardMatrix are defined against true PRE-libraw
- * sensor RGB, but Silverbox's decoder (librawDecoder.ts) hands back pixels
- * ALREADY converted to linear Rec.2020 by libraw's own internal camera→XYZ
- * matrix — there is no lower-level hook to intercept camera-native values
- * before that conversion without a much larger decoder change, out of scope
- * for Stage 1. This function inverts libraw's OWN conversion instead, using
- * the SAME `camXyz` (XYZ→camera) matrix whiteBalance.ts already carries for
- * its own WB math: workingRGB → XYZ (D65, standard primaries conversion) →
- * `camXyz` → an approximate camera-native RGB. Since `camXyz` is exactly the
- * matrix libraw used to go the other way, this recovers the camera-native
- * signal up to libraw's own internal WB/highlight-recovery nuances — close
- * enough to feed ForwardMatrix meaningfully, not bit-exact to a true sensor
- * capture.
+ * Provenance (LibRaw / dcraw `cam_xyz_coeff`, `src/utils/utils_dcraw.cpp` —
+ * read from the public LibRaw GitHub source; relationship replicated below,
+ * no LibRaw code copied):
+ *
+ *   cam_rgb[i][j]  = Σ_k cam_xyz[i][k] · xyz_rgb[k][j]     // camera-from-sRGB(D65)
+ *   pre_mul[i]     = 1 / Σ_j cam_rgb[i][j]                 // implied per-channel WB
+ *   cam_rgb[i][*] /= Σ_j cam_rgb[i][j]                     // row-normalize (⇒ WB'd input)
+ *   rgb_cam        = pseudoinverse(cam_rgb)                // sRGB(D65)-from-camera(WB'd)
+ *
+ * `rgb_cam` therefore maps the ALREADY as-shot-WB'd, demosaiced camera-native
+ * RGB (the row-normalization folds the implied WB into the matrix) to linear
+ * sRGB D65 — libraw-wasm exposes this exact matrix as `color_data.rgb_cam`
+ * ("3x4 camera-to-sRGB matrix"; see librawDecoder.ts / RawDecoder.ts).
+ * `convert_to_rgb()` then composes it with the requested output colorspace
+ * table (`out_cam = out_rgb[outputColor-1] · rgb_cam`) before applying it
+ * per pixel; for our decoder's `outputColor` (Rec.2020, DECODE_OUTPUT_COLOR),
+ * `out_rgb[...]` is the standard sRGB(D65)→Rec.2020(D65) primaries matrix —
+ * i.e. workingSpace.ts's `SRGB_TO_WORK`, here reached via its exact inverse
+ * `WORK_TO_SRGB` (both D65; reused rather than re-derived a second time in
+ * this module's own matrix family, since it's THE canonical working-space
+ * boundary conversion — workingSpace.ts's own charter — and duplicating it
+ * would risk a rounding mismatch that defeats the whole point of this fix).
+ *
+ * So: workingRgb = SRGB_TO_WORK · rgb_cam · cameraWbRgb, and inverting both
+ * factors recovers cameraWbRgb EXACTLY (up to libraw's own float32 precision
+ * and highlight-recovery clipping) — not a second approximating model, the
+ * literal matrix libraw applied, run backward.
  */
-export function cameraNativeFromWorking(workingRgb: Vec3, camXyzD65: Mat3): Vec3 {
-  const xyzD65 = mulMat3Vec3(REC2020_TO_XYZ_D65, workingRgb);
-  return mulMat3Vec3(camXyzD65, xyzD65);
+export function exactCameraFromWorkingMatrix(rgbCam: Mat3): Mat3 {
+  return mulMat3Mat3(invertMat3(rgbCam), WORK_TO_SRGB);
+}
+
+/**
+ * STAGE-1 APPROXIMATION — kept as the fallback path for inputs where the
+ * decoder didn't expose `rgb_cam` (see `exactCameraFromWorkingMatrix`'s doc
+ * comment for the exact route, which is preferred whenever available).
+ *
+ * The DNG spec's ColorMatrix/ForwardMatrix are defined against true
+ * PRE-libraw sensor RGB, but Silverbox's decoder (librawDecoder.ts) hands
+ * back pixels already converted to linear Rec.2020. Absent `rgb_cam`, this
+ * inverts libraw's XYZ→camera matrix (`camXyz`, the same one whiteBalance.ts
+ * carries for its own WB math) instead: workingRGB → XYZ (D65, standard
+ * primaries conversion) → `camXyz` → an approximate camera-native RGB. This
+ * ignores libraw's actual WB scaling and normalization convention, so it is
+ * markedly less accurate than the exact route (the documented source of
+ * Stage 1's green cast) — a fallback of last resort, not a target.
+ */
+export function approxCameraFromWorkingMatrix(camXyzD65: Mat3): Mat3 {
+  return mulMat3Mat3(camXyzD65, REC2020_TO_XYZ_D65);
+}
+
+/**
+ * Pick the exact route when `rgbCam` is available (the decoder exposed
+ * libraw's own matrix — see `exactCameraFromWorkingMatrix`), else fall back
+ * to the `camXyz` approximation (`approxCameraFromWorkingMatrix`).
+ */
+export function cameraFromWorkingMatrix(rgbCam: Mat3 | null, camXyzD65: Mat3): Mat3 {
+  return rgbCam ? exactCameraFromWorkingMatrix(rgbCam) : approxCameraFromWorkingMatrix(camXyzD65);
+}
+
+/** Apply a precomposed camera-from-working matrix (see `cameraFromWorkingMatrix`) to one working-space pixel. */
+export function cameraNativeFromWorking(workingRgb: Vec3, cameraFromWorking: Mat3): Vec3 {
+  return mulMat3Vec3(cameraFromWorking, workingRgb);
 }
 
 // --- HSV (V unclamped) ------------------------------------------------------
@@ -286,11 +338,16 @@ export function applyToneCurve(curve: ToneCurve, rgb: Vec3): Vec3 {
  * Render one working-space (linear Rec.2020) pixel through the DCP pipeline,
  * returning the working-space result (same space, so the caller can treat
  * this as a drop-in replacement / residual source — see `bakeDcpLattice`).
+ *
+ * `cameraFromWorking` is the PRECOMPOSED matrix from `cameraFromWorkingMatrix`
+ * (exact `rgb_cam`-based route when available, else the `camXyz` fallback) —
+ * computed once by the caller rather than per pixel, since it never varies
+ * within one bake.
  */
-export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, camXyzD65: Mat3, asShotTempK: number): Vec3 {
+export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, cameraFromWorking: Mat3, asShotTempK: number): Vec3 {
   const fraction = illuminantFraction(dcp, asShotTempK);
   const camToXyz = cameraToXyzD50Matrix(dcp, fraction);
-  const cameraRgb = cameraNativeFromWorking(workingRgb, camXyzD65);
+  const cameraRgb = cameraNativeFromWorking(workingRgb, cameraFromWorking);
   const xyzD50 = mulMat3Vec3(camToXyz, cameraRgb);
   const prophotoLin = mulMat3Vec3(XYZ_D50_TO_PROPHOTO, xyzD50);
 
@@ -333,8 +390,11 @@ export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, camXyzD65: Mat3
  * GPU/CPU parity for free. `n` is normally `PROFILE_LATTICE_N`
  * (profileFit.ts) — passed in rather than imported to keep this module
  * independent of profileFit.ts's own concerns.
+ *
+ * `cameraFromWorking` — see `renderDcpPixel`'s doc comment — is built ONCE by
+ * the caller (`cameraFromWorkingMatrix`) and reused across all n³ nodes.
  */
-export function bakeDcpLattice(dcp: ParsedDcp, camXyzD65: Mat3, asShotTempK: number, n: number): number[] {
+export function bakeDcpLattice(dcp: ParsedDcp, cameraFromWorking: Mat3, asShotTempK: number, n: number): number[] {
   const out = new Array<number>(n * n * n * 3);
   for (let ix = 0; ix < n; ix++) {
     const r = ix / (n - 1);
@@ -342,7 +402,7 @@ export function bakeDcpLattice(dcp: ParsedDcp, camXyzD65: Mat3, asShotTempK: num
       const g = iy / (n - 1);
       for (let iz = 0; iz < n; iz++) {
         const b = iz / (n - 1);
-        const rendered = renderDcpPixel(dcp, [r, g, b], camXyzD65, asShotTempK);
+        const rendered = renderDcpPixel(dcp, [r, g, b], cameraFromWorking, asShotTempK);
         const base = ((ix * n + iy) * n + iz) * 3;
         out[base] = rendered[0] - r;
         out[base + 1] = rendered[1] - g;

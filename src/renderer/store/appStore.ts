@@ -60,7 +60,7 @@ import {
 } from '../engine/graph/projectDoc';
 import { defaultDevelopParams, profileSource } from '../engine/graph/developNode';
 import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
-import { parseDcp, bakeDcpLattice, type Mat3 as DcpMat3 } from '../engine/color/dcp';
+import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
 import { defaultImageParams, dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
@@ -1638,7 +1638,7 @@ export function seedDefaultLook(
   const { usedSidecar, kind, testFlags: flags } = opts;
   // per-image WB model; resolve the as-shot placeholder (temp 0) in the
   // loaded/default doc so WB sliders always show real Kelvin values
-  const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz });
+  const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz, rgbCam: image.color?.rgbCam });
   let out: GraphDoc = {
     ...graph,
     nodes: graph.nodes.map((n) => {
@@ -4154,10 +4154,16 @@ export const useAppStore = create<AppState>((set, get) => {
     try {
       const buf = await window.silverbox.readFile(profile.dcpPath);
       const parsed = parseDcp(buf, profile.dcpPath);
-      // camXyz is the SAME XYZ(D65)→camera matrix whiteBalance.ts uses for its
-      // own WB math (see WbModel.camXyz's doc comment) — cast past the two
-      // modules' independently-typed (but shape-identical) 3×3 matrix aliases.
-      const lattice = bakeDcpLattice(parsed, wbModel.camXyz as unknown as DcpMat3, wbModel.asShot.temp, PROFILE_LATTICE_N);
+      // camXyz/rgbCam are the SAME matrices whiteBalance.ts carries for its own
+      // WB math (see WbModel.camXyz / WbModel.rgbCam's doc comments) — cast
+      // past the two modules' independently-typed (but shape-identical) 3×3
+      // matrix aliases. cameraFromWorkingMatrix picks the exact rgb_cam route
+      // when the decoder exposed one, else the camXyz approximation.
+      const cameraFromWorking = cameraFromWorkingMatrix(
+        wbModel.rgbCam as unknown as DcpMat3 | null,
+        wbModel.camXyz as unknown as DcpMat3
+      );
+      const lattice = bakeDcpLattice(parsed, cameraFromWorking, wbModel.asShot.temp, PROFILE_LATTICE_N);
       mirrorDcpLattice(lattice);
       set((s) => ({ dcpProfileStatus: 'ready', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
     } catch (err) {

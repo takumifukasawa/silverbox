@@ -144,6 +144,11 @@ export class LibrawDecoder implements RawDecoder {
         color = {
           camMul: [cd.cam_mul[0]!, cd.cam_mul[1]!, cd.cam_mul[2]!, cd.cam_mul[3]!],
           camXyz: cd.cam_xyz,
+          // rgb_cam: the exact camera(WB'd)->sRGB matrix libraw used for THIS
+          // decode (see CameraColorInfo.rgbCam's doc comment) — carried
+          // alongside camXyz so the DCP pipeline's exact reconstruction path
+          // (dcp/pipeline.ts's exactCameraFromWorkingMatrix) has it available.
+          rgbCam: Array.isArray(cd.rgb_cam) ? cd.rgb_cam : undefined,
           black: cd.black,
           maximum: cd.maximum,
           rawBps: cd.raw_bps,

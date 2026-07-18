@@ -6,8 +6,21 @@ import {
   mulMat3Vec3,
   REC2020_TO_XYZ_D65,
   XYZ_D65_TO_REC2020,
+  type Mat3,
+  type Vec3,
 } from './matrices';
-import { evalToneCurve, hsvToRgb, illuminantFraction, lookupTable, rgbToHsv } from './pipeline';
+import {
+  approxCameraFromWorkingMatrix,
+  cameraFromWorkingMatrix,
+  cameraNativeFromWorking,
+  evalToneCurve,
+  exactCameraFromWorkingMatrix,
+  hsvToRgb,
+  illuminantFraction,
+  lookupTable,
+  rgbToHsv,
+} from './pipeline';
+import { SRGB_TO_WORK } from '../workingSpace';
 import { DcpParseError, parseDcp } from './parser';
 import type { HueSatTable, ParsedDcp } from './parser';
 
@@ -35,6 +48,53 @@ describe('dcp matrices', () => {
     const back65 = mulMat3Vec3(BRADFORD_D50_TO_D65, xyz50);
     const rec = mulMat3Vec3(XYZ_D65_TO_REC2020, back65);
     for (const c of rec) expect(Math.abs(c - 1)).toBeLessThan(1e-4);
+  });
+});
+
+describe('dcp camera-native reconstruction (Stage 2)', () => {
+  // OUR own synthetic "rgb_cam" (camera(WB'd)-native -> sRGB D65) — invertible,
+  // not the identity, so the round trip genuinely exercises matrix inversion.
+  const SYNTH_RGB_CAM: Mat3 = [
+    [1.62, -0.48, -0.06],
+    [-0.1, 1.4, -0.18],
+    [0.02, -0.32, 1.62],
+  ];
+  const SYNTH_CAM_XYZ: Mat3 = [
+    [0.9, -0.2, 0.05],
+    [-0.15, 1.1, 0.03],
+    [0.02, -0.25, 1.05],
+  ];
+
+  it('a known camera-native RGB pushed through a known rgb_cam round-trips exactly via exactCameraFromWorkingMatrix', () => {
+    const cameraRgb: Vec3 = [0.42, 0.55, 0.3];
+    // Simulate exactly what libraw's convert_to_rgb() + our decoder produce
+    // (pipeline.ts's own doc comment derives this from LibRaw's cam_xyz_coeff):
+    // workingRgb = SRGB_TO_WORK · rgb_cam · cameraRgb.
+    const camSrgb = mulMat3Vec3(SYNTH_RGB_CAM, cameraRgb);
+    const workingRgb = mulMat3Vec3(SRGB_TO_WORK as unknown as Mat3, camSrgb);
+    const matrix = exactCameraFromWorkingMatrix(SYNTH_RGB_CAM);
+    const recovered = cameraNativeFromWorking(workingRgb, matrix);
+    // Tolerance set by SRGB_TO_WORK's own stored precision (6 decimal places,
+    // ~1e-6 rounding), not by the reconstruction math itself (which is a
+    // plain double-precision matrix inverse/compose) — still 100x tighter
+    // than the engine's 1/255 GPU-vs-CPU parity gate.
+    for (let i = 0; i < 3; i++) expect(Math.abs(recovered[i]! - cameraRgb[i]!)).toBeLessThan(1e-5);
+  });
+
+  it('approxCameraFromWorkingMatrix matches the documented Stage-1 formula (camXyz · REC2020_TO_XYZ_D65)', () => {
+    const matrix = approxCameraFromWorkingMatrix(SYNTH_CAM_XYZ);
+    const reference = mulMat3Mat3(SYNTH_CAM_XYZ, REC2020_TO_XYZ_D65);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) expect(Math.abs(matrix[i]![j]! - reference[i]![j]!)).toBeLessThan(1e-12);
+  });
+
+  it('cameraFromWorkingMatrix picks the exact route when rgbCam is present, else the approx fallback', () => {
+    const exact = cameraFromWorkingMatrix(SYNTH_RGB_CAM, SYNTH_CAM_XYZ);
+    const exactRef = exactCameraFromWorkingMatrix(SYNTH_RGB_CAM);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) expect(Math.abs(exact[i]![j]! - exactRef[i]![j]!)).toBeLessThan(1e-12);
+
+    const approx = cameraFromWorkingMatrix(null, SYNTH_CAM_XYZ);
+    const approxRef = approxCameraFromWorkingMatrix(SYNTH_CAM_XYZ);
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) expect(Math.abs(approx[i]![j]! - approxRef[i]![j]!)).toBeLessThan(1e-12);
   });
 });
 
