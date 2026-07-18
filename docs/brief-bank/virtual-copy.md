@@ -1,6 +1,11 @@
 # Brief: virtual copies (named output nodes)
 
-Status: DESIGN OPEN — and the two preset/paste hazards below are
+Status: LANDED 2026-07-18 (e0b8387 + the unambiguous-single-Develop
+fallback follow-up: a preset applied while a fresh-id clone chain is
+active now REACHES that chain's one Develop node instead of no-oping —
+strict id matching still governs any ambiguous case, i.e. 2+ Develops
+on either side). Original hazard analysis kept below for the record.
+(Was: DESIGN OPEN.) The two preset/paste hazards below are
 CONFIRMED REAL (2026-07-18, conductor): reproduced at runtime against the
 actual repo modules (mergeScopedLook + a verbatim copy of the private
 mergeLookWithCurrentGeometry; 2-output doc round-trips parseGraphDoc, so

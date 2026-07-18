@@ -381,8 +381,8 @@ try {
   const cloneDevIdAfterHazard = develNodeIdFeeding(gAfterHazard, cloneOut.id);
   const cloneEvAfterHazard = gAfterHazard.nodes.find((n) => n.id === cloneDevIdAfterHazard)?.develop?.basic?.ev;
   check(
-    "the ACTIVE clone's own Develop node is untouched too (no id match — documented limitation, not a regression)",
-    cloneEvAfterHazard === cloneEvBefore4b,
+    "the ACTIVE clone's own Develop node RECEIVES the preset (unambiguous-single-Develop fallback — a preset onto a fresh-id clone chain must not be a dead button)",
+    cloneEvAfterHazard === 0.33,
     { before: cloneEvBefore4b, after: cloneEvAfterHazard }
   );
   await page.evaluate((slug) => window.__debug.deletePreset(slug), scopedSlug);

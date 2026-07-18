@@ -412,10 +412,24 @@ export function mergeScopedLook(
   scope?: ReadonlySet<string> | null
 ): GraphDoc {
   const inScope = (id: string) => !scope || scope.has(id);
+  // Unambiguous-single-Develop fallback (virtual-copy follow-up): a clone
+  // chain's Develop has a fresh id, so a preset captured from any ordinary
+  // doc (id 'dev') id-matches nothing there and the apply used to no-op —
+  // safe but a dead button. When the scope holds EXACTLY one Develop node
+  // and the look holds EXACTLY one, the pairing is unambiguous and the id
+  // check adds nothing — match them. Multi-Develop chains (or unscoped
+  // calls) keep strict id matching: with 2+ candidates on either side an
+  // id-less pairing WOULD be a guess, and "left untouched rather than
+  // guessed at" still stands.
+  const scopedDevelops = scope ? graph.nodes.filter((n) => n.kind === DEVELOP_KIND && n.develop && scope.has(n.id)) : [];
+  const lookDevelops = look.nodes.filter((ln) => ln.kind === DEVELOP_KIND && ln.develop);
+  const uniqueFallback = scope && scopedDevelops.length === 1 && lookDevelops.length === 1 ? lookDevelops[0] : null;
   const nodes = graph.nodes.map((n) => {
     if (n.kind === DEVELOP_KIND) {
       if (!n.develop || !inScope(n.id)) return n;
-      const srcNode = look.nodes.find((ln) => ln.id === n.id && ln.kind === DEVELOP_KIND);
+      const srcNode =
+        look.nodes.find((ln) => ln.id === n.id && ln.kind === DEVELOP_KIND) ??
+        (uniqueFallback && n.id === scopedDevelops[0]!.id ? uniqueFallback : undefined);
       if (!srcNode?.develop) return n;
       return { ...n, develop: pickDevelopFamilies(srcNode.develop, n.develop, families) };
     }

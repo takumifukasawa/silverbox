@@ -398,7 +398,46 @@ describe('mergeScopedLook — scope param (multi-output apply-time fix, the conf
     const scope = reachableFrom(graph, 'out2');
     const merged = mergeScopedLook(graph, look, new Set(['basic-tone']), scope);
     expect(merged.nodes.find((n) => n.id === 'dev')!.develop!.basic.ev).toBe(0.1); // UNCHANGED — not silently overwritten to 0.99
-    expect(merged.nodes.find((n) => n.id === 'dev-clone')!.develop!.basic.ev).toBe(0.2); // untouched too — no id match
+    // The ACTIVE chain's own Develop (fresh id, no id match) RECEIVES the
+    // look via the unambiguous-single-Develop fallback — one Develop in
+    // scope, one in the look, so the pairing is not a guess (follow-up to
+    // the initial scoping fix, where this was a documented no-op).
+    expect(merged.nodes.find((n) => n.id === 'dev-clone')!.develop!.basic.ev).toBe(0.99);
+  });
+
+  it('the unambiguous fallback stays OFF when the pairing would be a guess (2 Develops in scope, or 2 in the look)', () => {
+    // Chain with TWO Develop nodes in scope: in → devA → devB → out.
+    const graph: GraphDoc = {
+      version: 1,
+      nodes: [
+        inputNode(),
+        devNode('devA', { basic: { ...defaultDevelopParams().basic, ev: 0.1 } }),
+        devNode('devB', { basic: { ...defaultDevelopParams().basic, ev: 0.2 } }),
+        outputNode('out'),
+      ],
+      edges: [edge('e0', 'in', 'devA'), edge('e1', 'devA', 'devB'), edge('e2', 'devB', 'out')],
+    };
+    const look: GraphDoc = { version: 1, nodes: [inputNode(), devNode('dev', { basic: { ...defaultDevelopParams().basic, ev: 0.99 } }), outputNode()], edges: [edge('e0', 'in', 'dev'), edge('e1', 'dev', 'out')] };
+    const scope = reachableFrom(graph, 'out');
+    const merged = mergeScopedLook(graph, look, new Set(['basic-tone']), scope);
+    // Ambiguous (which of devA/devB should 'dev' map to?) — both left alone.
+    expect(merged.nodes.find((n) => n.id === 'devA')!.develop!.basic.ev).toBe(0.1);
+    expect(merged.nodes.find((n) => n.id === 'devB')!.develop!.basic.ev).toBe(0.2);
+
+    // Mirror case: ONE Develop in scope but TWO in the look — also ambiguous.
+    const graph2 = twoOutputGraph();
+    const look2: GraphDoc = {
+      version: 1,
+      nodes: [
+        inputNode(),
+        devNode('x1', { basic: { ...defaultDevelopParams().basic, ev: 0.5 } }),
+        devNode('x2', { basic: { ...defaultDevelopParams().basic, ev: 0.6 } }),
+        outputNode('out'),
+      ],
+      edges: [edge('e0', 'in', 'x1'), edge('e1', 'x1', 'x2'), edge('e2', 'x2', 'out')],
+    };
+    const merged2 = mergeScopedLook(graph2, look2, new Set(['basic-tone']), reachableFrom(graph2, 'out2'));
+    expect(merged2.nodes.find((n) => n.id === 'dev-clone')!.develop!.basic.ev).toBe(0.2); // untouched
   });
 
   it('the SAME apply, scoped to the id-matching chain instead, updates it normally (scoping only EXCLUDES, never blocks a legitimate in-scope match)', () => {
