@@ -112,6 +112,20 @@ axis that must compose, not fork the preset:
   "stamp sheet" copy is the honest weight class. Aperture-dependent
   visibility means per-frame application judgment is needed anyway, so
   fully-automatic following would be wrong even if cheap.
+- **Orientation (user: 「縦構図か横構図かでも違うしなぁ」) reveals the
+  deeper rule: every shared element has a NATURAL COORDINATE FRAME.**
+  Dust is fixed to the SENSOR — a portrait shot is the same sensor
+  rotated, so a stamp sheet stored in frame-normalized coords lands in
+  the wrong place on every portrait frame. Store the repair set in
+  SENSOR space (pre-orientation) and map through each photo's own
+  orientation at apply time — the anchor-space machinery already tracks
+  exactly this. Composition-driven elements (a sky-darkening linear
+  mask) are the opposite: FRAME-anchored ("top of frame" is top in
+  either orientation). So a shared asset must declare its anchor:
+  repair set = sensor-anchored; look-level masks (if ever shared) =
+  frame-anchored. Same conclusion as the dust axis: orientation is not
+  a reason for preset variants — anchoring to the right frame keeps it
+  to one asset.
 
 ## Interim ladder (pragmatic, already decided or cheap)
 
