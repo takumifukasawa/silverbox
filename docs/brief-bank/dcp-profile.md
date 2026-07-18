@@ -6,6 +6,38 @@ see below). STAGE 1 LANDED 2026-07-18 (parser + DNG §6 pipeline +
 DCP result is baked into the SAME 17³ residual-lattice shape the
 builtin profile uses, so GPU/CPU parity is inherited).
 
+RIGOROUS RE-MEASUREMENT (2026-07-18, fit-profile.mjs-rigor harness —
+all 14 LR-reference scenes, NCC-tile-gated, held-out by construction
+since no fitting happens): the earlier single-scene smoke test's "on
+par" reading does NOT generalize. Executing the real, locally
+installed Sony ILCE-7CM2 "Adobe Standard" DCP scores held-out ΔE2000
+mean 4.99 vs identity 4.36 and the shipped round-6 lattice 4.33 — DCP
+LOSES to both, concentrated in chroma (ΔEab 6.99 vs 4.83–4.92) and
+worst in the green sector (5.11 vs 4.25–4.31). Root cause: exiftool on
+the LR reference JPEGs' own XMP shows CameraProfile=Adobe Standard +
+LookName=Adobe Color, LookParametersLookTable=<obfuscated hash> — there
+is no separate per-camera "Adobe Color" .dcp on this machine to run;
+"Adobe Color" is an obfuscated, cross-camera LookTable Look layered on
+top of the per-camera Adobe Standard profile, which this pipeline does
+not execute — a bigger simplification than illuminant interpolation,
+tone-curve domain, or CameraCalibration. `profile.source` stays
+`'builtin'` by default; LookTable execution is the next lever, not
+another statistical refit.
+
+CONDUCTOR CROSS-CHECK ADDENDA (same day): (1) the Adobe Color Look
+DOES exist locally as an ACR creative-profile XMP (Settings/Adobe/
+Profiles/Adobe Raw/Adobe Color.xmp, crs:PresetType="Look",
+crs:CameraProfile="Adobe Standard") whose crs:LookTable payload is a
+~100KB OBFUSCATED ascii-encoded table — executing it would require
+reverse-engineering that encoding first (research project, unscheduled).
+(2) The per-camera CameraProfiles/Camera/ dir holds COMPLETE
+camera-matching DCPs (Camera ST/VV/NT/PT/FL/BW/IN/SH for the ILCE-7CM2)
+— these are ordinary DCPs the shipped pipeline can execute TODAY, and
+"Camera ST" (the camera's own Standard look) aligns with the
+camera-faithful principle far better than chasing Adobe Color; the
+immediate practical payoff of DCP mode is these + third-party/film
+DCPs, not the Adobe look.
+
 STAGE 2 (root cause + fix): Stage 1's `cameraNativeFromWorking`
 inverted the decoded working-space pixel through `camXyz` (the raw
 XYZ→camera matrix) — no per-channel WB scaling, and the wrong
