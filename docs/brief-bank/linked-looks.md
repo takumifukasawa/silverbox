@@ -156,15 +156,30 @@ peer-to-peer copy dissolves into exactly two clean operations:
 2. **Apply preset to selection**: the one-shot "make these match once"
    case that doesn't deserve a shared asset (small unbuilt feature).
 
-Remaining design choice — how edits flow into the look:
-(a) write-through (editing a linked photo edits the look live — UE's
-edit-the-material feel; powerful, but "I touched one thing and
-everything changed" surprise), vs (b) **explicit publish (recommended)**:
-edits are local first, a deliberate "update look from this photo"
-gesture propagates. The Auto Sync lesson IS the argument: implicit
-propagation is the accident class; declarative, deliberate propagation
-is the fix. Under (b), both today's Sync button AND Auto Sync are
-eventually subsumed.
+Edit-flow: **(b) explicit publish — USER-DECIDED 2026-07-18** («そうね、
+bの方が良さそう») over (a) write-through. Edits are local first; a
+deliberate "update look from this photo" gesture propagates. The Auto
+Sync lesson IS the argument: implicit propagation is the accident
+class; declarative, deliberate propagation is the fix. Under (b), both
+today's Sync button AND Auto Sync are eventually subsumed.
+
+## The asset taxonomy (user: 「消しゴムとか用のマテリアルみたいな概念も
+発生するってことかぁ」)
+
+Yes — the repair sheet is a second material-LIKE species, and the two
+differ along exactly two axes, which become the classifier for any
+future asset kind:
+
+| asset kind | payload | ANCHOR | PROPAGATION |
+|---|---|---|---|
+| look (material) | develop params | parameter space, per family | FOLLOWING (link + explicit publish) |
+| repair sheet (eraser) | spot set | physical sensor coords | ONE-SHOT (per-frame opt-in, no following) |
+
+Design the shared-asset container around those two declared axes
+(anchor × propagation); ship exactly these two kinds. A hypothetical
+third kind (frame-anchored one-shot watermark/border, say) would slot
+into the same grid without new architecture — but nothing beyond the
+two is planned or needed.
 
 ## Interim ladder (pragmatic, already decided or cheap)
 
