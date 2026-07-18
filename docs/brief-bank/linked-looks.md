@@ -39,6 +39,31 @@ look?") with a temporal mechanism ("when did you last copy?").
   looks cover the "keep following it" half. They compose: a preset is a
   frozen fork of a shared look.
 
+## The override problem (user, 2026-07-18 — the core design question)
+
+「上書きしたいパラメーターをどうするか。ハイライトやシャドウなどはある程度
+プリセットに埋め込むが、写真ごとにも調整すると思う。が、逆にプリセットの
+値を採用したい場合もあるだろうし」— i.e. a photo must be able to (1)
+follow the look, (2) locally override parts of it, and (3) RETURN to
+following. Three candidate models:
+
+- **(A) Per-family fork + revert (recommended).** The link covers preset
+  FAMILIES (the exact vocabulary preset scoping / sync already ship).
+  Touching any param in a linked family forks THAT family local (visible
+  "modified from look" badge); "Revert to look" per family resumes
+  following. Declarative state, reuses existing machinery, expresses
+  "tone per-photo, color follows" naturally.
+- **(B) Graph stacking (node-native).** Shared look = upstream reference
+  node; per-photo tweaks = a separate downstream Develop node. No
+  override machinery at all — but the COMPOSITION MATH goes muddy for
+  replace-semantics params (running highlights/shadows tone mapping
+  twice ≠ replacing the value; curves/WB don't stack) — the reason
+  LR/C1 use value-level overrides. Philosophically pretty, rejected on
+  image-math grounds unless someone finds a clean composition algebra.
+- **(C) Per-parameter override set** (CSS/Houdini-style). Finest grain,
+  heaviest UI (every slider needs a follow/override state). Position:
+  refine (A) into (C) only where real usage demands it, not up front.
+
 ## Interim ladder (pragmatic, already decided or cheap)
 
 1. Now: explicit Sync button only; Auto Sync is removal-candidate
