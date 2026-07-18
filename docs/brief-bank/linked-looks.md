@@ -126,6 +126,19 @@ axis that must compose, not fork the preset:
   frame-anchored. Same conclusion as the dust axis: orientation is not
   a reason for preset variants — anchoring to the right frame keeps it
   to one asset.
+- **APS-C crop mode (user: 「apscモードとかもあったりするしなぁ」) pins
+  the definition down: "sensor space" means PHYSICAL sensor
+  coordinates.** Crop mode reads a centered window of the same sensor —
+  and the engine already knows that window exactly (raw_inset_crops /
+  computeCropbox, the geometry-saga work: crop-mode frames are
+  4552×3028 center-preserved against the full readout). Store the
+  repair set in physical-sensor pixels; apply through each photo's
+  readout-window ∘ orientation transform — both already tracked. One
+  stamp sheet then covers FF/APS-C/portrait/landscape mixes; dust
+  outside the APS-C window simply maps away (correct: it isn't in that
+  frame). Every objection so far (dust presence, orientation, crop
+  mode) collapses into the same rule: anchor low enough and one asset
+  suffices.
 
 ## Interim ladder (pragmatic, already decided or cheap)
 
