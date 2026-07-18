@@ -70,6 +70,14 @@ The user connected the dots himself: "profileの中にトーンカーブを
 ships LCP (Lens Correction Profile) files — if an "LR-geometry mode"
 is ever wanted, reading the LCP is the principled route (not scaling
 our spline); camera-faithful stays the default regardless.
+LCP EXPERIMENT RESULT (2026-07-18, scratchpad-only, adoption
+deferred per user): executing the 24mm LCP's radial polynomial
+(k1=-0.190667 k2=0.070143 k3=-0.018779; radius normalized to the
+FULL diagonal so the frame corner sits at r=0.5; ScaleFactor is
+metadata, not pixel math) on a lens-OFF render reproduces ~85% of
+LR's correction (51px uncorrected -> 6-9px vs LR, direction/sign
+exact; LR's own export floor is 2.24px). Hypothesis largely
+confirmed: LR's stronger-than-camera geometry IS its LCP.
 
 ## Open questions for the user
 

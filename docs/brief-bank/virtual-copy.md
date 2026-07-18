@@ -1,6 +1,17 @@
 # Brief: virtual copies (named output nodes)
 
-Status: DESIGN OPEN. Mechanism DECIDED (project memory, 2026-07-10 era):
+Status: DESIGN OPEN — and the two preset/paste hazards below are
+CONFIRMED REAL (2026-07-18, conductor): reproduced at runtime against the
+actual repo modules (mergeScopedLook + a verbatim copy of the private
+mergeLookWithCurrentGeometry; 2-output doc round-trips parseGraphDoc, so
+the state is legal and user-creatable today via Add-node > output). Paste
+deletes the second chain; scoped apply updates the id-matching copy
+regardless of which one the user is working on (the API has no
+active-output parameter at all). Single-output control case behaves
+correctly on both paths. One ⌘Z recovers, but autosave persists the loss
+once unnoticed — ship the scoping fix WITH (or before) any UI that makes
+2-output docs common.
+Mechanism DECIDED (project memory, 2026-07-10 era):
 "multiple named output nodes = the virtual-copy mechanism" — a doc already
 supports 2+ `kind: 'output'` nodes (spec §6, `docs/sidecar-spec.md` §4.1),
 each a named rendition ('main', 'bw-crop', …). The plumbing below this
