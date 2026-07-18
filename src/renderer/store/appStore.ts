@@ -8,6 +8,7 @@ import {
   peekRedo,
   peekUndo,
   pushUndoEntry,
+  type ArrangeUndoEntry,
   type FlagUndoEntry,
   type GraphEntryKind,
   type GraphUndoEntry,
@@ -880,6 +881,31 @@ interface AppState {
    */
   toggleNodeDisabled(nodeId: string): void;
   moveNode(nodeId: string, position: { x: number; y: number }): void;
+  /**
+   * "Arrange" (node-editor-ux.md's auto-layout-toggle successor, decided
+   * 2026-07-18): writes `positions` (a node id -> computed-layout-position
+   * map — NodeEditorPanel.tsx feeds this straight from computeAutoLayout,
+   * dagre unchanged) into the doc's nodes. Real graph mutation: dirty ->
+   * autosave, ONE `arrange` undo entry covering every node whose position
+   * actually moved (>= 1px on either axis — anything smaller is dagre/float
+   * noise, not a real move). Idempotent: if nothing moved beyond that
+   * tolerance, this is a true no-op — no entry, no dirty, so re-clicking
+   * Arrange on an already-arranged graph does nothing (brief's "idempotent
+   * re-click"). `positions` may reference nodes no longer in the graph (a
+   * stale computation racing a delete) — silently ignored, same defensive
+   * stance nodeAutoLayout.ts's own `g.hasNode` guard takes.
+   *
+   * Returns whether anything actually moved — NodeEditorPanel.tsx uses this
+   * to decide whether to request a fitView. That's load-bearing, not just an
+   * optimization: `pendingFitRef` is only ever CONSUMED by the effect that
+   * watches `rfNodes`, which itself only changes when `graph` gets a new
+   * reference. Setting the flag on a true no-op (unchanged `graph`) would
+   * leave it "banked" unconsumed until some LATER, unrelated `rfNodes`
+   * change (e.g. a subsequent undo/redo) — which would then wrongly refit
+   * the viewport against whatever positions happen to be current at THAT
+   * point, not the ones Arrange computed.
+   */
+  arrangeNodes(positions: Record<string, { x: number; y: number }>): boolean;
   addOpNode(kind: AddableKind): void;
   removeOpNode(nodeId: string): void;
   /** Rewire an input: replaces whatever currently feeds (target, handle). */
@@ -3389,6 +3415,46 @@ export const useAppStore = create<AppState>((set, get) => {
     }));
   },
 
+  arrangeNodes(positions) {
+    let moved = false;
+    set((s) => {
+      const target = s.imagePath;
+      if (!target) return {};
+      // 1px tolerance (brief): dagre's float output re-run on the SAME
+      // structure is deterministic (nodeAutoLayout.test.ts), so a second
+      // click after Arrange already ran only sees noise-level deltas, if any.
+      const MOVE_EPS = 1;
+      const before: Record<string, { x: number; y: number }> = {};
+      const after: Record<string, { x: number; y: number }> = {};
+      const nodes = s.graph.nodes.map((n) => {
+        const next = positions[n.id];
+        if (!next) return n;
+        if (Math.abs(next.x - n.position.x) < MOVE_EPS && Math.abs(next.y - n.position.y) < MOVE_EPS) return n;
+        before[n.id] = n.position;
+        after[n.id] = next;
+        return { ...n, position: next };
+      });
+      if (Object.keys(before).length === 0) return {}; // idempotent re-click — nothing moved, `moved` stays false
+      moved = true;
+      // Unlike a photo-edit entry (whose `after` is only knowable once the
+      // mutation has actually landed, captured lazily on first undo — see
+      // pushHistory's doc comment), Arrange's `after` is exactly `positions`
+      // filtered to the moved subset: known synchronously right here, same
+      // as a sync entry's before/after (undoStack.ts's SyncUndoEntry doc).
+      const entry: ArrangeUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'arrange',
+        label: 'Arrange nodes',
+        target,
+        before,
+        after,
+      };
+      return { graph: { ...s.graph, nodes }, graphDirty: true, undoStack: pushUndoEntry(s.undoStack, entry) };
+    });
+    return moved;
+  },
+
   // Insert before the ACTIVE output node; the new node takes the output's
   // spot and the output shifts right so the chain stays readable. A blend
   // node gets both inputs from the previous source (a self-blend is an
@@ -4160,11 +4226,28 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         return;
       }
-      case 'arrange':
-        // Type + dispatch designed (global-undo brief) but no producer in v1
-        // yet (Arrange hasn't landed) — nothing can ever push one of these
-        // onto the stack today, so this branch never actually runs.
+      case 'arrange': {
+        // "Jump semantics don't apply — arrange is always on the OPEN
+        // photo's doc" (node-editor-ux.md): still runs through the same
+        // ensurePhotoOpenForUndo/blockUndoRedo machinery as every other
+        // single-photo entry for the (rare) case a LATER entry for a
+        // DIFFERENT photo was undone first and this Arrange entry's photo
+        // is consequently not the one currently open — it's a no-op whenever
+        // that photo already is.
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('undo', entry.label, entry.target);
+          return;
+        }
+        set((s) => ({
+          graph: {
+            ...s.graph,
+            nodes: s.graph.nodes.map((n) => (entry.before[n.id] ? { ...n, position: entry.before[n.id]! } : n)),
+          },
+          graphDirty: true,
+          undoStack: moveTopToRedo(s.undoStack, entry),
+        }));
         return;
+      }
     }
   },
 
@@ -4225,8 +4308,23 @@ export const useAppStore = create<AppState>((set, get) => {
         }
         return;
       }
-      case 'arrange':
+      case 'arrange': {
+        if (entry.after === undefined) return; // defensive: arrangeNodes always populates `after` eagerly (both sides known synchronously at push time, like a sync entry)
+        if (!(await ensurePhotoOpenForUndo(entry.target))) {
+          blockUndoRedo('redo', entry.label, entry.target);
+          return;
+        }
+        const after = entry.after;
+        set((s) => ({
+          graph: {
+            ...s.graph,
+            nodes: s.graph.nodes.map((n) => (after[n.id] ? { ...n, position: after[n.id]! } : n)),
+          },
+          graphDirty: true,
+          undoStack: moveTopToUndo(s.undoStack, entry),
+        }));
         return;
+      }
     }
   },
 

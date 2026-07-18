@@ -76,12 +76,17 @@ export interface SyncUndoEntry extends UndoEntryBase {
 
 /**
  * Node-editor Arrange (node-editor-ux.md's auto-layout successor): before/
- * after are the stored node positions, keyed by node id. Type + dispatch only
- * for v1 — no producer yet either.
+ * after are the stored node positions of every node that actually MOVED,
+ * keyed by node id (a subset of the doc's nodes, not necessarily all of
+ * them). `target` is the open photo whose doc was arranged — same meaning
+ * as every other single-photo entry's `target` (photo-edit/rating/flag);
+ * "jump semantics don't apply" per the brief just means undo/redo don't need
+ * a SPECIAL case beyond the ordinary ensurePhotoOpenForUndo jump-if-needed
+ * machinery every other kind already uses.
  */
 export interface ArrangeUndoEntry extends UndoEntryBase {
   kind: 'arrange';
-  target: string; // project path (Arrange isn't scoped to one photo)
+  target: string; // photo path
   before: Record<string, { x: number; y: number }>;
   after?: Record<string, { x: number; y: number }>;
 }

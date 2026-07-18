@@ -276,6 +276,7 @@ export function NodeEditorPanel() {
   const selectedNodeId = useAppStore((s) => s.selectedNodeId);
   const selectNode = useAppStore((s) => s.selectNode);
   const moveNode = useAppStore((s) => s.moveNode);
+  const arrangeNodes = useAppStore((s) => s.arrangeNodes);
   const addOpNode = useAppStore((s) => s.addOpNode);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const connectEdge = useAppStore((s) => s.connectEdge);
@@ -424,62 +425,18 @@ export function NodeEditorPanel() {
   // has already run by the time this effect (declared in the PARENT
   // component) executes, so fitView measures the NEW layout, not the stale
   // one.
-  // Auto-layout toggle (presentation-form prototype,
-  // docs/brief-bank/node-editor-ux.md "decide by prototype"): session-local,
-  // deliberately NOT a store slice / doc field — this is a display
-  // preference for hand-testing free-canvas vs structured layout, not
-  // document state, so it resets on reload like `selectedEdgeId` above.
-  // VIEW-ONLY: `layoutPositions` below only ever feeds the `position` prop
-  // handed to React Flow when this is on; `graph`/`moveNode` are never
-  // touched by it, so stored positions survive untouched under it and
-  // reappear exactly as they were the moment it's switched back off.
-  const [autoLayoutOn, setAutoLayoutOn] = useState(false);
-  const [layoutPositions, setLayoutPositions] = useState<Record<string, { x: number; y: number }>>({});
-  // Re-layout on STRUCTURE changes only (node/edge added or removed), not on
-  // every rfNodes resync — param edits, thumbnails and badges land in
-  // rfNodes far more often than the graph's shape actually changes, and
-  // dagre reshuffling the whole canvas on every keystroke would be far more
-  // disruptive than useful. Node ids/edges are each sorted before joining so
-  // insertion order doesn't spuriously count as a structure change.
-  const structureKey = `${graph.nodes
-    .map((n) => n.id)
-    .sort()
-    .join(',')}|${graph.edges
-    .map((e) => `${e.source}>${e.target}:${e.targetHandle ?? ''}`)
-    .sort()
-    .join(',')}`;
-  const prevStructureKeyRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!autoLayoutOn) {
-      // Force a fresh computation next time this flips on, rather than
-      // trusting a stale layout from before the graph changed while it was off.
-      prevStructureKeyRef.current = null;
-      return;
-    }
-    if (prevStructureKeyRef.current === structureKey) return;
-    prevStructureKeyRef.current = structureKey;
-    const layoutNodes: LayoutNodeInput[] = graph.nodes.map((n) => {
-      const measured = rfNodes.find((rn) => rn.id === n.id)?.measured;
-      return { id: n.id, kind: n.kind, width: measured?.width, height: measured?.height };
-    });
-    const layoutEdges: LayoutEdgeInput[] = graph.edges.map((e) => ({ source: e.source, target: e.target }));
-    setLayoutPositions(Object.fromEntries(computeAutoLayout(layoutNodes, layoutEdges)));
-    pendingFitRef.current = true;
-  }, [autoLayoutOn, structureKey, graph.nodes, graph.edges, rfNodes]);
-
   useEffect(() => {
     if (!pendingFitRef.current) return;
     pendingFitRef.current = false;
     rfInstanceRef.current?.fitView({ padding: 0.2, maxZoom: 1 });
-  }, [rfNodes, layoutPositions]);
+  }, [rfNodes]);
 
-  // The nodes React Flow actually renders: stored doc positions while OFF
-  // (rfNodes as-is, draggable per React Flow's own default), dagre's
-  // computed positions while ON — dragging is disabled in that mode so a
-  // drag simply can't happen, rather than happening and being discarded.
-  const displayNodes = autoLayoutOn
-    ? rfNodes.map((n) => ({ ...n, position: layoutPositions[n.id] ?? n.position, draggable: false }))
-    : rfNodes;
+  // Nodes React Flow actually renders: always the stored doc positions,
+  // fully draggable — Arrange (below) is a real, undoable graph mutation now
+  // (node-editor-ux.md's auto-layout-toggle prototype decided 2026-07-18),
+  // not a view-only projection, so there's no second position source to pick
+  // between anymore.
+  const displayNodes = rfNodes;
 
   const edges: Edge[] = graph.edges.map((e) => ({
     id: e.id,
@@ -545,14 +502,30 @@ export function NodeEditorPanel() {
     [removeOpNode, removeEdge]
   );
   const onEdgeClick = useCallback((_ev: React.MouseEvent, edge: Edge) => setSelectedEdgeId(edge.id), []);
-  // Toggling in either direction jumps the visible node positions a long way
-  // (doc coordinates ↔ dagre's LR grid) — fitView so the switch never looks
-  // like "the editor went blank" (same failure mode the round-12 fix above
-  // already guards against for image switches/preset applies).
-  const toggleAutoLayout = useCallback(() => {
-    setAutoLayoutOn((v) => !v);
-    pendingFitRef.current = true;
-  }, []);
+  // "Arrange" (node-editor-ux.md's auto-layout-toggle successor, decided
+  // 2026-07-18): runs the SAME dagre layout the view-only prototype used
+  // (nodeAutoLayout.ts, unchanged) but WRITES the result into the doc via
+  // arrangeNodes — a real graph mutation (dirty -> autosave, one `arrange`
+  // undo entry), not a display-only projection. arrangeNodes itself is the
+  // idempotence gate (1px tolerance, no entry/no dirty if nothing moved) —
+  // ONLY request a fitView when it reports an actual move. Setting
+  // pendingFitRef unconditionally would "bank" it on a no-op re-click: that
+  // flag is only consumed by the effect watching `rfNodes`, which an
+  // idempotent Arrange never changes, so it would sit there and get wrongly
+  // consumed by some LATER, unrelated rfNodes change (e.g. a subsequent
+  // undo/redo) — refitting the viewport against whatever positions happen
+  // to be current at THAT point instead of doing nothing, as a true no-op
+  // click should (found via the idempotent-re-click + undo/redo + drag
+  // verify sequence in verify-ms4-graph.mjs).
+  const onArrange = useCallback(() => {
+    const layoutNodes: LayoutNodeInput[] = graph.nodes.map((n) => {
+      const measured = rfNodes.find((rn) => rn.id === n.id)?.measured;
+      return { id: n.id, kind: n.kind, width: measured?.width, height: measured?.height };
+    });
+    const layoutEdges: LayoutEdgeInput[] = graph.edges.map((e) => ({ source: e.source, target: e.target }));
+    const moved = arrangeNodes(Object.fromEntries(computeAutoLayout(layoutNodes, layoutEdges)));
+    if (moved) pendingFitRef.current = true;
+  }, [graph.nodes, graph.edges, rfNodes, arrangeNodes]);
 
   return (
     <div className="node-editor">
@@ -597,16 +570,11 @@ export function NodeEditorPanel() {
       <div className="node-editor-controls">
         <button
           type="button"
-          onClick={toggleAutoLayout}
-          data-testid="node-editor-autolayout"
-          className={autoLayoutOn ? 'active' : undefined}
-          title={
-            autoLayoutOn
-              ? 'Auto-layout is ON — view-only (dagre, left-to-right); stored node positions are untouched, dragging is disabled'
-              : 'Auto-layout is OFF — showing stored node positions; turn on for a read-only left-to-right layout (view-only prototype)'
-          }
+          onClick={onArrange}
+          data-testid="node-editor-arrange"
+          title="Arrange nodes left-to-right (⌘Z to undo)"
         >
-          Auto-layout
+          Arrange
         </button>
       </div>
     </div>

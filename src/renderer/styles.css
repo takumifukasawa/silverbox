@@ -2264,9 +2264,10 @@ button:disabled {
   color: #ff7a76;
 }
 
-/* Auto-layout toggle (presentation-form prototype): same floating overlay
-   cluster idiom as .canvas-controls, bottom-right so it never contests the
-   full-width banners above (.node-editor-banner). */
+/* Node editor's floating controls cluster (Arrange button, node-editor-ux.md's
+   auto-layout-toggle successor): same floating overlay idiom as
+   .canvas-controls, bottom-right so it never contests the full-width
+   banners above (.node-editor-banner). */
 .node-editor-controls {
   position: absolute;
   right: 10px;
@@ -2284,11 +2285,6 @@ button:disabled {
 .node-editor-controls button {
   padding: 2px 8px;
   font-size: 12px;
-}
-
-.node-editor-controls button.active {
-  background: #4a6b9a;
-  border-color: #6a9fe8;
 }
 
 /* Image node (composite/mask-by-another-file feature): Inspector's

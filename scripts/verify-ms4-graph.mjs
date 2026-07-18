@@ -10,7 +10,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, rmLook, writeLookFixture } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, readLook, rmLook, writeLookFixture } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -183,6 +183,122 @@ try {
     'far-away sidecar node positions are reframed inside the editor pane after switching images',
     nodeBoxes.length === 3 && nodeBoxes.every((nb) => intersects(nb, paneBox)),
     { paneBox, nodeBoxes }
+  );
+
+  console.log('verify-ms4 (Arrange — undoable auto-layout command, node-editor-ux.md):');
+  // Still on JPG_PATH's far-away fixture doc from the fitView check above
+  // (in/dev/out at x=3000/3300/3600) — a clean, big delta to prove Arrange
+  // actually WRITES new positions rather than just reprojecting them.
+  const posOf = (g, id) => g.nodes.find((n) => n.id === id).position;
+  const graphBeforeArrange = await page.evaluate(() => window.__debug.graphState());
+  const posBeforeArrange = { in: posOf(graphBeforeArrange, 'in'), dev: posOf(graphBeforeArrange, 'dev'), out: posOf(graphBeforeArrange, 'out') };
+
+  const arrangeButton = page.locator('[data-testid="node-editor-arrange"]');
+  await arrangeButton.scrollIntoViewIfNeeded();
+  await arrangeButton.click();
+
+  const graphAfterArrange = await page.evaluate(() => window.__debug.graphState());
+  const posAfterArrange = { in: posOf(graphAfterArrange, 'in'), dev: posOf(graphAfterArrange, 'dev'), out: posOf(graphAfterArrange, 'out') };
+  check(
+    'Arrange moves every stored node position (not view-only anymore)',
+    posAfterArrange.in.x !== posBeforeArrange.in.x &&
+      posAfterArrange.dev.x !== posBeforeArrange.dev.x &&
+      posAfterArrange.out.x !== posBeforeArrange.out.x,
+    { posBeforeArrange, posAfterArrange }
+  );
+  check(
+    'the new positions flow left-to-right, monotonically (nodeAutoLayout.test.ts\'s own invariant, exercised end-to-end)',
+    posAfterArrange.in.x < posAfterArrange.dev.x && posAfterArrange.dev.x < posAfterArrange.out.x,
+    posAfterArrange
+  );
+
+  const undoStackAfterArrange = await page.evaluate(() => window.__debug.undoStackState());
+  check(
+    'Arrange pushed exactly one \'arrange\' undo entry',
+    undoStackAfterArrange.undo.at(-1)?.kind === 'arrange',
+    undoStackAfterArrange.undo.at(-1)
+  );
+  check('the doc is dirty right after Arrange (real mutation, not a view-only toggle)', await page.evaluate(() => window.__debug.graphDirty()), null);
+
+  await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+  const savedLook = readLook(JPG_PATH);
+  const savedPos = (id) => savedLook.graph.nodes.find((n) => n.id === id).position;
+  check(
+    'autosave persists the arranged positions to the look file on disk',
+    savedPos('in').x === posAfterArrange.in.x &&
+      savedPos('dev').x === posAfterArrange.dev.x &&
+      savedPos('out').x === posAfterArrange.out.x,
+    { onDisk: savedLook.graph.nodes.map((n) => n.position), posAfterArrange }
+  );
+
+  console.log('verify-ms4 (Arrange — idempotent re-click):');
+  const undoLenBeforeReclick = undoStackAfterArrange.undo.length;
+  await arrangeButton.click();
+  const undoStackAfterReclick = await page.evaluate(() => window.__debug.undoStackState());
+  const graphAfterReclick = await page.evaluate(() => window.__debug.graphState());
+  check(
+    're-clicking Arrange on an already-arranged graph pushes NO new undo entry (idempotent)',
+    undoStackAfterReclick.undo.length === undoLenBeforeReclick,
+    { before: undoLenBeforeReclick, after: undoStackAfterReclick.undo.length }
+  );
+  check(
+    're-clicking Arrange leaves positions untouched',
+    posOf(graphAfterReclick, 'dev').x === posAfterArrange.dev.x && posOf(graphAfterReclick, 'dev').y === posAfterArrange.dev.y,
+    { before: posAfterArrange.dev, after: posOf(graphAfterReclick, 'dev') }
+  );
+  check(
+    're-clicking Arrange does not mark the doc dirty (true no-op, not just a no-op undo entry)',
+    !(await page.evaluate(() => window.__debug.graphDirty())),
+    null
+  );
+
+  console.log('verify-ms4 (Arrange — ⌘Z restores the exact previous hand-placed positions, redo re-applies):');
+  await page.keyboard.press('Meta+z');
+  await page.waitForFunction(
+    (expected) => window.__debug.graphState().nodes.find((n) => n.id === 'in')?.position.x === expected,
+    posBeforeArrange.in.x,
+    { timeout: 5_000 }
+  );
+  const graphAfterUndo = await page.evaluate(() => window.__debug.graphState());
+  check(
+    '⌘Z restores the exact pre-Arrange positions (in/dev/out)',
+    posOf(graphAfterUndo, 'in').x === posBeforeArrange.in.x &&
+      posOf(graphAfterUndo, 'in').y === posBeforeArrange.in.y &&
+      posOf(graphAfterUndo, 'dev').x === posBeforeArrange.dev.x &&
+      posOf(graphAfterUndo, 'dev').y === posBeforeArrange.dev.y &&
+      posOf(graphAfterUndo, 'out').x === posBeforeArrange.out.x &&
+      posOf(graphAfterUndo, 'out').y === posBeforeArrange.out.y,
+    { posBeforeArrange, graphAfterUndo: graphAfterUndo.nodes.map((n) => ({ id: n.id, position: n.position })) }
+  );
+
+  await page.locator('[data-testid="redo-button"]').scrollIntoViewIfNeeded();
+  await page.locator('[data-testid="redo-button"]').click();
+  await page.waitForFunction(
+    (expected) => window.__debug.graphState().nodes.find((n) => n.id === 'in')?.position.x === expected,
+    posAfterArrange.in.x,
+    { timeout: 5_000 }
+  );
+  const graphAfterRedo = await page.evaluate(() => window.__debug.graphState());
+  check(
+    'redo re-applies the arranged positions exactly',
+    posOf(graphAfterRedo, 'dev').x === posAfterArrange.dev.x && posOf(graphAfterRedo, 'dev').y === posAfterArrange.dev.y,
+    { posAfterArrange, graphAfterRedo: graphAfterRedo.nodes.map((n) => ({ id: n.id, position: n.position })) }
+  );
+
+  console.log('verify-ms4 (Arrange — nodes remain fully draggable afterward, no more view-only mode):');
+  const devNodeAfterArrange = page.locator('.react-flow__node[data-id="dev"]');
+  const devBoxBefore = await devNodeAfterArrange.boundingBox();
+  const dragDx = 80;
+  const dragDy = 30;
+  await page.mouse.move(devBoxBefore.x + devBoxBefore.width / 2, devBoxBefore.y + devBoxBefore.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(devBoxBefore.x + devBoxBefore.width / 2 + dragDx, devBoxBefore.y + devBoxBefore.height / 2 + dragDy, { steps: 10 });
+  await page.mouse.up();
+  const devPosAfterDrag = await page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.id === 'dev').position);
+  check(
+    'a plain drag still moves the node after Arrange (draggable, no view-only suppression left)',
+    devPosAfterDrag.x !== posAfterArrange.dev.x || devPosAfterDrag.y !== posAfterArrange.dev.y,
+    { before: posAfterArrange.dev, after: devPosAfterDrag }
   );
 
   console.log('screenshots: test-artifacts/ms4-exposure.png, ms4-grayscale.png');

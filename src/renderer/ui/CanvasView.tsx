@@ -232,7 +232,7 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
-      /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null for kinds that don't carry one (a batch entry — sync — carries `targets` instead, plain `arrange`'s single project-scoped target aside; `targets` is null for every non-batch kind). */
+      /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null only for a batch entry (`sync`, which carries `targets` instead) — every other kind, including `arrange`, carries a single photo-path `target` like `photo-edit`/`rating`/`flag`; `targets` is null for every non-batch kind. */
       undoStackState(): {
         undo: { kind: string; label: string; target: string | null; targets: string[] | null }[];
         redo: { kind: string; label: string; target: string | null; targets: string[] | null }[];
