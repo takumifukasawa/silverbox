@@ -100,6 +100,13 @@ chosen folder for candidates). Relink rewrites the playlist row + the
 look file's `photo` field. Image-node references keep their existing
 gray+badge missing state.
 
+KNOWN NIT (conductor live-check 2026-07-18, unfixed): opening a photo
+by RELATIVE path (harness/CLI-style — real dialog/D&D opens are always
+absolute) stores the relative string in the playlist row, which then
+resolves project-relative and renders as a missing cell even though
+the photo itself opened fine. Polish fix when convenient: normalize to
+an absolute path at the ensureProjectAndAddPhoto boundary.
+
 ## Migration & compatibility
 
 - Old adjacent sidecars remain READABLE forever (principle 9 —

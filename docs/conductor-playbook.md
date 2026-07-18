@@ -59,6 +59,15 @@ grep -E 'SUITE|FAIL' /tmp/v.log   # expect SUITE: PASS n/n and no FAIL lines
   impossible given the diff, don't start debugging the code — rerun the
   specific script standalone first. Pool contention produces false reds;
   chasing them as regressions burns real time for nothing.
+- A live app launch WITHOUT `SILVERBOX_TEST_PROJECT` (e.g. hand-testing the
+  real per-launch quick-session path, which the pinned-override suite never
+  exercises) needs ONE MORE isolation lever: `quickProjectDir`'s default is
+  `~/Silverbox/Quick` in the REAL home even under a fresh
+  `SILVERBOX_USER_DATA` (settings.ts resolves it from homedir, not
+  userData). Pre-seed the fresh userData's settings.json with a tmp
+  `quickProjectDir` or the test writes real session dirs into the user's
+  own folder (a conductor live-check did exactly that once and had to
+  clean up after itself).
 - NEVER pipe `npm run verify` into grep directly — the pipe eats the exit
   code (we once committed on a hidden red that way).
 - Agents claim green; verify it anyway. One agent left its suite running in
