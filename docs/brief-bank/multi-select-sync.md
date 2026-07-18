@@ -1,9 +1,11 @@
 # Brief: filmstrip multi-select + settings sync
 
-Status: DESIGNED 2026-07-16 (conductor, golden window; feature-queue
-head per user 2026-07-13 "一旦それで"). Ready to dispatch AFTER the
-user's project-storage hand-test clears the filmstrip (this feature
-builds directly on the playlist filmstrip landed in 65aaa68).
+Status: LANDED 2026-07-18 (0552648) — ⌘/⇧-click selection, Sync via
+FamilyScopeDialog, SyncUndoEntry, rating/flag fan-out all shipped.
+Kept for its decided-semantics record; the deferred batch-export item
+graduated to its own brief (batch-export-selection.md).
+(Originally DESIGNED 2026-07-16, feature-queue head per user
+2026-07-13 "一旦それで".)
 Prereq reading: Filmstrip.tsx (playlist cells, ★n+ filter, missing
 cells), appStore's project/playlist state + saveGraph + applyLook,
 docs/brief-bank/preset-scoping-and-export-overrides.md §1 (the family-
