@@ -140,6 +140,32 @@ axis that must compose, not fork the preset:
   mode) collapses into the same rule: anchor low enough and one asset
   suffices.
 
+## The conclusion: sync dissolves into "publish to the look" (user, 2026-07-18)
+
+「syncが必要かどうかだよねぇ。そのsync先をプリセット（マテリアル）に
+しちゃうって感じなのかなぁ」— yes, and that closes the whole question.
+Sync is the WORKAROUND for a missing link concept; once links exist, the
+peer-to-peer copy dissolves into exactly two clean operations:
+
+1. **Publish**: write the current photo's adjustments back into the
+   shared look — every linked photo follows BY CONSTRUCTION (no
+   selection, no timing, forked families untouched). Data flow becomes
+   photo → look → instances instead of photo → photos. This is
+   git-commit-shaped and composes perfectly with the git-native story
+   (local edits = working tree, publish = commit, following = pull).
+2. **Apply preset to selection**: the one-shot "make these match once"
+   case that doesn't deserve a shared asset (small unbuilt feature).
+
+Remaining design choice — how edits flow into the look:
+(a) write-through (editing a linked photo edits the look live — UE's
+edit-the-material feel; powerful, but "I touched one thing and
+everything changed" surprise), vs (b) **explicit publish (recommended)**:
+edits are local first, a deliberate "update look from this photo"
+gesture propagates. The Auto Sync lesson IS the argument: implicit
+propagation is the accident class; declarative, deliberate propagation
+is the fix. Under (b), both today's Sync button AND Auto Sync are
+eventually subsumed.
+
 ## Interim ladder (pragmatic, already decided or cheap)
 
 1. Now: explicit Sync button only; Auto Sync is removal-candidate
