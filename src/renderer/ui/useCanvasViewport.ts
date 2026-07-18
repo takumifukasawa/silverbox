@@ -40,7 +40,17 @@ export function useCanvasViewport(
    * preventDefault still fires either way, so the page itself never scrolls
    * underneath the canvas.
    */
-  suppressWheelZoom = false
+  suppressWheelZoom = false,
+  /**
+   * CSS px reserved at the container's BOTTOM by fit-to-view — crop mode
+   * passes the floating .crop-controls bar's footprint here so the fitted
+   * image never extends underneath it (with the always-visible filmstrip
+   * shrinking the canvas, a bottom-area crop's S/SE/SW handles could land
+   * under the bar, which sits at a higher z-index and swallowed their
+   * pointerdowns — caught by verify-crop's SE ratio-lock drag going no-op).
+   * Only fit math reserves it; free zoom/pan may still move under the bar.
+   */
+  bottomInset = 0
 ) {
   const [view, setView] = useState<ViewportState>({ mode: 'fit', scale: 1, tx: 0, ty: 0 });
   const viewRef = useRef(view);
@@ -51,6 +61,8 @@ export function useCanvasViewport(
   suppressPanRef.current = suppressPan;
   const suppressWheelZoomRef = useRef(suppressWheelZoom);
   suppressWheelZoomRef.current = suppressWheelZoom;
+  const bottomInsetRef = useRef(bottomInset);
+  bottomInsetRef.current = bottomInset;
 
   const computeFit = useCallback((): ViewportState | null => {
     const container = containerRef.current;
@@ -58,8 +70,11 @@ export function useCanvasViewport(
     if (!container || !img) return null;
     const { width: cw, height: ch } = container.getBoundingClientRect();
     if (cw === 0 || ch === 0) return null;
-    const scale = Math.min(cw / img.width, ch / img.height);
-    return { mode: 'fit', scale, tx: (cw - img.width * scale) / 2, ty: (ch - img.height * scale) / 2 };
+    // A degenerate container (smaller than the inset itself) ignores the
+    // inset rather than producing a zero/negative fit height.
+    const effH = ch - bottomInsetRef.current > 0 ? ch - bottomInsetRef.current : ch;
+    const scale = Math.min(cw / img.width, effH / img.height);
+    return { mode: 'fit', scale, tx: (cw - img.width * scale) / 2, ty: (effH - img.height * scale) / 2 };
   }, [containerRef]);
 
   // Space's animated fit (round-7 UX pack G §2, "スペースでpreviewにフィットする感じで滑らかに中央に戻る"):
@@ -165,6 +180,13 @@ export function useCanvasViewport(
     },
     [containerRef, zoomAt]
   );
+
+  // Refit when the reserved bottom inset changes (crop mode enter/exit) —
+  // but only while already in fit mode; a free (zoomed/panned) view is the
+  // user's own and must not snap back just because a mode toggled.
+  useEffect(() => {
+    if (viewRef.current.mode === 'fit') fit();
+  }, [bottomInset, fit]);
 
   // refit when the image changes, and follow container resizes in fit mode
   useEffect(() => {

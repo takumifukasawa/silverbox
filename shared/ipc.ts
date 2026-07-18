@@ -27,6 +27,11 @@ export const IPC = {
   // sidecar — see main/index.ts's assertSidecarPath).
   projectRead: 'project:read',
   projectWrite: 'project:write',
+  // Per-launch quick project (project-storage UX pack round 2, item A):
+  // `quickProjectDir` is the ROOT of dated session subdirs now, not a single
+  // fixed project dir — see main/index.ts's handler for the naming/
+  // disambiguation recipe and Settings.quickProjectDir's updated doc comment.
+  resolveQuickSessionDir: 'project:resolveQuickSessionDir',
   // Cheap per-photo status join for the filmstrip (hasLook/rating/missing),
   // given the project's already-resolved photo list — see FolderImageEntry's
   // doc comment and main/index.ts's handler.
@@ -279,6 +284,27 @@ export interface SilverboxApi {
    * already-existing project directory is a harmless no-op.
    */
   writeProjectManifest(dir: string, content: string): Promise<void>;
+  /**
+   * Per-launch quick project (project-storage UX pack round 2, item A):
+   * resolve (NOT create — no directory is made here; writeProjectManifest's
+   * own mkdir-recursive still does that lazily, same as ever) this app
+   * session's quick-project subdirectory under `root`
+   * (`settings.quickProjectDir`, now a ROOT rather than a single fixed
+   * project dir): `<root>/<local-date><letter>` (e.g. `2026-07-18a`),
+   * disambiguated against whatever subdirectories `root` already contains so
+   * a same-day relaunch never reuses yesterday's — or even this morning's —
+   * session dir (the bug this item fixes: "dropping 2 photos after relaunch
+   * shows every photo ever dropped"). Called at most ONCE per renderer
+   * session (appStore.ts's `ensureActiveProject` caches the result in a
+   * module-scope variable, reset only by `newProject()`), so every open/drop
+   * within the SAME session keeps accumulating into the SAME subdir
+   * (catalog semantics preserved — user decision, project-storage.md).
+   * `root` itself is NEVER returned or written to directly — a legacy
+   * `project.silverbox` sitting right in `root` (the old single-quick-
+   * project shape) is left completely untouched, still openable as a normal
+   * project by pointing "Open project…" at `root` itself.
+   */
+  resolveQuickSessionDir(root: string): Promise<string>;
   /**
    * Cheap per-photo status for the filmstrip: `photos` is the project's
    * playlist with each `path` ALREADY RESOLVED to absolute (see
@@ -886,18 +912,30 @@ export interface Settings {
   export: ExportSettingsShape;
   exportPresets: ExportPreset[];
   /**
-   * Quick-project directory (project-storage migration, stage 1): where a
-   * photo lands when no project is active yet — a real, VISIBLE folder the
-   * user can open/inspect/git, NOT an app-internal cache (the hidden-
-   * central-library failure mode docs/brief-bank/project-storage.md
-   * explicitly rejects). Empty string here means "not yet resolved" — this
+   * Quick-project ROOT (project-storage migration stage 1; reclassified from
+   * a single fixed project dir to a ROOT of dated per-launch subdirs by the
+   * UX pack round 2, item A — user report: "知らない間に…" ish bug, actually
+   * "dropping 2 photos after relaunch shows every photo ever dropped", since
+   * one eternal quick project across app launches defeats the "this
+   * project's own catalog" mental model). A real, VISIBLE folder the user
+   * can open/inspect/git, NOT an app-internal cache (the hidden-central-
+   * library failure mode docs/brief-bank/project-storage.md explicitly
+   * rejects) — each app SESSION gets its own `<root>/<date><letter>`
+   * subdirectory the first time it needs one (see
+   * SilverboxApi.resolveQuickSessionDir), and every open/drop within that
+   * SAME session accumulates into it (catalog semantics preserved — "その
+   * プロジェクトの中で今までドロップした全写真"). A legacy `project.silverbox`
+   * sitting directly in this root (the pre-round-2 single quick project) is
+   * left untouched — never migrated/moved silently — and stays openable as
+   * an ordinary project. Empty string here means "not yet resolved" — this
    * file (shared/ipc.ts) is isomorphic (renderer + preload + main) and can't
    * call `os.homedir()`; main's sanitizeSettings (src/main/settings.ts)
    * computes the real default (`join(homedir(), 'Silverbox', 'Quick')`)
    * whenever this field is absent/blank, so by the time settingsGet()
    * resolves in the renderer it's always a real path. `SILVERBOX_TEST_PROJECT`
-   * overrides this at the testFlags level (see its own doc comment) for the
-   * verify suite.
+   * (testFlags.projectDirOverride) overrides this ENTIRELY for the verify
+   * suite: a pinned project dir, used exactly as given, no per-session
+   * subdir — see that field's own doc comment.
    */
   quickProjectDir: string;
   /**
@@ -953,6 +991,18 @@ export interface Settings {
    * already pins presetSaveFamilies.
    */
   syncFamilies: string[];
+  /**
+   * Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round 2
+   * — LR-style toggle beside the existing Sync… button): while true, every
+   * COMPLETED edit gesture on the primary fans its checked `syncFamilies`
+   * out to the rest of the filmstrip selection automatically (appStore.ts's
+   * auto-sync subscriber calls the SAME `syncSelection` the Sync… button
+   * uses — no second implementation). Persists across sessions, default off
+   * (today's explicit-only Sync… behavior is unchanged unless the user opts
+   * in). Independent of `autosaveSidecar` — a disk-write preference
+   * unrelated to this fan-out.
+   */
+  autoSyncEnabled: boolean;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -975,6 +1025,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS) — a fresh install's Sync
   // dialog starts checked exactly like the Save-preset dialog does.
   syncFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
+  autoSyncEnabled: false,
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

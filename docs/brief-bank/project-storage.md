@@ -60,6 +60,32 @@ is the hidden-central-library failure mode (edits trapped in an opaque
 app-owned place; edits are not cache). Title bar always shows the
 active project name, so nothing happens "behind the user's back".
 
+**Per-launch quick project (UX pack round 2, item A, 2026-07-18 —
+LANDED).** The original single fixed Quick directory turned out to be
+ONE eternal project across every app launch forever — dropping 2
+photos after a relaunch showed every photo ever dropped into Quick,
+since. User's decisions, verbatim: filmstrip content is 「そのプロジェク
+トの中で今までドロップした全写真」って感じ。なぜならそのプロジェクトの
+カタログなので — accumulation WITHIN one project/session is correct,
+catalog semantics; the bug was that "session" never actually ended.
+とりあえず silverbox を開いてから open とかで写真を開いた場合は新しい
+プロジェクト扱い confirms the fix's shape: a fresh app launch (or an
+explicit "New Project") starts a NEW quick project, not a resumption of
+the old one. Settings' `quickProjectDir` is now the quick-projects ROOT,
+not a single project directory; the first photo-open of an app session
+that needs a quick project creates+activates a fresh dated subdirectory
+under it (`<root>/<local-date><letter>`, e.g. `2026-07-18a`,
+disambiguated against whatever the root already contains so a same-day
+relaunch never reuses an earlier session's dir) — every later open/drop
+in the SAME session keeps accumulating into that one subdirectory, same
+as before. A legacy `project.silverbox` sitting directly in the root
+(the pre-round-2 single quick project) is left completely untouched —
+never migrated or moved silently — and stays openable as an ordinary
+project by pointing "Open project…" at the root itself. A **"New
+Project"** toolbar action (near Open) closes the current project/photo
+(flushing any pending autosave first) and resets the session cache so
+the next photo open/drop mints a brand-new dated subdirectory.
+
 "Save as project…" MOVES the quick project's current entries (playlist
 rows + their look files) into the newly created project folder (user
 decision: move, not copy — Quick is a staging area, not a second

@@ -82,16 +82,20 @@ function OpenMenu() {
   const openFolder = useAppStore((s) => s.openFolder);
   const importSidecarsFromFolder = useAppStore((s) => s.importSidecarsFromFolder);
   const saveQuickProjectAs = useAppStore((s) => s.saveQuickProjectAs);
+  const newProject = useAppStore((s) => s.newProject);
   const project = useAppStore((s) => s.project);
-  const settings = useAppStore((s) => s.settings);
+  const quickSessionDir = useAppStore((s) => s.quickSessionDir);
   const [open, setOpen] = useState(false);
   const busy = imageStatus === 'loading';
   // "Save as project…" (Quick project → real project, MOVE — see
   // saveQuickProjectAs's own doc comment) only makes sense while the ACTIVE
   // project IS the quick project — a real project is already its own home,
-  // no move semantics apply. Same quick-project identity check
-  // ensureActiveProject itself uses.
-  const quickDir = window.silverbox.testFlags.projectDirOverride ?? settings.quickProjectDir;
+  // no move semantics apply. Per-launch quick project (item A):
+  // `settings.quickProjectDir` is now a ROOT, never equal to any real
+  // project's own `dir` — `quickSessionDir` (this session's resolved dated
+  // subdir, mirrored in the store by ensureActiveProject) is the identity
+  // check now, same as saveQuickProjectAs's own.
+  const quickDir = window.silverbox.testFlags.projectDirOverride ?? quickSessionDir;
   const isQuickProject = !!project && !!quickDir && project.dir === quickDir;
 
   return (
@@ -154,6 +158,16 @@ function OpenMenu() {
               }}
             >
               Save as project…
+            </button>
+            <button
+              data-testid="new-project-button"
+              title="Close the current project/photo and start a fresh quick-project session (item A)"
+              onClick={() => {
+                setOpen(false);
+                void newProject();
+              }}
+            >
+              New Project
             </button>
           </div>
         </>

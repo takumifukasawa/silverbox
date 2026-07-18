@@ -119,6 +119,10 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.syncFamilies = Array.isArray(src.syncFamilies)
     ? src.syncFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.syncFamilies;
+  // Auto Sync (docs/brief-bank/multi-select-sync.md item E) — plain boolean,
+  // same lenient "anything else degrades to the default" convention as
+  // denoiseModelConsent above.
+  result.autoSyncEnabled = src.autoSyncEnabled === true;
   return result as unknown as Settings;
 }
 

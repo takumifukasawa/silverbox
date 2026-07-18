@@ -62,3 +62,16 @@ without the field parse (trivially covered but assert once).
 Delete/trash anything (never); flag sync across virtual copies /
 multiple outputs (revisit with the virtual-copy feature); flag-based
 smart collections (catalog slope — no).
+
+## 要検討 (not implemented — recorded only)
+
+UX pack round 2 hand-test (2026-07-18): user, looking at the filmstrip's
+current pick/reject rendering, said 「フラグは3種類とも出てほしいかも？
+まぁ要検討」 — wanting all THREE flag states (pick / reject / unflagged)
+visually distinct on the cell at a glance, not just "reject dims the
+thumbnail + pick gets a glyph" (today's shape leaves unflagged and
+picked cells looking closer to each other than pick/reject do). Genuinely
+open design question — a third glyph/border/tint for "picked", "unflagged
+with no marker" clearly distinct from both, three-way legend — needs its
+own round before landing. Not queued, not scoped; just don't lose the
+request.

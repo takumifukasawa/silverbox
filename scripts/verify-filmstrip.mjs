@@ -28,15 +28,16 @@
  *  5. Switching to a SECOND folder EXTENDS the playlist (project-storage
  *     migration): the strip now shows all 6 accumulated cells (folder A's 4
  *     + folder B's 2), and folder B's own first (sorted) image opens.
- *  6. A single-file open (the same debug hook every other script uses)
- *     shows no strip at all — folder context is cleared.
+ *  6. A single-file open (the same debug hook every other script uses) of a
+ *     BRAND-NEW photo still shows the strip, grown by one cell (UX pack
+ *     round 2, item B: any photo open activates/re-affirms the project, so
+ *     the strip must show it — this used to clear folderDir to null and
+ *     hide the strip entirely).
  *  7. Multi-file DROP (UX pack, hand-test 2026-07-17 item 1), driven via a
  *     CDP-synthesized OS drag (verify-dnd.mjs's own dispatch mechanism, not
  *     a debug hook — this exercises the real drop path end to end): dropping
  *     2 fresh files adds BOTH to the active project's playlist (exact +2,
- *     against the authoritative projectState().photoCount, since the strip
- *     was hidden — 0 DOM cells — right before this from check 6), shows the
- *     filmstrip, and opens the FIRST dropped file.
+ *     against the authoritative projectState().photoCount).
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -311,16 +312,30 @@ try {
     revocationsAfterLength: revocationsAfter.length,
   });
 
-  // === 6. A single-file open (existing flow) shows NO strip ===
-  console.log('verify-filmstrip (a single-file open shows no strip):');
+  // === 6. A single-file open of a BRAND-NEW photo still shows the strip,
+  // now GROWN by one (UX pack round 2, item B — "any photo open activates a
+  // project, so the strip must show it"; this used to clear folderDir to
+  // null and hide the strip entirely, which is exactly the bug item B
+  // fixes). The active project stays the SAME one accumulated by checks 1-5
+  // (a standalone open no longer starts a new context), so the assertion is
+  // "+1 cell, this exact photo is now current", not "strip disappears". ===
+  console.log('verify-filmstrip (6. a single-file open of a new photo still shows the strip, grown by one):');
+  const photoCountBeforeSingle = await page.evaluate(() => window.__debug.projectState().photoCount);
   await openImageFireAndForget(JPG_PATH);
   await waitReadyOrError();
+  await page.waitForFunction(
+    (n) => window.__debug.folderState().entries.length === n,
+    photoCountBeforeSingle + 1,
+    { timeout: 15_000 }
+  );
   const afterSingle = await page.evaluate(() => ({
     folder: window.__debug.folderState(),
     stripPresent: !!document.querySelector('[data-testid="filmstrip"]'),
   }));
-  check('folder context cleared on a standalone single-file open', afterSingle.folder.dir === null, afterSingle.folder);
-  check('no strip element in the DOM', afterSingle.stripPresent === false, afterSingle);
+  check('folder context stays active (item B) — never cleared to null any more', afterSingle.folder.dir !== null, afterSingle.folder);
+  check('the strip is still in the DOM', afterSingle.stripPresent === true, afterSingle);
+  check('the playlist grew by exactly 1 (the newly-opened JPG)', afterSingle.folder.entries.length === photoCountBeforeSingle + 1, afterSingle.folder);
+  check('the just-opened JPG is the current photo', afterSingle.folder.currentPath === JPG_PATH, afterSingle.folder);
 
   // === 7. Multi-file DROP adds all to the playlist, opens the first, shows
   // the strip (UX pack, hand-test 2026-07-17 item 1) — driven via the SAME
@@ -328,10 +343,8 @@ try {
   // not a debug hook, so this exercises the real App.tsx onDrop → appStore's
   // openMultiDrop path end to end. Two FRESH hardlinks (never opened before
   // in this session) so the "+2" delta is unambiguous; the baseline is
-  // projectState().photoCount (the AUTHORITATIVE playlist size), not the
-  // DOM's folderState().entries — check 6 just cleared the strip to 0 DOM
-  // cells, but the active project's playlist still holds the 6 entries
-  // accumulated by checks 1-5 underneath. ===
+  // projectState().photoCount (the AUTHORITATIVE playlist size), which by
+  // now (post item B) already matches the DOM's own folderEntries count. ===
   console.log('verify-filmstrip (7. multi-file drop adds all to the playlist, opens the first, shows the strip):');
   const multiDropDir = mkdtempSync(join(tmpdir(), 'silverbox-filmstrip-multidrop-'));
   const hDsc8 = join(multiDropDir, 'h_DSC8.ARW');

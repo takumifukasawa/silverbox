@@ -13,6 +13,7 @@ const api: SilverboxApi = {
   watchSidecar: (path) => ipcRenderer.invoke(IPC.watchSidecar, path),
   readProjectManifest: (dir) => ipcRenderer.invoke(IPC.projectRead, dir),
   writeProjectManifest: (dir, content) => ipcRenderer.invoke(IPC.projectWrite, dir, content),
+  resolveQuickSessionDir: (root) => ipcRenderer.invoke(IPC.resolveQuickSessionDir, root),
   projectPhotosStatus: (dir, photos) => ipcRenderer.invoke(IPC.projectPhotosStatus, dir, photos),
   fingerprintFile: (path) => ipcRenderer.invoke(IPC.fingerprintFile, path),
   scanFolderForRelink: (dir, basenameHint, expectedFingerprint) =>

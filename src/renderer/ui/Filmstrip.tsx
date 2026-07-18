@@ -20,6 +20,7 @@ import type { PresetFamilyId } from '../engine/graph/presetFamilies';
 function MissingFilmstripCell({ entry, playlistIndex }: { entry: FolderImageEntry; playlistIndex: number }) {
   const relinkPhoto = useAppStore((s) => s.relinkPhoto);
   const scanFolderForRelink = useAppStore((s) => s.scanFolderForRelink);
+  const removeFromProject = useAppStore((s) => s.removeFromProject);
 
   return (
     <div
@@ -58,6 +59,14 @@ function MissingFilmstripCell({ entry, playlistIndex }: { entry: FolderImageEntr
         >
           Scan folder…
         </button>
+        <button
+          type="button"
+          data-testid="filmstrip-remove-button"
+          title="Remove this row from the project's playlist (never deletes the photo file; a look file, if any, stays on disk)"
+          onClick={() => void removeFromProject([entry.path])}
+        >
+          Remove from project
+        </button>
       </div>
     </div>
   );
@@ -95,11 +104,21 @@ function FilmstripCell({
 }) {
   const cellRef = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState<string | null>(null);
+  // Fixed-position popup, anchored to the CLICK point (not to the cell via
+  // `position:absolute`) — `.filmstrip`'s own `overflow-y: hidden` (needed so
+  // the horizontally-scrolling strip doesn't grow the canvas column taller)
+  // would otherwise clip an absolutely-positioned popup regardless of which
+  // direction it opened, since clipping applies to the ancestor's bounding
+  // box on every side, not just the one the popup happened to overflow past.
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null);
   const openImageByPath = useAppStore((s) => s.openImageByPath);
   const toggleFilmstripSelection = useAppStore((s) => s.toggleFilmstripSelection);
   const rangeSelectFilmstrip = useAppStore((s) => s.rangeSelectFilmstrip);
   const setFilmstripSelection = useAppStore((s) => s.setFilmstripSelection);
   const setFilmstripSelectionAnchor = useAppStore((s) => s.setFilmstripSelectionAnchor);
+  const removeFromProject = useAppStore((s) => s.removeFromProject);
+  const imagePath = useAppStore((s) => s.imagePath);
+  const filmstripSelection = useAppStore((s) => s.filmstripSelection);
 
   useEffect(() => {
     const el = cellRef.current;
@@ -124,32 +143,44 @@ function FilmstripCell({
 
   if (entry.missing) return <MissingFilmstripCell entry={entry} playlistIndex={playlistIndex} />;
 
+  // "Remove from project" context menu (item C): right-clicking a cell that's
+  // PART of the current selection (primary or secondary) removes the WHOLE
+  // selection, same "act on the whole selection" convention the rating/flag
+  // keys already follow (App.tsx) — right-clicking an unselected cell removes
+  // just that one photo.
+  const removalPaths = current || secondary ? [...(imagePath ? [imagePath] : []), ...filmstripSelection] : [entry.path];
+
   return (
-    <button
-      ref={cellRef}
-      type="button"
-      className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}${secondary ? ' filmstrip-cell--secondary-selected' : ''}`}
-      data-testid="filmstrip-cell"
-      data-path={entry.path}
-      data-selected={current || secondary ? 'true' : undefined}
-      title={entry.name}
-      onClick={(ev) => {
-        if (ev.metaKey || ev.ctrlKey) {
-          toggleFilmstripSelection(entry.path);
-          return;
-        }
-        if (ev.shiftKey) {
-          rangeSelectFilmstrip(entry.path, visibleOrder);
-          return;
-        }
-        // Plain click (unchanged behavior): open it, collapse any
-        // multi-select back to single, and move the ⇧-click range anchor
-        // here (LR muscle memory).
-        setFilmstripSelection([]);
-        setFilmstripSelectionAnchor(entry.path);
-        void openImageByPath(entry.path, { keepFolderContext: true });
-      }}
-    >
+    <div className="filmstrip-cell-container">
+      <button
+        ref={cellRef}
+        type="button"
+        className={`filmstrip-cell${current ? ' filmstrip-cell--current' : ''}${secondary ? ' filmstrip-cell--secondary-selected' : ''}`}
+        data-testid="filmstrip-cell"
+        data-path={entry.path}
+        data-selected={current || secondary ? 'true' : undefined}
+        title={entry.name}
+        onClick={(ev) => {
+          if (ev.metaKey || ev.ctrlKey) {
+            toggleFilmstripSelection(entry.path);
+            return;
+          }
+          if (ev.shiftKey) {
+            rangeSelectFilmstrip(entry.path, visibleOrder);
+            return;
+          }
+          // Plain click (unchanged behavior): open it, collapse any
+          // multi-select back to single, and move the ⇧-click range anchor
+          // here (LR muscle memory).
+          setFilmstripSelection([]);
+          setFilmstripSelectionAnchor(entry.path);
+          void openImageByPath(entry.path, { keepFolderContext: true });
+        }}
+        onContextMenu={(ev) => {
+          ev.preventDefault();
+          setMenuPos({ x: ev.clientX, y: ev.clientY });
+        }}
+      >
       {url && (
         // Rejected cells dim the THUMBNAIL only (reject-flag pack,
         // docs/brief-bank/reject-flag.md — "≈45% opacity on the thumbnail,
@@ -195,7 +226,30 @@ function FilmstripCell({
           {entry.flag === 'pick' ? '⚑' : '⨯'}
         </span>
       )}
-    </button>
+      </button>
+      {menuPos && (
+        <>
+          <div className="add-node-menu-backdrop" onClick={() => setMenuPos(null)} />
+          <div
+            className="add-node-menu-list filmstrip-cell-menu"
+            data-testid="filmstrip-cell-menu"
+            style={{ position: 'fixed', left: menuPos.x, top: menuPos.y, transform: 'translateY(-100%)' }}
+          >
+            <button
+              type="button"
+              data-testid="filmstrip-remove-button"
+              title="Never deletes/moves the photo file — a look file, if any, stays on disk (recoverable by re-dropping the photo)"
+              onClick={() => {
+                setMenuPos(null);
+                void removeFromProject(removalPaths);
+              }}
+            >
+              Remove from project{removalPaths.length > 1 ? ` (${removalPaths.length})` : ''}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -257,9 +311,10 @@ function FlagFilter({ value, onChange }: { value: FlagFilterValue; onChange: (va
 /**
  * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
  * catalog): a horizontal, lazily-thumbnailed strip below the canvas,
- * rendered only while a folder/project context exists (appStore.ts's
- * folderDir) — a single-file open shows none of this, exactly today's
- * experience. Post-project-storage-migration (stage 1), the cells are the
+ * rendered whenever a PROJECT is active (appStore.ts's folderDir — UX pack
+ * round 2, item B: ANY photo open activates one, including a standalone
+ * single-file open, which shows a 1-cell strip that grows). Post-project-
+ * storage-migration (stage 1), the cells are the
  * active PROJECT's whole playlist (appStore.ts's folderEntries, rebuilt from
  * `project.photos` — see buildPlaylistEntries), not one folder's raw
  * listing — a playlist doesn't own photos, they can come from anywhere (see
@@ -278,6 +333,13 @@ export function Filmstrip() {
   // comment in appStore.ts).
   const filmstripSelection = useAppStore((s) => s.filmstripSelection);
   const syncSelection = useAppStore((s) => s.syncSelection);
+  // Auto Sync (item E): LR-style toggle beside Sync… — persisted, default
+  // off (today's explicit-only behavior unless the user opts in). The
+  // fan-out itself lives in appStore.ts's debounced subscriber (gesture-end
+  // proxy, same shape as sidecar autosave); this checkbox only flips the
+  // setting it reads.
+  const autoSyncEnabled = useAppStore((s) => s.settings.autoSyncEnabled);
+  const updateSettings = useAppStore((s) => s.updateSettings);
   const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   // ★n+ filter (ratings pack): strip-local view state, reset to "All" every
   // time this component remounts (a fresh folder — see the doc comment
@@ -340,6 +402,18 @@ export function Filmstrip() {
         >
           Sync…
         </button>
+        <label
+          className="filmstrip-autosync-toggle"
+          title="Auto Sync (LR-style): while on, every completed edit on the current photo fans out to the rest of the selection automatically (uses the same checked families as Sync…)"
+        >
+          <input
+            type="checkbox"
+            data-testid="filmstrip-autosync-toggle"
+            checked={autoSyncEnabled}
+            onChange={(ev) => void updateSettings({ autoSyncEnabled: ev.target.checked })}
+          />
+          Auto Sync
+        </label>
         <RatingFilter value={minRating} onChange={setMinRating} />
         <FlagFilter value={flagFilter} onChange={setFlagFilter} />
       </div>

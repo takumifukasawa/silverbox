@@ -85,6 +85,23 @@ function extractWrapperMeta(raw: string): { rating: number; flag: PhotoFlag | nu
 }
 
 /**
+ * Bijective base-26 letter suffix (0→'a', 25→'z', 26→'aa', 27→'ab', …) —
+ * per-launch quick project naming (UX pack round 2, item A): disambiguates
+ * same-day session dirs (`2026-07-18a`, `2026-07-18b`, …) without ever
+ * running out, however many times the app is relaunched in one day.
+ */
+function letterSuffix(n: number): string {
+  let out = '';
+  let i = n + 1;
+  while (i > 0) {
+    i -= 1;
+    out = String.fromCharCode(97 + (i % 26)) + out;
+    i = Math.floor(i / 26);
+  }
+  return out;
+}
+
+/**
  * Cheap content fingerprint of a photo file (project-storage migration,
  * stage 3 — docs/brief-bank/project-storage.md's "Missing photos" section):
  * used by relink to verify a candidate replacement is (probably) the SAME
@@ -399,6 +416,36 @@ function registerIpc(): void {
       await rename(tmpFile, target);
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  // Per-launch quick project (project-storage UX pack round 2, item A):
+  // resolve THIS session's dated subdirectory under `root` — see
+  // SilverboxApi.resolveQuickSessionDir's own doc comment for the caching/
+  // accumulation contract (appStore.ts calls this AT MOST ONCE per session).
+  // Nothing is created here (mkdir happens lazily, same as ever, via
+  // writeProjectManifest/writeSidecar) — this only picks a name that doesn't
+  // collide with whatever subdirectories `root` already has on disk, so a
+  // same-day relaunch never silently reuses an earlier session's dir.
+  ipcMain.handle(IPC.resolveQuickSessionDir, async (_ev, root: unknown): Promise<string> => {
+    if (typeof root !== 'string') throw new Error('resolveQuickSessionDir: root must be a string');
+    const now = new Date();
+    const date = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+    let existing: Set<string>;
+    try {
+      existing = new Set(
+        (await readdir(root, { withFileTypes: true })).filter((d) => d.isDirectory()).map((d) => d.name)
+      );
+    } catch (err) {
+      // ENOENT/ENOTDIR: root doesn't exist yet (very first quick open ever
+      // on this machine) — nothing to collide with.
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT' || code === 'ENOTDIR') existing = new Set();
+      else throw err;
+    }
+    for (let i = 0; ; i++) {
+      const name = `${date}${letterSuffix(i)}`;
+      if (!existing.has(name)) return join(root, name);
     }
   });
 

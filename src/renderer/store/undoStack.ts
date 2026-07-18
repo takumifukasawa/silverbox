@@ -18,6 +18,7 @@
  * being a later entry that would have to be undone first.
  */
 import type { GraphDoc } from '../engine/graph/graphDoc';
+import type { ProjectPhoto } from '../engine/graph/projectDoc';
 import type { PhotoFlag } from '../../../shared/ipc';
 
 /** Kinds whose value is a whole GraphDoc, keyed by the photo path that owns it. */
@@ -91,7 +92,30 @@ export interface ArrangeUndoEntry extends UndoEntryBase {
   after?: Record<string, { x: number; y: number }>;
 }
 
-export type UndoEntry = GraphUndoEntry | RatingUndoEntry | FlagUndoEntry | SyncUndoEntry | ArrangeUndoEntry;
+/**
+ * "Remove from project" (UX pack round 2, item C): removing one or more
+ * playlist rows is a whole-PLAYLIST operation, same "no single photo to jump
+ * to, revert all targets in place" shape as SyncUndoEntry above — the look
+ * FILES themselves are never touched (removal only drops playlist rows; the
+ * brief's own "an orphan row is recoverable by re-dropping the photo" note is
+ * exactly what keeps this entry simple: undo only needs to restore the
+ * ProjectPhoto rows, never resurrect any file). `removed` carries each row's
+ * ORIGINAL playlist index so undo can splice it back at (approximately) the
+ * same position rather than just appending it at the end.
+ */
+export interface RemovePhotosUndoEntry extends UndoEntryBase {
+  kind: 'remove-photos';
+  projectDir: string;
+  removed: { index: number; photo: ProjectPhoto }[];
+}
+
+export type UndoEntry =
+  | GraphUndoEntry
+  | RatingUndoEntry
+  | FlagUndoEntry
+  | SyncUndoEntry
+  | ArrangeUndoEntry
+  | RemovePhotosUndoEntry;
 
 /** Bounded (~200 entries, oldest dropped — brief's "Bounded stack"), session-scoped (no persistence across restarts). */
 export const UNDO_STACK_LIMIT = 200;

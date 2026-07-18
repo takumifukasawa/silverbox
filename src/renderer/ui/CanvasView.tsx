@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { buildSpotPreviewDoc, findActiveSpotsNodeId, openingPreviewRevocationLog, useAppStore } from '../store/appStore';
+import {
+  buildSpotPreviewDoc,
+  findActiveSpotsNodeId,
+  openingPreviewRevocationLog,
+  releaseOpeningPreviewUrl,
+  useAppStore,
+} from '../store/appStore';
 import { getThumbnail, thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
 import { srgbDecode, srgbEncode } from '../engine/color/srgb';
@@ -251,6 +257,10 @@ declare global {
       setFilmstripSelection(paths: string[]): void;
       /** "Sync…" (multi-select-sync.md): drives the SAME store action the toolbar's Sync… button (via FamilyScopeDialog's confirm) does — copies `families` from the primary's live graph to every secondary-selected look. */
       syncSelection(families: PresetFamilyId[]): Promise<void>;
+      /** "Remove from project" (UX pack round 2, item C) — drives the SAME store action the ⌫/Delete key and a cell's context-menu item do. */
+      removeFromProject(paths: string[]): Promise<void>;
+      /** Auto Sync toggle state (item E) — same field Filmstrip.tsx's checkbox reads/writes via updateSettings. */
+      autoSyncState(): boolean;
       setGeometry(geo: GeometryParams): void;
       geometryState(): GeometryParams;
       setLens(lens: LensParams): void;
@@ -509,6 +519,27 @@ export function CanvasView() {
   const settingsReloading = useAppStore((s) => s.settingsReloading);
   const image = useAppStore((s) => s.image);
   const openingPreview = useAppStore((s) => s.openingPreview);
+  // Decode-completion flash fix (UX pack round 2, item F — "photo blanks for
+  // an instant then reappears"): the embedded-preview overlay used to be
+  // gated on `imageStatus==='loading'` alone, but openImageByPath's SUCCESS
+  // commit clears `openingPreview` in the SAME synchronous set() that flips
+  // `imageStatus` to 'ready' — one or more render/present round trips BEFORE
+  // `pendingSwitch` itself actually clears (see the flicker-fix block below).
+  // Result: for that whole gap, `overlayVisible` correctly keeps
+  // `.canvas-viewport` hidden (no stale OLD frame), but the preview overlay
+  // ALSO isn't rendered any more (imageStatus is already 'ready') — nothing
+  // paints at all, the reported blank/background flash. Freeze the last
+  // non-null `openingPreview` here and keep showing it through the SAME
+  // `pendingSwitch` gate the canvas itself waits on (see the render-time
+  // logic near `overlayVisible` below), resetting only when a genuinely NEW
+  // photo starts opening (tracked by `imagePath`, which changes at the very
+  // TOP of a switch — well before `image`/`openingPreview` do, so this can't
+  // reuse `revealCheckImageRef`'s own image-based check without wiping the
+  // value it exists to preserve).
+  const frozenOpeningPreviewRef = useRef<typeof openingPreview>(null);
+  const lastPreviewPathRef = useRef<string | null>(null);
+  /** A frozen preview's URL the render body just decided is no longer needed — released by the effect below (never revoked inline during render, which must stay pure). */
+  const urlToReleaseRef = useRef<string | null>(null);
   const imageError = useAppStore((s) => s.imageError);
   const graph = useAppStore((s) => s.graph);
   const fileName = useAppStore((s) => s.fileName);
@@ -653,7 +684,15 @@ export function CanvasView() {
     containerRef,
     outputDims,
     wbPicking || colorKeyPicking || maskDrawMode !== null || spotMode,
-    spotMode // spot mode repurposes the wheel to adjust brush radius (see the dedicated wheel listener below)
+    spotMode, // spot mode repurposes the wheel to adjust brush radius (see the dedicated wheel listener below)
+    // Crop mode reserves the floating .crop-controls bar's footprint PLUS
+    // the rotate-zone overhang: the bar band is ~48px (bottom 10 + ~38 bar),
+    // and the corner rotate zones hang ~40px OUTSIDE the crop rect — a
+    // bottom-edge crop's S handles AND its SE/SW rotate zones must both
+    // clear the bar's higher-z hit area (verify-crop caught each in turn:
+    // first the SE ratio-lock handle at 56px of inset, then the SE rotate
+    // zone once the smaller image put it inside the bar's horizontal span).
+    cropMode ? 96 : 0
   );
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -1533,6 +1572,10 @@ export function CanvasView() {
           label: e.label,
           target: 'target' in e ? e.target : null,
           targets: 'targets' in e ? e.targets : null,
+          // "Remove from project" (item C) — no single photo/target list, a
+          // whole-playlist batch keyed by project dir + the removed rows.
+          projectDir: 'projectDir' in e ? e.projectDir : null,
+          removedCount: 'removed' in e ? e.removed.length : null,
         });
         return { undo: stack.undo.map(summarize), redo: stack.redo.map(summarize) };
       },
@@ -1551,6 +1594,14 @@ export function CanvasView() {
       },
       syncSelection(families) {
         return useAppStore.getState().syncSelection(families);
+      },
+      /** "Remove from project" (UX pack round 2, item C) — same action the ⌫/Delete key and a cell's context-menu item drive. */
+      removeFromProject(paths) {
+        return useAppStore.getState().removeFromProject(paths);
+      },
+      /** Auto Sync toggle state (item E) — verify convenience, same field the Filmstrip.tsx checkbox reads/writes via updateSettings. */
+      autoSyncState() {
+        return useAppStore.getState().settings.autoSyncEnabled;
       },
       scopeState() {
         const s = useAppStore.getState();
@@ -2096,6 +2147,56 @@ export function CanvasView() {
     if (!pendingSwitch) setPendingSwitch(true);
   }
   const overlayVisible = imageStatus !== 'ready' || gpuError !== null || pendingSwitch;
+  // Item F (cont.): reset the frozen preview the instant a NEW photo starts
+  // opening (imagePath changes at the very top of openImageByPath, long
+  // before `openingPreview`/`image` do) — done BEFORE the freeze/keep check
+  // below so a stale preview from 2 photos ago can never bleed into this
+  // switch's own gap. Deliberately does NOT fire on the 'ready' commit itself
+  // (imagePath is unchanged from the 'loading' phase at that point), which is
+  // exactly what lets the freeze below survive across it. Whenever a frozen
+  // URL is being dropped here, it's stashed in `urlToReleaseRef` instead of
+  // just discarded — revoking is a side effect (impure), done by the
+  // dedicated effect below, never inline during render.
+  //
+  // BUG CAUGHT BY verify-preview.mjs's own check 6 (a real, reproduced hole,
+  // not theoretical): this block reads `pendingSwitchRef.current`, NOT the
+  // `pendingSwitch` STATE variable, for the exact reason revealGenRef's own
+  // doc comment already documents for `overlayVisible` history — the arm
+  // block above calls `setPendingSwitch(true)` DURING render, which makes
+  // React abandon this pass and re-run the whole component with the fresh
+  // state; reading a plain VALUE (like `overlayVisible`) is harmless because
+  // an abandoned pass's output never paints, but MUTATING A REF here is a
+  // side effect that survives the abandon-and-rerun. Using `pendingSwitch`
+  // (state) meant pass 1 still saw the STALE `false` (this pass's own
+  // `setPendingSwitch(true)` hasn't taken effect for ITS OWN local binding),
+  // so the `else if` below incorrectly cleared `frozenOpeningPreviewRef` one
+  // commit early — the overlay dropped a beat before the canvas actually
+  // became visible, reopening the exact blank-flash gap this fix targets.
+  // `pendingSwitchRef.current` is written unconditionally in the arm block
+  // above (not gated by React's state-setter dance), so it already reads
+  // `true` even in pass 1.
+  if (imagePath !== lastPreviewPathRef.current) {
+    lastPreviewPathRef.current = imagePath;
+    if (frozenOpeningPreviewRef.current) urlToReleaseRef.current = frozenOpeningPreviewRef.current.url;
+    frozenOpeningPreviewRef.current = null;
+  }
+  if (openingPreview) {
+    frozenOpeningPreviewRef.current = openingPreview;
+  } else if (!pendingSwitchRef.current && frozenOpeningPreviewRef.current) {
+    // The real frame already presented (or nothing is pending at all) —
+    // nothing left worth freezing; release the URL it was holding.
+    urlToReleaseRef.current = frozenOpeningPreviewRef.current.url;
+    frozenOpeningPreviewRef.current = null;
+  }
+  // Bridges ONLY the "ready but the real frame hasn't presented yet" gap —
+  // NOT a blanket `pendingSwitch` (which the 'error' commit's own image→null
+  // transition can also re-arm, per revealCheckImageRef's own mechanism
+  // above; a stale preview has no business surviving onto an error screen,
+  // same as the ORIGINAL "gated on imageStatus alone" rule this replaces).
+  const showOpeningPreview =
+    gpuError === null &&
+    (imageStatus === 'loading' || (imageStatus === 'ready' && pendingSwitch)) &&
+    frozenOpeningPreviewRef.current !== null;
   // Verify-only bookkeeping (__debug.suppressedRevealCount): counts actual
   // commits where the gate was the ONLY thing keeping the canvas hidden
   // (imageStatus already 'ready', no GPU error) — an effect, not inline in
@@ -2105,6 +2206,26 @@ export function CanvasView() {
   useEffect(() => {
     if (readyButPending) suppressedRevealCountRef.current++;
   }, [readyButPending]);
+  // Item F: the ACTUAL revocation, as a side effect (never inline during
+  // render, which must stay pure) — runs after every commit, but the common
+  // case is a cheap ref-check + early return (nothing queued). No deps array
+  // on purpose: `urlToReleaseRef` is a ref, so a dep list can't observe it
+  // changing anyway — the effect body itself is the guard.
+  useEffect(() => {
+    const url = urlToReleaseRef.current;
+    if (!url) return;
+    urlToReleaseRef.current = null;
+    releaseOpeningPreviewUrl(url);
+  });
+  // Unmount-only: a frozen preview still pending when this component itself
+  // goes away (e.g. the whole app tearing down mid-switch) must not leak.
+  useEffect(() => {
+    return () => {
+      const url = frozenOpeningPreviewRef.current?.url ?? urlToReleaseRef.current;
+      if (url) releaseOpeningPreviewUrl(url);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // Compare view (compare pack): resolve which mode the compare pane is
   // showing, for the badge label only (the render effect above computes the
   // SAME thing to drive the actual compareRender call — kept as two small
@@ -2123,9 +2244,12 @@ export function CanvasView() {
   // JPEG's own EXIF orientation (round-8 fix — see appStore.ts's
   // openingPreview.flip / sonyLensProfile.ts's EmbeddedPreview.flip doc
   // comments for why the bytes need this at all). Same code space as
-  // RawDecoder's flip: 0=none, 3=180°, 5=90°CCW, 6=90°CW.
+  // RawDecoder's flip: 0=none, 3=180°, 5=90°CCW, 6=90°CW. Reads the FROZEN
+  // value (item F) so the rotation stays correct through the pendingSwitch
+  // gap too, not just while imageStatus is still 'loading'.
+  const frozenPreview = frozenOpeningPreviewRef.current;
   const previewRotateDeg =
-    openingPreview?.flip === 6 ? 90 : openingPreview?.flip === 5 ? -90 : openingPreview?.flip === 3 ? 180 : 0;
+    frozenPreview?.flip === 6 ? 90 : frozenPreview?.flip === 5 ? -90 : frozenPreview?.flip === 3 ? 180 : 0;
   const previewSwap = previewRotateDeg === 90 || previewRotateDeg === -90;
   // Only a ±90° rotation needs the FRAME's own pixel box (object-fit: contain
   // math changes when content and container swap which axis is limiting —
@@ -2134,7 +2258,7 @@ export function CanvasView() {
   // for the overwhelmingly common unrotated case.
   const [openingPreviewFrame, setOpeningPreviewFrame] = useState<{ width: number; height: number } | null>(null);
   useLayoutEffect(() => {
-    if (!(imageStatus === 'loading' && openingPreview && previewSwap)) {
+    if (!(showOpeningPreview && previewSwap)) {
       setOpeningPreviewFrame(null);
       return;
     }
@@ -2148,7 +2272,7 @@ export function CanvasView() {
     const ro = new ResizeObserver(measure);
     ro.observe(container);
     return () => ro.disconnect();
-  }, [imageStatus, openingPreview, previewSwap]);
+  }, [showOpeningPreview, previewSwap]);
   // The overlay <img>'s inline style override: for 0°, none (unchanged
   // pre-round-8 behavior — className alone gives inset:0/100%/100%/contain).
   // For 180°, just add the rotation in place (aspect is unchanged by a
@@ -2163,9 +2287,9 @@ export function CanvasView() {
   let previewImgStyle: React.CSSProperties | undefined;
   if (previewRotateDeg === 180) {
     previewImgStyle = { transform: 'rotate(180deg)' };
-  } else if (previewSwap && openingPreviewFrame && openingPreview) {
-    const correctedW = openingPreview.height;
-    const correctedH = openingPreview.width;
+  } else if (previewSwap && openingPreviewFrame && frozenPreview) {
+    const correctedW = frozenPreview.height;
+    const correctedH = frozenPreview.width;
     const scale = Math.min(openingPreviewFrame.width / correctedW, openingPreviewFrame.height / correctedH);
     const renderW = correctedW * scale;
     const renderH = correctedH * scale;
@@ -2389,24 +2513,26 @@ export function CanvasView() {
       )}
       {/* Embedded-preview-first opening (the Lightroom trick): the ARW's own
           embedded camera JPEG, shown the instant extraction (no decode)
-          succeeds and gone the moment the real image reaches 'ready' — see
-          appStore.ts's openImageByPath / clearOpeningPreview. Dead simple by
-          design: no pan/zoom wiring, no crossfade (v1 — see ROADMAP), and it
-          renders BEFORE (so, beneath) the "Decoding…" indicator below so
-          that text stays readable over it. Gated on imageStatus alone, not
-          overlayVisible (which also fires on gpuError) — a stale preview has
-          no business surviving a GPU error on some OTHER already-ready
-          image. */}
-      {imageStatus === 'loading' && openingPreview && (
+          succeeds. Item F (decode-completion flash fix): stays up through the
+          SAME `pendingSwitch` gate the canvas itself waits on — not just
+          while `imageStatus==='loading'` — so it never drops out before the
+          real first frame has actually presented (see `showOpeningPreview`'s
+          own doc comment above and `frozenOpeningPreviewRef`). Dead simple by
+          design otherwise: no pan/zoom wiring, no crossfade (v1 — see
+          ROADMAP), and it renders BEFORE (so, beneath) the "Decoding…"
+          indicator below so that text stays readable over it. `gpuError`
+          drops it immediately even so — a stale preview has no business
+          surviving a GPU error on some OTHER already-ready image. */}
+      {showOpeningPreview && frozenPreview && (
         <img
-          src={openingPreview.url}
+          src={frozenPreview.url}
           alt="Camera preview"
           className="opening-preview-overlay"
           data-testid="opening-preview-overlay"
           style={previewImgStyle}
         />
       )}
-      {imageStatus === 'loading' && openingPreview && (
+      {showOpeningPreview && frozenPreview && (
         <div className="preview-badge" data-testid="preview-badge">
           Preview
         </div>

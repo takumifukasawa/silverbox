@@ -25,6 +25,8 @@ declare global {
     __openFolderByPath: (path: string) => Promise<void>;
     /** Verify-harness hook: open a project (a directory containing project.silverbox) bypassing drag-drop. */
     __openProjectByPath: (dir: string) => Promise<void>;
+    /** Verify-harness hook: "New Project" (UX pack round 2, item A) — same action the toolbar button drives. */
+    __newProject: () => Promise<void>;
   }
 }
 
@@ -48,9 +50,9 @@ async function openPathSmart(path: string): Promise<void> {
   const openedAsProject = await useAppStore.getState().openProjectByPath(projectDir);
   if (openedAsProject) return;
   const openedAsFolder = await useAppStore.getState().openFolder(path);
-  // Not a folder after all — a standalone single-file open. openImageByPath
-  // itself exits folder-browsing by default (see its `keepFolderContext` doc
-  // comment), so nothing else to reset.
+  // Not a folder after all — a standalone single-file open. Still activates/
+  // extends whatever project is active and shows the strip (item B) — see
+  // openImageByPath's own `keepFolderContext` doc comment.
   if (!openedAsFolder) await useAppStore.getState().openImageByPath(path);
 }
 
@@ -61,6 +63,7 @@ export function App() {
     window.__openImageByPath = (path, opts) => useAppStore.getState().openImageByPath(path, opts);
     window.__openFolderByPath = (path: string) => useAppStore.getState().openFolder(path).then(() => undefined);
     window.__openProjectByPath = (dir: string) => useAppStore.getState().openProjectByPath(dir).then(() => undefined);
+    window.__newProject = () => useAppStore.getState().newProject();
     const onKeyDown = (ev: KeyboardEvent) => {
       const cmd = ev.metaKey || ev.ctrlKey;
       if (cmd && !ev.altKey && !ev.shiftKey && ev.key === 'o') {
@@ -272,6 +275,22 @@ export function App() {
           s.removeSpot(s.selectedNodeId, s.selectedSpotIndex);
         }
       }
+      if ((ev.key === 'Backspace' || ev.key === 'Delete') && useAppStore.getState().filmstripSelection.length > 0) {
+        // "Remove from project" (UX pack round 2, item C): scoped to an
+        // actual MULTI-select (filmstripSelection.length > 0 — ⌘/⇧-click
+        // used), deliberately narrower than "any filmstrip context active",
+        // so this never steals Backspace/Delete from React Flow's own
+        // selected-node deletion (NodeEditorPanel.tsx) in the single-select
+        // case, which is also the common state while editing the graph. A
+        // lone cell's removal goes through its own context-menu item
+        // instead (Filmstrip.tsx) — see this action's own doc comment.
+        if (isTextEntry(ev.target)) return;
+        const s = useAppStore.getState();
+        ev.preventDefault();
+        ev.stopPropagation();
+        const paths = [...(s.imagePath ? [s.imagePath] : []), ...s.filmstripSelection];
+        void s.removeFromProject(paths);
+      }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
         // masks milestone: 'O' toggles the LR-style red mask overlay.
         // Round-7 hand-test fix ("赤のまま" — the overlay got stuck ON):
@@ -301,6 +320,16 @@ export function App() {
         // checking here too means a bare ArrowLeft/Right on a single-file
         // open doesn't even preventDefault — nothing to lose focus/scroll to).
         if (isTextEntry(ev.target)) return;
+        // Arrows are ALSO meaningful on non-text controls (a range slider
+        // steps, a select navigates its options) — unlike ⌘Z/O-style
+        // shortcuts, this handler must yield to ANY focused input/select,
+        // not just text entry. Before the always-visible filmstrip (per-
+        // launch project pack) folderDir was null on a single-file open and
+        // masked this; now it's always set, and without this guard arrow
+        // keys on a focused slider stepped the filmstrip instead
+        // (verify-ms4's arrow-on-slider check caught it).
+        const tag = (ev.target as HTMLElement | null)?.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT') return;
         const s = useAppStore.getState();
         if (!s.folderDir) return;
         ev.preventDefault();

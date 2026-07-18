@@ -13,6 +13,7 @@ import {
   type GraphEntryKind,
   type GraphUndoEntry,
   type RatingUndoEntry,
+  type RemovePhotosUndoEntry,
   type SyncUndoEntry,
   type UndoEntry,
   type UndoStackState,
@@ -92,6 +93,7 @@ import { buildLutExport } from '../engine/color/lutExport';
 import { parsePresetFile, serializePreset, type ParsedPreset } from '../engine/graph/presetDoc';
 import {
   buildScopedLook,
+  DEFAULT_CHECKED_FAMILY_IDS,
   isDevelopFamily,
   isKnownFamilyId,
   mergeScopedLook,
@@ -170,6 +172,31 @@ interface AppState {
    * very first photo of an interactive session has been opened.
    */
   project: ActiveProject | null;
+  /**
+   * Per-launch quick project (UX pack round 2, item A): mirrors the store
+   * body's own module-scope `quickSessionDir` cache — the resolved dated
+   * subdirectory (`<settings.quickProjectDir>/<date><letter>`) THIS session
+   * activated, or null before the first quick-project need this session (or
+   * whenever `testFlags.projectDirOverride` is set, which bypasses this
+   * entirely). Exists so callers OUTSIDE the store body (Toolbar.tsx's "Save
+   * as project…" gating, saveQuickProjectAs) can compare `project.dir`
+   * against it reactively — `settings.quickProjectDir` alone no longer
+   * identifies the quick project now that it's a ROOT, not a single fixed
+   * directory (a real project's own dir is never equal to it, but neither is
+   * the quick session's — the session lives one level DEEPER, under it).
+   */
+  quickSessionDir: string | null;
+  /**
+   * "New Project" (UX pack round 2, item A — answers the user's own "new
+   * project が必要なのかな"): closes the current project/photo (flushing any
+   * pending autosave first — openProject's own awaited-flush precedent) and
+   * resets the quick-session cache so the NEXT photo open/drop mints a
+   * FRESH dated subdirectory under `settings.quickProjectDir` instead of
+   * resuming whatever was active. Lands the app back at the boot-time empty
+   * state (no project, no image) — same shape openImageByPath's own
+   * per-photo reset fields use, plus the project-level ones it doesn't touch.
+   */
+  newProject(): Promise<void>;
   /**
    * Open the project at `dir` (a directory containing project.silverbox):
    * activates it, loads its playlist into the filmstrip, and opens the
@@ -306,16 +333,20 @@ interface AppState {
   saveQuickProjectAs(destDir: string): Promise<{ ok: true } | { ok: false; message: string }>;
   /**
    * Folder filmstrip (ROADMAP "nice to have" — browse a folder, NOT a
-   * catalog): non-null while the open image came from an explicit folder OR
-   * project open (a folder/project.silverbox drop, the toolbar's "Open
-   * Folder…", or __openProjectByPath), holding that open's directory (its
-   * only remaining job is the `key={dir}` remount trick — see Filmstrip.tsx;
-   * the CELLS shown are the active project's whole playlist, not this one
-   * directory's raw listing — see `folderEntries`). null for a standalone
-   * single-file open (Open… dialog, or dropping one file) — the filmstrip
-   * renders nothing at all while this is null, so a single-file open keeps
-   * today's exact experience (see openImageViaDialog / App.tsx's drop
-   * handler, which both clear this before opening).
+   * catalog): non-null whenever a PROJECT is active (UX pack round 2, item B
+   * — "any photo open activates a project, so the strip must show it"),
+   * holding that project's directory; its only remaining job is the
+   * `key={dir}` remount trick (see Filmstrip.tsx) — the CELLS shown are the
+   * active project's whole playlist, not a raw directory listing (see
+   * `folderEntries`). Set by openImageByPath's own success commit on EVERY
+   * resolved photo open (folder/project drop, toolbar "Open Folder…",
+   * __openProjectByPath, and — since item B — a standalone Open…/single-
+   * file-drop open too, which used to clear this to null and leave it there
+   * forever: a lone opened photo now shows a 1-cell strip that grows as more
+   * are opened/dropped, instead of hiding the strip entirely). null only
+   * while NO project is active yet (CLI-headless session, or before the
+   * very first interactive photo open) — see `project`'s own doc comment for
+   * exactly when that is.
    */
   folderDir: string | null;
   /**
@@ -396,6 +427,23 @@ interface AppState {
    * an open primary, an active project, or any secondary selected.
    */
   syncSelection(families: PresetFamilyId[]): Promise<void>;
+  /**
+   * "Remove from project" (UX pack round 2, item C — ⌫/Delete on the
+   * filmstrip selection, or a cell's context-menu item): drops `paths` from
+   * the ACTIVE project's playlist only. NEVER deletes/moves the original
+   * photo file, and the look file (if any) stays exactly where it is on disk
+   * — an orphaned row, recoverable by simply re-dropping the same photo
+   * (project-storage.md's playlist-doesn't-own-photos model already makes
+   * that trivial). If the CURRENTLY OPEN photo is among `paths`, opens the
+   * nearest remaining neighbor by the strip's own sort order (folderEntries,
+   * pre-removal), or falls to the empty state (project stays active, just
+   * with nothing open) if none survive. Pushes ONE RemovePhotosUndoEntry
+   * (multi-select removal removes all selected as a single batch, one undo
+   * step) restoring the removed rows at their original playlist positions;
+   * redo re-removes them. No-op without an active project or a `paths` list
+   * that resolves to zero playlist rows.
+   */
+  removeFromProject(paths: string[]): Promise<void>;
   /**
    * NG3 fix pack ("renaming an OPEN photo's file shows nothing"): missing-
    * photo status used to be computed only on project/folder open — an
@@ -837,14 +885,18 @@ interface AppState {
    * exactly as a truly-fresh open would, and the input node's geometry stays
    * identity, which is what a preset's applyLook then preserves.
    *
-   * `opts.keepFolderContext` (folder filmstrip, ROADMAP "nice to have"):
-   * by default, EVERY call to this function exits folder-browsing (clears
-   * folderDir/folderEntries, hiding the strip) — that's what makes a
-   * standalone single-file open (Open… dialog, a single-file drop, the
-   * `__openImageByPath` verify hook) behave exactly like it always has, with
-   * no strip. The 3 call sites that must NOT do that — a filmstrip cell
-   * click, ←/→ (stepFilmstrip), and openFolder's own "open the first entry"
-   * — pass `true` here.
+   * `opts.keepFolderContext` (folder filmstrip, ROADMAP "nice to have"): by
+   * default this function clears folderDir/folderEntries at the very TOP,
+   * before the (possibly slow) decode/project-resolution work below — but
+   * (UX pack round 2, item B) the SUCCESS commit re-sets `folderDir` to the
+   * resolved project's own directory regardless of this flag, since ANY
+   * resolved photo open activates/re-affirms a project and the strip must
+   * show it. What this flag actually controls now is a brief MID-FLIGHT
+   * flicker of the OLD strip during the switch (cleared at the top, restored
+   * a moment later) — true keeps the strip's stale content from flashing
+   * away and back for callers that already know they're staying in the same
+   * project (a filmstrip cell click, ←/→ (stepFilmstrip), openFolder's own
+   * "open the first entry", and every other project-aware caller).
    *
    * `opts.legacySidecarOnly` (headless CLI ONLY — runCliRender/runCliCheck/
    * runCliDiff's own internal calls, WITHOUT `--project`): bypasses the
@@ -1281,6 +1333,54 @@ function cancelAutosaveTimer(): void {
   }
 }
 
+// --- Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round
+// 2 — LR-style toggle beside the existing Sync… button) ---------------------
+//
+// "Every COMPLETED edit gesture on the primary… sliders sync once on gesture
+// end, never per tick" is the SAME problem sidecar autosave above already
+// solved (a graph mutation fires on every tick of a drag) — same fix, same
+// shape: debounce on `state.graph`'s own reference change, act once it
+// settles. Deliberately a SEPARATE timer/subscriber from autosave's own
+// (independent of `settings.autosaveSidecar`, a disk-write preference this
+// fan-out has nothing to do with), but same module-scope-above-the-store
+// declaration order, for the same reason (openImageByPath's own flush-on-
+// switch call needs it, and the post-creation subscriber schedules it).
+let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Fire (or re-fire) the auto-sync fan-out NOW against whatever's current —
+ * re-checks every gate at call time EXCEPT `graphDirty`, deliberately: the
+ * subscriber below only ever ARMS this timer when the triggering graph
+ * change was itself dirty (a real edit, not a fresh open/reset — see its own
+ * comment), and re-reading `graphDirty` here, 1000ms later, would race the
+ * SIDECAR AUTOSAVE subscriber's own independent 1000ms timer on the SAME
+ * graph-changed event: whichever of the two timers happens to fire first
+ * (autosave's `saveGraph()` clears `graphDirty` to false) would silently
+ * starve the other if this re-checked it — a real bug caught by
+ * verify-autosync.mjs's own rapid-tick check before this comment existed.
+ */
+function runAutoSyncNow(): void {
+  autoSyncTimer = null;
+  const s = useAppStore.getState();
+  if (!s.settings.autoSyncEnabled) return;
+  if (!s.imagePath || s.imageStatus !== 'ready') return;
+  if (s.filmstripSelection.length === 0) return; // nothing to fan out to
+  const checked = s.settings.syncFamilies.filter(isKnownFamilyId);
+  const families = checked.length > 0 ? checked : [...DEFAULT_CHECKED_FAMILY_IDS];
+  void s.syncSelection(families);
+}
+/**
+ * Flush-on-switch (autosave's own precedent, data-loss-in-a-race fix):
+ * called from openImageByPath/openProjectByPath/newProject at the same
+ * "this is a real switch, not a reopen" points sidecar autosave's own flush
+ * is — a photo switch a moment after a gesture ends must not silently drop
+ * the pending fan-out for whatever was just edited.
+ */
+function flushPendingAutoSync(): void {
+  if (autoSyncTimer === null) return;
+  clearTimeout(autoSyncTimer);
+  runAutoSyncNow();
+}
+
 // --- Fingerprint (project-storage migration, stage 3) ----------------------
 //
 // The sha256 recipe itself lives main-side (src/main/index.ts's
@@ -1553,17 +1653,36 @@ function scheduleSettingsReload(): Promise<void> {
 // --- Embedded-preview-first opening (AppState.openingPreview) --------------
 //
 // Revoke the overlay's blob: URL and drop it — call sites: a new open
-// starting (openImageByPath's top), the real image reaching 'ready', or the
-// open failing. Never leaves a blob: URL live past whichever of those three
-// happens first, so two rapid opens never leak the first one's URL.
+// starting (openImageByPath's top) and the open failing both still revoke
+// immediately here (nothing will ever hand that URL off to a completed
+// switch). The real image reaching 'ready' is DIFFERENT since item F
+// (decode-completion flash fix): that commit only nulls the FIELD — the URL
+// itself is released later, by CanvasView, via releaseOpeningPreviewUrl
+// below, once the real frame has actually presented (see that commit's own
+// doc comment for why revoking synchronously with 'ready' reintroduced the
+// flash this whole mechanism exists to prevent).
 //
-// Verify-only: every URL actually revoked here, in order — lets
-// verify-preview.mjs prove a rapid second open revoked the FIRST open's URL
-// specifically (not just that openingPreview is now null, which a leaked
-// URL sitting unreferenced would also show).
+// Verify-only: every URL actually revoked here, in order (REGARDLESS of
+// which of the paths above did it) — lets verify-preview.mjs prove a rapid
+// second open revoked the FIRST open's URL specifically (not just that
+// openingPreview is now null, which a leaked URL sitting unreferenced would
+// also show).
 const revokedOpeningPreviewUrls: string[] = [];
 export function openingPreviewRevocationLog(): readonly string[] {
   return revokedOpeningPreviewUrls;
+}
+
+/**
+ * Item F: CanvasView calls this once it's actually done showing a preview it
+ * froze past the 'ready' transition — either the real frame finally
+ * presented (pendingSwitch cleared) or the component unmounted with one
+ * still pending. The ONLY revocation path for a URL that made it to a
+ * completed switch (see the section doc comment above); logged into the
+ * SAME ledger every other revocation path uses.
+ */
+export function releaseOpeningPreviewUrl(url: string): void {
+  URL.revokeObjectURL(url);
+  revokedOpeningPreviewUrls.push(url);
 }
 
 function clearOpeningPreview(state: Pick<AppState, 'openingPreview'>): { openingPreview: null } {
@@ -1572,6 +1691,63 @@ function clearOpeningPreview(state: Pick<AppState, 'openingPreview'>): { opening
     revokedOpeningPreviewUrls.push(state.openingPreview.url);
   }
   return { openingPreview: null };
+}
+
+/**
+ * The per-PHOTO fields openImageByPath's own success commit resets on every
+ * switch (image, graph, sidecar fields, selectedNodeId, … — see that
+ * commit's own field list), factored out here so "close the open photo back
+ * to nothing"
+ * has ONE definition shared by `newProject` (item A: closes the whole
+ * project too — see its own call site) and `removeFromProject`'s own
+ * "removed the last remaining neighbor too" fallback (item C, which must
+ * NOT touch project/folderDir — the project stays active, just emptied).
+ * Deliberately excludes anything openImageByPath itself doesn't touch
+ * (undoStack, exportStatus, histogram, renderer, …) — same scope discipline.
+ */
+function emptyPhotoFields(): Partial<AppState> {
+  return {
+    imageStatus: 'idle',
+    image: null,
+    fileName: null,
+    imagePath: null,
+    imageError: null,
+    settingsReloading: false,
+    currentLookPath: null,
+    currentPhotoMissingNotice: null,
+    graph: defaultGraphDoc(),
+    graphDirty: false,
+    selectedNodeId: null,
+    nodeThumbs: {},
+    imageNodeMissing: {},
+    imageNodeSourceThumbs: {},
+    inspectNodeId: null,
+    shaderErrors: {},
+    sidecarNotice: null,
+    sidecarUnreadable: false,
+    sidecarCreatedAt: null,
+    sidecarRating: 0,
+    sidecarFlag: null,
+    sidecarUnknownFields: null,
+    sidecarFingerprint: null,
+    sidecarPhotoAtOpen: null,
+    lastSidecarText: null,
+    sidecarHotReloadNotice: null,
+    sidecarDiffDialog: null,
+    exportInfo: null,
+    wbModel: DEFAULT_WB_MODEL,
+    activeOutputId: null,
+    maskOverlay: false,
+    maskDrawMode: null,
+    cropMode: false,
+    wbPicking: false,
+    colorKeyPicking: false,
+    spotMode: false,
+    selectedSpotIndex: null,
+    compareMode: false,
+    compareOutputId: null,
+    compareDocOverride: null,
+  };
 }
 
 /**
@@ -2612,22 +2788,51 @@ export const useAppStore = create<AppState>((set, get) => {
   // --- Project storage (stage 1, docs/brief-bank/project-storage.md) --------
 
   /**
+   * Per-launch quick project (UX pack round 2, item A): this SESSION's own
+   * dated subdir under `settings.quickProjectDir` (now a ROOT — see that
+   * field's doc comment), resolved at most once per app session and cached
+   * here so every later open/drop within the SAME session keeps accumulating
+   * into it (catalog semantics preserved). `null` = not yet resolved this
+   * session; `newProject()` resets it back to `null` so the NEXT quick-
+   * project need mints a fresh dated subdir instead of reusing this one.
+   * Irrelevant whenever `testFlags.projectDirOverride` is set (that lever
+   * wins outright, no subdir — see ensureActiveProject below).
+   */
+  let quickSessionDir: string | null = null;
+
+  /**
    * Resolve the ACTIVE project, activating the quick project on demand if
    * none is open yet: `SILVERBOX_TEST_PROJECT` (testFlags.projectDirOverride
    * — the verify-suite lever) wins over the `quickProjectDir` setting,
-   * used EXACTLY as given. Reads/parses an existing manifest at that
-   * directory if one exists; starts a fresh empty one otherwise (nothing is
-   * written to disk here — the FIRST playlist mutation is what schedules
-   * the debounced project.silverbox write, see this file's bottom-of-file
-   * subscriber; writeSidecar itself also mkdir's the looks/ dir just-in-
-   * time, so there is no race between "photo added" and "look saved" even
-   * before that first manifest write lands).
+   * used EXACTLY as given (a pinned dir, no per-session subdir — keeps the
+   * whole verify suite valid unchanged). Otherwise `quickProjectDir` is this
+   * session's quick-projects ROOT: the first call resolves (via main's
+   * resolveQuickSessionDir) and caches a fresh dated subdirectory
+   * (`quickSessionDir` above); every subsequent call this session reuses it.
+   * Reads/parses an existing manifest at the resolved directory if one
+   * exists; starts a fresh empty one otherwise (nothing is written to disk
+   * here — the FIRST playlist mutation is what schedules the debounced
+   * project.silverbox write, see this file's bottom-of-file subscriber;
+   * writeSidecar itself also mkdir's the looks/ dir just-in-time, so there is
+   * no race between "photo added" and "look saved" even before that first
+   * manifest write lands).
    */
   const ensureActiveProject = async (): Promise<ActiveProject> => {
     const existing = get().project;
     if (existing) return existing;
-    const dir = window.silverbox.testFlags.projectDirOverride ?? get().settings.quickProjectDir;
-    if (!dir) throw new Error('quick project directory is not yet known (settings still loading)');
+    const override = window.silverbox.testFlags.projectDirOverride;
+    let dir: string;
+    if (override !== null) {
+      dir = override;
+    } else {
+      const root = get().settings.quickProjectDir;
+      if (!root) throw new Error('quick project directory is not yet known (settings still loading)');
+      if (quickSessionDir === null) {
+        quickSessionDir = await window.silverbox.resolveQuickSessionDir(root);
+        set({ quickSessionDir });
+      }
+      dir = quickSessionDir;
+    }
     let manifest: ProjectManifest;
     try {
       const text = await window.silverbox.readProjectManifest(dir);
@@ -2834,6 +3039,7 @@ export const useAppStore = create<AppState>((set, get) => {
   imageError: null,
   settingsReloading: false,
   project: null,
+  quickSessionDir: null,
   projectNotice: null,
   currentLookPath: null,
   legacySidecarImportNotice: null,
@@ -2928,7 +3134,10 @@ export const useAppStore = create<AppState>((set, get) => {
     // Flushing here would write straight into the file this reopen's own
     // upcoming readSidecar is about to read, racing it.
     const priorState = get();
-    if (priorState.imagePath !== path) void flushPendingAutosave(priorState);
+    if (priorState.imagePath !== path) {
+      void flushPendingAutosave(priorState);
+      flushPendingAutoSync(); // item E — a switch a moment after a gesture ends must not drop the pending fan-out
+    }
     cancelAutosaveTimer();
     // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
     // default — see this method's `keepFolderContext` doc comment.
@@ -3124,12 +3333,35 @@ export const useAppStore = create<AppState>((set, get) => {
       // are about to receive (see graphRenderer.ts's setImage doc comment).
       clearImageNodeSourceCache();
       set({
-        ...clearOpeningPreview(get()),
+        // Item F (decode-completion flash fix): the FIELD is cleared here as
+        // always, but the blob: URL itself is deliberately NOT revoked at
+        // this commit any more (contrast the other 3 clearOpeningPreview
+        // call sites in this file, which still revoke immediately — an
+        // abandoned/failed open has nothing left to hand off to). CanvasView
+        // freezes this value the moment it sees it and keeps showing it
+        // through its own `pendingSwitch` gate — revoking here, in the SAME
+        // synchronous commit that flips `imageStatus` to 'ready', would hand
+        // it a URL that's already dead for that entire gap. CanvasView's own
+        // releaseOpeningPreviewUrl call (once the real frame actually
+        // presents, or on unmount) is now the ONLY place this specific URL
+        // gets revoked — logged into the same revokedOpeningPreviewUrls
+        // ledger either way, so openingPreviewRevocationLog()'s contract is
+        // unchanged for callers that don't care which path did it.
+        openingPreview: null,
         imageStatus: 'ready',
         image,
         graph,
         graphDirty: false,
-        ...(projectPatch ? { project: projectPatch } : {}),
+        // Filmstrip-always-visible (UX pack round 2, item B): ANY successful
+        // photo open that resolved a project (every interactive open except
+        // the CLI-internal branches above) activates/re-affirms it, so the
+        // strip must show it — including a lone single-file open, which used
+        // to clear `folderDir` to null a moment ago (line above,
+        // `!opts?.keepFolderContext`) and never set it back. Superseding
+        // that here means "no project active" is the only remaining case the
+        // strip stays hidden for (folderDir's own doc comment has the full
+        // rule).
+        ...(projectPatch ? { project: projectPatch, folderDir: projectPatch.dir } : {}),
         currentLookPath: watchPath,
         legacySidecarImportNotice,
         selectedNodeId: null,
@@ -3186,6 +3418,15 @@ export const useAppStore = create<AppState>((set, get) => {
       // comment. Fire-and-forget: a failure here just means no hot-reload
       // push for this image, not a broken open.
       void window.silverbox.watchSidecar(watchPath);
+      // Item B (cont.): a photo that's brand new to the playlist (just added
+      // by ensureProjectAndAddPhoto above) needs its OWN cell to actually
+      // show up — folderEntries is otherwise only rebuilt by folder/project-
+      // level operations (openFolder/openMultiDrop/openProjectByPath), never
+      // by an ordinary single-photo open. Fire-and-forget, same as
+      // watchSidecar above: refreshPlaylistStatus's own staleness guard
+      // (`get().project !== project`) keeps a slower round trip from
+      // clobbering a newer switch's state.
+      if (projectPatch) void get().refreshPlaylistStatus();
     } catch (err) {
       // A stale open's failure — including StaleOpenError from
       // session.guard(), which by construction only throws once
@@ -3205,8 +3446,8 @@ export const useAppStore = create<AppState>((set, get) => {
     if (get().imageStatus === 'loading') return;
     const result = await window.silverbox.openImageDialog();
     if (result.canceled) return;
-    // openImageByPath itself exits folder-browsing by default (see its
-    // `keepFolderContext` doc comment) — nothing extra to do here.
+    // openImageByPath's own success commit sets folderDir to the resolved
+    // project's directory regardless (item B) — nothing extra to do here.
     await get().openImageByPath(result.path);
   },
 
@@ -3375,6 +3616,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // path happens to repeat across projects.
     await flushPendingAutosave(get());
     cancelAutosaveTimer();
+    flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     set({ project, folderDir: dir, folderEntries: [] });
     const entries = await buildPlaylistEntries(project);
@@ -3383,6 +3625,32 @@ export const useAppStore = create<AppState>((set, get) => {
     const first = entries.find((e) => !e.missing);
     if (first) await get().openImageByPath(first.path, { keepFolderContext: true });
     return true;
+  },
+
+  async newProject() {
+    // Same flush-before-close as openProjectByPath's own AWAITED flush
+    // (data-loss precedent) — closing the current project is itself a photo
+    // switch a moment later (down to the empty state), so whatever's
+    // pending belongs here just as much.
+    await flushPendingAutosave(get());
+    cancelAutosaveTimer();
+    flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
+    // Reset the per-session quick-project cache (ensureActiveProject's own
+    // module-scope variable) — the NEXT photo open/drop that needs a quick
+    // project mints a FRESH dated subdirectory instead of resuming this one.
+    quickSessionDir = null;
+    set({
+      ...emptyPhotoFields(),
+      project: null,
+      quickSessionDir: null,
+      projectNotice: null,
+      relinkMismatchNotice: null,
+      legacySidecarImportNotice: null,
+      folderDir: null,
+      folderEntries: [],
+      filmstripSelection: [],
+      filmstripSelectionAnchor: null,
+    });
   },
 
   stepFilmstrip(delta) {
@@ -4371,6 +4639,30 @@ export const useAppStore = create<AppState>((set, get) => {
         }));
         return;
       }
+      case 'remove-photos': {
+        // Batch, no single photo to jump to (SyncUndoEntry's own shape) — the
+        // project itself has to still be the SAME one this removal happened
+        // against, or there is nothing coherent to splice the rows back into.
+        const project = get().project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not undo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        let photos = [...project.photos];
+        for (const { index, photo } of [...entry.removed].sort((a, b) => a.index - b.index)) {
+          const at = Math.min(index, photos.length);
+          photos = [...photos.slice(0, at), photo, ...photos.slice(at)];
+        }
+        set((s) => ({
+          project: { ...project, photos },
+          undoStack: moveTopToRedo(s.undoStack, entry),
+        }));
+        await get().refreshPlaylistStatus();
+        return;
+      }
     }
   },
 
@@ -4446,6 +4738,55 @@ export const useAppStore = create<AppState>((set, get) => {
           graphDirty: true,
           undoStack: moveTopToUndo(s.undoStack, entry),
         }));
+        return;
+      }
+      case 'remove-photos': {
+        const before = get();
+        const project = before.project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not redo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        const removedLooks = new Set(entry.removed.map((r) => r.photo.look));
+        const removedPaths = new Set(entry.removed.map((r) => resolveProjectPath(project.dir, r.photo.path)));
+        const photos = project.photos.filter((p) => !removedLooks.has(p.look));
+        const priorFolderEntries = before.folderEntries;
+        set((s) => ({
+          project: { ...project, photos },
+          undoStack: moveTopToUndo(s.undoStack, entry),
+        }));
+        // Same "reopened one of these since the removal, redo must move the
+        // canvas off it" handling removeFromProject itself does — the user
+        // may have undone this exact removal and reopened one of the
+        // restored photos before pressing redo.
+        if (before.imagePath && removedPaths.has(before.imagePath)) {
+          const idx = priorFolderEntries.findIndex((e) => e.path === before.imagePath);
+          let neighbor: string | null = null;
+          for (let d = 1; idx !== -1 && d < priorFolderEntries.length && neighbor === null; d++) {
+            const after = priorFolderEntries[idx + d];
+            if (after && !removedPaths.has(after.path)) {
+              neighbor = after.path;
+              break;
+            }
+            const beforeEntry = priorFolderEntries[idx - d];
+            if (beforeEntry && !removedPaths.has(beforeEntry.path)) {
+              neighbor = beforeEntry.path;
+              break;
+            }
+          }
+          if (neighbor) {
+            await get().openImageByPath(neighbor, { keepFolderContext: true });
+          } else {
+            await flushPendingAutosave(get());
+            cancelAutosaveTimer();
+            flushPendingAutoSync();
+            set(emptyPhotoFields());
+          }
+        }
+        await get().refreshPlaylistStatus();
         return;
       }
     }
@@ -5584,6 +5925,70 @@ export const useAppStore = create<AppState>((set, get) => {
     });
   },
 
+  async removeFromProject(paths) {
+    const s = get();
+    const project = s.project;
+    if (!project || paths.length === 0) return;
+    const pathSet = new Set(paths);
+    const removed: { index: number; photo: ProjectPhoto }[] = [];
+    const remaining: ProjectPhoto[] = [];
+    project.photos.forEach((p, index) => {
+      if (pathSet.has(resolveProjectPath(project.dir, p.path))) removed.push({ index, photo: p });
+      else remaining.push(p);
+    });
+    if (removed.length === 0) return;
+    const updatedProject: ActiveProject = { ...project, photos: remaining };
+    const entry: RemovePhotosUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'remove-photos',
+      label: `Remove ${removed.length} photo${removed.length === 1 ? '' : 's'} from project`,
+      projectDir: project.dir,
+      removed,
+    };
+    // Snapshot the PRE-removal strip order for the neighbor search below —
+    // folderEntries is about to go stale the instant `project` changes.
+    const priorFolderEntries = s.folderEntries;
+    set((st) => ({
+      project: updatedProject,
+      filmstripSelection: st.filmstripSelection.filter((p) => !pathSet.has(p)),
+      undoStack: pushUndoEntry(st.undoStack, entry),
+    }));
+    if (s.imagePath && pathSet.has(s.imagePath)) {
+      // The currently open photo was removed — step to the nearest
+      // remaining neighbor by the strip's own (pre-removal) sort order,
+      // walking outward on both sides so a removal in the middle of a
+      // contiguous multi-select still lands on the closest survivor.
+      const idx = priorFolderEntries.findIndex((e) => e.path === s.imagePath);
+      let neighbor: string | null = null;
+      for (let d = 1; idx !== -1 && d < priorFolderEntries.length && neighbor === null; d++) {
+        const after = priorFolderEntries[idx + d];
+        if (after && !pathSet.has(after.path)) {
+          neighbor = after.path;
+          break;
+        }
+        const before = priorFolderEntries[idx - d];
+        if (before && !pathSet.has(before.path)) {
+          neighbor = before.path;
+          break;
+        }
+      }
+      if (neighbor) {
+        await get().openImageByPath(neighbor, { keepFolderContext: true });
+      } else {
+        // Nothing left on the playlist — fall to the empty state (the
+        // project stays active, just with nothing open; openImageByPath's
+        // own flush-on-switch precedent doesn't apply here since we're not
+        // opening anything, so flush explicitly first).
+        await flushPendingAutosave(get());
+        cancelAutosaveTimer();
+        flushPendingAutoSync();
+        set(emptyPhotoFields());
+      }
+    }
+    await get().refreshPlaylistStatus();
+  },
+
   async saveGraph() {
     // an explicit save (⌘S, or autosave's own timer firing) always cancels
     // any still-pending autosave — nothing left to race it afterward
@@ -5805,7 +6210,13 @@ export const useAppStore = create<AppState>((set, get) => {
 
   async saveQuickProjectAs(destDir) {
     const project = get().project;
-    const quickDir = window.silverbox.testFlags.projectDirOverride ?? get().settings.quickProjectDir;
+    // Per-launch quick project (item A): `settings.quickProjectDir` is now a
+    // ROOT, never equal to any real project's own `dir` (including the
+    // active quick SESSION's own dated subdir) — `quickSessionDir` (this
+    // session's resolved subdir, mirrored in state by ensureActiveProject)
+    // is the identity check now, same as `testFlags.projectDirOverride`'s
+    // exact-pin case.
+    const quickDir = window.silverbox.testFlags.projectDirOverride ?? get().quickSessionDir;
     if (!project || !quickDir || project.dir !== quickDir) {
       return { ok: false, message: 'only the Quick project can be saved as a new project' };
     }
@@ -6150,6 +6561,30 @@ useAppStore.subscribe((state) => {
     autosaveTimer = null;
     void useAppStore.getState().saveGraph();
   }, 1000);
+});
+
+// Auto Sync (docs/brief-bank/multi-select-sync.md item E) — same "watch
+// `graph`'s own reference change" shape as the autosave subscriber just
+// above, but its OWN timer/gates (runAutoSyncNow/flushPendingAutoSync,
+// declared near cancelAutosaveTimer): independent of
+// `settings.autosaveSidecar`, gated on `settings.autoSyncEnabled` instead.
+// Deliberately does NOT also watch sidecarRating/sidecarFlag — a rating/flag
+// key already fans out to the whole selection directly (App.tsx), it isn't
+// what this "completed edit gesture" fan-out is for.
+//
+// `state.graphDirty` is checked HERE, at arm time, and deliberately NEVER
+// again at fire time (see runAutoSyncNow's own doc comment for the autosave-
+// race this avoids): a graph change that ISN'T dirty (a fresh photo open/
+// reset, which replaces `graph` too) must never arm a sync attempt at all —
+// syncing a just-opened, unedited photo's identity graph onto the rest of
+// the selection would be exactly wrong.
+let lastAutoSyncGraph: GraphDoc | null = null;
+useAppStore.subscribe((state) => {
+  if (state.graph === lastAutoSyncGraph) return;
+  lastAutoSyncGraph = state.graph;
+  if (autoSyncTimer !== null) clearTimeout(autoSyncTimer);
+  if (!state.graphDirty) return;
+  autoSyncTimer = setTimeout(runAutoSyncNow, 1000);
 });
 
 // Mask overlay auto-clear (round-7 hand-test fix, "0キーでのオーバーレイは切り替わらないかも？

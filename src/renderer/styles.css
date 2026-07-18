@@ -484,6 +484,19 @@ button:disabled {
   background: #1a1a1a;
 }
 
+/* Wraps a non-missing FilmstripCell's <button> + its "Remove from project"
+   context menu (item C) — the button alone can't host a popup (nesting
+   interactive controls inside a <button> is invalid HTML, same reasoning as
+   MissingFilmstripCell's own doc comment), so this takes over the flex-item
+   slot the button used to occupy directly inside `.filmstrip`, and stretches
+   its one child (the button) to fill it via `display:flex`. */
+.filmstrip-cell-container {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  width: 96px;
+}
+
 .filmstrip-cell {
   position: relative;
   flex: 0 0 auto;
@@ -499,18 +512,43 @@ button:disabled {
   border-color: #666;
 }
 
-.filmstrip-cell--current {
+/* Specificity note: `.filmstrip-cell:hover` is a class + pseudo-class (0,2,0)
+   — a single-class `--current`/`--secondary-selected` rule (0,1,0) would lose
+   to it while hovered, so both selectors below repeat `.filmstrip-cell` to
+   match specificity (0,2,0) and win by source order instead. */
+.filmstrip-cell.filmstrip-cell--current {
   border-color: #6a9fe8;
 }
 
 /* Multi-select (docs/brief-bank/multi-select-sync.md): a ⌘/⇧-selected
-   SECONDARY cell reuses the primary's own selection color at reduced
-   intensity (the brief's "existing selection style at reduced intensity") —
-   never the full --current ring, so the primary (the photo actually open in
-   the canvas) always reads as the "most selected" one. */
-.filmstrip-cell--secondary-selected {
-  border-color: rgba(106, 159, 232, 0.45);
+   SECONDARY cell. Round-2 UX pack item D ("色がわかりづらかっただけか" — the
+   user initially thought multi-select was broken because the reduced-
+   intensity border alone read as "basically nothing"): a bright, distinct
+   (amber, never confusable with --current's blue) border PLUS a translucent
+   tint overlay across the whole cell — unmistakable at a glance, still
+   clearly a different, lesser state than the primary's full --current ring. */
+.filmstrip-cell.filmstrip-cell--secondary-selected {
+  border-color: #e8b23a;
 }
+
+.filmstrip-cell--secondary-selected::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(232, 178, 58, 0.28);
+  pointer-events: none;
+}
+
+/* "Remove from project" cell context menu (item C, `.filmstrip-cell-menu`
+   in Filmstrip.tsx): positioned INLINE (`position:fixed`, anchored to the
+   click point, growing upward via `translateY(-100%)`), NOT `.add-node-menu-
+   list`'s default `position:absolute` relative to the cell — the strip
+   itself clips overflow vertically (`.filmstrip`'s `overflow-y: hidden`),
+   which would clip an absolutely-positioned popup regardless of which
+   direction it opened (clipping applies to the ancestor's box on every
+   side); `position:fixed` escapes that ancestor entirely. No dedicated CSS
+   rule needed here — the class is a test/readability marker only, all its
+   styling comes from `.add-node-menu-list` + the inline position. */
 
 .filmstrip-selection-count {
   font-size: 11px;
@@ -537,6 +575,17 @@ button:disabled {
 .filmstrip-sync-button:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Auto Sync toggle (item E) — plain checkbox + label, same font-size as the
+   filter selects beside it. */
+.filmstrip-autosync-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #ccc;
+  white-space: nowrap;
 }
 
 /* Missing-photo placeholder (project-storage migration §"Missing photos"):

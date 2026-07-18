@@ -432,6 +432,13 @@ try {
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length === 4, {
     timeout: 15_000,
   });
+  // Thumbnails load lazily (IntersectionObserver, thumbnailCache.ts) — the
+  // dimming check below reads the thumbnail's OWN class, so it must wait for
+  // the <img> to actually mount first (verify-filmstrip.mjs's own precedent),
+  // not just the cell count above.
+  await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-thumb"]').length === 4, {
+    timeout: 15_000,
+  });
 
   const folderFlags = await page.evaluate(() =>
     window.__debug.folderState().entries.map((e) => ({ path: e.path, flag: e.flag, rating: e.rating }))
