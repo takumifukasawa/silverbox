@@ -100,6 +100,13 @@ export const IPC = {
   denoiseRun: 'denoise:run',
   /** Verify-only: how many times this session actually ran ORT inference (cache hits don't count) — scripts/verify-denoise.mjs's cache check, spawnCount-style. */
   denoiseRunCount: 'denoise:runCount',
+  // Look extraction, mode 1 (docs/brief-bank/look-extraction.md — sidecar
+  // consensus): `--extract-look` writes an arbitrary, CLI-chosen output
+  // path, unlike presetWrite (userData/presets/<slug>.json only) or
+  // writeSidecar (project looks/ only) — same "trust the CLI's own --out
+  // argument" level exportEncode's outPath already operates at (see
+  // main/index.ts's handler).
+  extractLookWrite: 'cli:extractLookWrite',
 } as const;
 
 /** Suffix of the GraphDoc sidecar written next to the image file. Retired as a WRITE target by the project-storage migration (stage 1) — still READ forever (principle 9) for legacy adjacent sidecars and CLI import. */
@@ -411,6 +418,17 @@ export interface SilverboxApi {
   /** Send a `cli:warn` notice (see IPC.cliWarn's doc comment) — always printed to main's stderr, independent of `--json`. */
   cliWarn(message: string): void;
   /**
+   * Write the extracted-preset JSON to an ARBITRARY path (`--extract-look
+   * … --out <path>` — docs/brief-bank/look-extraction.md mode 1): atomic
+   * write (mkdtemp+rename, same discipline as writeSidecar/settings.ts),
+   * `dirname(path)` created on demand. Deliberately UNRESTRICTED (unlike
+   * writeSidecar/presetWrite's path guards) — the path comes straight from
+   * the CLI invoker's own `--out` argument, the same trust level
+   * ExportEncodeRequest.outPath already operates at; only ever called from
+   * runCliExtractLook, never reachable from the interactive app.
+   */
+  writeExtractedPreset(path: string, content: string): Promise<void>;
+  /**
    * Subscribe to main's file-association open push (project-storage
    * migration, stage 2 — see IPC.openPath's doc comment): `path` is the
    * launched/double-clicked `project.silverbox` (or a directory containing
@@ -652,8 +670,37 @@ export interface CliDiffJob {
   image: string | null;
 }
 
+/**
+ * The whole job for one `--extract-look <look…> --out <path>` invocation
+ * (look extraction mode 1 — sidecar-consensus distillation, docs/brief-bank/
+ * look-extraction.md), built by main (src/main/cliArgs.ts's buildCliJob).
+ * Unlike CliRenderJob/CliCheckJob this is never a per-image batch — like
+ * CliDiffJob it's ONE job producing ONE outcome: N look/sidecar files in,
+ * one consensus preset file out. Never decodes/renders anything (pure JSON
+ * math over each look's Develop params — see engine/look/consensus.ts), so
+ * there is no `image` field at all, unlike CliDiffJob.
+ */
+export interface CliExtractLookJob {
+  mode: 'extract-look';
+  /** Absolute paths to each input look/sidecar JSON file, in argv order (parseCliArgs' own positional-argument bucket, shared with CliRenderJob.images — see its own doc comment for why that's fine here too). At least one, enforced at parse time. */
+  looks: string[];
+  /** Absolute path to the preset FILE this job writes (`--out <path>`, required for this mode — unlike CliRenderJob.outDir, which is a DIRECTORY and optional). */
+  outPath: string;
+  /**
+   * `--families id1,id2,…` (shape-validated only by cliArgs.ts — plain
+   * strings, not `PresetFamilyId[]`, same isomorphic-file reason
+   * Settings.presetSaveFamilies is a plain string[]; the renderer's
+   * runCliExtractLook validates against the real vocabulary and rejects an
+   * unknown/structural id with a clear error). null = every 'develop'-group
+   * family is considered (presetFamilies.ts's own default set).
+   */
+  families: string[] | null;
+  /** `--min-agreement <0-1>` — per-family inclusion gate; null = engine/look/consensus.ts's own DEFAULT_AGREEMENT_THRESHOLD. */
+  minAgreement: number | null;
+}
+
 /** Either job shape `cli:run` can carry; the renderer branches on `mode`. */
-export type CliJob = CliRenderJob | CliCheckJob | CliDiffJob;
+export type CliJob = CliRenderJob | CliCheckJob | CliDiffJob | CliExtractLookJob;
 
 /** Golden-render outcome for one status that isn't a pass/fail ΔE comparison. */
 export type CliCheckStatus =
@@ -699,8 +746,31 @@ export type CliDiffOutcome =
 /** CliDiffOutcome plus the same {input,error} failure shape every other CLI result uses — streamed via cliProgress. */
 export type CliDiffResult = CliDiffOutcome | { input: string; error: string };
 
+/**
+ * The one `--extract-look` outcome (see CliExtractLookJob's doc comment).
+ * `input` holds the WRITTEN output path (same as `outputPath`) rather than
+ * an input file — there is no single "input" for a consensus job, and every
+ * CliProgressResult variant needs an `input` for formatCliProgress's uniform
+ * addressing. `report` is engine/look/consensus.ts's formatConsensusReport
+ * output — per-family agreement + per-param spread lines (the brief's "fit
+ * report"), never a raw curve point dump (same restraint diffLook.ts's own
+ * curve summary uses).
+ */
+export interface CliExtractLookOutcome {
+  input: string;
+  outputPath: string;
+  /** Family ids that made it into the written preset's `includes`. */
+  includes: string[];
+  /** Family ids considered but excluded (below the agreement threshold, or filtered out by `--families`). */
+  excluded: string[];
+  report: string[];
+}
+
+/** CliExtractLookOutcome plus the same {input,error} failure shape every other CLI result uses — streamed via cliProgress. */
+export type CliExtractLookResult = CliExtractLookOutcome | { input: string; error: string };
+
 /** Whatever cliProgress carries — main's formatter (cliArgs.ts's formatCliProgress) branches on shape. */
-export type CliProgressResult = CliRenderResult | CliCheckResult | CliDiffResult;
+export type CliProgressResult = CliRenderResult | CliCheckResult | CliDiffResult | CliExtractLookResult;
 
 /**
  * Request for one image's golden check/update (`window.silverbox.checkGoldenImage`

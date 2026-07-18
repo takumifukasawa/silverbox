@@ -53,6 +53,7 @@ const api: SilverboxApi = {
   cliProgress: (result) => ipcRenderer.send(IPC.cliProgress, result),
   cliDone: () => ipcRenderer.send(IPC.cliDone),
   cliWarn: (message) => ipcRenderer.send(IPC.cliWarn, message),
+  writeExtractedPreset: (path, content) => ipcRenderer.invoke(IPC.extractLookWrite, path, content),
   onOpenPath: (callback) => {
     const listener = (_ev: IpcRendererEvent, path: string) => callback(path);
     ipcRenderer.on(IPC.openPath, listener);

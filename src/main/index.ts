@@ -674,6 +674,26 @@ function registerIpc(): void {
   });
 
   ipcMain.handle(IPC.denoiseRunCount, async (): Promise<number> => denoiseRunCount());
+
+  // Look extraction (`--extract-look … --out <path>` — see
+  // shared/ipc.ts's writeExtractedPreset doc comment): deliberately
+  // UNRESTRICTED path, unlike writeSidecar/presetWrite — `path` is the CLI
+  // invoker's own `--out` argument, already resolved absolute by
+  // cliArgs.ts's buildCliJob. Same atomic mkdtemp+rename discipline as
+  // writeSidecar above.
+  ipcMain.handle(IPC.extractLookWrite, async (_ev, path: unknown, content: unknown): Promise<void> => {
+    if (typeof path !== 'string') throw new Error('writeExtractedPreset: path must be a string');
+    if (typeof content !== 'string') throw new Error('writeExtractedPreset: content must be a string');
+    await mkdir(dirname(path), { recursive: true });
+    const tmpDir = await mkdtemp(join(dirname(path), '.silverbox-save-'));
+    const tmpFile = join(tmpDir, basename(path));
+    try {
+      await writeFile(tmpFile, content, 'utf8');
+      await rename(tmpFile, path);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
 }
 
 /**

@@ -90,12 +90,14 @@ import { buildLutExport } from '../engine/color/lutExport';
 import { parsePresetFile, serializePreset, type ParsedPreset } from '../engine/graph/presetDoc';
 import {
   buildScopedLook,
+  isDevelopFamily,
   isKnownFamilyId,
   mergeScopedLook,
   structuralFamilyCompatible,
   type PresetFamilyId,
 } from '../engine/graph/presetFamilies';
 import { diffLook } from '../engine/look/diffLook';
+import { computeLookConsensus, formatConsensusReport } from '../engine/look/consensus';
 import {
   DEFAULT_SETTINGS,
   PROJECT_MANIFEST_NAME,
@@ -104,6 +106,8 @@ import {
   type CliCheckResult,
   type CliDiffJob,
   type CliDiffResult,
+  type CliExtractLookJob,
+  type CliExtractLookResult,
   type CliRenderJob,
   type CliRenderResult,
   type FolderImageEntry,
@@ -1174,6 +1178,22 @@ interface AppState {
    * fires exactly once.
    */
   runCliDiff(job: CliDiffJob, onResult: (result: CliDiffResult) => void): Promise<void>;
+  /**
+   * Look extraction, mode 1 (main/index.ts's `--extract-look` mode,
+   * docs/brief-bank/look-extraction.md — sidecar-consensus distillation):
+   * reads every `job.looks` file as raw text, `parseGraphDoc`s each (no
+   * `srcDims` — this mode only ever reads a Develop node's own params,
+   * never masks/spots/geometry, so there is no anchor-space migration to
+   * feed dims into), pulls out each doc's first Develop node's params, and
+   * hands them to engine/look/consensus.ts's computeLookConsensus. Never
+   * opens an image, never touches the GPU — same "pure JSON math, one job,
+   * one outcome" shape as runCliDiff, `onResult` fires exactly once. A
+   * `job.families` entry this build doesn't recognize (or a structural one,
+   * always out of scope for a look — see the brief) is a hard failure
+   * naming the bad id, same "explicit error over silent guess" cliArgs.ts
+   * convention.
+   */
+  runCliExtractLook(job: CliExtractLookJob, onResult: (result: CliExtractLookResult) => void): Promise<void>;
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
@@ -1950,6 +1970,18 @@ export function cliOutputPath(input: string, outDir: string | null): string {
   if (!outDir) return base;
   const name = base.slice(base.lastIndexOf('/') + 1);
   return `${outDir.replace(/\/+$/, '')}/${name}`;
+}
+
+/**
+ * `--extract-look --families` validation (main/index.ts's own mode):
+ * true only for a family id BOTH this build recognizes AND that lives in
+ * the 'develop' group — a structural family (geometry/spots/masks/
+ * custom-nodes) is always out of scope for a look (docs/brief-bank/
+ * look-extraction.md: "per-photo, not look"), so naming one here is a
+ * caller error, not a silent no-op.
+ */
+function isValidDevelopFamilyId(id: string): id is PresetFamilyId {
+  return isKnownFamilyId(id) && isDevelopFamily(id);
 }
 
 /**
@@ -4991,6 +5023,54 @@ export const useAppStore = create<AppState>((set, get) => {
       onResult({ input: image, lines, deltaE });
     } catch (err) {
       onResult({ input: image ?? `${job.sidecarA} vs ${job.sidecarB}`, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async runCliExtractLook(job, onResult) {
+    try {
+      if (job.families !== null) {
+        const invalidIds = job.families.filter((id) => !isValidDevelopFamilyId(id));
+        if (invalidIds.length > 0) {
+          throw new Error(`--families has unknown or structural id(s): ${invalidIds.join(', ')} (structural families — geometry/spots/masks/custom-nodes — are never part of a look)`);
+        }
+      }
+      const families = job.families?.filter(isValidDevelopFamilyId);
+
+      const developsList = await Promise.all(
+        job.looks.map(async (path) => {
+          const text = new TextDecoder().decode(await window.silverbox.readFile(path));
+          let parsed: SidecarDoc;
+          try {
+            // No srcDims: this mode only ever reads a Develop node's own
+            // params (never masks/spots/geometry — see this function's own
+            // doc comment), so there is nothing an anchor-space migration
+            // would need dims for.
+            parsed = parseGraphDoc(text);
+          } catch (err) {
+            throw new Error(`${path}: ${err instanceof Error ? err.message : String(err)}`);
+          }
+          const devNode = parsed.graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.develop);
+          if (!devNode?.develop) throw new Error(`${path}: no Develop node found — nothing to extract a look from`);
+          return devNode.develop;
+        })
+      );
+
+      const consensus = computeLookConsensus(developsList, {
+        families,
+        minAgreement: job.minAgreement ?? undefined,
+      });
+      const graph = defaultGraphDoc();
+      const devNode = graph.nodes.find((n) => n.kind === DEVELOP_KIND)!;
+      devNode.develop = consensus.params;
+      const name = job.outPath.split(/[\\/]/).pop()?.replace(/\.json$/i, '') || 'Extracted look';
+      const content = serializePreset(name, graph, new Date().toISOString(), undefined, consensus.includes);
+      await window.silverbox.writeExtractedPreset(job.outPath, content);
+
+      const excluded = consensus.reports.filter((r) => !r.included).map((r) => r.family);
+      const report = formatConsensusReport(consensus.reports);
+      onResult({ input: job.outPath, outputPath: job.outPath, includes: consensus.includes, excluded, report });
+    } catch (err) {
+      onResult({ input: job.outPath, error: err instanceof Error ? err.message : String(err) });
     }
   },
 

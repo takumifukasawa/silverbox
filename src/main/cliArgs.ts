@@ -15,6 +15,7 @@ import {
   PROJECT_MANIFEST_NAME,
   type CliCheckJob,
   type CliDiffJob,
+  type CliExtractLookJob,
   type CliJob,
   type CliProgressResult,
   type CliRenderJob,
@@ -26,6 +27,7 @@ import {
 export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg|look.json> [more…]
        silverbox-render --check [--update] [--threshold <deltaE>] [--json] <image…>
        silverbox-render --diff <sidecarA> <sidecarB> [--image <arw>] [--json]
+       silverbox-render --extract-look <look…> --out <preset.json> [--families <ids>] [--min-agreement <0-1>] [--json]
 
   --project <dir>       resolve every plain-image input's look from this
                         project's playlist (<dir>/looks/) instead of the
@@ -165,11 +167,43 @@ Exit codes (--diff): 0 the comparison ran (regardless of whether it found
 differences — the same "diff always succeeds, its OUTPUT is the news"
 exit-code philosophy \`git diff\` itself uses), 1 a sidecar/the image could
 not be read or parsed, 2 bad usage.
+
+Look extraction (--extract-look): distill a preset from N already-edited
+looks that share a look (docs/brief-bank/look-extraction.md, mode 1 —
+sidecar consensus). Never opens/decodes/renders any photo — pure JSON math
+over each input's Develop params. Files only: no scraping, no network, no
+auth, ever — feed it look/sidecar files you already have on disk (a
+project's looks/<name>.json, or a legacy adjacent <image>.silverbox.json).
+
+  --extract-look <look…>  two or more look/sidecar JSON files
+  --out <path>            required: where to write the extracted preset
+  --families <ids>         comma-separated family ids (see the app's Save-
+                        preset dialog for the list) — restricts which
+                        'develop' families are even considered; default is
+                        every develop family. Structural families
+                        (geometry/spots/masks/custom-nodes) are ALWAYS
+                        excluded from extraction — a look is Develop
+                        params, never per-photo structure.
+  --min-agreement <0-1> per-family inclusion gate: a family whose inputs
+                        disagree more than this is left at default and
+                        reported excluded, rather than averaged into a
+                        value nobody asked for (default 0.5).
+
+A family below the agreement threshold (or filtered out by --families) is
+never written into the preset's includes — the report explains why. Human
+output prints the written path plus the full per-family/per-param report;
+--json emits one NDJSON object {input,outputPath,includes,excluded,report}.
+
+Exit codes (--extract-look): 0 the preset was written (regardless of how
+many families got excluded — that's expected, not a failure), 1 a look file
+could not be read/parsed or named an unknown/structural --families id, 2 bad
+usage.
 `;
 
 export interface CliParsedArgs {
-  mode: 'render' | 'check' | 'diff';
+  mode: 'render' | 'check' | 'diff' | 'extract-look';
   images: string[];
+  /** `--out <path>`: a DIRECTORY for mode 'render' (CliRenderJob.outDir), a preset FILE path for mode 'extract-look' (CliExtractLookJob.outPath) — same flag, mode-dependent meaning; not valid with 'check'/'diff'. */
   outDir: string | null;
   preset: string | null;
   output: string | null;
@@ -203,6 +237,18 @@ export interface CliParsedArgs {
   diffImage: string | null;
   /** --project <dir>; valid with every mode (render/check/diff) — see CLI_USAGE. null = no project (today's legacy behavior). */
   project: string | null;
+  /**
+   * `--families <ids>`; only meaningful with mode 'extract-look'. Shape-
+   * validated only (non-empty comma-separated ids) — cliArgs.ts (main
+   * process) never imports the renderer-only presetFamilies.ts, same
+   * isomorphic-file boundary Settings.presetSaveFamilies already respects
+   * (see shared/ipc.ts). null = every develop family considered (the
+   * renderer's own default). The actual vocabulary check (unknown/
+   * structural id → error) happens in appStore.ts's runCliExtractLook.
+   */
+  families: string[] | null;
+  /** `--min-agreement <0-1>`; only meaningful with mode 'extract-look'. null = engine/look/consensus.ts's own default threshold. */
+  minAgreement: number | null;
 }
 
 const METADATA_VALUES: ExportMetadataPolicy[] = ['all', 'minimal', 'none'];
@@ -234,6 +280,8 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     sidecarB: null,
     diffImage: null,
     project: null,
+    families: null,
+    minAgreement: null,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!;
@@ -271,6 +319,26 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         opts.diffImage = argv[++i] ?? null;
         if (opts.diffImage === null) return { error: '--image expects a path' };
         break;
+      case '--extract-look':
+        opts.mode = 'extract-look';
+        break;
+      case '--families': {
+        const v = argv[++i];
+        if (v === undefined) return { error: '--families expects a comma-separated list of family ids' };
+        const ids = v
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s !== '');
+        if (ids.length === 0) return { error: '--families expects a comma-separated list of family ids' };
+        opts.families = ids;
+        break;
+      }
+      case '--min-agreement': {
+        const v = Number(argv[++i]);
+        if (!Number.isFinite(v) || v < 0 || v > 1) return { error: '--min-agreement expects a number 0-1' };
+        opts.minAgreement = v;
+        break;
+      }
       case '--update':
         opts.update = true;
         break;
@@ -281,8 +349,10 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       }
       case '--out':
+        // See CliParsedArgs.outDir's own doc comment: a directory for
+        // --render, a preset file path for --extract-look.
         opts.outDir = argv[++i] ?? null;
-        if (opts.outDir === null) return { error: '--out expects a directory' };
+        if (opts.outDir === null) return { error: '--out expects a path' };
         break;
       case '--preset':
         opts.preset = argv[++i] ?? null;
@@ -340,6 +410,8 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     // it's valid with --check too (CliCheckJob.skipRejected's doc comment).
     if (opts.allowExternal) return { error: '--allow-external is not valid with --check' };
     if (opts.diffImage !== null) return { error: '--image is not valid with --check' };
+    if (opts.families !== null) return { error: '--families requires --extract-look' };
+    if (opts.minAgreement !== null) return { error: '--min-agreement requires --extract-look' };
   } else if (opts.mode === 'diff') {
     // --image is no longer required at parse time (CLI tooling parity,
     // project-storage.md stage 2): it can be DERIVED from both sidecars'
@@ -359,10 +431,32 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.allowExternal) return { error: '--allow-external is not valid with --diff' };
     if (opts.update) return { error: '--update is not valid with --diff' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --diff' };
+    if (opts.families !== null) return { error: '--families requires --extract-look' };
+    if (opts.minAgreement !== null) return { error: '--min-agreement requires --extract-look' };
+  } else if (opts.mode === 'extract-look') {
+    // Never opens/decodes/renders anything (pure JSON math over each look's
+    // Develop params — see CliExtractLookJob's doc comment), so none of
+    // render's/check's per-image output options apply.
+    if (opts.images.length < 2) return { error: '--extract-look needs at least two look files (one look has nothing to reach consensus with)' };
+    if (opts.outDir === null) return { error: '--extract-look requires --out <path>' };
+    if (opts.preset !== null) return { error: '--preset is not valid with --extract-look' };
+    if (opts.output !== null) return { error: '--output is not valid with --extract-look' };
+    if (opts.quality !== 90) return { error: '--quality is not valid with --extract-look' };
+    if (opts.maxDim !== null) return { error: '--max-dim is not valid with --extract-look' };
+    if (opts.metadata !== 'all') return { error: '--metadata is not valid with --extract-look' };
+    if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --extract-look' };
+    if (opts.minRating !== null) return { error: '--min-rating is not valid with --extract-look' };
+    if (opts.skipRejected) return { error: '--skip-rejected is not valid with --extract-look' };
+    if (opts.allowExternal) return { error: '--allow-external is not valid with --extract-look' };
+    if (opts.diffImage !== null) return { error: '--image is not valid with --extract-look' };
+    if (opts.update) return { error: '--update is not valid with --extract-look' };
+    if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --extract-look' };
   } else {
     if (opts.update) return { error: '--update requires --check' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
     if (opts.diffImage !== null) return { error: '--image requires --diff' };
+    if (opts.families !== null) return { error: '--families requires --extract-look' };
+    if (opts.minAgreement !== null) return { error: '--min-agreement requires --extract-look' };
   }
   return opts;
 }
@@ -424,6 +518,18 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
     };
     return job;
   }
+  if (parsed.mode === 'extract-look') {
+    // parseCliArgs' own validation guarantees outDir is set (--out is
+    // required for this mode) and images has at least two entries.
+    const job: CliExtractLookJob = {
+      mode: 'extract-look',
+      looks: images,
+      outPath: resolve(cwd, parsed.outDir!),
+      families: parsed.families,
+      minAgreement: parsed.minAgreement,
+    };
+    return job;
+  }
   const preset: CliRenderPresetRef | null =
     parsed.preset === null
       ? null
@@ -457,6 +563,17 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
 export function formatCliProgress(result: CliProgressResult, json: boolean): { stderr: boolean; line: string } {
   if (json) return { stderr: false, line: JSON.stringify(result) };
   if ('error' in result) return { stderr: true, line: `${result.input}: ERROR ${result.error}` };
+  if ('outputPath' in result) {
+    // --extract-look (CliExtractLookOutcome) — checked BEFORE 'lines' below:
+    // a unique key, no other CliProgressResult variant carries it. Never a
+    // failure (excluded families are expected, not an error — see this
+    // file's CLI_USAGE "Exit codes (--extract-look)" note).
+    const summary =
+      result.includes.length > 0
+        ? `wrote ${result.outputPath} (families: ${result.includes.join(', ')})`
+        : `wrote ${result.outputPath} (no family cleared the agreement threshold — every section left at default)`;
+    return { stderr: false, line: [summary, ...result.report.map((l) => `  ${l}`)].join('\n') };
+  }
   if ('lines' in result) {
     // --diff (CliDiffOutcome): checked BEFORE the 'status'/'deltaE' branches
     // below — a dims-changed diff outcome also carries 'status', and a
