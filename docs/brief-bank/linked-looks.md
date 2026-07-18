@@ -137,7 +137,14 @@ axis that must compose, not fork the preset:
   computeCropbox, the geometry-saga work: crop-mode frames are
   4552×3028 center-preserved against the full readout). Store the
   repair set in physical-sensor pixels; apply through each photo's
-  readout-window ∘ orientation transform — both already tracked. One
+  readout-window ∘ orientation transform. PRECISION (double-checked
+  2026-07-18): orientation IS retained per photo (DecodedImage.flip /
+  geometry.orientation), but the readout-window origin is currently
+  COMPUTED at decode time (computeCropbox) and then discarded —
+  DecodedImage carries no cropbox field, so implementing the repair
+  sheet needs one small additive field to retain it (same pattern
+  CameraColorInfo.rgbCam followed in DCP stage 2). Not a design
+  blocker; an honest implementation-cost note. One
   stamp sheet then covers FF/APS-C/portrait/landscape mixes; dust
   outside the APS-C window simply maps away (correct: it isn't in that
   frame). Every objection so far (dust presence, orientation, crop
