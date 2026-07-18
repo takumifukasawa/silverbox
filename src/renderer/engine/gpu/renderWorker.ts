@@ -59,6 +59,8 @@ let wbModel: WbModel = createWbModel({});
 let currentImageDims: { width: number; height: number } | null = null;
 /** Camera model of the current preview image — selects the per-camera profile lattice (profileFit.ts). */
 let currentCameraModel: string | null = null;
+/** DCP profile mode (docs/brief-bank/dcp-profile.md): the baked lattice for whichever DCP file is currently configured, mirrored here via the 'dcpLattice' command — see renderProtocol.ts's doc comment. */
+let currentDcpLattice: readonly number[] | null = null;
 /** Gen of the most recently applied 'image'/'render' command (main surface — see renderProtocol.ts). */
 let currentGen = 0;
 
@@ -214,6 +216,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcWidth: req.image.width,
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
+          dcpLattice: currentDcpLattice,
           allowExternal: req.allowExternal,
         });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
@@ -234,6 +237,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcWidth: req.image.width,
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
+          dcpLattice: currentDcpLattice,
           inspectNodeId: req.inspectNodeId,
         });
         const result = await renderer.captureCutPointPixels(req.image, plan, req.encoded);
@@ -308,6 +312,10 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       }
       return;
     }
+    case 'dcpLattice': {
+      currentDcpLattice = msg.lattice;
+      return;
+    }
     case 'imageNode': {
       // Cached here (not just applied) so a compare pane created LATER
       // (initCompare below) can replay every image node loaded so far, not
@@ -347,6 +355,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcWidth: currentImageDims?.width,
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
+              dcpLattice: currentDcpLattice,
               inspectNodeId: msg.inspectNodeId ?? undefined,
             },
             msg.showBefore
@@ -490,6 +499,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcWidth: currentImageDims?.width,
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
+              dcpLattice: currentDcpLattice,
             },
             msg.showBefore
           );

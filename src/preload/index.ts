@@ -5,6 +5,7 @@ const api: SilverboxApi = {
   ping: () => ipcRenderer.invoke(IPC.ping),
   openImageDialog: (scope) => ipcRenderer.invoke(IPC.openImageDialog, scope),
   openFolderDialog: () => ipcRenderer.invoke(IPC.openFolderDialog),
+  openDcpDialog: () => ipcRenderer.invoke(IPC.openDcpDialog),
   listImages: (dir) => ipcRenderer.invoke(IPC.listImages, dir),
   readFile: (path) => ipcRenderer.invoke(IPC.readFile, path),
   readSidecar: (path) => ipcRenderer.invoke(IPC.readSidecar, path),

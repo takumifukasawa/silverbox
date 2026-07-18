@@ -541,6 +541,12 @@ export function CanvasView() {
   // client.render() reposts and the fresh texture shows up" role as
   // externalNodeRev/imageNodeRev above.
   const denoiseNodeRev = useAppStore((s) => s.denoiseNodeRev);
+  // DCP camera-profile mode (docs/brief-bank/dcp-profile.md): the baked DCP
+  // lattice is mirrored into the render worker OUTSIDE this effect (appStore's
+  // refreshDcpProfile — baking needs file IO, this effect must stay
+  // synchronous) — dcpProfileRev is what makes this effect re-run and repost
+  // 'render' once a bake actually lands, same role as the three revs above.
+  const dcpProfileRev = useAppStore((s) => s.dcpProfileRev);
   const setImageNodeMissing = useAppStore((s) => s.setImageNodeMissing);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
@@ -1169,6 +1175,7 @@ export function CanvasView() {
     imageNodeRev,
     externalNodeRev,
     denoiseNodeRev,
+    dcpProfileRev,
   ]);
 
   // Round-11 fix pack item 4 ("PNG chosen on an Image node showed no node

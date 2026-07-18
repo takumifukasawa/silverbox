@@ -11,6 +11,9 @@ export const IPC = {
   ping: 'app:ping',
   openImageDialog: 'dialog:openImage',
   openFolderDialog: 'dialog:openFolder',
+  // DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1): the
+  // Develop panel's "DCP file…" picker (Inspector's minimal source-selector UI).
+  openDcpDialog: 'dialog:openDcp',
   listImages: 'fs:listImages',
   readFile: 'file:read',
   readSidecar: 'sidecar:read',
@@ -241,6 +244,8 @@ export interface SilverboxApi {
   openImageDialog(scope?: 'imageNode'): Promise<OpenImageDialogResult>;
   /** Show the native folder-picker dialog (folder filmstrip, ROADMAP "nice to have"). */
   openFolderDialog(): Promise<OpenImageDialogResult>;
+  /** Show the native open dialog filtered to .dcp (DCP camera-profile mode, stage 1) — the Develop panel's profile source picker. */
+  openDcpDialog(): Promise<OpenImageDialogResult>;
   /**
    * List `dir`'s supported images (IMAGE_EXTENSIONS, no recursion), sorted by
    * filename — folder filmstrip's one piece of main-process surface. Throws

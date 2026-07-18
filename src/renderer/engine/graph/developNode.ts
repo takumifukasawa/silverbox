@@ -159,12 +159,33 @@ export interface EffectsParams {
  * Fitted camera-profile transform (the Adobe-Color character match — see
  * engine/color/profileFit.ts and docs/brief-bank/profile-fit.md). `amount`
  * 0..100 blends identity → the per-camera residual lattice; applied FIRST in
- * the Develop chain (before the base curve / any user slider). Only `amount`
- * is stored in the doc — the lattice itself is resolved from the camera model
- * at compile time (buildPlan → profileForModel), never serialized.
+ * the Develop chain (before the base curve / any user slider).
+ *
+ * `source` (docs/brief-bank/dcp-profile.md, DCP stage 1): 'builtin' (default)
+ * keeps today's behavior — `amount` blends against the fitted round-6
+ * lattice resolved from the camera model (buildPlan → profileForModel),
+ * never serialized. 'dcp' instead blends against a lattice BAKED from a
+ * user-supplied DCP camera-profile file (`dcpPath`, executing the DNG
+ * spec's own camera-profile pipeline — engine/color/dcp/) — the baked
+ * lattice is likewise resolved at compile time (buildPlan → CompileContext's
+ * `dcpLattice`, computed main-thread-side where file IO/parsing can happen),
+ * never serialized; only this config (source/dcpPath/amount) is stored in
+ * the doc, so a look file stays portable (points at a DCP file the way an
+ * `image` node points at a composite file, not by embedding its data).
+ * `dcpPath` is an absolute path (never relative — same reasoning as a
+ * photo's own out-of-tree path, see sidecar-spec.md §1) to a user's own
+ * locally-installed DCP; never bundled/redistributed (the brief's legal
+ * line).
  */
 export interface ProfileParams {
   amount: number;
+  source?: 'builtin' | 'dcp';
+  dcpPath?: string;
+}
+
+/** `source` defaults to 'builtin' when absent (older/hand-authored docs). */
+export function profileSource(p: ProfileParams): 'builtin' | 'dcp' {
+  return p.source === 'dcp' ? 'dcp' : 'builtin';
 }
 
 export interface DevelopParams {
@@ -191,7 +212,7 @@ export function defaultDevelopParams(): DevelopParams {
   return {
     // identity (no pass); fresh RAW opens seed amount 100 under the
     // default-look gate (appStore.seedDefaultLook), JPEG/restored keep 0.
-    profile: { amount: 0 },
+    profile: { amount: 0, source: 'builtin', dcpPath: '' },
     basic: {
       temp: 0,
       tint: 0,

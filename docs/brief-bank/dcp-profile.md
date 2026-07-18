@@ -1,8 +1,23 @@
 # Brief: DCP camera-profile loading (the direct route to Adobe Color)
 
-Status: DESIGNED 2026-07-18 (conductor, from the user's own insight:
+Status: STAGE 1 LANDED 2026-07-18 (parser + DNG §6 pipeline +
+`profile.source: 'dcp'` + verify-dcp fixture suite + minimal UI; the
+DCP result is baked into the SAME 17³ residual-lattice shape the
+builtin profile uses, so GPU/CPU parity is inherited).
+KNOWN LIMITATION (Stage 2, the real remaining work): the pipeline
+needs true camera-native RGB, but our decoder gets linear Rec.2020
+straight from libraw — Stage 1 approximates the inverse via
+whiteBalance.ts's camXyz, which is NOT libraw's actual rgb_cam
+normalization. Smoke test against the real Sony ILCE-7CM2 Adobe
+Standard DCP: parses cleanly, but renders with a large systematic
+green cast — DO NOT judge Adobe-Color fidelity on Stage 1. Stage 2 =
+replicate libraw's rgb_cam derivation (or expose sensor-native RGB
+from the decoder) so the reconstruction is exact; the green cast is
+the signature of that gap (WB-scale mismatch in camera space), not a
+table/matrix bug (fixture golden math passes).
+(Originally DESIGNED 2026-07-18, from the user's own insight:
 "adobecolorが公開されてたら全く同じようには理論的にはできるよね" —
-and it effectively IS available locally). Not yet scheduled.
+and it effectively IS available locally.)
 Prereq reading: COLOR.md "Calibration state" (the statistical route
 plateaued at ~3.6 dE2000 after six rounds — this brief is the
 structural alternative), profileFit.ts history, the DNG 1.7 spec's

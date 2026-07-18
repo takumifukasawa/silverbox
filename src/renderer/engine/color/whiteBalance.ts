@@ -45,6 +45,14 @@ export interface WbModel {
   mccamyCct: number;
   /** Relative WB gains vs as-shot; exactly [1,1,1] at the as-shot values. */
   gains(temp: number, tint: number): [number, number, number];
+  /**
+   * XYZ (D65) → camera matrix (libraw's `cam_xyz`, or the Rec.2020 fallback —
+   * see `pickCamXyz`). Exposed for the DCP profile pipeline
+   * (engine/color/dcp/pipeline.ts's `cameraNativeFromWorking`), which inverts
+   * this SAME conversion to approximate camera-native RGB from a decoded
+   * working-space pixel — no separate matrix, so both consumers always agree.
+   */
+  camXyz: number[][];
 }
 
 /** Tint slider units per unit Δuv (DNG order of magnitude). */
@@ -329,6 +337,7 @@ export function createWbModel(meta: WbMeta): WbModel {
       const m = tempTintToMul(t, ti, camXyz);
       return [m[0] / mAsShot[0], 1, m[2] / mAsShot[2]];
     },
+    camXyz,
   };
 }
 

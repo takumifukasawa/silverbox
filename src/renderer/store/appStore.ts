@@ -58,7 +58,9 @@ import {
   type ProjectManifest,
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
-import { defaultDevelopParams } from '../engine/graph/developNode';
+import { defaultDevelopParams, profileSource } from '../engine/graph/developNode';
+import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
+import { parseDcp, bakeDcpLattice, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
 import { defaultImageParams, dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
@@ -69,7 +71,7 @@ import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode'
 import { retryPendingDenoise } from '../engine/graph/denoiseNodeRunner';
 import { DENOISE_MODEL_SHA256 } from '../../../shared/denoiseModel';
 import { sha256Hex, type HistogramData, type ScopeSamples } from '../engine/gpu/graphRenderer';
-import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet } from '../engine/gpu/renderClient';
+import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet, mirrorDcpLattice } from '../engine/gpu/renderClient';
 import { BLEND_KIND, CUSTOM_KIND } from '../engine/graph/ops';
 import {
   buildCustomShaderWgsl,
@@ -1083,6 +1085,25 @@ interface AppState {
   /** Bumped whenever a denoise round trip settles or a cached result becomes ready with no run needed — mirrors externalNodeRev's role. */
   denoiseNodeRev: number;
   bumpDenoiseNodeRev(): void;
+  // --- DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) -----
+  /** 'idle' (no DCP configured), 'loading' (readFile+parse+bake in flight), 'ready' (a lattice was baked and posted to the worker), 'error' (see dcpProfileError). Drives the minimal Inspector UI's status line. */
+  dcpProfileStatus: 'idle' | 'loading' | 'ready' | 'error';
+  /** Actionable message from the last failed load (bad path, not a DCP, malformed structure — see engine/color/dcp/parser.ts) — null when status isn't 'error'. */
+  dcpProfileError: string | null;
+  /** Bumped once a DCP bake lands worker-side — mirrors imageNodeRev's "an async op settled, re-render" role (the bake itself needs file IO, so it can't happen inside buildPlan). */
+  dcpProfileRev: number;
+  /**
+   * Read+parse+bake the Develop node's currently-configured DCP file (no-op,
+   * status 'idle', if profile.source isn't 'dcp' or dcpPath is empty) and
+   * mirror the resulting lattice into the render worker. Called after
+   * opening an image (so a saved DCP config takes effect immediately,
+   * including under the headless CLI, which shares this same store) and
+   * after the user changes profile.source/dcpPath.
+   */
+  refreshDcpProfile(): Promise<void>;
+  /** Update the Develop node's profile source/DCP path (Inspector's minimal UI); `amount` keeps riding updateNodeParam like every other numeric slider. */
+  setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp'): void;
+  setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -3154,6 +3175,12 @@ export const useAppStore = create<AppState>((set, get) => {
         compareDocOverride: null,
       });
       revalidateShaders(graph);
+      // DCP camera-profile mode (docs/brief-bank/dcp-profile.md): if the
+      // opened graph's Develop node is configured for a DCP file (saved
+      // sidecar state, or a hand-authored look), load+bake it now — fire-
+      // and-forget like watchSidecar below; a no-op (source !== 'dcp') is
+      // the overwhelming common case and returns immediately.
+      void get().refreshDcpProfile();
       // Arm (re-arm) the main-process sidecar watcher for THIS image's
       // resolved look/sidecar path — see shared/ipc.ts's watchSidecar doc
       // comment. Fire-and-forget: a failure here just means no hot-reload
@@ -4110,6 +4137,64 @@ export const useAppStore = create<AppState>((set, get) => {
     set((s) => ({ denoiseNodeRev: s.denoiseNodeRev + 1 }));
   },
 
+  // --- DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) -----
+  dcpProfileStatus: 'idle',
+  dcpProfileError: null,
+  dcpProfileRev: 0,
+  async refreshDcpProfile() {
+    const { graph, wbModel } = get();
+    const devNode = graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.develop);
+    const profile = devNode?.develop?.profile;
+    if (!profile || profileSource(profile) !== 'dcp' || !profile.dcpPath) {
+      mirrorDcpLattice(null);
+      set((s) => ({ dcpProfileStatus: 'idle', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
+      return;
+    }
+    set({ dcpProfileStatus: 'loading', dcpProfileError: null });
+    try {
+      const buf = await window.silverbox.readFile(profile.dcpPath);
+      const parsed = parseDcp(buf, profile.dcpPath);
+      // camXyz is the SAME XYZ(D65)→camera matrix whiteBalance.ts uses for its
+      // own WB math (see WbModel.camXyz's doc comment) — cast past the two
+      // modules' independently-typed (but shape-identical) 3×3 matrix aliases.
+      const lattice = bakeDcpLattice(parsed, wbModel.camXyz as unknown as DcpMat3, wbModel.asShot.temp, PROFILE_LATTICE_N);
+      mirrorDcpLattice(lattice);
+      set((s) => ({ dcpProfileStatus: 'ready', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      mirrorDcpLattice(null);
+      set((s) => ({ dcpProfileStatus: 'error', dcpProfileError: message, dcpProfileRev: s.dcpProfileRev + 1 }));
+    }
+  },
+  setDevelopProfileSource(nodeId, source) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== DEVELOP_KIND) return {};
+      const develop = structuredClone(node.develop ?? defaultDevelopParams());
+      develop.profile.source = source;
+      return {
+        ...pushHistory(s, `param:${nodeId}:profile.source`, { label: 'Switch profile source' }),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)) },
+        graphDirty: true,
+      };
+    });
+    void get().refreshDcpProfile();
+  },
+  setDevelopProfileDcpPath(nodeId, dcpPath) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== DEVELOP_KIND) return {};
+      const develop = structuredClone(node.develop ?? defaultDevelopParams());
+      develop.profile.dcpPath = dcpPath;
+      return {
+        ...pushHistory(s, `param:${nodeId}:profile.dcpPath`, { label: 'Choose DCP file' }),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)) },
+        graphDirty: true,
+      };
+    });
+    void get().refreshDcpProfile();
+  },
+
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {
     set((s) => ({
       ...pushHistory(s, coalesceKey, { label: 'Adjust develop' }),
@@ -4822,6 +4907,16 @@ export const useAppStore = create<AppState>((set, get) => {
           });
           if (nextGraph) revalidateShaders(nextGraph);
         }
+
+        // DCP camera-profile mode (docs/brief-bank/dcp-profile.md): the
+        // headless CLI must not race the (async, file-IO-bound) DCP bake —
+        // unlike the interactive app's fire-and-forget refresh inside
+        // openImageByPath (a live preview just re-renders once the bake
+        // lands), a CLI render is a ONE-SHOT action with no second chance.
+        // Awaited HERE (after openImageByPath, the lookGraphText full-graph
+        // replace, and any --preset apply above — whichever of those actually
+        // set the FINAL develop.profile.dcpPath this render should use).
+        await get().refreshDcpProfile();
 
         const outputs = get().graph.nodes.filter((n) => n.kind === 'output');
         const targets =

@@ -5,8 +5,8 @@
  * in git. Node positions live here for that reason.
  */
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
-import { compileDevelop, defaultDevelopParams, type DevelopParams, type PassSpec } from './developNode';
-import { profileForModel } from '../color/profileFit';
+import { compileDevelop, defaultDevelopParams, profileSource, type DevelopParams, type PassSpec } from './developNode';
+import { profileForModel, PROFILE_LATTICE_N } from '../color/profileFit';
 import {
   createDefaultCustomShaderParams,
   getCustomShaderArtifact,
@@ -1014,6 +1014,12 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
       const s = (source as Record<string, unknown>)[key];
       if (typeof t === 'number') {
         (target as Record<string, unknown>)[key] = num(s, t, `${path}.${key}`);
+      } else if (typeof t === 'string') {
+        // Malformed VALUE (wrong type) sanitizes quietly by keeping the
+        // default rather than rejecting the whole document (sidecar-spec.md
+        // rule 7) — enum-specific sanitizing (profile.source) happens as a
+        // targeted post-pass below, same pattern toneCurve points use.
+        if (typeof s === 'string') (target as Record<string, unknown>)[key] = s;
       } else if (Array.isArray(t)) {
         if (s !== undefined) (target as Record<string, unknown>)[key] = s; // curve points; sanitized at use
       } else if (typeof t === 'object' && t !== null) {
@@ -1027,6 +1033,10 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
     if (!sanitized) throw new Error(`develop toneCurve.${ch} is invalid`);
     base.toneCurve[ch] = sanitized;
   }
+  // profile.source is a closed enum ('builtin' | 'dcp') — an unrecognized
+  // string sanitizes quietly to 'builtin' rather than rejecting the doc
+  // (sidecar-spec.md rule 7), same posture as `rating`/`flag`.
+  if (base.profile.source !== 'dcp') base.profile.source = 'builtin';
   return base;
 }
 
@@ -1172,6 +1182,19 @@ export interface CompileContext {
    */
   cameraModel?: string | null;
   /**
+   * DCP profile mode (docs/brief-bank/dcp-profile.md, Stage 1): the BAKED
+   * residual lattice (engine/color/dcp/pipeline.ts's `bakeDcpLattice`,
+   * PROFILE_LATTICE_N³ entries) for whichever DCP file the Develop node's
+   * `profile.dcpPath` currently names — resolved OUTSIDE buildPlan (baking
+   * needs file IO + parsing, buildPlan must stay pure/synchronous) and
+   * threaded in here, the same "resolved elsewhere, threaded through ctx"
+   * shape `cameraModel` already uses for the builtin lattice. Undefined/null
+   * (not yet loaded, load failed, or no DCP configured) falls back to an
+   * all-zero (identity) lattice — see the DEVELOP_KIND branch below — so an
+   * in-flight or failed load renders as a safe no-op, never a crash.
+   */
+  dcpLattice?: readonly number[] | null;
+  /**
    * Selects which output node to resolve when the doc has more than one
    * (named-outputs, spec §6) — matched against a node's `id`. Default (or no
    * match) = the doc's first output node, in `doc.nodes` array order.
@@ -1208,6 +1231,9 @@ export interface CompileContext {
    */
   allowExternal?: boolean;
 }
+
+/** All-zero residual lattice (identity) — the DCP profile's safe fallback while no bake has landed yet (see CompileContext.dcpLattice). */
+const ZERO_DCP_LATTICE: readonly number[] = new Array(PROFILE_LATTICE_N * PROFILE_LATTICE_N * PROFILE_LATTICE_N * 3).fill(0);
 
 /**
  * Compile the GraphDoc into an execution plan by resolving the output node's
@@ -1342,7 +1368,14 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const wbGains = wb.gains(params.basic.temp, params.basic.tint);
-        const compiled = compileDevelop(params, wbGains, renderScale, profileForModel(ctx?.cameraModel));
+        // DCP mode (docs/brief-bank/dcp-profile.md): the baked DCP lattice
+        // shares the EXACT residual-lattice shape/trilinear code the builtin
+        // fitted profile uses (see compileDevelop/PROFILE_WGSL) — only WHICH
+        // array feeds it differs. `ctx.dcpLattice` absent/null (not loaded
+        // yet, load failed, or no dcpPath configured) falls back to an
+        // all-zero lattice: identity, never a crash or a stale render.
+        const lattice = profileSource(params.profile) === 'dcp' ? (ctx?.dcpLattice ?? ZERO_DCP_LATTICE) : profileForModel(ctx?.cameraModel);
+        const compiled = compileDevelop(params, wbGains, renderScale, lattice);
         if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {

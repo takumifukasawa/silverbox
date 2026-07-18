@@ -221,6 +221,29 @@ every reader needs to orient themselves.
 | `image` | Reference to another image file on disk (composite/mask-by-file). | `imageNode.ts` |
 | `external` | External-tool hook: a `{in}`/`{out}` command template run as a subprocess round trip (e.g. an external denoiser). | `externalNode.ts` |
 
+**Develop's `profile` field** (docs/brief-bank/dcp-profile.md — DCP camera-
+profile loading, stage 1): `{ amount, source?, dcpPath? }`. `source` is
+`'builtin'` (default, omittable) or `'dcp'`; `amount` (0–100) blends identity
+→ whichever transform `source` selects, same "amount slider" shape either
+way. `'builtin'` resolves the fitted per-camera lattice (`profileFit.ts`) at
+render time from the photo's own camera model — never serialized itself,
+same as before this addition. `'dcp'` instead executes the DNG spec's own
+camera-profile pipeline (`engine/color/dcp/`) against a user-supplied `.dcp`
+file named by `dcpPath` — an **absolute path** (never relative — same
+reasoning as an out-of-tree photo path, §1) to a file that lives OUTSIDE the
+project, on the user's own machine (their Lightroom/ACR install, typically);
+Silverbox never copies, embeds, or bundles its bytes into the sidecar or the
+project — a look file naming a `dcpPath` that has since moved or been
+deleted simply fails to load that profile (reported to the user; the
+Development section's Amount slider becomes a no-op until it's relinked to a
+valid file, exactly like a broken `image`-node reference). `dcpPath` absent,
+empty, or unloadable with `source: 'dcp'` renders as IDENTITY (zero
+residual) rather than falling back to `'builtin'`'s fitted lattice — a
+missing/broken reference must never silently substitute a DIFFERENT look.
+Both new keys are additive with no schema version bump —
+an older Silverbox build round-trips them verbatim without acting on `'dcp'`
+mode (forward-compat, same posture as `disabled`).
+
 ### 4.2 Edges and ports
 
 An edge is `{ id, from, to, port? }` (serialized field names — internally

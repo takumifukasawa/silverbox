@@ -43,6 +43,7 @@ import {
   HSL_BANDS,
   type DevelopParams,
   type HslBand,
+  type ProfileParams,
 } from '../engine/graph/developNode';
 import { ColorWheel } from './ColorWheel';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
@@ -241,6 +242,60 @@ function BwSection({ node, params }: { node: GraphNode; params: DevelopParams })
   );
 }
 
+/**
+ * DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) —
+ * minimal source selector: Built-in (today's base-curve + round-6 lattice,
+ * the default) vs a user-chosen .dcp file, executing the DNG spec's own
+ * camera-profile pipeline (engine/color/dcp/). Deliberately small (per the
+ * brief) — polish is a later stage. The `Amount` slider right below this
+ * component (rendered by the caller) blends either mode's result the same
+ * way, so it isn't duplicated here.
+ */
+function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
+  const setDevelopProfileSource = useAppStore((s) => s.setDevelopProfileSource);
+  const setDevelopProfileDcpPath = useAppStore((s) => s.setDevelopProfileDcpPath);
+  const dcpProfileStatus = useAppStore((s) => s.dcpProfileStatus);
+  const dcpProfileError = useAppStore((s) => s.dcpProfileError);
+  const source = profile.source === 'dcp' ? 'dcp' : 'builtin';
+  const chooseFile = async () => {
+    const result = await window.silverbox.openDcpDialog();
+    if (result.canceled) return;
+    setDevelopProfileDcpPath(nodeId, result.path);
+    if (source !== 'dcp') setDevelopProfileSource(nodeId, 'dcp');
+  };
+  return (
+    <div className="dcp-profile-controls">
+      <div className="param-row">
+        <span className="param-label">Source</span>
+        <select
+          data-testid="profile-source-select"
+          value={source}
+          onChange={(ev) => setDevelopProfileSource(nodeId, ev.target.value === 'dcp' ? 'dcp' : 'builtin')}
+        >
+          <option value="builtin">Built-in</option>
+          <option value="dcp">DCP file…</option>
+        </select>
+      </div>
+      {source === 'dcp' && (
+        <div className="dcp-profile-file-row">
+          <button type="button" data-testid="dcp-choose-file-button" onClick={() => void chooseFile()}>
+            Choose DCP file…
+          </button>
+          <span className="dcp-profile-path" data-testid="dcp-profile-path" title={profile.dcpPath || undefined}>
+            {profile.dcpPath ? profile.dcpPath.split('/').pop() : 'No file chosen'}
+          </span>
+          {dcpProfileStatus === 'loading' && <span data-testid="dcp-profile-status">Loading…</span>}
+          {dcpProfileStatus === 'error' && (
+            <span className="dcp-profile-error" data-testid="dcp-profile-status" title={dcpProfileError ?? undefined}>
+              {dcpProfileError ?? 'Failed to load'}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** The aggregated Develop panel — Basic now; more sections per spec order. */
 function DevelopInspector({ node }: { node: GraphNode }) {
   const wbModel = useAppStore((s) => s.wbModel);
@@ -275,6 +330,7 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         </button>
       </div>
       <Section title="Profile">
+        <DcpSourceControls nodeId={node.id} profile={params.profile} />
         <ParamSlider
           nodeId={node.id}
           def={{ key: 'profile.amount', label: 'Amount', min: 0, max: 100, step: 1, default: 0 }}

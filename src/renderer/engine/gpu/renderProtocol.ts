@@ -84,6 +84,18 @@ export type RenderWorkerCommand =
   | { type: 'shaderArtifactSet'; nodeId: string; artifact: CustomShaderArtifact }
   | { type: 'shaderArtifactClear' }
   /**
+   * DCP profile mode (docs/brief-bank/dcp-profile.md, Stage 1): the BAKED
+   * residual lattice for the currently-configured DCP file, computed
+   * main-thread-side (appStore.ts) where file IO (window.silverbox.readFile)
+   * and parsing can happen — the worker only ever sees the resulting plain
+   * number array, stored here and threaded into every buildPlan() ctx as
+   * `dcpLattice` until the next 'dcpLattice' command replaces it (mirrors
+   * `currentCameraModel`'s "set once on change, read on every render" shape).
+   * `null` = no DCP configured, or the last load failed — the DEVELOP_KIND
+   * branch's fallback (an all-zero lattice) then applies.
+   */
+  | { type: 'dcpLattice'; lattice: readonly number[] | null }
+  /**
    * External-tool hook node (denoise v1, task #41): the completed (or
    * failed) result of one round trip through externalNodeRunner.ts's IPC
    * call — see graphRenderer.ts's setExternalResult. Caching/decoding only;

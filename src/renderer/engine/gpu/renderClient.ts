@@ -42,6 +42,19 @@ export function mirrorShaderArtifactClear(): void {
   getWorker().postMessage(msg);
 }
 
+/**
+ * DCP profile mode (docs/brief-bank/dcp-profile.md, stage 1): mirror a
+ * freshly-baked DCP residual lattice (or `null` to clear it) into the render
+ * worker — see appStore.ts's `refreshDcpProfile`. Fire-and-forget, like the
+ * shaderArtifact* mirrors above; the caller is responsible for bumping
+ * `dcpProfileRev` afterward so CanvasView's render effect re-posts a fresh
+ * 'render' and the change actually shows up (same shape as imageNodeRev).
+ */
+export function mirrorDcpLattice(lattice: readonly number[] | null): void {
+  const msg: RenderWorkerCommand = { type: 'dcpLattice', lattice };
+  getWorker().postMessage(msg);
+}
+
 let nextReqId = 0;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 /** The one live client, so the shared worker's onmessage router can reach it for out-of-band messages (initError). */

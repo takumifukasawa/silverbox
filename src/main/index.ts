@@ -274,6 +274,13 @@ function registerIpc(): void {
     return { canceled: false, path, fileName: basename(path) };
   });
 
+  ipcMain.handle(IPC.openDcpDialog, async (): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'DNG Camera Profile', extensions: ['dcp'] }] });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return { canceled: true };
+    return { canceled: false, path, fileName: basename(path) };
+  });
+
   ipcMain.handle(IPC.openFolderDialog, async (): Promise<OpenImageDialogResult> => {
     // `createDirectory` (macOS-only NSOpenPanel option): lets "Save as
     // project…" pick a BRAND-NEW destination folder without leaving the
