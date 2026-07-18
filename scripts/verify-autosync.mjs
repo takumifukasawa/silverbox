@@ -190,6 +190,34 @@ try {
   check('clicking the checkbox flips the real setting to true', await page.evaluate(() => window.__debug.settingsState().autoSyncEnabled), null);
   check('the checkbox itself now reports checked', await checkbox.isChecked(), null);
 
+  // === 7. ←/→ dissolves the ⌘selection (hand-test round 3: no cross-primary clobber) ===
+  // An arrow switch changes the primary exactly like a plain cell click (which
+  // clears the selection) — leaving the selection alive let an edit on the NEW
+  // primary auto-sync-clobber the still-selected previous photo, which read as
+  // "my edits disappeared" in the user's hand test. The pending fan-out is
+  // flushed BEFORE the clear (stepFilmstrip), so §5's guarantee still holds.
+  console.log('verify-autosync (7. arrow switch clears the selection — no cross-primary clobber):');
+  await openFireAndForget(PRIMARY, { keepFolderContext: true });
+  await waitReady(page);
+  await setAutoSync(true);
+  await setSelection([TARGET_B]);
+  const evTargetBBeforeArrow = devOf(readLook(TARGET_B)).develop.basic.ev;
+  // §6 left focus on the Auto Sync checkbox (an INPUT) — the arrow handler
+  // correctly yields to focused controls (ms4's arrow-on-slider guard), so
+  // drop focus first, exactly as a user clicking back into the canvas would.
+  await page.evaluate(() => (document.activeElement instanceof HTMLElement ? document.activeElement.blur() : undefined));
+  await page.keyboard.press('ArrowRight'); // sorted a_primary → b_targeta: primary moves off PRIMARY
+  await waitReady(page);
+  const selAfterArrow = await page.evaluate(() => window.__debug.filmstripSelectionState());
+  check('arrow switch cleared the secondary selection', selAfterArrow.secondary.length === 0, selAfterArrow);
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'basic.ev', -0.8));
+  await page.waitForTimeout(1_500);
+  check(
+    'editing the NEW primary no longer fans onto the previously selected photo',
+    devOf(readLook(TARGET_B)).develop.basic.ev === evTargetBBeforeArrow,
+    devOf(readLook(TARGET_B))
+  );
+
   check('no page errors across the run', pageErrors.length === 0, pageErrors);
 } finally {
   await app.close();

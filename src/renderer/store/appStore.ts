@@ -3660,6 +3660,22 @@ export const useAppStore = create<AppState>((set, get) => {
     if (idx === -1) return;
     const next = idx + delta;
     if (next < 0 || next >= folderEntries.length) return;
+    // The ⌘/⇧ multi-select is anchored to the CURRENT primary's context: a
+    // plain cell click clears it before opening (Filmstrip.tsx), and an
+    // arrow switch changes the primary the same way, so it must clear too.
+    // Leaving it alive across arrow switches let (a) Auto Sync fan a newly
+    // edited photo's families onto the still-silently-selected previous one
+    // (user's hand-test 「編集して違う写真を触って編集して戻ってくると、
+    // そもそも反映されてない」 — the previous photo's edit was overwritten
+    // by the fan-out, not lost by the store) and (b) ⌫ remove photos whose
+    // selection highlight was no longer on screen.
+    // Flush any pending fan-out BEFORE dissolving the selection — an edit
+    // made <1000ms ago still reaches the targets that were visibly selected
+    // when it was made (verify-autosync §5's flush-on-switch guarantee;
+    // clearing first would drop it, since the flush reads the live
+    // selection).
+    flushPendingAutoSync();
+    set({ filmstripSelection: [], filmstripSelectionAnchor: folderEntries[next]!.path });
     void get().openImageByPath(folderEntries[next]!.path, { keepFolderContext: true });
   },
 

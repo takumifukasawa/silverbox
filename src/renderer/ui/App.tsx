@@ -275,21 +275,32 @@ export function App() {
           s.removeSpot(s.selectedNodeId, s.selectedSpotIndex);
         }
       }
-      if ((ev.key === 'Backspace' || ev.key === 'Delete') && useAppStore.getState().filmstripSelection.length > 0) {
-        // "Remove from project" (UX pack round 2, item C): scoped to an
-        // actual MULTI-select (filmstripSelection.length > 0 — ⌘/⇧-click
-        // used), deliberately narrower than "any filmstrip context active",
-        // so this never steals Backspace/Delete from React Flow's own
-        // selected-node deletion (NodeEditorPanel.tsx) in the single-select
-        // case, which is also the common state while editing the graph. A
-        // lone cell's removal goes through its own context-menu item
-        // instead (Filmstrip.tsx) — see this action's own doc comment.
-        if (isTextEntry(ev.target)) return;
+      if (ev.key === 'Backspace' || ev.key === 'Delete') {
+        // "Remove from project" (UX pack round 2, item C; single-photo case
+        // widened same day after the user's hand-test — ⌫ on a lone photo
+        // did nothing and only the context menu worked: 「deleteで消え
+        // なかった。右クリックでは消えた」). Fires when there's a real
+        // multi-select (⌘/⇧-click), OR for the current photo alone when NO
+        // graph node is selected — a selected node keeps owning ⌫ for React
+        // Flow's node deletion / the spot-removal branch above, so graph
+        // editing never loses its delete key.
         const s = useAppStore.getState();
-        ev.preventDefault();
-        ev.stopPropagation();
-        const paths = [...(s.imagePath ? [s.imagePath] : []), ...s.filmstripSelection];
-        void s.removeFromProject(paths);
+        const multi = s.filmstripSelection.length > 0;
+        // React Flow selections don't all reach our store: an EDGE (or a
+        // rubber-band multi) selection leaves selectedNodeId null but must
+        // still own ⌫ for its own deletion (verify-editing's broken-path
+        // test caught exactly this) — sniff React Flow's own .selected
+        // class as the source of truth for "the graph owns the key".
+        const graphOwnsKey =
+          s.selectedNodeId !== null ||
+          document.querySelector('.react-flow__node.selected, .react-flow__edge.selected') !== null;
+        const solo = s.imagePath !== null && !graphOwnsKey;
+        if ((multi || solo) && !isTextEntry(ev.target)) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          const paths = [...(s.imagePath ? [s.imagePath] : []), ...s.filmstripSelection];
+          void s.removeFromProject(paths);
+        }
       }
       if (!cmd && !ev.altKey && !ev.shiftKey && ev.key.toLowerCase() === 'o') {
         // masks milestone: 'O' toggles the LR-style red mask overlay.
