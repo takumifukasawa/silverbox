@@ -195,11 +195,17 @@ branches — the link never dictates topology, per principle 6).
   («共通ルックを編集したら変わるのは当然な気がする。今は。なぜなら
   そういうプリセット/マテリアルだから»): the look file hot-reloads
   and followers RE-MATERIALIZE automatically, with a notice and one
-  undoable entry (same shape as publish undo) — symmetric with the
-  shipped photo-sidecar hot-reload, which already auto-applies
-  external edits. Principle 4 is not violated (see its scope note):
-  the file edit is an explicit edit OF the look, and declared
-  followers following it is the link's contract.
+  undoable entry (same shape as publish undo) — inheriting the shipped
+  photo-sidecar hot-reload discipline EXACTLY (appStore.ts
+  handleExternalSidecarChange, corrected in the third double-check:
+  it auto-applies in a CLEAN session but raises the 'pending'
+  Reload/Show-diff notice in a DIRTY one, and 'malformed' when the
+  new content doesn't parse). The look re-materialization gets the
+  same clean/dirty guard for the open photo; with autosave default ON
+  dirty windows are transient, and §9-2's flush ordering applies.
+  Principle 4 is not violated (see its scope note): the file edit is
+  an explicit edit OF the look, and declared followers following it
+  is the link's contract.
 
 ### 4.5 Cross-machine / git story
 
@@ -410,7 +416,14 @@ third layer). This spec deliberately adds NO sharing on top of it.
    external delete — distinct from app-side delete, which strips
    metadata). Materialization means rendering is always correct;
    define the load-time normalization/notice per DESIGN.md principle 9
-   (never silently destroy).
+   (never silently destroy). Include the FOLLOWER-side external-edit
+   rule (third double-check): if a follower file's followed-group
+   values differ from the look body it claims to follow,
+   **value-drift implies fork** — normalize by unlisting those groups
+   (個別調整) with a notice, never by clobbering them at the next
+   re-materialization. (The clean contract for external editors:
+   editing a followed group means also unlisting it; the sanitizer
+   forgives the omission in this direction.)
 7. **Library location — RESOLVED, USER-DECIDED 2026-07-19 («ok»):
    visible folder `~/Silverbox/Library/`.** One-time migration copies
    `<userData>/presets/*.json` in (old files left in place; reads stay
@@ -419,7 +432,9 @@ third layer). This spec deliberately adds NO sharing on top of it.
    look/preset file in the folder IS the import (folder watch, same
    pattern as sidecar hot-reload), plus a "ライブラリに取り込む…" menu
    item for the visible-path rule (its implementation is a file
-   copy). Cross-machine / person-to-person sharing = the user's own
+   copy). Migration must also cover CLI preset resolution —
+   cliArgs.ts documents `<userData>/presets` lookup today, so the CLI
+   learns the new location with the same dual-location read. Cross-machine / person-to-person sharing = the user's own
    sync or git of the folder; the app never touches git. (An earlier
    revision cited DESIGN.md's "looks travel" here — MISAPPLIED,
    user-corrected 2026-07-19: that sentence is about export targets
