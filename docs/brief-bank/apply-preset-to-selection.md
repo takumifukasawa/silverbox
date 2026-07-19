@@ -1,8 +1,10 @@
 # Brief: apply preset to selection (linked-looks stage A)
 
-Status: DISPATCHED 2026-07-19 (linked-looks GO given; this is the
-REQUIRED prerequisite for the Sync-button removal — see
-linked-looks.md §6 ordering constraint).
+Status: LANDED 2026-07-19 (SUITE 67/67; one deviation documented in
+the commit — legacy no-`includes` presets batch-apply as every family
+except geometry; plus a shared applySyncEntryGraphs
+self-write-suppression fix). Sync-button removal (stage G) may now
+land any time in the same release.
 
 ## Intent
 

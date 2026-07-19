@@ -52,9 +52,16 @@ const HOVER_PREVIEW_DELAY_MS = 120;
  */
 export function PresetsMenu() {
   const imageStatus = useAppStore((s) => s.imageStatus);
+  const imagePath = useAppStore((s) => s.imagePath);
+  // Apply-to-selection (docs/brief-bank/apply-preset-to-selection.md,
+  // linked-looks stage A): same total-selected-count shape Filmstrip.tsx's
+  // own "N selected" badge uses (imagePath counts once, filmstripSelection
+  // never contains it — appStore.ts's own invariant).
+  const filmstripSelection = useAppStore((s) => s.filmstripSelection);
   const presets = useAppStore((s) => s.presets);
   const savePreset = useAppStore((s) => s.savePreset);
   const applyPreset = useAppStore((s) => s.applyPreset);
+  const applyPresetToSelection = useAppStore((s) => s.applyPresetToSelection);
   const deletePreset = useAppStore((s) => s.deletePreset);
   const setPreviewLook = useAppStore((s) => s.setPreviewLook);
   const previewParsedPreset = useAppStore((s) => s.previewParsedPreset);
@@ -154,6 +161,7 @@ export function PresetsMenu() {
   };
 
   const selectedPreset = presets.find((p) => p.slug === selected);
+  const totalSelectedCount = (imagePath ? 1 : 0) + filmstripSelection.length;
 
   return (
     <span className="presets-menu">
@@ -199,6 +207,26 @@ export function PresetsMenu() {
               >
                 Apply
               </button>
+              {/* Apply-to-selection (docs/brief-bank/apply-preset-to-selection.md,
+                  linked-looks stage A — visible-path principle: the SAME
+                  preset row, not a new modifier-key-only gesture) — appears
+                  only once 2+ photos are selected, applying the preset's
+                  OWN saved scope to every one of them (primary included) as
+                  ONE undoable batch, no apply-time dialog. */}
+              {totalSelectedCount >= 2 && (
+                <button
+                  type="button"
+                  data-testid="preset-apply-selection"
+                  disabled={!ready || !selected}
+                  onClick={() => {
+                    setPreviewLook(null);
+                    void applyPresetToSelection(selected);
+                  }}
+                  title={`Apply the selected preset to every one of the ${totalSelectedCount} selected photos (one undo entry — ⌘Z reverts all of them)`}
+                >
+                  選択中の{totalSelectedCount}枚に適用
+                </button>
+              )}
               <button
                 type="button"
                 data-testid="preset-update"

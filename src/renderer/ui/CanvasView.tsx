@@ -260,6 +260,8 @@ declare global {
       setFilmstripSelection(paths: string[]): void;
       /** "Sync…" (multi-select-sync.md): drives the SAME store action the toolbar's Sync… button (via FamilyScopeDialog's confirm) does — copies `families` from the primary's live graph to every secondary-selected look. */
       syncSelection(families: PresetFamilyId[]): Promise<void>;
+      /** "Apply to selection" (docs/brief-bank/apply-preset-to-selection.md): drives the SAME store action PresetsMenu's "apply to selection" button does — applies preset `slug` to the primary + every secondary-selected look, one batch undo entry. */
+      applyPresetToSelection(slug: string): Promise<void>;
       /** "Remove from project" (UX pack round 2, item C) — drives the SAME store action the ⌫/Delete key and a cell's context-menu item do. */
       removeFromProject(paths: string[]): Promise<void>;
       /** Auto Sync toggle state (item E) — same field Filmstrip.tsx's checkbox reads/writes via updateSettings. */
@@ -1602,6 +1604,9 @@ export function CanvasView() {
       },
       syncSelection(families) {
         return useAppStore.getState().syncSelection(families);
+      },
+      applyPresetToSelection(slug) {
+        return useAppStore.getState().applyPresetToSelection(slug);
       },
       /** "Remove from project" (UX pack round 2, item C) — same action the ⌫/Delete key and a cell's context-menu item drive. */
       removeFromProject(paths) {

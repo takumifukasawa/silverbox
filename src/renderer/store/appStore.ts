@@ -92,6 +92,7 @@ import { baseCurveForModel } from '../engine/color/baseCurve';
 import { buildLutExport } from '../engine/color/lutExport';
 import { parsePresetFile, serializePreset, type ParsedPreset } from '../engine/graph/presetDoc';
 import {
+  ALL_FAMILY_IDS,
   buildScopedLook,
   DEFAULT_CHECKED_FAMILY_IDS,
   isDevelopFamily,
@@ -845,6 +846,49 @@ interface AppState {
    * ignored here, per the brief's forward-compat rule.
    */
   applyPreset(slug: string): Promise<void>;
+  /**
+   * Apply a saved preset to the WHOLE filmstrip selection (primary + every
+   * secondary — docs/brief-bank/apply-preset-to-selection.md, linked-looks
+   * stage A): the one-shot no-asset batch case of linked-looks.md §6,
+   * REQUIRED for both look presets and repair-sheet-style spot batches
+   * («写真を複数選択してプリセットを一気に適用できる»). Composes syncSelection's
+   * target-iteration/batch-undo/look-file-write pattern with applyPreset's
+   * own preset-parse/includes/merge path — SHARES both halves
+   * (mergeFamiliesWithSkipDetection, the module-level helper syncSelection
+   * itself now uses) rather than re-deriving either.
+   *
+   * No secondary selection (`filmstripSelection` empty): delegates to
+   * `applyPreset` UNCHANGED — bit-identical behavior, no batch undo entry,
+   * exactly today's single-photo apply (brief's explicit "no behavior
+   * change for the 1-photo case").
+   *
+   * 2+ selected: the preset's OWN saved `includes` governs — NO apply-time
+   * dialog, one click. Develop families merge via mergeScopedLook;
+   * structural families (spots/masks/custom-nodes) graft via the same
+   * graftStructuralFamily machinery applyPreset already uses, skipped
+   * per-target (and counted in the notice) when that target's own chain
+   * isn't structurally compatible, exactly like syncSelection. A preset with
+   * no `includes` (a pre-scoping whole-look file) is treated as every
+   * family except geometry — the same "whole look, geometry excluded" shape
+   * applyLook's own historical behavior has always had for a single photo;
+   * this is the one case the brief doesn't pin down explicitly (every preset
+   * saved through the UI today carries `includes`).
+   *
+   * The PRIMARY (the currently open photo) is a target too: its live graph
+   * is merged in memory (same scoped-merge path applyPreset's own scoped
+   * branch uses), applied immediately (canvas updates live), and flushed to
+   * disk right away via saveGraph() — "flush discipline included", so the
+   * open photo's look file is never left lagging the in-memory edit the way
+   * the ordinary 1000ms autosave debounce would leave it.
+   *
+   * ONE SyncUndoEntry (kind 'sync', reusing the exact batch-undo shape
+   * syncSelection's own targets carry) covers primary + every secondary
+   * that actually got written — ⌘Z reverts all of them in place (no
+   * cherry-picking), redo re-applies. A completion `projectNotice` reports
+   * the target count + any structural skips/errors. No-op without an open
+   * primary, an active project, or a slug that fails to read/parse.
+   */
+  applyPresetToSelection(slug: string): Promise<void>;
   /** Delete a saved preset's file; refreshes the list. No confirm dialog (see PresetsMenu's low-friction-but-not-accidental design). */
   deletePreset(slug: string): Promise<void>;
   /**
@@ -2075,6 +2119,38 @@ function restrictToChain(doc: GraphDoc, ids: ReadonlySet<string>): GraphDoc {
 }
 
 /**
+ * Per-target scoped-family merge with structural skip-detection — shared by
+ * syncSelection AND applyPresetToSelection (docs/brief-bank/
+ * apply-preset-to-selection.md): both walk a target list, copying `families`
+ * from one shared `source` doc onto each target's own graph, and both need
+ * the SAME "don't graft an orphaned structural node" guard. Any family in
+ * `masks`/`spots`/`custom-nodes` whose graft would be structurally
+ * incompatible with `baseGraph`'s own chain (structuralFamilyCompatible) is
+ * dropped from the merge for THIS target and reported back in `skipped`, so
+ * the caller can count it into its own completion notice — the exact rule
+ * multi-select-sync's brief documents ("skipped for structurally
+ * incompatible target"). A develop family is never skipped (pickDevelopFamilies
+ * is pure scalar/array param data, always compatible).
+ */
+function mergeFamiliesWithSkipDetection(
+  baseGraph: GraphDoc,
+  source: GraphDoc,
+  families: ReadonlySet<PresetFamilyId>,
+  scope: ReadonlySet<string> | null
+): { merged: GraphDoc; skipped: PresetFamilyId[] } {
+  const structuralFamilies = (['masks', 'spots', 'custom-nodes'] as const).filter((f) => families.has(f));
+  const effective = new Set(families);
+  const skipped: PresetFamilyId[] = [];
+  for (const fam of structuralFamilies) {
+    if (!structuralFamilyCompatible(baseGraph, source, fam)) {
+      effective.delete(fam);
+      skipped.push(fam);
+    }
+  }
+  return { merged: structuredClone(mergeScopedLook(baseGraph, source, effective, scope)), skipped };
+}
+
+/**
  * Multi-output whole-look apply/paste fix (virtual-copy.md — "the real
  * hazard" the brief ships alongside "Duplicate output"): applyLook's old
  * mergeLookWithCurrentGeometry wholesale-replaces `graph.nodes`/`edges`,
@@ -3123,7 +3199,7 @@ export const useAppStore = create<AppState>((set, get) => {
   ): Promise<{ ok: true } | { ok: false; failedTarget: string }> => {
     const project = get().project;
     if (!project) return { ok: false, failedTarget: targets[0] ?? '' };
-    const writes: { lookPath: string; content: string }[] = [];
+    const writes: { lookPath: string; content: string; photoPath: string }[] = [];
     for (const photoPath of targets) {
       const row = findPlaylistPhoto(project, photoPath);
       const targetGraph = graphs[photoPath];
@@ -3152,9 +3228,27 @@ export const useAppStore = create<AppState>((set, get) => {
         parsed.fingerprint,
         parsed.flag
       );
-      writes.push({ lookPath, content });
+      writes.push({ lookPath, content, photoPath });
     }
     for (const w of writes) await window.silverbox.writeSidecar(w.lookPath, w.content);
+    // Self-write-suppression baseline (saveGraph/writeGraphSaveSnapshot's own
+    // "record exactly what we just wrote" discipline — AppState.
+    // lastSidecarText's doc comment): this is a DIRECT writeSidecar, not
+    // saveGraph, so nothing else updates lastSidecarText. Harmless while the
+    // currently open photo is never among `targets` (syncSelection's own
+    // case, since its targets always exclude the primary) — but
+    // applyPresetToSelection's targets DO include the primary, and the
+    // caller (undo()/redo()'s 'sync' case) reopens it right after this
+    // returns ("the currently open photo happens to be one of the targets"
+    // branch, both callers share). Without this, the fs-watch echo of the
+    // write just above can race that reopen's own (slower — a real decode)
+    // completion and misfire handleExternalSidecarChange as a genuine
+    // EXTERNAL change, clobbering the just-pushed redo entry with a spurious
+    // "Reload from disk" entry (caught by this feature's own verify script,
+    // where the primary being a target is the COMMON case, not an edge one).
+    const openPath = get().imagePath;
+    const openWrite = writes.find((w) => w.photoPath === openPath);
+    if (openWrite) set({ lastSidecarText: openWrite.content });
     return { ok: true };
   };
 
@@ -6042,7 +6136,6 @@ export const useAppStore = create<AppState>((set, get) => {
     const primaryScope = chainScope(s.graph, s.activeOutputId);
     const rawPrimaryLook = checkedFamilies.has('geometry') ? s.graph : captureLook(s.graph);
     const primaryLook = restrictToChain(rawPrimaryLook, primaryScope);
-    const structuralFamilies = (['masks', 'spots', 'custom-nodes'] as const).filter((f) => checkedFamilies.has(f));
 
     const before: Record<string, GraphDoc> = {};
     const after: Record<string, GraphDoc> = {};
@@ -6129,26 +6222,16 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
 
-      // Per-target structural skip-counting: a develop family always merges
-      // cleanly (pickDevelopFamilies is pure scalar/array param data); only
-      // the three graph-shaped families can be structurally incompatible
-      // with THIS target's own chain (presetFamilies.ts's
-      // structuralFamilyCompatible — same by-id rule graftStructuralFamily
-      // itself uses, checked read-only here first).
-      const effectiveFamilies = new Set(checkedFamilies);
-      for (const fam of structuralFamilies) {
-        if (!structuralFamilyCompatible(baseGraph, primaryLook, fam)) {
-          effectiveFamilies.delete(fam);
-          skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
-        }
-      }
-
       // Target-side scoping fix (virtual-copy.md): a TARGET photo isn't open,
       // so there's no live activeOutputId for it — default to its own first
       // output, the same "activeOutputId ?? first" fallback rule
-      // activeOutputNode always applies (chainScope with `null`).
+      // activeOutputNode always applies (chainScope with `null`). Per-target
+      // structural skip-counting (masks/spots/custom-nodes incompatible with
+      // THIS target's own chain) is the shared helper's job now —
+      // applyPresetToSelection below walks the exact same shape.
       const targetScope = chainScope(baseGraph, null);
-      const mergedGraph = structuredClone(mergeScopedLook(baseGraph, primaryLook, effectiveFamilies, targetScope));
+      const { merged: mergedGraph, skipped } = mergeFamiliesWithSkipDetection(baseGraph, primaryLook, checkedFamilies, targetScope);
+      for (const fam of skipped) skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
       const content = serializeGraphDoc(
         mergedGraph,
         meta.source,
@@ -6191,6 +6274,206 @@ export const useAppStore = create<AppState>((set, get) => {
     raiseNotice('projectNotice', {
       kind: errorCount > 0 ? 'error' : 'success',
       message: `synced ${families.length} famil${families.length === 1 ? 'y' : 'ies'} to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}${skipSuffix}${errorSuffix}`,
+    });
+  },
+
+  async applyPresetToSelection(slug) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+    // Same membership rule syncSelection uses (primary excluded, everything
+    // else in filmstripSelection is a secondary target).
+    const secondaryTargets = s.filmstripSelection.filter((p) => p !== primaryPath);
+    if (secondaryTargets.length === 0) {
+      // No secondary selection: brief's explicit "no behavior change for the
+      // 1-photo case" — defer to the existing single-photo apply verbatim
+      // (its own 'preset-apply' undo entry, no SyncUndoEntry batch).
+      await get().applyPreset(slug);
+      return;
+    }
+
+    const text = await window.silverbox.presetRead(slug);
+    if (!text) return;
+    let parsed: ParsedPreset;
+    try {
+      parsed = parsePresetFile(text);
+    } catch (err) {
+      console.warn(`preset "${slug}" could not be parsed:`, err);
+      return;
+    }
+
+    // Scope law (brief): the preset's OWN saved `includes` governs — no
+    // apply-time dialog. Absent `includes` (a pre-scoping whole-look file,
+    // predating preset-scoping-and-export-overrides.md) is treated as every
+    // family except geometry, mirroring applyLook's own single-photo
+    // "whole look, geometry excluded" shape — the one case the brief itself
+    // doesn't pin down (every preset saved through today's UI carries
+    // `includes`; see this action's own doc comment).
+    const families = new Set<PresetFamilyId>(
+      parsed.includes ? parsed.includes.filter(isKnownFamilyId) : ALL_FAMILY_IDS.filter((id) => id !== 'geometry')
+    );
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    const skippedByFamily: Record<string, number> = {};
+    let errorCount = 0;
+
+    // --- Primary (the open photo): merge onto its LIVE graph, the same
+    // scoped-merge path applyPreset's own scoped branch (applyParsedPreset)
+    // uses — chainScope'd to the active-output chain exactly like that
+    // branch, via the SAME shared helper syncSelection's loop below uses.
+    const primaryScope = chainScope(s.graph, s.activeOutputId);
+    const { merged: primaryAfter, skipped: primarySkipped } = mergeFamiliesWithSkipDetection(
+      s.graph,
+      parsed.look,
+      families,
+      primaryScope
+    );
+    for (const fam of primarySkipped) skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
+    before[primaryPath] = structuredClone(s.graph);
+    after[primaryPath] = primaryAfter;
+
+    // --- Secondaries: syncSelection's own read-existing/seed-if-absent/
+    // merge/write loop, with the preset's OWN `look` playing the role
+    // syncSelection's captured primaryLook plays.
+    for (const photoPath of secondaryTargets) {
+      const row = findPlaylistPhoto(project, photoPath);
+      if (!row) {
+        errorCount++;
+        continue;
+      }
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null = null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`applyPresetToSelection: could not read ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+
+      let baseGraph: GraphDoc;
+      let meta: {
+        source: SidecarSource | null;
+        createdAt: string | null;
+        unknown: Record<string, unknown> | undefined;
+        rating: number;
+        photo: string | undefined;
+        fingerprint: string | undefined;
+        flag: PhotoFlag | undefined;
+      };
+      if (existingText !== null) {
+        let parsedLook: SidecarDoc;
+        try {
+          parsedLook = parseGraphDoc(existingText);
+        } catch (err) {
+          console.warn(`applyPresetToSelection: ${lookPath} is unreadable by this build, skipping:`, err);
+          errorCount++;
+          continue;
+        }
+        baseGraph = parsedLook.graph;
+        meta = {
+          source: parsedLook.source ?? null,
+          createdAt: parsedLook.createdAt ?? null,
+          unknown: parsedLook.unknown,
+          rating: parsedLook.rating,
+          photo: parsedLook.photo,
+          fingerprint: parsedLook.fingerprint,
+          flag: parsedLook.flag,
+        };
+      } else {
+        // No look yet — seed it exactly like a fresh open would (same as
+        // syncSelection), THEN merge the preset's families onto it, so the
+        // file this creates is never a bare default doc.
+        try {
+          const bytes = await window.silverbox.readFile(photoPath);
+          const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
+          const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
+          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
+            usedSidecar: false,
+            kind,
+            testFlags: window.silverbox.testFlags,
+          }).graph;
+          const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
+          meta = {
+            source: {
+              fileName: photoPath.split('/').pop() ?? photoPath,
+              ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+              kind,
+            },
+            createdAt: new Date().toISOString(),
+            unknown: undefined,
+            rating: 0,
+            photo: relativizeProjectPath(project.dir, photoPath),
+            fingerprint,
+            flag: undefined,
+          };
+        } catch (err) {
+          console.warn(`applyPresetToSelection: could not decode ${photoPath} to seed a fresh look:`, err);
+          errorCount++;
+          continue;
+        }
+      }
+
+      // Target-side scoping fix (virtual-copy.md): same "activeOutputId ??
+      // first" fallback rule as syncSelection's own loop (chainScope with
+      // `null` — this target photo isn't open, so there's no live
+      // activeOutputId for it).
+      const targetScope = chainScope(baseGraph, null);
+      const { merged: mergedGraph, skipped } = mergeFamiliesWithSkipDetection(baseGraph, parsed.look, families, targetScope);
+      for (const fam of skipped) skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
+      const content = serializeGraphDoc(
+        mergedGraph,
+        meta.source,
+        meta.createdAt,
+        meta.unknown,
+        meta.rating,
+        meta.photo,
+        meta.fingerprint,
+        meta.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`applyPresetToSelection: could not write ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      before[photoPath] = structuredClone(baseGraph);
+      after[photoPath] = mergedGraph;
+    }
+
+    // --- Apply to the live graph + persist the open photo right away
+    // (flush discipline — see this action's own doc comment): unlike
+    // syncSelection (which never touches the primary's own file, since it
+    // only ever copies FROM the primary), the preset applies TO the primary
+    // too, so its look file must land on disk now, not 1000ms later on the
+    // ordinary autosave debounce.
+    set({ graph: primaryAfter, graphDirty: true });
+    revalidateShaders(primaryAfter);
+    await get().saveGraph();
+
+    const writtenTargets = Object.keys(after);
+    const entry: SyncUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'sync',
+      label: `Apply "${parsed.name}" to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}`,
+      targets: writtenTargets,
+      before,
+      after,
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshPlaylistStatus();
+
+    const skipParts = Object.entries(skippedByFamily).map(([fam, n]) => `${fam} on ${n} (incompatible chain)`);
+    const skipSuffix = skipParts.length > 0 ? `; skipped ${skipParts.join(', ')}` : '';
+    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 ? 'error' : 'success',
+      message: `applied "${parsed.name}" to ${writtenTargets.length} photo${writtenTargets.length === 1 ? '' : 's'}${skipSuffix}${errorSuffix}`,
     });
   },
 
