@@ -77,6 +77,18 @@ Instance = the photo's sparse override state.
   Graph-stacking (shared look as an upstream node) was REJECTED:
   replace-semantics params (highlights/shadows tone mapping, curves,
   WB) don't compose by stacking — the reason LR/C1 use value overrides.
+- **One look per photo — USER-DECIDED 2026-07-19** («ok»). Layering
+  needs are expressed through per-group 個別調整, never multiple links.
+- **Publish undo — USER-DECIDED 2026-07-19** («合ってる»): one ⌘Z
+  reverts the whole publish (all followers restored via the shared
+  look's before/after — one typed global-undo entry).
+- **Deleting a shared look with followers — USER-DECIDED 2026-07-19**
+  («ルックがなかったら全部ローカル化»): every follower keeps its exact
+  current rendering and becomes independent. No render-changing delete
+  exists.
+- **Link-time default (no dialog)**: adjustment groups the photo has
+  already edited stay 個別調整; untouched groups follow. Deliberate
+  discard = 共通ルックに合わせる afterward.
 - **Orphaned overrides**: if the look body drops/reshapes a family a
   photo forked, the fork SURVIVES as local (UE silently drops; our
   non-destructive stance doesn't).
@@ -113,8 +125,38 @@ Instance = the photo's sparse override state.
 | Apply preset to selection | the one-shot no-asset batch case (small, separate feature) |
 
 Under this set, today's Sync button AND Auto Sync are both eventually
-subsumed. (Interim, pre-GO: Sync stays; Auto Sync is removal-candidate
-pending the user's call.)
+subsumed. USER-DECIDED (2026-07-19): the Sync button IS removed when
+linked looks land («いらないかも»), and **apply-preset-to-selection is
+promoted from nice-to-have to REQUIRED**, for both look presets and
+repair sheets («写真を複数選択してプリセットを一気に適用できる、という
+機能は必要。ルックやゴミとり系などどっちも»).
+
+**"Force overwrite" decomposes into existing operations** (user asked to
+organize it: «ローカルの値を無視して強制的にそのプリセットで上書きしちゃ
+いたい…リセット的な概念に近い»): (1) one-shot case — apply-preset-to-
+selection ALREADY replaces the checked adjustment groups wholesale;
+that IS the force semantics. (2) linked case — "align every group to
+the shared look" (revert-all), presentable as a "reset to the shared
+look" button, matching the user's reset intuition. No third concept.
+
+## UI vocabulary (user: the jargon was all confusing — plain words only)
+
+Spec term → display term (Japanese-first):
+
+| spec term | 表示名 |
+|---|---|
+| shared look | 共通ルック |
+| link | 共通ルックを使う |
+| publish | この写真の調整を共通ルックに反映 |
+| forked family (state) | この写真だけ個別調整中 (badge) |
+| revert to look | 共通ルックに合わせる |
+| unlink / make local | 共通ルックから外す (見た目は変わらない) |
+| vendor in | プロジェクトに取り込む |
+| repair sheet | ゴミ取りセット |
+| preset family | 調整グループ (the preset-save checkbox units) |
+
+In user-facing text and this brief's future revisions, prefer 調整グループ
+/ 個別調整 over family/fork.
 
 ## 6. Verified foundations (conductor double-check, 2026-07-18..19)
 
