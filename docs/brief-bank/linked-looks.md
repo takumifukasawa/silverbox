@@ -183,6 +183,32 @@ demonstrated demand. Interim fact either way: one-shot distribution of
 layered looks ALREADY works today via whole-look presets (structure
 included); only FOLLOWING is at stake here.
 
+## 3d. The video-grading secondary lens (user's judgment axis, 2026-07-19)
+
+「映像文脈のセカンダリをどこまで考慮するかって感じなのかなぁ。判断軸と
+して」— and the mapping makes the ①/② choice concrete:
+
+| video secondary | silverbox embodiment | shareable under ① ? |
+|---|---|---|
+| hue-qualified (skin isolation, per-hue push) | HSL 8-band params — INSIDE Develop | ✅ already follows |
+| luma-qualified (shadow/mid/high wheels) | grading wheels — INSIDE Develop | ✅ already follows |
+| spatially-qualified (windows/masks) | mask nodes (radial/linear/colorKey) — STRUCTURE | ❌ needs ② |
+
+Key observation: hue/luma secondaries already live in the single
+Develop's parameter space, so ① follows them today; only SPATIAL
+secondaries are at stake. And video practice itself dictates their
+semantics: grades are copied across shots, then windows are re-placed
+PER SHOT (tracking) — exactly ②'s frozen skeleton: link instantiates
+the mask scaffolding once, positions/shapes are photo-local from that
+instant (they're anchor-space photo-anchored by construction), and
+publish moves Develop values only — a look-side window move never
+drags followers' windows, matching the per-shot reality.
+
+**The ①/② decision therefore reduces to: does the user's look-making
+signature include spatial windows?** Tonal/color-driven looks → ①
+suffices. Window-inclusive looks (sky treatment, vignette windows as
+part of the look identity) → ② earns its link-time replace gesture.
+
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
 - Stored in **physical sensor pixels**; applied through each photo's
