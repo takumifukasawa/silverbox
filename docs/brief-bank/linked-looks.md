@@ -123,6 +123,15 @@ Instance = the photo's sparse override state.
 - **No library** (user instinct, endorsed): strictly dust is a BODY ×
   TIME-RANGE property, but dust states drift and stale sheets mislead —
   make-and-discard within a project is the honest weight class.
+- **Double-check findings (2026-07-19, GO-time obligations):**
+  (1) SPOTS_CAP is 32 and mergeSpotsParams TRUNCATES SILENTLY
+  (spotsNode.ts slice(0, CAP)) — sheet application onto a photo whose
+  existing spots + sheet exceed the cap must refuse/warn LOUDLY, never
+  silently drop (or the cap gets raised deliberately). (2) Non-RAW
+  targets: a JPEG has no readout-window metadata, so the sensor→frame
+  mapping is undefined — v1 scopes sheet application to RAW photos
+  (camera-JPEG fallback assumptions are a GO-time decision, not an
+  implicit default).
 
 ## 5. Operations
 
@@ -144,6 +153,10 @@ linked looks land («いらないかも»), and **apply-preset-to-selection is
 promoted from nice-to-have to REQUIRED**, for both look presets and
 repair sheets («写真を複数選択してプリセットを一気に適用できる、という
 機能は必要。ルックやゴミとり系などどっちも»).
+ORDERING CONSTRAINT: the removal and apply-preset-to-selection land in
+the SAME release — Sync is today's only batch vehicle (incl. the
+interim dust workflow in §8), so removing it first would strand those
+workflows.
 
 **"Force overwrite" decomposes into existing operations** (user asked to
 organize it: «ローカルの値を無視して強制的にそのプリセットで上書きしちゃ
