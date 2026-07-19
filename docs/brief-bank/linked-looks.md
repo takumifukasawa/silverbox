@@ -92,10 +92,24 @@ Instance = the photo's sparse override state.
 - **Orphaned overrides**: if the look body drops/reshapes a family a
   photo forked, the fork SURVIVES as local (UE silently drops; our
   non-destructive stance doesn't).
-- **The photo keeps its own look file.** Link state is additive
-  metadata (which look, which families follow); the file remains
-  independently readable — sidecar back-compat rule 9 intact, CLI
-  unaffected until it opts into resolving links.
+- **The photo keeps its own look file — with FULLY MATERIALIZED values
+  (user-confirmed 2026-07-19: 「写真の方のjsonでも基本的には全ての
+  パラメーターを保存している感じになるのかなぁ今まで通り」— yes,
+  exactly).** The photo JSON always holds the complete resolved
+  parameter set, as today; "following" means publish WRITES the
+  followed groups' new values into each follower's file at that
+  explicit moment. Link state is only additive sync metadata (which
+  look, which groups may be rewritten by a publish). Consequences,
+  all intended: look deletion = strip the metadata, values were
+  already there (render never moves); any old reader/CLI renders the
+  file correctly standalone (back-compat rule 9); a publish diff
+  touches N+1 files — the history showing one intent reaching N
+  photos, a procedural feature not a smell. The
+  reference-resolved alternative (photo stores only individual
+  adjustments, followed groups resolved at open) was REJECTED: it
+  breaks standalone readability and old-reader compatibility.
+  Publish undo still fits (a): one entry holds the shared look's
+  before/after and re-materializes followers on undo/redo.
 
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
