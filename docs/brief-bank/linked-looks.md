@@ -174,12 +174,9 @@ disappears, it only moves** (「写真ごとのノードはどうなるか、と
 | ③ publish-mutable structure | every publish × every follower | REJECTED |
 
 Both ① and ② satisfy the refined principle 6 (publish moves values
-only). The choice between them is a UX taste call, **OPEN — a GO-time
-user decision**: is "linking replaces your chain (same feeling as
-applying a whole-look preset)" acceptable as the entry gesture? If yes,
-② can be v1 scope and the user's "look = the whole recipe, secondary
-layers included" instinct ships; if cautious, v1 = ① and ② waits for
-demonstrated demand. Interim fact either way: one-shot distribution of
+only). The choice between them was settled via the video-secondary lens —
+see §3d: **v1 = ①, USER-DECIDED 2026-07-19**; ② stays shelved with
+this section as its ready design. Interim fact either way: one-shot distribution of
 layered looks ALREADY works today via whole-look presets (structure
 included); only FOLLOWING is at stake here.
 
@@ -204,10 +201,13 @@ instant (they're anchor-space photo-anchored by construction), and
 publish moves Develop values only — a look-side window move never
 drags followers' windows, matching the per-shot reality.
 
-**The ①/② decision therefore reduces to: does the user's look-making
-signature include spatial windows?** Tonal/color-driven looks → ①
-suffices. Window-inclusive looks (sky treatment, vignette windows as
-part of the look identity) → ② earns its link-time replace gesture.
+**RESOLVED — v1 scope is ① (single-Develop look), USER-DECIDED
+2026-07-19** («マスクはまぁでも、写真ごとだよなぁさすがに»): spatial
+masks are per-photo, full stop — which removes ②'s main motivation.
+Hue/luma secondaries follow under ① already; layered-look one-shot
+distribution already works via whole-look presets. ② (frozen skeleton)
+is SHELVED, not rejected: §3c's design stands ready if a real demand
+ever appears.
 
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
