@@ -411,21 +411,21 @@ third layer). This spec deliberately adds NO sharing on top of it.
    metadata). Materialization means rendering is always correct;
    define the load-time normalization/notice per DESIGN.md principle 9
    (never silently destroy).
-7. **Library location.** `<userData>/presets` is app-internal —
-   exactly the hidden-central-library shape the project-storage
-   decision rejected for documents. (An earlier revision cited
-   DESIGN.md's "looks travel" here — MISAPPLIED, user-corrected
-   2026-07-19: that sentence is about export targets (Unity/UE/OBS/
-   web, principle 7), not library files. The case rests on the
-   project-storage precedent and the cross-machine sharing need
-   alone.) Decide whether the look library gets a visible folder
-   (~/Silverbox/Library?) or inherits the presets dir, and whether
-   existing presets migrate.
-   USER LEANING (2026-07-19, not final): visible folder — «可視フォル
-   ダかなぁ、git管理どうする問題はたしかにあるかぁ». The git question
-   resolves the same way projects did: the app provides a gittable
-   visible folder and never touches git itself; whether to version it
-   is the user's own call.
+7. **Library location — RESOLVED, USER-DECIDED 2026-07-19 («ok»):
+   visible folder `~/Silverbox/Library/`.** One-time migration copies
+   `<userData>/presets/*.json` in (old files left in place; reads stay
+   dual-location per compatibility rule 9; writes go to the new
+   location only). Import dissolves into file operations: putting a
+   look/preset file in the folder IS the import (folder watch, same
+   pattern as sidecar hot-reload), plus a "ライブラリに取り込む…" menu
+   item for the visible-path rule (its implementation is a file
+   copy). Cross-machine / person-to-person sharing = the user's own
+   sync or git of the folder; the app never touches git. (An earlier
+   revision cited DESIGN.md's "looks travel" here — MISAPPLIED,
+   user-corrected 2026-07-19: that sentence is about export targets
+   (Unity/UE/OBS/web, principle 7), not library files. The case rests
+   on the project-storage precedent and the cross-machine sharing
+   need alone.)
 8. **Visible-path + editor-visibility obligations for the GO-time
    brief** (DESIGN.md "Visible path to every result" REQUIRES
    new-feature briefs to enumerate, per interaction, the clickable
