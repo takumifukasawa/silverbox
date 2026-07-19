@@ -66,6 +66,17 @@ and already works today via whole-look presets.
 4. **Propagation is explicit** — (b) publish, USER-DECIDED («そうね、
    bの方が良さそう») over write-through. The Auto Sync lesson is the
    argument: implicit propagation is the accident class.
+   SCOPE NOTE (2026-07-19, second double-check follow-up): this
+   principle governs the PHOTO→LOOK direction only — a photo-local
+   edit never enters the shared look without a publish. The
+   LOOK→FOLLOWERS direction is the opposite by design: following the
+   look's current body IS the link's contract («共通ルックを編集した
+   ら変わるのは当然な気がする…なぜならそういうプリセット/マテリアル
+   だから» — UE material semantics), so once the look body changes by
+   any explicit act (publish, external file edit, git pull),
+   followers reflect it. The Auto Sync accident was edits reaching
+   INVISIBLE, undeclared targets; declared followers are the
+   opposite.
 5. **Following stops at the project boundary; reuse crosses by copy**
    (vendoring). Protects project self-containedness and finished work;
    git-native alignment (local edits = working tree, publish = commit,
@@ -180,6 +191,39 @@ branches — the link never dictates topology, per principle 6).
   («ルックがなかったら全部ローカル化»): every follower keeps its exact
   current rendering and becomes independent. No render-changing delete
   exists.
+- **External edit of the shared look file — USER-DECIDED 2026-07-19**
+  («共通ルックを編集したら変わるのは当然な気がする。今は。なぜなら
+  そういうプリセット/マテリアルだから»): the look file hot-reloads
+  and followers RE-MATERIALIZE automatically, with a notice and one
+  undoable entry (same shape as publish undo) — symmetric with the
+  shipped photo-sidecar hot-reload, which already auto-applies
+  external edits. Principle 4 is not violated (see its scope note):
+  the file edit is an explicit edit OF the look, and declared
+  followers following it is the link's contract.
+
+### 4.5 Cross-machine / git story
+
+The shared look lives INSIDE the project folder (per §2 scope:
+following never crosses the project; vendor-in copies a library look
+into the project and links against the copy). Consequences for a
+git-managed project across machines:
+
+- **Reproduction**: a clone renders every photo correctly even in
+  isolation (materialized files, §4.1) AND carries the look + link
+  relationships in full.
+- **Edit & publish on machine B**: works identically — the look is in
+  the repo. A publish commits N+1 files, so machine A's pull is
+  already consistent; no re-materialization needed.
+- **Drift** (a pull/merge/checkout or manual edit that changed the
+  look body but not the followers): detected at project open by
+  comparing the look body against the materialized-from marker in
+  link metadata, then auto-re-materialized with notice + undo — the
+  SAME mechanism as the external-edit rule above; one mechanism
+  covers both.
+- **The library deliberately does NOT travel with a project**
+  (vendored copies make projects self-contained). Sharing the library
+  itself across machines is the user's own sync/git of the visible
+  library folder (§9-7 leaning).
 
 ## 5. The repair sheet (「消しゴム用のマテリアル」/ ゴミ取りセット)
 
@@ -352,15 +396,13 @@ third layer). This spec deliberately adds NO sharing on top of it.
 4. Retain the readout-window origin on DecodedImage (the ⚠️ in §7;
    computeCropbox lives in librawDecoder.ts, the interface in
    RawDecoder.ts).
-5. **Shared-look file external-edit semantics (the AI-native path,
-   principle 2 of DESIGN.md).** Photo look files hot-reload today; an
-   AI's natural gesture "edit the 共通ルック file to retune the
-   series" currently has NO defined propagation (materialized
-   followers don't change until an app-side publish). Decide: notice
-   + offer-to-publish (likely — keeps principle 4's explicitness), a
-   CLI `publish` verb, or ignore-until-app-publish. Either way the
-   link metadata format must be documented in sidecar-spec.md — the
-   sidecar is an API surface.
+5. **Shared-look file external-edit semantics — RESOLVED, no longer
+   open (USER-DECIDED 2026-07-19, see §4.4/§4.5)**: hot-reload →
+   auto-re-materialize followers + notice + one undo entry; drift
+   detection at project open via a materialized-from marker (look
+   body hash) in link metadata — add that marker to the §9-3 schema
+   work. Remaining obligation only: document the link metadata format
+   in sidecar-spec.md — the sidecar is an API surface.
 6. **Sanitizer semantics for invalid link states in hand-written
    docs** (the document is an API surface, so these WILL occur): two
    linked Develops in one chain, different looks across chains of one
