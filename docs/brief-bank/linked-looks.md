@@ -1,228 +1,153 @@
-# Design seed: linked looks (references, not copies)
+# Spec draft: linked looks & shared assets
 
-Status: SEED — **implementation gated on an EXPLICIT user GO** (user,
-2026-07-18: 「この話はちゃんと結論がついてから実装にGOする感じにしようね」).
-No agent may be dispatched on this brief, and no part of it may be built
-piecemeal inside other features, until the user says GO — however
-complete the design below looks. Written 2026-07-18 while the
-user weighed whether sync should exist at all: 「そもそも、ノードベースを
-重視するならsyncしたいときとそうじゃないときがあるだろうしなぁ、むずいね」.
-That instinct is the whole brief: in a node-based system, cross-photo
-"sameness" should be a REFERENCE, not repeated copying.
+Status: DESIGN-COMPLETE DRAFT — **implementation gated on an EXPLICIT
+user GO** (user, 2026-07-18: 「この話はちゃんと結論がついてから実装に
+GOする感じにしようね」). No agent may be dispatched on this brief, and no
+part of it may be built piecemeal inside other features, until the user
+says GO — however complete the design below looks.
+History: grew out of the sync-or-not question (2026-07-18 evening,
+commits a42beeb..6034d55 — the dialogue-ordered originals are in git
+history); reorganized into this spec form 2026-07-19 after a conductor
+double-check that also resolved three internal inconsistencies the
+append-driven growth had left (look-carries-structure wording, the
+photo-keeps-its-own-file point, the sensor-mapping overclaim).
 
-## The framing (DCC vocabulary)
+## 0. Summary
 
-Two legitimate cross-photo relationships:
+「そもそも、ノードベースを重視するならsyncしたいときとそうじゃないとき
+があるだろうしなぁ」(user) — in a node-based system, cross-photo
+"sameness" is a REFERENCE, not repeated copying. Sync answers a
+declarative question ("are these the same look?") with a temporal
+mechanism ("when did you last copy?") — which is why it grew the
+clobber footgun (fixed ee95326) and why it keeps feeling wrong. Once
+references exist, sync dissolves (user: 「そのsync先をプリセット
+（マテリアル）にしちゃうって感じなのかなぁ」):
 
-1. **Linked (instanced)**: several photos REFERENCE one shared look.
-   Edits propagate because they're the same object, not because a copy
-   ran. Detach = "make local" (Blender linked-duplicate / Houdini
-   instance vocabulary). This is what "I want sync" actually means.
-2. **Independent (copied)**: each photo owns its look. Today's default,
-   and what "I don't want sync" means.
+```
+photo = link(look)        followed per family, forkable, revertable
+      + repair sheet(s)   sensor-anchored one-shot stamp sets
+      + local structure   this photo's own spots/masks — never in the look
+      + local geometry    crop/angle — never shared, ever
+```
 
-Sync-the-button is an imperative patch that emulates (1) with a one-shot
-copy; Auto Sync emulates it with CONTINUOUS copies — which is why it
-grew a clobber footgun (fixed 2026-07-18, ee95326) and why it keeps
-feeling wrong: it answers a declarative question ("are these the same
-look?") with a temporal mechanism ("when did you last copy?").
+## 1. Principles (each earned against a user objection)
 
-## What it would take (why this is a seed, not a brief)
+1. **Composition over variants.** Dust presence, orientation, APS-C
+   crop mode — none may multiply presets; each is an orthogonal axis or
+   a coordinate mapping.
+2. **Every shared element declares its anchor frame.** Look = parameter
+   space; repair sheet = PHYSICAL sensor pixels; composition masks (if
+   ever shared) = frame. Anchor low enough and one asset covers
+   FF/APS-C/portrait/landscape mixes.
+3. **Only things worth following get links.** Aesthetics evolve → the
+   look follows. Dust never changes retroactively → one-shot, no link.
+4. **Propagation is explicit** — (b) publish, USER-DECIDED («そうね、
+   bの方が良さそう») over write-through. The Auto Sync lesson is the
+   argument: implicit propagation is the accident class.
+5. **Following stops at the project boundary; reuse crosses by copy**
+   (vendoring). Protects project self-containedness and finished work;
+   git-native alignment (local edits = working tree, publish = commit,
+   following = pull).
+6. **Structure is never part of the look** (UE: instances cannot change
+   the graph). Photo-local spots/masks compose downstream of the link,
+   so "stamp, then update the look body" cannot conflict.
 
-- The doc model gains a cross-photo reference: a playlist row pointing
-  at a SHARED look asset (`looks/shared/<name>.json`?) instead of its
-  own file — touches the look-file-per-photo independence that project
-  storage deliberately established (sidecar-spec.md), autosave (which
-  file does an edit write?), undo (an edit on a shared look changes N
-  photos — one entry? N?), the git-native story (a shared look diff
-  touches many photos at once — arguably a FEATURE for the
-  procedural pitch), CLI resolution, and relink/copy-on-detach UX.
-- Per-photo geometry must stay LOCAL even under a shared look (a crop
-  is never shared — same reasoning as applyLook's geometry carve-out).
-- Presets already cover the "publish a snapshot of a look" half; linked
-  looks cover the "keep following it" half. They compose: a preset is a
-  frozen fork of a shared look.
+## 2. Asset taxonomy (complete — exactly two kinds)
 
-## The override problem (user, 2026-07-18 — the core design question)
+| kind | payload | ANCHOR | PROPAGATION | SCOPE |
+|---|---|---|---|---|
+| look (material) | develop params | parameter space, per family | FOLLOWING — link + explicit publish | follow within project; copy across (library = template store) |
+| repair sheet (eraser) | spot set | physical sensor pixels | ONE-SHOT — per-frame opt-in | project-local only, no library |
 
-「上書きしたいパラメーターをどうするか。ハイライトやシャドウなどはある程度
-プリセットに埋め込むが、写真ごとにも調整すると思う。が、逆にプリセットの
-値を採用したい場合もあるだろうし」— i.e. a photo must be able to (1)
-follow the look, (2) locally override parts of it, and (3) RETURN to
-following. Three candidate models:
+The three axes (anchor × propagation × scope) are the classifier; a
+hypothetical third kind would slot in without new architecture, but
+nothing beyond these two is planned.
 
-- **(A) Per-family fork + revert (recommended).** The link covers preset
-  FAMILIES (the exact vocabulary preset scoping / sync already ship).
-  Touching any param in a linked family forks THAT family local (visible
-  "modified from look" badge); "Revert to look" per family resumes
-  following. Declarative state, reuses existing machinery, expresses
-  "tone per-photo, color follows" naturally.
-- **(B) Graph stacking (node-native).** Shared look = upstream reference
-  node; per-photo tweaks = a separate downstream Develop node. No
-  override machinery at all — but the COMPOSITION MATH goes muddy for
-  replace-semantics params (running highlights/shadows tone mapping
-  twice ≠ replacing the value; curves/WB don't stack) — the reason
-  LR/C1 use value-level overrides. Philosophically pretty, rejected on
-  image-math grounds unless someone finds a clean composition algebra.
-- **(C) Per-parameter override set** (CSS/Houdini-style). Finest grain,
-  heaviest UI (every slider needs a follow/override state). Position:
-  refine (A) into (C) only where real usage demands it, not up front.
+## 3. The look link (Material / Material Instance)
 
-## The UE Material / Material Instance mapping (user, 2026-07-18)
+User's model: 「UEのマテリアルとマテリアルインスタンス的な考え方」.
+Material = shared look (parameter defaults ONLY — no structure).
+Instance = the photo's sparse override state.
 
-「UEのマテリアルとマテリアルインスタンス的な考え方かなぁ。シェーディング
-本体と、パラメーターを上書きするやつ。でもスタンプで消したりとかした後に、
-シェーディング本体を上書きするとどうなる？」— the analogy holds precisely,
-and the stamp question answers itself through it:
+- **Granularity: per preset FAMILY** (the shipped vocabulary —
+  basic-tone/wb/curves/hsl/…): touching any param in a followed family
+  FORKS that family local (visible "modified from look" badge);
+  **Revert to look** per family resumes following. Refine to
+  per-parameter (CSS/Houdini-style) only where real usage demands it.
+  Graph-stacking (shared look as an upstream node) was REJECTED:
+  replace-semantics params (highlights/shadows tone mapping, curves,
+  WB) don't compose by stacking — the reason LR/C1 use value overrides.
+- **Orphaned overrides**: if the look body drops/reshapes a family a
+  photo forked, the fork SURVIVES as local (UE silently drops; our
+  non-destructive stance doesn't).
+- **The photo keeps its own look file.** Link state is additive
+  metadata (which look, which families follow); the file remains
+  independently readable — sidecar back-compat rule 9 intact, CLI
+  unaffected until it opts into resolving links.
 
-- Material = the shared look (default parameter values, maybe structure).
-  Material Instance = the photo's sparse override set; editing the parent
-  flows into every non-overridden slot. This is model (A)/(C) above with
-  a production-proven precedent.
-- UE instances CANNOT change the graph — parameters only — and that's
-  exactly why it doesn't collapse. Translated here: **spots/masks/custom
-  nodes are NOT part of the look; they're photo-anchored LOCAL structure
-  composed downstream of the link.** The codebase already says so twice:
-  anchor space stores spot/mask coords in the photo's own pixel frame
-  (meaningless on another photo), and the preset-family split already
-  quarantines them as 'structural', default-unchecked. So "stamp, then
-  update the look body" simply doesn't conflict — the body's changes
-  arrive through the parameter layer; local stamps live downstream
-  untouched (UE: swap the material, the decals stay).
-- Two real edge cases remain: **sensor dust** (see the next section —
-  the user found the deeper shape of it) and **orphaned overrides**
-  (the body removes/reshapes a family the photo overrode — UE silently
-  drops; our non-destructive stance says the fork survives as local).
+## 4. The repair sheet (「消しゴム用のマテリアル」)
 
-## Dust is an ORTHOGONAL axis, not a look variant (user, 2026-07-18)
+- Stored in **physical sensor pixels**; applied through each photo's
+  readout-window ∘ orientation transform. Dust outside the APS-C
+  window maps away (correct — it isn't in that frame).
+- **One-shot per-frame opt-in, never following**: dust doesn't change
+  retroactively, and aperture-dependent visibility demands per-frame
+  judgment anyway. Applied spots become ordinary photo-local spots
+  (editable/deletable individually afterward).
+- **No library** (user instinct, endorsed): strictly dust is a BODY ×
+  TIME-RANGE property, but dust states drift and stale sheets mislead —
+  make-and-discard within a project is the honest weight class.
 
-「同じ環境下だけど固定のゴミがある場合とない場合がある。そういうときに
-プリセットを増やさないといけなくなる」— exactly: baking dust spots into
-the look multiplies presets by dust-state (look × dust = variant
-explosion). Dust is equipment-state REPAIR, not aesthetics — a separate
-axis that must compose, not fork the preset:
+## 5. Operations
 
-- **Today's answer (already shippable with landed machinery):** keep
-  spots OUT of look presets (structural families are default-unchecked
-  — already the case); dust handling = select the affected frames,
-  Sync with ONLY the spots family checked. Frames without the dust
-  simply aren't selected. One look preset, ever.
-- **Linked-world answer:** a photo carries MULTIPLE orthogonal links —
-  `look` (aesthetics) + `repair set` (dust) attached/detached
-  independently. Composition instead of variants; the core node-based
-  argument again.
-- **And dust may not even deserve a LINK:** sensor dust never changes
-  retroactively, so following-semantics buys nothing — a one-shot
-  "stamp sheet" copy is the honest weight class. Aperture-dependent
-  visibility means per-frame application judgment is needed anyway, so
-  fully-automatic following would be wrong even if cheap.
-- **Orientation (user: 「縦構図か横構図かでも違うしなぁ」) reveals the
-  deeper rule: every shared element has a NATURAL COORDINATE FRAME.**
-  Dust is fixed to the SENSOR — a portrait shot is the same sensor
-  rotated, so a stamp sheet stored in frame-normalized coords lands in
-  the wrong place on every portrait frame. Store the repair set in
-  SENSOR space (pre-orientation) and map through each photo's own
-  orientation at apply time — the anchor-space machinery already tracks
-  exactly this. Composition-driven elements (a sky-darkening linear
-  mask) are the opposite: FRAME-anchored ("top of frame" is top in
-  either orientation). So a shared asset must declare its anchor:
-  repair set = sensor-anchored; look-level masks (if ever shared) =
-  frame-anchored. Same conclusion as the dust axis: orientation is not
-  a reason for preset variants — anchoring to the right frame keeps it
-  to one asset.
-- **APS-C crop mode (user: 「apscモードとかもあったりするしなぁ」) pins
-  the definition down: "sensor space" means PHYSICAL sensor
-  coordinates.** Crop mode reads a centered window of the same sensor —
-  and the engine already knows that window exactly (raw_inset_crops /
-  computeCropbox, the geometry-saga work: crop-mode frames are
-  4552×3028 center-preserved against the full readout). Store the
-  repair set in physical-sensor pixels; apply through each photo's
-  readout-window ∘ orientation transform. PRECISION (double-checked
-  2026-07-18): orientation IS retained per photo (DecodedImage.flip /
-  geometry.orientation), but the readout-window origin is currently
-  COMPUTED at decode time (computeCropbox) and then discarded —
-  DecodedImage carries no cropbox field, so implementing the repair
-  sheet needs one small additive field to retain it (same pattern
-  CameraColorInfo.rgbCam followed in DCP stage 2). Not a design
-  blocker; an honest implementation-cost note. One
-  stamp sheet then covers FF/APS-C/portrait/landscape mixes; dust
-  outside the APS-C window simply maps away (correct: it isn't in that
-  frame). Every objection so far (dust presence, orientation, crop
-  mode) collapses into the same rule: anchor low enough and one asset
-  suffices.
+| operation | semantics |
+|---|---|
+| Link photo(s) to look | attach; all families follow (fresh) or keep local values as forks (choice at link time — TBD at GO) |
+| Edit a followed family | forks it local (badge) |
+| Revert family to look | drop the fork, resume following |
+| **Publish** | write chosen families of the current photo INTO the shared look → followers update by construction. Explicit gesture only |
+| Unlink (make local) | dissolve into a plain local look |
+| Vendor in | copy a library look into the project; linking happens against the copy |
+| Publish to library | explicit; updates the template, never past projects |
+| Apply repair sheet | one-shot stamp of the sheet's spots onto selected frames |
+| Apply preset to selection | the one-shot no-asset batch case (small, separate feature) |
 
-## The conclusion: sync dissolves into "publish to the look" (user, 2026-07-18)
+Under this set, today's Sync button AND Auto Sync are both eventually
+subsumed. (Interim, pre-GO: Sync stays; Auto Sync is removal-candidate
+pending the user's call.)
 
-「syncが必要かどうかだよねぇ。そのsync先をプリセット（マテリアル）に
-しちゃうって感じなのかなぁ」— yes, and that closes the whole question.
-Sync is the WORKAROUND for a missing link concept; once links exist, the
-peer-to-peer copy dissolves into exactly two clean operations:
+## 6. Verified foundations (conductor double-check, 2026-07-18..19)
 
-1. **Publish**: write the current photo's adjustments back into the
-   shared look — every linked photo follows BY CONSTRUCTION (no
-   selection, no timing, forked families untouched). Data flow becomes
-   photo → look → instances instead of photo → photos. This is
-   git-commit-shaped and composes perfectly with the git-native story
-   (local edits = working tree, publish = commit, following = pull).
-2. **Apply preset to selection**: the one-shot "make these match once"
-   case that doesn't deserve a shared asset (small unbuilt feature).
+| claim the design leans on | verdict | evidence |
+|---|---|---|
+| structural families default-unchecked in presets | ✅ | presetFamilies.ts PRESET_FAMILIES defaultChecked |
+| spots-only Sync can seed dust onto targets TODAY (incl. targets with no spots node — graft ADDS nodes + splices edges) | ✅ | graftStructuralFamily read in full: newNodeIds/grafted/supersede logic |
+| anchor space = oriented-full-frame (photo-local) coords | ✅ | anchorSpace.ts doc comment |
+| presets are already app-global (library embryo) | ✅ | `<userData>/presets/*.json` (ipc.ts) |
+| per-photo orientation retained | ✅ | DecodedImage.flip / geometry.orientation |
+| readout-window origin available post-decode | ⚠️ | computeCropbox COMPUTES it but DecodedImage doesn't retain it — repair sheet needs one additive field (rgbCam's stage-2 pattern) |
+| publish/vendoring mechanics | design-level only | file-write + copy patterns match landed machinery (look files, import-sidecars/save-as-move); unverified because unbuilt |
 
-Edit-flow: **(b) explicit publish — USER-DECIDED 2026-07-18** («そうね、
-bの方が良さそう») over (a) write-through. Edits are local first; a
-deliberate "update look from this photo" gesture propagates. The Auto
-Sync lesson IS the argument: implicit propagation is the accident
-class; declarative, deliberate propagation is the fix. Under (b), both
-today's Sync button AND Auto Sync are eventually subsumed.
+## 7. Implementation questions to settle AT GO TIME (not defects)
 
-## The asset taxonomy (user: 「消しゴムとか用のマテリアルみたいな概念も
-発生するってことかぁ」)
+1. **Publish undo**: one gesture changes N photos' renders. Natural
+   shape: one typed global-undo entry restoring the shared look file's
+   before/after (SyncUndoEntry precedent); followers recompute.
+2. **Write ordering**: publish vs the autosave debounce touching the
+   same files — extend the existing flush-on-switch discipline.
+3. **Schema**: additive link-state fields on the photo look file +
+   shared-look file format + library dir layout; migration additive per
+   sidecar rules. Also: link-time choice UX (follow fresh vs fork-keep).
+4. Retain the readout-window origin on DecodedImage (the ⚠️ above).
 
-Yes — the repair sheet is a second material-LIKE species, and the two
-differ along exactly two axes, which become the classifier for any
-future asset kind:
+## 8. Interim operation (today, no new code)
 
-| asset kind | payload | ANCHOR | PROPAGATION |
-|---|---|---|---|
-| look (material) | develop params | parameter space, per family | FOLLOWING (link + explicit publish) |
-| repair sheet (eraser) | spot set | physical sensor coords | ONE-SHOT (per-frame opt-in, no following) |
+- Look distribution: presets (develop families only).
+- Dust: select affected frames → Sync with ONLY the spots family.
+- Auto Sync: unused; removal awaiting the user's explicit call.
 
-Design the shared-asset container around those two declared axes
-(anchor × propagation); ship exactly these two kinds. A hypothetical
-third kind (frame-anchored one-shot watermark/border, say) would slot
-into the same grid without new architecture — but nothing beyond the
-two is planned or needed.
+## 9. Explicitly deferred
 
-## The third axis: SCOPE (user: 「マテリアルはプロジェクト間で再利用して
-いて欲しい感じもありつつ、repairは別にいらなそう」)
-
-Cross-project reuse wants a global library — but cross-project
-FOLLOWING would break the project's self-containedness (copy the
-project folder elsewhere → look missing; git history incomplete via
-external reference) and would let a library edit retroactively change
-FINISHED projects' renders. Both violate the git-native stance. The
-resolution:
-
-> **Following stops at the project boundary; reuse crosses it by COPY
-> (vendoring).** Library = template store; using a library look COPIES
-> it into the project, and all linking/publish thereafter is closed
-> within the project (Blender append-vs-link, UE migrate). The reverse
-> is explicit too: "publish this look to the library" updates the
-> template — past projects never move.
-
-Repair sheets: no library (user instinct, endorsed). Strictly dust is a
-BODY × TIME-RANGE property, not a project one — but dust states drift,
-stale sheets mislead, and make-and-discard within a session is the
-honest weight class. The vendoring mechanics would fit them later if
-ever wanted; no reason to pre-build.
-
-Final taxonomy: look = {parameter-space anchor, following via publish,
-follow-within-project / copy-across}; repair sheet = {physical-sensor
-anchor, one-shot, project-local only}.
-
-## Interim ladder (pragmatic, already decided or cheap)
-
-1. Now: explicit Sync button only; Auto Sync is removal-candidate
-   pending the user's call (the 2026-07-18 discussion).
-2. Cheap next rung if wanted: "apply preset to selection" — batch
-   look application with clear, named, one-shot semantics.
-3. This seed, only if/when the user wants true following semantics.
+True cross-project following (rejected, not deferred — it breaks
+self-containedness). Repair-sheet library. Per-parameter override
+granularity (refinement path). Any third asset kind.
