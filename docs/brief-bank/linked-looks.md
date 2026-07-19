@@ -126,6 +126,23 @@ Two sub-questions, both resolvable without bending either system:
   decision becomes the constraint "every linked Develop in one photo
   links to the SAME look" (no multi-look confusion), not "one linked
   node".
+- **Adding a Develop to a linked chain (user, 2026-07-19: 「developを
+  追加した時とかに、どういう扱いになるか。プライマリセカンダリ的な
+  考え方としてはそういうケースもあるかしら？」):** the new node is
+  simply a LOCAL node — it carries no link, and since a default Develop
+  is identity/pass-through, inserting it changes nothing on screen.
+  The user's primary/secondary intuition emerges without any new
+  machinery: linked node = the base the 共通ルック drives; added nodes =
+  this photo's own layered tweaks. Three consequences made explicit:
+  (1) **At most ONE linked Develop per chain** — two nodes following
+  the same look would apply its values twice in series (doubled
+  exposure etc.); attempting a second link moves or refuses,
+  structurally enforced. (2) **Publish reads ONLY the linked node's
+  groups** — tweak-layer values never leak into the shared look.
+  (3) Graph stacking, rejected as the OVERRIDE mechanism, remains
+  available as an explicit USER choice (additive params layer fine;
+  stacking curves/WB is node-craft self-responsibility — the node-based
+  covenant).
 - **Custom-node looks are a DIFFERENT sharing axis, already named by
   the taxonomy's open third slot: the shared node/subgraph (Houdini
   HDA / Nuke gizmo precedent).** A look built from WGSL custom nodes
