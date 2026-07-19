@@ -114,7 +114,7 @@ Instance = the photo's sparse override state.
 
 | operation | semantics |
 |---|---|
-| Link photo(s) to look | attach; all families follow (fresh) or keep local values as forks (choice at link time — TBD at GO) |
+| Link photo(s) to look | attach; edited adjustment groups stay 個別調整, untouched groups follow (automatic — no dialog, see §3's link-time default) |
 | Edit a followed family | forks it local (badge) |
 | Revert family to look | drop the fork, resume following |
 | **Publish** | write chosen families of the current photo INTO the shared look → followers update by construction. Explicit gesture only |
