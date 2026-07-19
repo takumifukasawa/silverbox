@@ -139,6 +139,10 @@ standalone readability and old-reader compatibility.
 
 ### 4.3 Node-graph rules (the link is a property of the DEVELOP NODE)
 
+(Provenance: user, 2026-07-19 — 「ノードベースとの両立がどうなるか」
+and 「developを追加した時とかに、どういう扱いになるか。プライマリ
+セカンダリ的な考え方としてはそういうケースもあるかしら？」.)
+
 A Develop node carries "following look X for these adjustment groups";
 the graph around it stays entirely free (custom nodes, blends,
 branches — the link never dictates topology, per principle 6).
@@ -189,11 +193,15 @@ branches — the link never dictates topology, per principle 6).
 - **No library** (user instinct, endorsed): strictly dust is a BODY ×
   TIME-RANGE property, but dust states drift and stale sheets mislead —
   make-and-discard within a project is the honest weight class.
-- **GO-time obligations (double-check findings 2026-07-19):**
-  (1) SPOTS_CAP is 32 and mergeSpotsParams TRUNCATES SILENTLY
-  (spotsNode.ts slice(0, CAP)) — sheet application onto a photo whose
-  existing spots + sheet exceed the cap must refuse/warn LOUDLY, never
-  silently drop (or the cap gets raised deliberately). (2) Non-RAW
+- **GO-time obligations (double-check findings 2026-07-19; function
+  name corrected in the second double-check):**
+  (1) SPOTS_CAP is 32 and **sanitizeSpotsParams** TRUNCATES SILENTLY
+  (spotsNode.ts:115 slice(0, SPOTS_CAP)) — and since sanitization runs
+  on EVERY load/apply path, a photo written with existing spots + sheet
+  exceeding the cap gets silently trimmed on the next open. Sheet
+  application must therefore check the cap BEFORE writing and
+  refuse/warn LOUDLY, never silently drop (or the cap gets raised
+  deliberately). (2) Non-RAW
   targets: a JPEG has no readout-window metadata, so the sensor→frame
   mapping is undefined — v1 scopes sheet application to RAW photos
   (camera-JPEG fallback assumptions are a GO-time decision, not an
@@ -257,7 +265,7 @@ In user-facing text and this brief's future revisions, prefer
 | structural families default-unchecked in presets | ✅ | presetFamilies.ts PRESET_FAMILIES defaultChecked |
 | spots-only Sync can seed dust onto targets TODAY (incl. targets with no spots node — graft ADDS nodes + splices edges) | ✅ | graftStructuralFamily read in full: newNodeIds/grafted/supersede logic |
 | anchor space = oriented-full-frame (photo-local) coords | ✅ | anchorSpace.ts doc comment |
-| presets are already app-global (library embryo) | ✅ | `<userData>/presets/*.json` (ipc.ts) |
+| presets are already app-global (library embryo) | ✅ | `<userData>/presets/*.json` (main/presets.ts presetsDir()) |
 | per-photo orientation retained | ✅ | DecodedImage.flip / geometry.orientation |
 | readout-window origin available post-decode | ⚠️ | computeCropbox COMPUTES it but DecodedImage doesn't retain it — repair sheet needs one additive field (rgbCam's stage-2 pattern) |
 | publish/vendoring mechanics | design-level only | file-write + copy patterns match landed machinery (look files, import-sidecars/save-as-move); unverified because unbuilt |
@@ -341,7 +349,42 @@ third layer). This spec deliberately adds NO sharing on top of it.
 3. **Schema**: additive link-state fields on the photo look file +
    shared-look file format + library dir layout; migration additive per
    sidecar rules. Also: link-time choice UX (follow fresh vs fork-keep).
-4. Retain the readout-window origin on DecodedImage (the ⚠️ in §7).
+4. Retain the readout-window origin on DecodedImage (the ⚠️ in §7;
+   computeCropbox lives in librawDecoder.ts, the interface in
+   RawDecoder.ts).
+5. **Shared-look file external-edit semantics (the AI-native path,
+   principle 2 of DESIGN.md).** Photo look files hot-reload today; an
+   AI's natural gesture "edit the 共通ルック file to retune the
+   series" currently has NO defined propagation (materialized
+   followers don't change until an app-side publish). Decide: notice
+   + offer-to-publish (likely — keeps principle 4's explicitness), a
+   CLI `publish` verb, or ignore-until-app-publish. Either way the
+   link metadata format must be documented in sidecar-spec.md — the
+   sidecar is an API surface.
+6. **Sanitizer semantics for invalid link states in hand-written
+   docs** (the document is an API surface, so these WILL occur): two
+   linked Develops in one chain, different looks across chains of one
+   photo, a link naming a look file that is MISSING (git checkout,
+   external delete — distinct from app-side delete, which strips
+   metadata). Materialization means rendering is always correct;
+   define the load-time normalization/notice per DESIGN.md principle 9
+   (never silently destroy).
+7. **Library location.** `<userData>/presets` is app-internal —
+   exactly the hidden-central-library shape the project-storage
+   decision rejected for documents. Looks the user authors are meant
+   to travel (DESIGN.md identity) and be git-able; decide whether the
+   look library gets a visible folder (~/Silverbox/Library?) or
+   inherits the presets dir, and whether existing presets migrate.
+8. **Visible-path + editor-visibility obligations for the GO-time
+   brief** (DESIGN.md "Visible path to every result" REQUIRES
+   new-feature briefs to enumerate, per interaction, the clickable
+   path): link/unlink/publish/revert all need visible controls; the
+   node editor must SHOW link state on the Develop node (the graph is
+   the review surface for auditing what an AI wrote); the link
+   gesture needs a completion notice ("N groups follow, M stayed
+   個別調整" — the no-dialog default in §4.2 makes this the only
+   feedback); publish's group-choice UI is FamilyScopeDialog reuse
+   (the shared component preset scoping landed, 2e2cd0b).
 
 ## 10. Interim operation (today, no new code)
 
