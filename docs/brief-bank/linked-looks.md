@@ -48,9 +48,13 @@ photo = link(look)        followed per family, forkable, revertable
    (vendoring). Protects project self-containedness and finished work;
    git-native alignment (local edits = working tree, publish = commit,
    following = pull).
-6. **Structure is never part of the look** (UE: instances cannot change
-   the graph). Photo-local spots/masks compose downstream of the link,
-   so "stamp, then update the look body" cannot conflict.
+6. **Publish moves VALUES only — structure never propagates** (refined
+   2026-07-19 from the earlier "structure is never part of the look",
+   after the user's 素朴な challenge exposed that as an overclaim: a
+   look MAY carry a frozen multi-node skeleton; what it may never do is
+   restructure followers at publish time). Photo-local spots/masks
+   compose around the link, so "stamp, then update the look body"
+   cannot conflict.
 
 ## 2. Asset taxonomy (complete — exactly two kinds)
 
@@ -152,6 +156,32 @@ Two sub-questions, both resolvable without bending either system:
   UNSCHEDULED, not part of this spec's GO scope; noting it here only
   proves the node-based story and the linked-look story compose
   rather than collide.
+
+## 3c. Structure-carrying looks: the merge-cost conservation law
+(user dialogue, 2026-07-19)
+
+The user pushed on why the look should be Develop-only (「まだあんまり
+developだけがいいっていう理由が腑に落ちてない。素朴な話ね」), which
+exposed the real invariant: **sharing structure means paying a
+merge-against-the-photo's-own-nodes cost SOMEWHERE — it never
+disappears, it only moves** (「写真ごとのノードはどうなるか、という話に
+戻るよねぇ」):
+
+| level | where the merge cost lands | consequence |
+|---|---|---|
+| ① single-Develop look | NOWHERE | link = metadata on the existing Develop; the photo's node structure is never touched |
+| ② frozen-skeleton look | ONCE, at link time | linking REPLACES the chain with the skeleton (whole-look-preset semantics: edited values carry into matching groups as 個別調整; photo-specific custom node arrangements cannot merge — replaced or link refused). After that, value-only following per node × group; look-side structure changes = a NEW look version that never auto-propagates (re-link explicitly, or keep following the old skeleton) |
+| ③ publish-mutable structure | every publish × every follower | REJECTED |
+
+Both ① and ② satisfy the refined principle 6 (publish moves values
+only). The choice between them is a UX taste call, **OPEN — a GO-time
+user decision**: is "linking replaces your chain (same feeling as
+applying a whole-look preset)" acceptable as the entry gesture? If yes,
+② can be v1 scope and the user's "look = the whole recipe, secondary
+layers included" instinct ships; if cautious, v1 = ① and ② waits for
+demonstrated demand. Interim fact either way: one-shot distribution of
+layered looks ALREADY works today via whole-look presets (structure
+included); only FOLLOWING is at stake here.
 
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
