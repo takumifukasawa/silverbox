@@ -111,6 +111,31 @@ Instance = the photo's sparse override state.
   Publish undo still fits (a): one entry holds the shared look's
   before/after and re-materializes followers on undo/redo.
 
+## 3b. Node-graph coexistence (user, 2026-07-19: 「ノードベースとの
+両立がどうなるか」)
+
+Two sub-questions, both resolvable without bending either system:
+
+- **The link is a property of the DEVELOP NODE, not the photo.** A
+  Develop node carries "following look X for these adjustment groups";
+  the graph around it stays entirely free (custom nodes, blends,
+  branches — the link never dictates topology, per principle 6). This
+  also settles the virtual-copies interplay: duplicating an output
+  clones the Develop WITH its link state, and each chain then decides
+  independently to keep following or detach. The "one look per photo"
+  decision becomes the constraint "every linked Develop in one photo
+  links to the SAME look" (no multi-look confusion), not "one linked
+  node".
+- **Custom-node looks are a DIFFERENT sharing axis, already named by
+  the taxonomy's open third slot: the shared node/subgraph (Houdini
+  HDA / Nuke gizmo precedent).** A look built from WGSL custom nodes
+  can't and shouldn't squeeze into the parameter-shaped 共通ルック;
+  node sharing is reference-shaped (graph-topology anchor, following
+  propagation). Recorded as the third kind's likely identity —
+  UNSCHEDULED, not part of this spec's GO scope; noting it here only
+  proves the node-based story and the linked-look story compose
+  rather than collide.
+
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
 - Stored in **physical sensor pixels**; applied through each photo's
