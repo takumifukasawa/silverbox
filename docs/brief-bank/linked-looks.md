@@ -209,6 +209,25 @@ distribution already works via whole-look presets. ② (frozen skeleton)
 is SHELVED, not rejected: §3c's design stands ready if a real demand
 ever appears.
 
+**The colorKey crack — examined and closed (2026-07-19, second
+pass).** Re-opening the 「写真にはセカンダリはいらないのか？」question
+exposed one row the table above files too coarsely: colorKey is
+spatial in EFFECT but color-anchored in DEFINITION (H/S/L range +
+softness), so unlike windows, a skin/sky key could in principle
+travel across photos — the shape of ②'s first real demand, and the
+LR adaptive-preset precedent (semantic anchor ⇒ shareable spatial
+mask). User verdict: «肌とか空は写真次第かなぁ» — key ranges are
+re-pulled per photo (lighting/WB/subject), matching video practice
+for qualifiers too. So colorKey is photo-anchored IN USE even though
+color-anchored in form, and following would actively fight the
+per-photo re-pull. The clean statement of the whole scope decision:
+**what follows = photo-independent aesthetics (①'s parameter space,
+entirely); what stays local = everything photo-dependent (ALL
+secondaries — radial/linear by frame anchor, colorKey by use)** —
+one-shot distribution + per-photo tweak is the correct mechanics for
+the latter and already works today. ②'s last standing motivator is
+gone; ① is stronger than when first decided.
+
 ## 4. The repair sheet (「消しゴム用のマテリアル」)
 
 - Stored in **physical sensor pixels**; applied through each photo's
