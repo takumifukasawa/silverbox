@@ -375,6 +375,11 @@ third layer). This spec deliberately adds NO sharing on top of it.
    to travel (DESIGN.md identity) and be git-able; decide whether the
    look library gets a visible folder (~/Silverbox/Library?) or
    inherits the presets dir, and whether existing presets migrate.
+   USER LEANING (2026-07-19, not final): visible folder — «可視フォル
+   ダかなぁ、git管理どうする問題はたしかにあるかぁ». The git question
+   resolves the same way projects did: the app provides a gittable
+   visible folder and never touches git itself; whether to version it
+   is the user's own call.
 8. **Visible-path + editor-visibility obligations for the GO-time
    brief** (DESIGN.md "Visible path to every result" REQUIRES
    new-feature briefs to enumerate, per interaction, the clickable
