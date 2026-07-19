@@ -413,10 +413,14 @@ third layer). This spec deliberately adds NO sharing on top of it.
    (never silently destroy).
 7. **Library location.** `<userData>/presets` is app-internal —
    exactly the hidden-central-library shape the project-storage
-   decision rejected for documents. Looks the user authors are meant
-   to travel (DESIGN.md identity) and be git-able; decide whether the
-   look library gets a visible folder (~/Silverbox/Library?) or
-   inherits the presets dir, and whether existing presets migrate.
+   decision rejected for documents. (An earlier revision cited
+   DESIGN.md's "looks travel" here — MISAPPLIED, user-corrected
+   2026-07-19: that sentence is about export targets (Unity/UE/OBS/
+   web, principle 7), not library files. The case rests on the
+   project-storage precedent and the cross-machine sharing need
+   alone.) Decide whether the look library gets a visible folder
+   (~/Silverbox/Library?) or inherits the presets dir, and whether
+   existing presets migrate.
    USER LEANING (2026-07-19, not final): visible folder — «可視フォル
    ダかなぁ、git管理どうする問題はたしかにあるかぁ». The git question
    resolves the same way projects did: the app provides a gittable
