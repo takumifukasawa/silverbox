@@ -14,6 +14,7 @@ import {
   type GraphUndoEntry,
   type RatingUndoEntry,
   type DeleteSharedLookUndoEntry,
+  type PublishUndoEntry,
   type RemovePhotosUndoEntry,
   type SyncUndoEntry,
   type UndoEntry,
@@ -976,6 +977,49 @@ interface AppState {
    * job either).
    */
   deleteSharedLook(slug: string): Promise<void>;
+  /**
+   * The currently open photo's linked Develop node, scoped to the ACTIVE
+   * CHAIN (parent spec §4.3 / linked-looks-stage-c.md semantic 2 — publish
+   * must read ONLY this node, never an added local tweak Develop sharing the
+   * same chain). A plain synchronous getter (not stateful) so the UI
+   * (SharedLookMenu's Publish button) and publishToSharedLook itself resolve
+   * the exact same node rather than risking two independent chainScope
+   * computations drifting apart. Filters on `n.link` truthy, NOT merely
+   * "first Develop node in scope" — a chain can hold a linked Develop PLUS
+   * one or more unlinked tweak-layer Develop nodes (§4.3's "added Develop
+   * nodes are local tweak layers"), and array order between them is not
+   * meaningful. `null` when no image is ready, or the active chain has no
+   * linked Develop node at all.
+   */
+  activeLinkedDevelopNode(): GraphNode | null;
+  /**
+   * "この写真の調整を共通ルックに反映" (publish — linked-looks-stage-c.md,
+   * parent spec §4.4/§9-2): write `families` (checked develop families,
+   * FamilyScopeDialog reuse — checking one the look doesn't yet offer
+   * EXTENDS its `includes`; unchecking an already-offered one only omits it
+   * from THIS publish, never removes it from the look) from the OPEN
+   * photo's linked Develop node — activeLinkedDevelopNode's ACTIVE-CHAIN
+   * node ONLY, never an added local tweak Develop (semantic 2) — into the
+   * shared look it's linked to, then re-materializes every follower of that
+   * look across the project (semantic 4): each follower's (`follows` ∩
+   * `families`) values are rewritten from the new look body, and EVERY
+   * follower's `materializedFrom` is bumped to the new look file's hash —
+   * including a follower whose intersection is empty (stage D's future
+   * drift detection depends on this). The publisher re-follows every
+   * published family (semantic 5: those values equal the look's own by
+   * construction); families it didn't publish keep their current
+   * follow/fork state untouched, and so does every OTHER follower's
+   * `follows` list (only the publisher re-follows). Flushes the open
+   * photo's own pending autosave state BEFORE writing anything (semantic
+   * 3), then writes the shared-look file, then fans out. One
+   * PublishUndoEntry covers the whole operation. No-op (with a notice,
+   * never a crash) without an active project, a linked Develop in the
+   * active chain, at least one checked develop family, or a readable/
+   * parseable look file (semantic 8) — silently returns (no notice, same as
+   * every sibling shared-look action) when no image is ready, since the UI
+   * gates the button on that already.
+   */
+  publishToSharedLook(families: PresetFamilyId[]): Promise<void>;
   /**
    * LR-style preset hover preview (round-7 UX pack G §4): the RAW captured
    * look (pre-geometry-merge) a preset row is currently hovered over, or null
@@ -5170,6 +5214,37 @@ export const useAppStore = create<AppState>((set, get) => {
         if (entry.targets.length > 0) await get().refreshPlaylistStatus();
         return;
       }
+      case 'publish': {
+        // Same "project must still be the SAME one" guard, and the SAME
+        // "file first" order as delete-shared-look's own undo, exactly per
+        // the brief (PublishUndoEntry's own doc comment): the shared-look
+        // FILE is restored to `lookTextBefore` FIRST, then every follower's
+        // `before` graph.
+        const project = get().project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not undo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookTextBefore);
+        const result = await applySyncEntryGraphs(entry.targets, entry.before);
+        if (!result.ok) {
+          blockUndoRedo('undo', entry.label, result.failedTarget);
+          return;
+        }
+        await get().refreshSharedLooks();
+        set((s) => ({ undoStack: moveTopToRedo(s.undoStack, entry) }));
+        // Same "currently open follower" resync as the 'sync'/
+        // 'delete-shared-look' cases above.
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        await get().refreshPlaylistStatus();
+        return;
+      }
     }
   },
 
@@ -5325,6 +5400,35 @@ export const useAppStore = create<AppState>((set, get) => {
           await get().openImageByPath(openPath, { keepFolderContext: true });
         }
         if (entry.targets.length > 0) await get().refreshPlaylistStatus();
+        return;
+      }
+      case 'publish': {
+        if (entry.after === undefined) return; // defensive: publishToSharedLook always populates `after` eagerly (both sides known synchronously at push time, like a sync entry)
+        const project = get().project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not redo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        const result = await applySyncEntryGraphs(entry.targets, entry.after);
+        if (!result.ok) {
+          blockUndoRedo('redo', entry.label, result.failedTarget);
+          return;
+        }
+        // Mirror order of undo's own "file first" (PublishUndoEntry's own
+        // doc comment): every follower's `after` graph FIRST, then the
+        // shared-look file's own `lookTextAfter` — the delete-shared-look
+        // precedent's exact mirror-order shape.
+        await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookTextAfter);
+        await get().refreshSharedLooks();
+        set((s) => ({ undoStack: moveTopToUndo(s.undoStack, entry) }));
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        await get().refreshPlaylistStatus();
         return;
       }
     }
@@ -6107,6 +6211,199 @@ export const useAppStore = create<AppState>((set, get) => {
     raiseNotice('projectNotice', {
       kind: errorCount > 0 ? 'error' : 'success',
       message: `deleted shared look — ${writtenTargets.length} follower${writtenTargets.length === 1 ? '' : 's'} unlinked${errorSuffix}`,
+    });
+  },
+
+  activeLinkedDevelopNode() {
+    const s = get();
+    if (!s.imagePath || s.imageStatus !== 'ready') return null;
+    const scope = chainScope(s.graph, s.activeOutputId);
+    const devNode = s.graph.nodes.find((n) => n.kind === DEVELOP_KIND && scope.has(n.id) && !!n.link);
+    return devNode ?? null;
+  },
+
+  async publishToSharedLook(families) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return; // UI gates the button on this — silent, same posture as every sibling shared-look action
+    const project = s.project;
+    if (!project) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'no active project — nothing to publish' });
+      return;
+    }
+
+    // Semantic 2: read ONLY the linked Develop node of the active chain —
+    // NEVER a tweak-layer Develop node sharing the same chain.
+    const scope = chainScope(s.graph, s.activeOutputId);
+    const devNode = s.graph.nodes.find((n) => n.kind === DEVELOP_KIND && scope.has(n.id) && !!n.link);
+    if (!devNode || !devNode.link) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'no linked look on this photo — nothing to publish' });
+      return;
+    }
+    const slug = devNode.link.look;
+
+    // develop families only — same create-time guard createSharedLook uses.
+    const developFamilies = families.filter(isDevelopFamily);
+    if (developFamilies.length === 0) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'publish needs at least one develop family checked' });
+      return;
+    }
+
+    const lookTextBefore = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (lookTextBefore === null) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" could not be read — nothing published` });
+      return;
+    }
+    let parsedBefore: ParsedPreset;
+    try {
+      parsedBefore = parsePresetFile(lookTextBefore);
+    } catch (err) {
+      console.warn(`publishToSharedLook: shared look "${slug}" could not be parsed:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" is corrupt — nothing published` });
+      return;
+    }
+
+    // Semantic 3: flush the open photo's own pending autosave state FIRST —
+    // writeGraphSaveSnapshot/flushPendingAutosave's own discipline, run
+    // inline here since publish never navigates the primary away.
+    if (s.graphDirty) await get().saveGraph();
+
+    // Build the new look body: `developFamilies` picked FROM the photo's
+    // current develop values, onto the EXISTING look body as base — mirrors
+    // buildScopedLook's SAVE direction (pickDevelopFamilies's own doc
+    // comment), so an unchecked-but-already-offered family's look value is
+    // left exactly as it was (never removed from the look, per semantic 1).
+    const currentDevelop = devNode.develop ?? defaultDevelopParams();
+    const lookDevelopBefore = parsedBefore.look.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+    const existingIncludes = (parsedBefore.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+    const newIncludes = [...new Set([...existingIncludes, ...developFamilies])]; // semantic 1: checking a new family EXTENDS includes
+    const newLookDevelop = pickDevelopFamilies(currentDevelop, lookDevelopBefore, new Set(developFamilies));
+    const newLookGraph: GraphDoc = {
+      ...parsedBefore.look,
+      nodes: parsedBefore.look.nodes.map((n) => (n.kind === DEVELOP_KIND ? { ...n, develop: newLookDevelop } : n)),
+    };
+    const lookTextAfter = serializePreset(parsedBefore.name, newLookGraph, parsedBefore.createdAt, parsedBefore.unknown, newIncludes);
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(lookTextAfter).buffer);
+
+    await window.silverbox.sharedLookWrite(project.dir, slug, lookTextAfter);
+
+    // Fan-out re-materialization (semantic 4) — same playlist-scan shape as
+    // deleteSharedLook, but every row whose Develop node follows THIS slug
+    // gets its (follows ∩ developFamilies) values rewritten AND its
+    // materializedFrom bumped unconditionally (even an empty intersection —
+    // CRITICAL DETAIL, stage D's drift detection depends on it). The
+    // publisher (currently open photo) is handled inline via the live graph;
+    // every other follower is read/patched/written on disk, same shape
+    // linkPhotosToLook/deleteSharedLook already use.
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    let errorCount = 0;
+
+    for (const row of project.photos) {
+      const photoPath = resolveProjectPath(project.dir, row.path);
+      const isOpen = photoPath === primaryPath;
+
+      if (isOpen) {
+        // Semantic 5: the publisher re-follows every published family — its
+        // checked-family values already equal the look's own by
+        // construction (this pickDevelopFamilies call is an identity write
+        // for `developFamilies`), but running it uniformly keeps this
+        // branch's shape identical to every other follower's own
+        // materialization below. Families NOT published keep whatever
+        // follow/fork state they already had.
+        const newFollows = [...new Set([...devNode.link.follows, ...developFamilies])];
+        const newDevelop = pickDevelopFamilies(newLookDevelop, devNode.develop ?? defaultDevelopParams(), new Set(developFamilies));
+        const newLink: DevelopLink = { look: slug, follows: newFollows, materializedFrom };
+        const nextGraph: GraphDoc = {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === devNode.id ? { ...n, develop: newDevelop, link: newLink } : n)),
+        };
+        before[photoPath] = structuredClone(s.graph);
+        after[photoPath] = nextGraph;
+        set({ graph: nextGraph, graphDirty: true });
+        revalidateShaders(nextGraph);
+        await get().saveGraph();
+        continue;
+      }
+
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`publishToSharedLook: could not read ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      if (existingText === null) continue; // never saved — nothing to re-materialize
+      let parsedLook: SidecarDoc;
+      try {
+        parsedLook = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`publishToSharedLook: ${lookPath} is unreadable by this build, skipping:`, err);
+        errorCount++;
+        continue;
+      }
+      const node = parsedLook.graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+      if (!node?.link) continue; // not a follower of THIS look
+
+      // Semantic 4: rewrite ONLY (follows ∩ published families)'s values;
+      // `follows` itself is untouched here (only the publisher re-follows,
+      // semantic 5) — but materializedFrom bumps regardless of whether the
+      // intersection is empty.
+      const intersect = node.link.follows.filter((f) => developFamilies.includes(f));
+      const newDevelop =
+        intersect.length > 0
+          ? pickDevelopFamilies(newLookDevelop, node.develop ?? defaultDevelopParams(), new Set(intersect))
+          : (node.develop ?? defaultDevelopParams());
+      const newLink: DevelopLink = { ...node.link, materializedFrom };
+      const nextGraph: GraphDoc = {
+        ...parsedLook.graph,
+        nodes: parsedLook.graph.nodes.map((n) => (n.id === node.id ? { ...n, develop: newDevelop, link: newLink } : n)),
+      };
+      const content = serializeGraphDoc(
+        nextGraph,
+        parsedLook.source ?? null,
+        parsedLook.createdAt ?? null,
+        parsedLook.unknown,
+        parsedLook.rating,
+        parsedLook.photo,
+        parsedLook.fingerprint,
+        parsedLook.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`publishToSharedLook: could not write ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      before[photoPath] = structuredClone(parsedLook.graph);
+      after[photoPath] = nextGraph;
+    }
+
+    const targets = Object.keys(after);
+    const entry: PublishUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'publish',
+      label: `Publish "${parsedBefore.name}" → ${targets.length} photo${targets.length === 1 ? '' : 's'}`,
+      projectDir: project.dir,
+      slug,
+      lookTextBefore,
+      lookTextAfter,
+      targets,
+      before,
+      after,
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshSharedLooks();
+    await get().refreshPlaylistStatus();
+
+    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 ? 'error' : 'success',
+      message: `published "${parsedBefore.name}" — applied to ${targets.length} photo${targets.length === 1 ? '' : 's'}${errorSuffix}`,
     });
   },
 

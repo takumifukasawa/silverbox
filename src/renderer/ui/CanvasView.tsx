@@ -381,6 +381,10 @@ declare global {
       unlinkLook(nodeId: string): Promise<void>;
       /** Delete a shared look's file; strips `link` from every follower across the project (mirrors the shared-look list's Delete button). */
       deleteSharedLook(slug: string): Promise<void>;
+      /** The open photo's linked Develop node, scoped to the active chain (linked-looks-stage-c.md) — null when not ready or the active chain has no linked Develop. */
+      activeLinkedDevelopNode(): import('../engine/graph/graphDoc').GraphNode | null;
+      /** Publish checked develop families from the open photo's linked Develop node into the shared look, then re-materialize every follower (mirrors "この写真の調整を共通ルックに反映"). */
+      publishToSharedLook(families: PresetFamilyId[]): Promise<void>;
       /**
        * Linked-look badge state for `nodeId` (defaults to the current
        * selection) — null when it isn't a Develop node or carries no `link`.
@@ -1898,6 +1902,12 @@ export function CanvasView() {
       },
       deleteSharedLook(slug) {
         return useAppStore.getState().deleteSharedLook(slug);
+      },
+      activeLinkedDevelopNode() {
+        return useAppStore.getState().activeLinkedDevelopNode();
+      },
+      publishToSharedLook(families) {
+        return useAppStore.getState().publishToSharedLook(families);
       },
       async developLinkState(nodeId) {
         const s = useAppStore.getState();

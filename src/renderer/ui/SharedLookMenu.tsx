@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { FamilyScopeDialog } from './FamilyScopeDialog';
-import { PRESET_FAMILY_DEFS } from '../engine/graph/presetFamilies';
+import { isDevelopFamily, isKnownFamilyId, PRESET_FAMILY_DEFS, type PresetFamilyId } from '../engine/graph/presetFamilies';
+import { parsePresetFile } from '../engine/graph/presetDoc';
 
 /** Only the `develop` group — a shared look never offers a structural family (linked-looks-stage-b.md semantic 1: refuse/ignore at create time). */
 const LOOK_FAMILY_DEFS = PRESET_FAMILY_DEFS.filter((f) => f.group === 'develop');
@@ -36,11 +37,22 @@ export function SharedLookMenu() {
   const createSharedLook = useAppStore((s) => s.createSharedLook);
   const linkPhotosToLook = useAppStore((s) => s.linkPhotosToLook);
   const deleteSharedLook = useAppStore((s) => s.deleteSharedLook);
+  const publishToSharedLook = useAppStore((s) => s.publishToSharedLook);
+  // activeLinkedDevelopNode() is a synchronous getter (appStore.ts's own doc
+  // comment) — calling it FROM INSIDE the selector (not just reading the
+  // method reference) is what makes this reactive: zustand recomputes the
+  // selector on every store change and only re-renders when the RETURNED
+  // node differs by reference, which changes exactly when the active
+  // chain's link actually does (untouched nodes keep their object identity
+  // across every immutable graph update elsewhere in this file).
+  const linkedDevNode = useAppStore((s) => s.activeLinkedDevelopNode());
 
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState('');
   const [createName, setCreateName] = useState('');
   const [createScopeOpen, setCreateScopeOpen] = useState(false);
+  const [publishScopeOpen, setPublishScopeOpen] = useState(false);
+  const [publishInitialChecked, setPublishInitialChecked] = useState<PresetFamilyId[]>([]);
 
   useEffect(() => {
     if (selected && !sharedLooks.some((p) => p.slug === selected)) setSelected('');
@@ -48,6 +60,36 @@ export function SharedLookMenu() {
 
   const ready = imageStatus === 'ready';
   const linkTargets = imagePath ? [imagePath, ...filmstripSelection] : [];
+
+  // Publish (linked-looks-stage-c.md semantic 1): "この写真の調整を共通
+  // ルックに反映", available whenever the open photo's active chain has a
+  // linked Develop — independent of `selected` above (that dropdown picks
+  // which look to LINK to; publish always targets whichever look the photo
+  // is ALREADY linked to). The display name (not the bare slug) for the
+  // dialog's own copy, falling back to the slug if the summary list hasn't
+  // caught up yet (refreshSharedLooks race, same defensive fallback
+  // developLinkState's own callers use elsewhere).
+  const linkedLookSlug = linkedDevNode?.link?.look;
+  const linkedLookName = linkedLookSlug ? (sharedLooks.find((p) => p.slug === linkedLookSlug)?.name ?? linkedLookSlug) : '';
+
+  const openPublishDialog = async () => {
+    if (!linkedLookSlug || !project) return;
+    const text = await window.silverbox.sharedLookRead(project.dir, linkedLookSlug);
+    let offered: PresetFamilyId[] = [];
+    if (text) {
+      try {
+        const parsed = parsePresetFile(text);
+        offered = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+      } catch {
+        // Unreadable/corrupt look file — publishToSharedLook itself notices
+        // and no-ops on confirm (semantic 8's quiet-degradation posture);
+        // the dialog still opens with an empty default rather than never
+        // opening at all, so the user isn't stuck with a dead button.
+      }
+    }
+    setPublishInitialChecked(offered);
+    setPublishScopeOpen(true);
+  };
 
   return (
     <span className="shared-look-menu">
@@ -109,6 +151,17 @@ export function SharedLookMenu() {
               </button>
             </div>
             <div className="presets-menu-row">
+              <button
+                type="button"
+                data-testid="shared-look-publish"
+                disabled={!linkedDevNode}
+                onClick={() => void openPublishDialog()}
+                title="この写真の調整を共通ルックに反映 — write checked develop families from THIS photo's linked Develop node into the shared look, then re-materialize every follower; one undo entry"
+              >
+                この写真の調整を共通ルックに反映
+              </button>
+            </div>
+            <div className="presets-menu-row">
               <input
                 type="text"
                 placeholder="shared look name"
@@ -140,6 +193,21 @@ export function SharedLookMenu() {
                 const name = createName;
                 setCreateName('');
                 void createSharedLook(name, families);
+              }}
+            />
+            <FamilyScopeDialog
+              open={publishScopeOpen}
+              title="Publish to shared look"
+              targetDescription={`Publish this photo's adjustments into "${linkedLookName}":`}
+              families={LOOK_FAMILY_DEFS}
+              initialChecked={publishInitialChecked}
+              settingsKey="publishFamilies"
+              confirmLabel="Publish"
+              onCancel={() => setPublishScopeOpen(false)}
+              onConfirm={(families) => {
+                setPublishScopeOpen(false);
+                setOpen(false);
+                void publishToSharedLook(families);
               }}
             />
           </div>

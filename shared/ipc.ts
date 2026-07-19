@@ -1053,6 +1053,18 @@ export interface Settings {
    */
   sharedLookFamilies: string[];
   /**
+   * Publish to shared look (docs/brief-bank/linked-looks-stage-c.md): last-
+   * used family checkbox state in the "Publish to shared look" dialog — the
+   * SAME FamilyScopeDialog component, restricted to the `develop` group
+   * only (same as sharedLookFamilies above). A settingsKey of its own, same
+   * "different habit, remembered independently" reasoning as the other
+   * family-scoped dialogs — though in practice this dialog's OWN default is
+   * almost always overridden per-open by the look's current `includes`
+   * (FamilyScopeDialog's `initialChecked` prop), so this remembered value
+   * only surfaces if a future caller ever opens the dialog without one.
+   */
+  publishFamilies: string[];
+  /**
    * Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round 2
    * — LR-style toggle beside the existing Sync… button): while true, every
    * COMPLETED edit gesture on the primary fans its checked `syncFamilies`
@@ -1090,6 +1102,11 @@ export const DEFAULT_SETTINGS: Settings = {
   // DEFAULT_CHECKED_FAMILY_IDS, which is entirely `develop`-group ids) — the
   // Create-shared-look dialog starts checked exactly like the other two.
   sharedLookFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
+  // Same default set again (also pinned to presetFamilies.ts's
+  // DEFAULT_CHECKED_FAMILY_IDS) — a fresh install's Publish dialog starts
+  // checked the same way, on the rare occasion its own per-look default
+  // (the look's current `includes`) isn't available.
+  publishFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
   autoSyncEnabled: false,
 };
 

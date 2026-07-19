@@ -67,6 +67,12 @@ describe('DEFAULT_SETTINGS.sharedLookFamilies stays pinned to DEFAULT_CHECKED_FA
   });
 });
 
+describe('DEFAULT_SETTINGS.publishFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
+  it("linked-looks-stage-c.md's Publish dialog starts with the same defaults as the other family dialogs (on the rare open where its own per-look default isn't available)", () => {
+    expect(DEFAULT_SETTINGS.publishFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
+  });
+});
+
 describe('LOOK_FAMILY_IDS', () => {
   it('is exactly the develop-group ids — no structural family is ever offered by a shared look', () => {
     expect(LOOK_FAMILY_IDS).toEqual(DEFAULT_CHECKED_FAMILY_IDS); // develop-group ids happen to all be default-checked too

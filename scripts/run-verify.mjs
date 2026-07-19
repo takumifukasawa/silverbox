@@ -157,6 +157,7 @@ const ALL_SCRIPTS = [
   { name: 'dcp', file: 'verify-dcp.mjs' },
   { name: 'virtualcopy', file: 'verify-virtualcopy.mjs' },
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
+  { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

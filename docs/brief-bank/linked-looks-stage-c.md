@@ -1,6 +1,10 @@
 # Brief: publish to the shared look (linked-looks stage C)
 
-Status: DISPATCHED 2026-07-19.
+Status: LANDED 2026-07-19 (SUITE 69/69, unit 243). Deviations
+accepted: undo label says "N photos" (brief wording slip); follower
+files verified at materialized-field granularity rather than
+byte-identical (serializeGraphDoc stamps updatedAt on every write —
+the shared-look file itself IS restored byte-for-byte).
 Parent spec: docs/brief-bank/linked-looks.md §4.3/§4.4/§6, §9-1/9-2.
 Builds directly on stage B (commit 3cf7bae — read its appStore
 actions, DeleteSharedLookUndoEntry, SharedLookMenu, and

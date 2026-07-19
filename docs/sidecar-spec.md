@@ -327,6 +327,37 @@ version bump, same posture as `disabled`/the DCP profile fields above — an
 older Silverbox round-trips `link` verbatim via ordinary unknown-field
 passthrough without acting on it.
 
+#### Publish and `materializedFrom` maintenance (docs/brief-bank/linked-looks-stage-c.md)
+
+**Publish** ("この写真の調整を共通ルックに反映") writes checked develop
+families from a photo's OWN linked Develop node — the active chain's linked
+node only; an added local tweak Develop's values never leak into the
+shared look, per §4's node-graph rule — into the shared-look FILE, then
+re-materializes every follower found across the project: for each
+follower, the (follower's own `follows` ∩ the published families)' values
+are rewritten from the new look body. A family checked during publish that
+the look didn't previously offer is ADDED to the look's own `includes` (the
+look grows); an already-offered family left unchecked is simply omitted
+from that one publish, never dropped from the look. Only the PUBLISHER
+itself re-follows every published family (those values equal the look's
+own by construction, so the fork-on-touch state those families may have
+carried is cleared); every OTHER follower's own `follows` list is left
+exactly as it was — publish never makes a follower start following a
+family it wasn't already following.
+
+**`materializedFrom` updates on EVERY follower of the look, including one
+whose followed∩published intersection is empty.** This is the maintenance
+contract this field exists for: a follower whose own values happen not to
+change in this particular publish (nothing it follows was touched) still
+gets its `materializedFrom` bumped to the new look file's hash, because the
+shared-look FILE's bytes changed regardless of which families moved — a
+stale `materializedFrom` on such a follower would otherwise misread as
+drift once a hot-reload/drift-detection stage compares it against the
+look's current body. Concretely: publishing changes N+1 files on disk (the
+look + every follower, per parent spec §4.1's "a publish diff touches N+1
+files" observation) even when some of those N followers' own rendered
+pixels don't move at all.
+
 ---
 
 ## 5. Versioning & migration promises

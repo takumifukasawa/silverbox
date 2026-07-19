@@ -139,6 +139,37 @@ export interface DeleteSharedLookUndoEntry extends UndoEntryBase {
   after?: Record<string, GraphDoc>;
 }
 
+/**
+ * Publish (docs/brief-bank/linked-looks-stage-c.md semantic 6, parent spec
+ * §4.4/§9-1): one ⌘Z reverts a whole publish — writing the open photo's
+ * checked develop families INTO the shared look, then re-materializing
+ * every follower across the project. Same SyncUndoEntry-adjacent shape as
+ * DeleteSharedLookUndoEntry (both `before`/`after` known synchronously at
+ * push time — see appStore.ts's publishToSharedLook), but publish changes
+ * the shared-look FILE's own bytes in BOTH directions (create/delete only
+ * ever has ONE known file state to restore) — `lookTextBefore`/
+ * `lookTextAfter` carry the file's own serialized bytes on each side.
+ * `targets` is every follower actually re-materialized — INCLUDING the
+ * publisher itself (which re-follows the published families, semantic 5)
+ * and any follower whose followed∩published intersection was empty
+ * (materializedFrom still bumps for every follower regardless — stage D's
+ * future drift detection depends on this, see publishToSharedLook's own doc
+ * comment). Undo: restore `lookTextBefore` FIRST, then every follower's
+ * `before` graph (DeleteSharedLookUndoEntry's own "file first" order,
+ * exactly). Redo: mirror order — every follower's `after` graph FIRST, then
+ * `lookTextAfter`.
+ */
+export interface PublishUndoEntry extends UndoEntryBase {
+  kind: 'publish';
+  projectDir: string;
+  slug: string;
+  lookTextBefore: string;
+  lookTextAfter: string;
+  targets: string[];
+  before: Record<string, GraphDoc>;
+  after?: Record<string, GraphDoc>;
+}
+
 export type UndoEntry =
   | GraphUndoEntry
   | RatingUndoEntry
@@ -146,7 +177,8 @@ export type UndoEntry =
   | SyncUndoEntry
   | ArrangeUndoEntry
   | RemovePhotosUndoEntry
-  | DeleteSharedLookUndoEntry;
+  | DeleteSharedLookUndoEntry
+  | PublishUndoEntry;
 
 /** Bounded (~200 entries, oldest dropped — brief's "Bounded stack"), session-scoped (no persistence across restarts). */
 export const UNDO_STACK_LIMIT = 200;

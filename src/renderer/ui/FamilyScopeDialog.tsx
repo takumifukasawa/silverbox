@@ -48,6 +48,20 @@ export interface FamilyScopeDialogProps {
   title: string;
   targetDescription: string;
   families?: readonly PresetFamilyDef[];
+  /**
+   * Overrides the initial checked set for THIS open transition, bypassing
+   * the settingsKey-remembered value entirely (linked-looks-stage-c.md
+   * semantic 1 — publish's own "default checked = the look's CURRENT
+   * includes" requirement is a per-look DYNAMIC default, not a remembered
+   * habit like every other caller's checkboxes). Still written to
+   * `settings[settingsKey]` on confirm, same as ever — so a later re-open
+   * without a fresh `initialChecked` (there is none for this dialog; every
+   * open recomputes it) would fall back to the ordinary remembered
+   * behavior. Omitted (every caller before publish) leaves this
+   * bit-identical to the settings-remembered/DEFAULT_CHECKED_FAMILY_IDS
+   * behavior.
+   */
+  initialChecked?: PresetFamilyId[];
   settingsKey: string;
   confirmLabel?: string;
   onCancel(): void;
@@ -59,6 +73,7 @@ export function FamilyScopeDialog({
   title,
   targetDescription,
   families = PRESET_FAMILY_DEFS,
+  initialChecked,
   settingsKey,
   confirmLabel = 'Save',
   onCancel,
@@ -69,6 +84,7 @@ export function FamilyScopeDialog({
 
   const knownIds = new Set(families.map((f) => f.id));
   const rememberedChecked = (): Set<PresetFamilyId> => {
+    if (initialChecked !== undefined) return new Set(initialChecked.filter((id) => knownIds.has(id)));
     const remembered = (settings as unknown as Record<string, unknown>)[settingsKey];
     if (Array.isArray(remembered)) {
       const filtered = remembered.filter(
