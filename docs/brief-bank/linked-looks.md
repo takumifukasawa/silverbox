@@ -1,10 +1,11 @@
 # Spec: linked looks & shared assets (共通ルック)
 
-Status: DESIGN-COMPLETE — **implementation gated on an EXPLICIT user
-GO** (user, 2026-07-18: 「この話はちゃんと結論がついてから実装に
-GOする感じにしようね」). No agent may be dispatched on this brief, and
-no part of it may be built piecemeal inside other features, until the
-user says GO — however complete the design below looks.
+Status: **GO GIVEN (user, 2026-07-19: «go») — IMPLEMENTATION IN
+PROGRESS**, staged: A apply-preset-to-selection → B link core →
+C publish → hand-test stop → D hot-reload/drift → E library →
+F repair sheets → G Sync-button removal. The design-first gate
+(user, 2026-07-18: 「この話はちゃんと結論がついてから実装にGOする感じ
+にしようね」) was satisfied by three double-check rounds before GO.
 
 History: grew out of the sync-or-not question (2026-07-18..19 dialogue,
 commits a42beeb..39bf246 — the dialogue-ordered originals are in git
