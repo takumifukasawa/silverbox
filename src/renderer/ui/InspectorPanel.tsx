@@ -1,5 +1,7 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
+import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
+import { parsePresetFile } from '../engine/graph/presetDoc';
 import {
   BLEND_KIND,
   BLEND_PARAM_DEFS,
@@ -115,13 +117,24 @@ function ParamSlider({
   );
 }
 
-/** Collapsible inspector section (UI spec §5). */
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/**
+ * Collapsible inspector section (UI spec §5). `badge` (linked-looks-
+ * stage-b.md semantic 4) renders to the right of the title — the
+ * 「この写真だけ個別調整中」 fork indicator + its "合わせる" revert button,
+ * when this section's develop family/families are forked off a linked
+ * look; absent for every section on an unlinked (or fully-following) node.
+ */
+function Section({ title, children, badge }: { title: string; children: React.ReactNode; badge?: React.ReactNode }) {
   const [open, setOpen] = useState(true);
   return (
     <div className="inspector-section">
       <div className="inspector-section-header" onClick={() => setOpen((o) => !o)}>
         <span className="inspector-section-caret">{open ? '▾' : '▸'}</span> {title}
+        {badge && (
+          <span className="inspector-section-badge" onClick={(ev) => ev.stopPropagation()}>
+            {badge}
+          </span>
+        )}
       </div>
       {open && <div className="inspector-section-body">{children}</div>}
     </div>
@@ -303,6 +316,10 @@ function DevelopInspector({ node }: { node: GraphNode }) {
   const setWbPicking = useAppStore((s) => s.setWbPicking);
   const imageStatus = useAppStore((s) => s.imageStatus);
   const resetDevelopNode = useAppStore((s) => s.resetDevelopNode);
+  const project = useAppStore((s) => s.project);
+  const revertFamilyToLook = useAppStore((s) => s.revertFamilyToLook);
+  const resetAllFamiliesToLook = useAppStore((s) => s.resetAllFamiliesToLook);
+  const unlinkLook = useAppStore((s) => s.unlinkLook);
   const params: DevelopParams = node.develop ?? defaultDevelopParams();
   const basic = params.basic as unknown as Record<string, number>;
   const wbDefs: OpParamDef[] = [
@@ -314,6 +331,71 @@ function DevelopInspector({ node }: { node: GraphNode }) {
     const v = basic[key.split('.')[1]!] ?? 0;
     return v !== 0 || key === 'basic.tint' ? v : wbDefault(key); // temp 0 = unresolved placeholder
   };
+
+  // Linked look (docs/brief-bank/linked-looks-stage-b.md): which develop
+  // families the look OFFERS (its own `includes`) is only known by reading
+  // the shared-look file — fetched once per (node, look) pair, same
+  // fetch-on-demand idiom PresetsMenu's hover preview uses. `forkedFamilies`
+  // = offered families NOT currently in `follows` — the 「この写真だけ
+  // 個別調整中」 badge's own condition (semantic 4).
+  const link = node.link;
+  const [offeredFamilies, setOfferedFamilies] = useState<PresetFamilyId[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!link || !project) {
+      setOfferedFamilies([]);
+      return;
+    }
+    void (async () => {
+      const text = await window.silverbox.sharedLookRead(project.dir, link.look);
+      if (cancelled) return;
+      if (!text) {
+        // Missing/unreadable shared-look file (e.g. deleted this session,
+        // or a git checkout that dropped it — stage D's drift detection is
+        // out of scope here, but this stage must still degrade quietly
+        // rather than leave stale badge state around): "link present but
+        // look unavailable" — no offered families known, so no fork badge
+        // and no per-family revert button render, and the "共通ルックに
+        // リセット" button (gated on offeredFamilies.length > 0) disables
+        // itself. No crash either way.
+        setOfferedFamilies([]);
+        return;
+      }
+      try {
+        const parsed = parsePresetFile(text);
+        const offered = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+        if (!cancelled) setOfferedFamilies(offered);
+      } catch {
+        if (!cancelled) setOfferedFamilies([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [link, project]);
+
+  const forkedFamilies = new Set(link ? offeredFamilies.filter((f) => !link.follows.includes(f)) : []);
+  const familyBadge = (family: PresetFamilyId) => {
+    if (!forkedFamilies.has(family)) return null;
+    return (
+      <span className="family-fork-badge" data-testid={`family-fork-badge-${family}`}>
+        この写真だけ個別調整中
+        <button
+          type="button"
+          data-testid={`family-revert-${family}`}
+          onClick={() => void revertFamilyToLook(node.id, family)}
+          title="共通ルックに合わせる — re-write this family's values from the shared look"
+        >
+          合わせる
+        </button>
+      </span>
+    );
+  };
+  // "Basic" combines the basic-tone AND wb families in one UI section — the
+  // badge fires if EITHER is forked (a deliberate simplification: the
+  // section groups two families visually, so its badge does too).
+  const basicBadge = forkedFamilies.has('basic-tone') || forkedFamilies.has('wb') ? familyBadge('basic-tone') ?? familyBadge('wb') : null;
+
   return (
     <>
       <div className="inspector-title-row">
@@ -329,6 +411,31 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           Reset Develop
         </button>
       </div>
+      {link && (
+        <div className="inspector-title-row linked-look-row" data-testid="linked-look-row">
+          <div className="inspector-title" data-testid="linked-look-name">
+            共通ルック: {link.look}
+          </div>
+          <button
+            type="button"
+            data-testid="linked-look-reset-all"
+            disabled={imageStatus !== 'ready' || offeredFamilies.length === 0}
+            title="共通ルックにリセット — re-follow every offered family"
+            onClick={() => void resetAllFamiliesToLook(node.id)}
+          >
+            共通ルックにリセット
+          </button>
+          <button
+            type="button"
+            data-testid="linked-look-unlink"
+            disabled={imageStatus !== 'ready'}
+            title="共通ルックから外す — 見た目は変わらない (values untouched, only the link metadata is dropped)"
+            onClick={() => void unlinkLook(node.id)}
+          >
+            共通ルックから外す
+          </button>
+        </div>
+      )}
       <Section title="Profile">
         <DcpSourceControls nodeId={node.id} profile={params.profile} />
         <ParamSlider
@@ -337,7 +444,7 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           value={params.profile.amount}
         />
       </Section>
-      <Section title="Basic">
+      <Section title="Basic" badge={basicBadge}>
         <div className="wb-eyedropper-row">
           <button
             type="button"
@@ -362,16 +469,16 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
         ))}
       </Section>
-      <Section title="Tone Curve">
+      <Section title="Tone Curve" badge={familyBadge('curves')}>
         <ToneCurveEditor nodeId={node.id} params={params} />
       </Section>
-      <Section title="HSL">
+      <Section title="HSL" badge={familyBadge('hsl')}>
         <HslSection node={node} params={params} />
       </Section>
-      <Section title="B&W">
+      <Section title="B&W" badge={familyBadge('bw')}>
         <BwSection node={node} params={params} />
       </Section>
-      <Section title="Color Grading">
+      <Section title="Color Grading" badge={familyBadge('grading')}>
         <div className="grading-wheels">
           {GRADING_REGIONS.map((region) => (
             <ColorWheel key={region} nodeId={node.id} region={region} wheel={params.grading[region]} />
@@ -388,7 +495,7 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           value={params.grading.balance}
         />
       </Section>
-      <Section title="Detail">
+      <Section title="Detail" badge={familyBadge('detail')}>
         <div className="detail-group-label">Sharpening</div>
         <ParamSlider
           nodeId={node.id}
@@ -444,7 +551,7 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           Preview is downsampled — judge sharpening/NR at 100% zoom or in the exported file.
         </div>
       </Section>
-      <Section title="Effects">
+      <Section title="Effects" badge={familyBadge('effects')}>
         <ParamSlider
           nodeId={node.id}
           def={{ key: 'effects.dehaze', label: 'Dehaze', min: -100, max: 100, step: 1, default: 0 }}

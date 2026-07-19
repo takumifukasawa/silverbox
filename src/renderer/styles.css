@@ -251,6 +251,11 @@ button:disabled {
   position: relative;
 }
 
+.shared-look-menu {
+  position: relative;
+}
+
+.shared-look-menu-list,
 .presets-menu-list {
   position: absolute;
   top: calc(100% + 4px);
@@ -1975,6 +1980,34 @@ button:disabled {
   color: #888;
 }
 
+/* Linked-look fork badge (docs/brief-bank/linked-looks-stage-b.md semantic
+   4): 「この写真だけ個別調整中」 + its "合わせる" revert button, shown on a
+   develop section's header only while that section's family is forked off
+   a linked look. */
+.inspector-section-badge {
+  float: right;
+  font-weight: normal;
+}
+
+.family-fork-badge {
+  color: #e8c96b;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.family-fork-badge button {
+  font-size: 11px;
+  padding: 1px 6px;
+}
+
+.linked-look-row {
+  gap: 8px;
+  font-size: 12px;
+  color: #aab;
+}
+
 .inspector-section-body {
   padding: 2px 0 10px;
 }
@@ -2585,6 +2618,22 @@ button:disabled {
   color: #e8c96b;
   font-size: 12px;
   line-height: 1;
+}
+
+/* Linked-look node label (linked-looks-stage-b.md semantic 8): subtle but
+   visible — the graph is the review surface for auditing what an AI wrote.
+   No new node class; this only ever appears on a plain Develop node. */
+.op-node-link-label {
+  position: absolute;
+  bottom: 2px;
+  left: 4px;
+  right: 4px;
+  color: #8ab4e8;
+  font-size: 9px;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ---- export dialog (UX pack B §4) ---- */

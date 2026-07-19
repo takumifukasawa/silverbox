@@ -40,6 +40,7 @@ import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
 import { deletePreset, listPresets, readPreset, writePreset } from './presets';
+import { deleteSharedLook, listSharedLooks, readSharedLook, writeSharedLook } from './sharedLooks';
 import { readSettings, updateSettings } from './settings';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -758,6 +759,22 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.presetDelete, async (_ev, slug: unknown): Promise<void> => {
     await deletePreset(slug);
+  });
+
+  // Shared looks (docs/brief-bank/linked-looks-stage-b.md): presets.ts's
+  // twin, project-scoped — see main/sharedLooks.ts.
+  ipcMain.handle(IPC.sharedLooksList, async (_ev, projectDir: unknown): Promise<PresetSummary[]> => listSharedLooks(projectDir));
+
+  ipcMain.handle(IPC.sharedLookRead, async (_ev, projectDir: unknown, slug: unknown): Promise<string | null> =>
+    readSharedLook(projectDir, slug)
+  );
+
+  ipcMain.handle(IPC.sharedLookWrite, async (_ev, projectDir: unknown, slug: unknown, content: unknown): Promise<void> => {
+    await writeSharedLook(projectDir, slug, content);
+  });
+
+  ipcMain.handle(IPC.sharedLookDelete, async (_ev, projectDir: unknown, slug: unknown): Promise<void> => {
+    await deleteSharedLook(projectDir, slug);
   });
 
   ipcMain.handle(IPC.goldenCheck, async (_ev, req: CliCheckImageRequest): Promise<CliCheckOutcome> => {

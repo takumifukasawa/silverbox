@@ -54,6 +54,15 @@ export const IPC = {
   presetRead: 'presets:read',
   presetWrite: 'presets:write',
   presetDelete: 'presets:delete',
+  // Shared looks (docs/brief-bank/linked-looks-stage-b.md): the SAME preset
+  // file format (name + includes + graph — presetDoc.ts), but PROJECT-scoped
+  // at `<projectDir>/shared-looks/<slug>.json` rather than global userData —
+  // hence a `dir` argument on every call, unlike presetsList/presetRead/…
+  // above. See main/sharedLooks.ts.
+  sharedLooksList: 'sharedLooks:list',
+  sharedLookRead: 'sharedLooks:read',
+  sharedLookWrite: 'sharedLooks:write',
+  sharedLookDelete: 'sharedLooks:delete',
   // Headless CLI renderer (`electron . --render …` — see main/index.ts):
   // main pushes ONE job to the renderer once it signals ready, then the
   // renderer streams results back one at a time as they render.
@@ -436,6 +445,14 @@ export interface SilverboxApi {
   presetWrite(slug: string, content: string): Promise<void>;
   /** Delete one preset file by slug. */
   presetDelete(slug: string): Promise<void>;
+  /** List `<projectDir>/shared-looks/*.json` summaries; a malformed file is skipped (never crashes the list) — same convention as presetsList. */
+  sharedLooksList(projectDir: string): Promise<PresetSummary[]>;
+  /** Read one shared look's raw JSON text by slug (project-scoped); null if it doesn't exist. */
+  sharedLookRead(projectDir: string, slug: string): Promise<string | null>;
+  /** Write (create or overwrite) one shared look's raw JSON text by slug (project-scoped). */
+  sharedLookWrite(projectDir: string, slug: string, content: string): Promise<void>;
+  /** Delete one shared look's file by slug (project-scoped). */
+  sharedLookDelete(projectDir: string, slug: string): Promise<void>;
   /**
    * Test-harness flags read from the main-process env at preload time; all
    * false in normal use. `isTest` mirrors SILVERBOX_TEST (the verify suite);
@@ -1025,6 +1042,17 @@ export interface Settings {
    */
   syncFamilies: string[];
   /**
+   * Linked looks (docs/brief-bank/linked-looks-stage-b.md): last-used family
+   * checkbox state in the "Create shared look" dialog — the SAME
+   * FamilyScopeDialog component, restricted to the `develop` group only
+   * (structural families are never offered by a shared look — see
+   * presetFamilies.ts's LOOK_FAMILY_IDS). A settingsKey of its own (not
+   * presetSaveFamilies/syncFamilies), same "different habit, remembered
+   * independently" reasoning those two fields' own doc comments give. Same
+   * plain-`string[]`/shape-only-validation posture as the other two.
+   */
+  sharedLookFamilies: string[];
+  /**
    * Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round 2
    * — LR-style toggle beside the existing Sync… button): while true, every
    * COMPLETED edit gesture on the primary fans its checked `syncFamilies`
@@ -1058,6 +1086,10 @@ export const DEFAULT_SETTINGS: Settings = {
   // presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS) — a fresh install's Sync
   // dialog starts checked exactly like the Save-preset dialog does.
   syncFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
+  // Same default set again (also pinned to presetFamilies.ts's
+  // DEFAULT_CHECKED_FAMILY_IDS, which is entirely `develop`-group ids) — the
+  // Create-shared-look dialog starts checked exactly like the other two.
+  sharedLookFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
   autoSyncEnabled: false,
 };
 

@@ -13,6 +13,7 @@ import {
   type GraphEntryKind,
   type GraphUndoEntry,
   type RatingUndoEntry,
+  type DeleteSharedLookUndoEntry,
   type RemovePhotosUndoEntry,
   type SyncUndoEntry,
   type UndoEntry,
@@ -40,6 +41,7 @@ import {
   sanitizeRating,
   serializeGraphDoc,
   type AddableKind,
+  type DevelopLink,
   type ExportOverrides,
   type GeometryParams,
   type GraphDoc,
@@ -59,7 +61,7 @@ import {
   type ProjectManifest,
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
-import { defaultDevelopParams, profileSource } from '../engine/graph/developNode';
+import { defaultDevelopParams, profileSource, type DevelopParams } from '../engine/graph/developNode';
 import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
@@ -95,9 +97,12 @@ import {
   ALL_FAMILY_IDS,
   buildScopedLook,
   DEFAULT_CHECKED_FAMILY_IDS,
+  familyForDevelopKey,
   isDevelopFamily,
   isKnownFamilyId,
+  LOOK_FAMILY_IDS,
   mergeScopedLook,
+  pickDevelopFamilies,
   structuralFamilyCompatible,
   type PresetFamilyId,
 } from '../engine/graph/presetFamilies';
@@ -891,6 +896,86 @@ interface AppState {
   applyPresetToSelection(slug: string): Promise<void>;
   /** Delete a saved preset's file; refreshes the list. No confirm dialog (see PresetsMenu's low-friction-but-not-accidental design). */
   deletePreset(slug: string): Promise<void>;
+  /**
+   * `<projectDir>/shared-looks/*.json` summaries (docs/brief-bank/
+   * linked-looks-stage-b.md) — the SAME preset file format, project-scoped.
+   * Refreshed on project open/create/close and after create/delete; empty
+   * with no active project.
+   */
+  sharedLooks: PresetSummary[];
+  /** Re-read `<projectDir>/shared-looks/` into `sharedLooks`; no-op without an active project. */
+  refreshSharedLooks(): Promise<void>;
+  /**
+   * "Create shared look" (共通ルック — linked-looks-stage-b.md semantic 1):
+   * captures the CURRENTLY OPEN photo's checked develop families (SAME
+   * capture path buildScopedLook/savePreset use, restricted to develop-group
+   * families only — presetFamilies.ts's LOOK_FAMILY_IDS; structural
+   * families are refused/ignored, never offered) into a NEW file at
+   * `<projectDir>/shared-looks/<slug>.json` (presetDoc.ts's serializePreset,
+   * the exact preset-file shape — one format for presets and shared looks),
+   * then LINKS the open photo to it (creating a look you don't follow
+   * yourself is meaningless, per the brief) — internally delegates to
+   * `linkPhotosToLook([imagePath], slug)` so the two features share one
+   * materialization implementation. No-op without a ready image or an
+   * active project, or an empty/whitespace-only `name`.
+   */
+  createSharedLook(name: string, families: PresetFamilyId[]): Promise<void>;
+  /**
+   * "Link photo(s) to look" (共通ルックを使う — linked-looks-stage-b.md
+   * semantic 2): attach `targets` (1..N photo paths, batch shape copied from
+   * applyPresetToSelection/syncSelection — stage A) to the shared look
+   * `slug`. Per photo, per family the look OFFERS (its own `includes`,
+   * develop-only): if that family's CURRENT value differs from this
+   * target's own FRESH-SEED DEFAULTS (seeded via the same decode +
+   * seedDefaultLook path syncSelection uses for an absent look), the photo
+   * already edited it — it stays 個別調整 (excluded from `follows`, values
+   * untouched); an untouched family gets the look's own values WRITTEN in
+   * (materialization) and enters `follows`. A target whose Develop node is
+   * ALREADY linked (to this look or a different one) is skipped and counted
+   * — constraint 3's "at most one linked Develop, refuse rather than
+   * silently double-link" enforced per-target rather than aborting the
+   * whole batch (same "skip, don't corrupt, report" posture as
+   * mergeFamiliesWithSkipDetection's structural skip). ONE SyncUndoEntry
+   * covers every photo actually written; a completion notice reports
+   * per-photo followed/individual counts (the brief's "only feedback the
+   * no-dialog default gets"). No-op without an active project or a slug
+   * that fails to read/parse.
+   */
+  linkPhotosToLook(targets: string[], slug: string): Promise<void>;
+  /**
+   * "共通ルックに合わせる" (revert one family to the look — semantic 5): on
+   * the CURRENTLY OPEN photo's Develop node `nodeId`, re-write `family`'s
+   * values from the shared look's current body and re-add it to `follows`.
+   * One undo entry (reuses the 'sync' shape, single-target). No-op unless
+   * the node is linked and the look file still reads/parses.
+   */
+  revertFamilyToLook(nodeId: string, family: PresetFamilyId): Promise<void>;
+  /**
+   * "共通ルックにリセット" (revert ALL offered families to the look, force-
+   * overwrite case 2 of the parent spec's §6 — one button): same as calling
+   * `revertFamilyToLook` for every family the look offers, but as one undo
+   * entry instead of N.
+   */
+  resetAllFamiliesToLook(nodeId: string): Promise<void>;
+  /**
+   * "共通ルックから外す" (unlink — semantic 6): strip `link` from the
+   * CURRENTLY OPEN photo's Develop node `nodeId`; values untouched (見た目は
+   * 変わらない). One undo entry. No-op unless the node is linked.
+   */
+  unlinkLook(nodeId: string): Promise<void>;
+  /**
+   * "ルックがなかったら全部ローカル化" (look deletion — semantic 7): delete
+   * the shared look file itself, then strip `link` from every follower found
+   * across the ACTIVE PROJECT's playlist (their values were already
+   * materialized — render never changes). One batch undo entry (targets =
+   * every follower actually rewritten) plus the file deletion (not itself
+   * undoable, same "undo doesn't cover file deletion" posture as
+   * deletePreset — but stripping the `link` fields IS covered, so undo
+   * restores every follower's link state; the file staying gone is the one
+   * irreversible part, same as re-creating a deleted preset isn't undo's
+   * job either).
+   */
+  deleteSharedLook(slug: string): Promise<void>;
   /**
    * LR-style preset hover preview (round-7 UX pack G §4): the RAW captured
    * look (pre-geometry-merge) a preset row is currently hovered over, or null
@@ -2119,6 +2204,64 @@ function restrictToChain(doc: GraphDoc, ids: ReadonlySet<string>): GraphDoc {
 }
 
 /**
+ * Fork-on-touch (docs/brief-bank/linked-looks-stage-b.md semantic 4):
+ * editing ANY param inside a FOLLOWED family forks that family local —
+ * metadata-only (the values are already local; only `link.follows`
+ * shrinks), folded into the SAME undo entry as the edit itself rather than
+ * a separate op, per the brief ("fork is a metadata-only change"). Shared
+ * by every Develop-param mutator (updateNodeParam/updateNodeParamsBatch/
+ * setDevelopBwEnabled/setDevelopProfileSource/setDevelopProfileDcpPath/
+ * setToneCurvePoints) so the rule can never drift between them. No-op
+ * (returns `node` unchanged, same reference when nothing moves) when the
+ * node isn't linked, or none of `touchedKeys` maps to a currently-followed
+ * family.
+ */
+function forkLinkedFamilies(node: GraphNode, touchedKeys: readonly string[]): GraphNode {
+  if (!node.link) return node;
+  const touchedFamilies = new Set(
+    touchedKeys.map(familyForDevelopKey).filter((f): f is PresetFamilyId => f !== null)
+  );
+  if (touchedFamilies.size === 0) return node;
+  const nextFollows = node.link.follows.filter((f) => !touchedFamilies.has(f as PresetFamilyId));
+  if (nextFollows.length === node.link.follows.length) return node; // nothing actually followed was touched
+  return { ...node, link: { ...node.link, follows: nextFollows } };
+}
+
+/**
+ * Strip `link` from node `nodeId` entirely (unlink — semantic 6, and look
+ * deletion — semantic 7): values untouched (見た目は変わらない), only the
+ * metadata is dropped. Deletes the property rather than setting it to
+ * `undefined` so the in-memory node object matches exactly what a doc that
+ * never had `link` looks like.
+ */
+function stripDevelopLink(graph: GraphDoc, nodeId: string): GraphDoc {
+  return {
+    ...graph,
+    nodes: graph.nodes.map((n) => {
+      if (n.id !== nodeId) return n;
+      const { link: _link, ...rest } = n;
+      return rest as GraphNode;
+    }),
+  };
+}
+
+/**
+ * Which develop family a `PresetFamilyId` slice of `develop` equals the
+ * SAME family slice of `fresh` — used by linkPhotosToLook (link-time
+ * default, semantic 2) to tell "untouched since fresh-open" (family
+ * follows) from "already edited" (stays 個別調整). Both slices are picked
+ * against the SAME identity base (defaultDevelopParams()) so a plain
+ * structural equality of the picked result is a true per-family compare —
+ * every OTHER family's data is identically the default on both sides.
+ */
+function developFamilyUntouched(develop: DevelopParams, fresh: DevelopParams, family: PresetFamilyId): boolean {
+  const base = defaultDevelopParams();
+  const a = pickDevelopFamilies(develop, base, new Set([family]));
+  const b = pickDevelopFamilies(fresh, base, new Set([family]));
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
  * Per-target scoped-family merge with structural skip-detection — shared by
  * syncSelection AND applyPresetToSelection (docs/brief-bank/
  * apply-preset-to-selection.md): both walk a target list, copying `families`
@@ -3046,6 +3189,7 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     set({ project });
+    void get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped, refresh on every project switch
     return project;
   };
 
@@ -3840,6 +3984,7 @@ export const useAppStore = create<AppState>((set, get) => {
     flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     set({ project, folderDir: dir, folderEntries: [] });
+    void get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped
     const entries = await buildPlaylistEntries(project);
     if (get().project !== project) return true; // superseded by a newer project/folder open meanwhile
     set({ folderEntries: entries });
@@ -3871,6 +4016,7 @@ export const useAppStore = create<AppState>((set, get) => {
       folderEntries: [],
       filmstripSelection: [],
       filmstripSelectionAnchor: null,
+      sharedLooks: [], // linked-looks-stage-b.md: shared-looks/ is project-scoped, gone with the project
     });
   },
 
@@ -3927,7 +4073,7 @@ export const useAppStore = create<AppState>((set, get) => {
             let obj = develop as unknown as Record<string, unknown>;
             for (const part of parts.slice(0, -1)) obj = obj[part] as Record<string, unknown>;
             obj[parts[parts.length - 1]!] = value;
-            return { ...n, develop };
+            return forkLinkedFamilies({ ...n, develop }, [key]);
           }
           return { ...n, params: { ...n.params, [key]: value } };
         }),
@@ -3946,7 +4092,7 @@ export const useAppStore = create<AppState>((set, get) => {
         ...pushHistory(s, `param:${nodeId}:bw.enabled`, { label: 'Toggle black & white' }),
         graph: {
           ...s.graph,
-          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)),
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? forkLinkedFamilies({ ...n, develop }, ['bw.enabled']) : n)),
         },
         graphDirty: true,
       };
@@ -4769,7 +4915,10 @@ export const useAppStore = create<AppState>((set, get) => {
       develop.profile.source = source;
       return {
         ...pushHistory(s, `param:${nodeId}:profile.source`, { label: 'Switch profile source' }),
-        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)) },
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? forkLinkedFamilies({ ...n, develop }, ['profile.source']) : n)),
+        },
         graphDirty: true,
       };
     });
@@ -4783,7 +4932,10 @@ export const useAppStore = create<AppState>((set, get) => {
       develop.profile.dcpPath = dcpPath;
       return {
         ...pushHistory(s, `param:${nodeId}:profile.dcpPath`, { label: 'Choose DCP file' }),
-        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop } : n)) },
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? forkLinkedFamilies({ ...n, develop }, ['profile.dcpPath']) : n)),
+        },
         graphDirty: true,
       };
     });
@@ -4804,7 +4956,7 @@ export const useAppStore = create<AppState>((set, get) => {
             for (const part of parts.slice(0, -1)) obj = obj[part] as Record<string, unknown>;
             obj[parts[parts.length - 1]!] = value;
           }
-          return { ...n, develop };
+          return forkLinkedFamilies({ ...n, develop }, entries.map(([key]) => key));
         }),
       },
       graphDirty: true,
@@ -4821,7 +4973,10 @@ export const useAppStore = create<AppState>((set, get) => {
         nodes: s.graph.nodes.map((n) => {
           if (n.id !== nodeId || n.kind !== DEVELOP_KIND) return n;
           const develop = n.develop ?? defaultDevelopParams();
-          return { ...n, develop: { ...develop, toneCurve: { ...develop.toneCurve, [channel]: sanitized } } };
+          return forkLinkedFamilies(
+            { ...n, develop: { ...develop, toneCurve: { ...develop.toneCurve, [channel]: sanitized } } },
+            [`toneCurve.${channel}`]
+          );
         }),
       },
       graphDirty: true,
@@ -4984,6 +5139,37 @@ export const useAppStore = create<AppState>((set, get) => {
         await get().refreshPlaylistStatus();
         return;
       }
+      case 'delete-shared-look': {
+        // Same "project must still be the SAME one" guard as remove-photos
+        // above. The FILE is restored FIRST (conductor review finding —
+        // DeleteSharedLookUndoEntry's own doc comment): a follower's `link`
+        // must never end up pointing at a missing file, even transiently.
+        const project = get().project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not undo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookText);
+        if (entry.targets.length > 0) {
+          const result = await applySyncEntryGraphs(entry.targets, entry.before);
+          if (!result.ok) {
+            blockUndoRedo('undo', entry.label, result.failedTarget);
+            return;
+          }
+        }
+        await get().refreshSharedLooks();
+        set((s) => ({ undoStack: moveTopToRedo(s.undoStack, entry) }));
+        // Same "currently open follower" resync as the 'sync' case above.
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        if (entry.targets.length > 0) await get().refreshPlaylistStatus();
+        return;
+      }
     }
   },
 
@@ -5108,6 +5294,37 @@ export const useAppStore = create<AppState>((set, get) => {
           }
         }
         await get().refreshPlaylistStatus();
+        return;
+      }
+      case 'delete-shared-look': {
+        if (entry.after === undefined) return; // defensive: deleteSharedLook always populates `after` eagerly (both sides known synchronously at push time, like a sync entry)
+        const project = get().project;
+        if (!project || project.dir !== entry.projectDir) {
+          raiseNotice('projectNotice', {
+            kind: 'error',
+            message: `could not redo "${entry.label}" — the active project has changed since`,
+          });
+          return;
+        }
+        if (entry.targets.length > 0) {
+          const result = await applySyncEntryGraphs(entry.targets, entry.after);
+          if (!result.ok) {
+            blockUndoRedo('redo', entry.label, result.failedTarget);
+            return;
+          }
+        }
+        // Strip the followers' links FIRST, then delete the file — the
+        // mirror order of undo's own "restore file first" (no window where
+        // a follower's link points at a file the delete hasn't reached yet
+        // in either direction).
+        await window.silverbox.sharedLookDelete(entry.projectDir, entry.slug);
+        await get().refreshSharedLooks();
+        set((s) => ({ undoStack: moveTopToUndo(s.undoStack, entry) }));
+        const openPath = get().imagePath;
+        if (openPath && entry.targets.includes(openPath)) {
+          await get().openImageByPath(openPath, { keepFolderContext: true });
+        }
+        if (entry.targets.length > 0) await get().refreshPlaylistStatus();
         return;
       }
     }
@@ -5246,13 +5463,31 @@ export const useAppStore = create<AppState>((set, get) => {
       ...pushHistory(s2, null, { kind: 'develop-reset', label: 'Reset develop' }),
       graph: {
         ...s2.graph,
-        nodes: s2.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop: structuredClone(seededDevelop) } : n)),
+        nodes: s2.graph.nodes.map((n) => {
+          if (n.id !== nodeId) return n;
+          const reset = { ...n, develop: structuredClone(seededDevelop) };
+          // A whole-node reset touches EVERY develop family at once —
+          // fork-on-touch (semantic 4), scaled up: every currently-followed
+          // family forks, same "metadata-only, same undo entry" rule.
+          return n.link ? { ...reset, link: { ...n.link, follows: [] } } : reset;
+        }),
       },
       graphDirty: true,
     }));
   },
 
   presets: [],
+
+  sharedLooks: [],
+
+  async refreshSharedLooks() {
+    const project = get().project;
+    if (!project) {
+      set({ sharedLooks: [] });
+      return;
+    }
+    set({ sharedLooks: await window.silverbox.sharedLooksList(project.dir) });
+  },
 
   async savePreset(name, families) {
     const trimmed = name.trim();
@@ -5347,6 +5582,532 @@ export const useAppStore = create<AppState>((set, get) => {
   async deletePreset(slug) {
     await window.silverbox.presetDelete(slug);
     set({ presets: await window.silverbox.presetsList() });
+  },
+
+  async createSharedLook(name, families) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+
+    // develop families only — refuse/ignore structural at create time (semantic 1).
+    const developFamilies = families.filter(isDevelopFamily);
+    if (developFamilies.length === 0) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'a shared look needs at least one develop family checked' });
+      return;
+    }
+
+    // geometry can never be among developFamilies (it's structural), so
+    // captureLook's geometry-stripping is always the right capture here —
+    // same conditional savePreset's own scoped branch reduces to in that case.
+    const scope = chainScope(s.graph, s.activeOutputId);
+    const look = buildScopedLook(captureLook(s.graph), new Set(developFamilies), scope);
+
+    const baseSlug = slugifyPresetName(trimmed);
+    const list = await window.silverbox.sharedLooksList(project.dir);
+    const sameName = list.find((p) => p.name === trimmed);
+    let slug = sameName?.slug ?? baseSlug;
+    if (!sameName) {
+      const taken = new Set(list.map((p) => p.slug));
+      for (let n = 2; taken.has(slug); n++) slug = `${baseSlug}-${n}`;
+    }
+    const content = serializePreset(trimmed, look, new Date().toISOString(), undefined, developFamilies);
+    await window.silverbox.sharedLookWrite(project.dir, slug, content);
+    await get().refreshSharedLooks();
+
+    // "creating a look you don't follow yourself is meaningless" (semantic
+    // 1) — link the creator DIRECTLY, rather than through
+    // linkPhotosToLook's "does this family differ from fresh-seed
+    // defaults?" comparison: that comparison is for photos being ATTACHED
+    // to an EXISTING look (semantic 2). The creator's checked-family values
+    // ARE, by construction, exactly what was just captured INTO the look —
+    // there is nothing to compare against a fresh-open baseline for, and
+    // running that comparison here would be a category error (a
+    // deliberately-edited creator photo would almost always look
+    // "already edited" relative to ITS OWN fresh-open defaults, forking
+    // every family it just used to build the look). Constraint 3 (at most
+    // one linked Develop) still applies.
+    const primaryScope = chainScope(s.graph, s.activeOutputId);
+    const devNode = s.graph.nodes.find((n) => n.kind === DEVELOP_KIND && primaryScope.has(n.id));
+    if (!devNode) return;
+    if (devNode.link) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'this photo is already linked to a shared look — unlink it first' });
+      return;
+    }
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(content).buffer);
+    const newLink: DevelopLink = { look: slug, follows: [...developFamilies], materializedFrom };
+    const before = structuredClone(s.graph);
+    const after: GraphDoc = {
+      ...s.graph,
+      nodes: s.graph.nodes.map((n) => (n.id === devNode.id ? { ...n, link: newLink } : n)),
+    };
+    set({ graph: after, graphDirty: true });
+    revalidateShaders(after);
+    await get().saveGraph();
+    const entry: SyncUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'sync',
+      label: `Create shared look "${trimmed}"`,
+      targets: [primaryPath],
+      before: { [primaryPath]: before },
+      after: { [primaryPath]: after },
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshPlaylistStatus();
+    raiseNotice('projectNotice', { kind: 'success', message: `created shared look "${trimmed}" and linked this photo to it` });
+  },
+
+  async linkPhotosToLook(targets, slug) {
+    const s = get();
+    const project = s.project;
+    if (!project || targets.length === 0) return;
+
+    const lookText = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (!lookText) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" could not be read` });
+      return;
+    }
+    let parsed: ParsedPreset;
+    try {
+      parsed = parsePresetFile(lookText);
+    } catch (err) {
+      console.warn(`shared look "${slug}" could not be parsed:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" is corrupt and could not be linked` });
+      return;
+    }
+    const offeredFamilies = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+    if (offeredFamilies.length === 0) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" offers no develop families to follow` });
+      return;
+    }
+    const lookDevelop = parsed.look.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(lookText).buffer);
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    let totalFollowed = 0;
+    let totalIndividual = 0;
+    let alreadyLinkedCount = 0;
+    let errorCount = 0;
+
+    for (const photoPath of targets) {
+      const row = findPlaylistPhoto(project, photoPath);
+      if (!row) {
+        errorCount++;
+        continue;
+      }
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      const isPrimary = photoPath === s.imagePath && s.imageStatus === 'ready' && !!s.image;
+
+      let baseGraph: GraphDoc;
+      let freshDevelop: DevelopParams;
+      let meta:
+        | {
+            source: SidecarSource | null;
+            createdAt: string | null;
+            unknown: Record<string, unknown> | undefined;
+            rating: number;
+            photo: string | undefined;
+            fingerprint: string | undefined;
+            flag: PhotoFlag | undefined;
+          }
+        | null = null;
+
+      if (isPrimary) {
+        // Live in-memory graph + already-decoded image — no I/O needed.
+        baseGraph = s.graph;
+        const kind: 'raw' | 'jpg' = isRawFileName(s.fileName ?? '') ? 'raw' : 'jpg';
+        freshDevelop =
+          seedDefaultLook(defaultGraphDoc(), s.image!, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags }).graph.nodes.find(
+            (n) => n.kind === DEVELOP_KIND
+          )?.develop ?? defaultDevelopParams();
+      } else {
+        let existingText: string | null = null;
+        try {
+          existingText = await window.silverbox.readSidecar(lookPath);
+        } catch (err) {
+          console.warn(`linkPhotosToLook: could not read ${lookPath}:`, err);
+          errorCount++;
+          continue;
+        }
+        let image: PreparedImage;
+        const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
+        try {
+          const bytes = await window.silverbox.readFile(photoPath);
+          image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
+        } catch (err) {
+          console.warn(`linkPhotosToLook: could not decode ${photoPath}:`, err);
+          errorCount++;
+          continue;
+        }
+        const seeded = seedDefaultLook(defaultGraphDoc(), image, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags });
+        freshDevelop = seeded.graph.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+        if (existingText !== null) {
+          let parsedLook: SidecarDoc;
+          try {
+            parsedLook = parseGraphDoc(existingText);
+          } catch (err) {
+            console.warn(`linkPhotosToLook: ${lookPath} is unreadable by this build, skipping:`, err);
+            errorCount++;
+            continue;
+          }
+          baseGraph = parsedLook.graph;
+          meta = {
+            source: parsedLook.source ?? null,
+            createdAt: parsedLook.createdAt ?? null,
+            unknown: parsedLook.unknown,
+            rating: parsedLook.rating,
+            photo: parsedLook.photo,
+            fingerprint: parsedLook.fingerprint,
+            flag: parsedLook.flag,
+          };
+        } else {
+          // No look yet — same fresh-seed baseline IS the current graph, no
+          // separate decode (mirrors syncSelection's own "seed it exactly
+          // like a fresh open would" branch).
+          baseGraph = seeded.graph;
+          const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
+          meta = {
+            source: {
+              fileName: photoPath.split('/').pop() ?? photoPath,
+              ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+              kind,
+            },
+            createdAt: new Date().toISOString(),
+            unknown: undefined,
+            rating: 0,
+            photo: relativizeProjectPath(project.dir, photoPath),
+            fingerprint,
+            flag: undefined,
+          };
+        }
+      }
+
+      const targetScope = isPrimary ? chainScope(s.graph, s.activeOutputId) : chainScope(baseGraph, null);
+      const devNode = baseGraph.nodes.find((n) => n.kind === DEVELOP_KIND && targetScope.has(n.id));
+      if (!devNode) {
+        errorCount++;
+        continue;
+      }
+      // Constraint 3 (structurally enforced at link time): at most one
+      // linked Develop, never silently double-link — skip and report rather
+      // than abort the whole batch (same "skip, don't corrupt" posture as
+      // mergeFamiliesWithSkipDetection's structural skip).
+      if (devNode.link) {
+        alreadyLinkedCount++;
+        continue;
+      }
+
+      const currentDevelop = devNode.develop ?? defaultDevelopParams();
+      const follows: PresetFamilyId[] = [];
+      const individual: PresetFamilyId[] = [];
+      for (const fam of offeredFamilies) {
+        if (developFamilyUntouched(currentDevelop, freshDevelop, fam)) follows.push(fam);
+        else individual.push(fam);
+      }
+      const newDevelop = pickDevelopFamilies(lookDevelop, currentDevelop, new Set(follows));
+      const newLink: DevelopLink = { look: slug, follows, materializedFrom };
+      const newGraph: GraphDoc = {
+        ...baseGraph,
+        nodes: baseGraph.nodes.map((n) => (n.id === devNode.id ? { ...n, develop: newDevelop, link: newLink } : n)),
+      };
+
+      if (!isPrimary) {
+        const m = meta!;
+        const content = serializeGraphDoc(newGraph, m.source, m.createdAt, m.unknown, m.rating, m.photo, m.fingerprint, m.flag);
+        try {
+          await window.silverbox.writeSidecar(lookPath, content);
+        } catch (err) {
+          console.warn(`linkPhotosToLook: could not write ${lookPath}:`, err);
+          errorCount++;
+          continue;
+        }
+      }
+      before[photoPath] = structuredClone(baseGraph);
+      after[photoPath] = newGraph;
+      totalFollowed += follows.length;
+      totalIndividual += individual.length;
+    }
+
+    // Primary flush discipline (applyPresetToSelection precedent): apply to
+    // the live graph + persist right away, rather than the ordinary 1000ms
+    // autosave debounce.
+    const primaryAfter = s.imagePath ? after[s.imagePath] : undefined;
+    if (primaryAfter) {
+      set({ graph: primaryAfter, graphDirty: true });
+      revalidateShaders(primaryAfter);
+      await get().saveGraph();
+    }
+
+    const writtenTargets = Object.keys(after);
+    if (writtenTargets.length > 0) {
+      const entry: SyncUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'sync',
+        label: `Link ${writtenTargets.length} photo${writtenTargets.length === 1 ? '' : 's'} to "${parsed.name}"`,
+        targets: writtenTargets,
+        before,
+        after,
+      };
+      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+      await get().refreshPlaylistStatus();
+    }
+
+    const skipSuffix = alreadyLinkedCount > 0 ? `; ${alreadyLinkedCount} already linked, skipped` : '';
+    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 ? 'error' : 'success',
+      message: `linked ${writtenTargets.length} photo${writtenTargets.length === 1 ? '' : 's'} to "${parsed.name}" — ${totalFollowed} group${totalFollowed === 1 ? '' : 's'} followed, ${totalIndividual} individual${skipSuffix}${errorSuffix}`,
+    });
+  },
+
+  async revertFamilyToLook(nodeId, family) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+    const node = s.graph.nodes.find((n) => n.id === nodeId);
+    if (!node || node.kind !== DEVELOP_KIND || !node.link) return;
+    const slug = node.link.look;
+    const lookText = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (!lookText) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" could not be read` });
+      return;
+    }
+    let parsed: ParsedPreset;
+    try {
+      parsed = parsePresetFile(lookText);
+    } catch (err) {
+      console.warn(`shared look "${slug}" could not be parsed:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" is corrupt` });
+      return;
+    }
+    const offeredFamilies = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+    if (!offeredFamilies.includes(family)) {
+      // Orphaned override (parent spec §4.2): the look body dropped this
+      // family — the fork survives as local, nothing to revert to.
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" no longer offers ${family}` });
+      return;
+    }
+    const lookDevelop = parsed.look.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(lookText).buffer);
+    const currentDevelop = node.develop ?? defaultDevelopParams();
+    const newDevelop = pickDevelopFamilies(lookDevelop, currentDevelop, new Set([family]));
+    const nextFollows = node.link.follows.includes(family) ? node.link.follows : [...node.link.follows, family];
+    const newLink: DevelopLink = { look: slug, follows: nextFollows, materializedFrom };
+    const before = structuredClone(s.graph);
+    const after: GraphDoc = {
+      ...s.graph,
+      nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop: newDevelop, link: newLink } : n)),
+    };
+    set({ graph: after, graphDirty: true });
+    revalidateShaders(after);
+    await get().saveGraph();
+    const entry: SyncUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'sync',
+      label: `Revert ${family} to shared look`,
+      targets: [primaryPath],
+      before: { [primaryPath]: before },
+      after: { [primaryPath]: after },
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshPlaylistStatus();
+  },
+
+  async resetAllFamiliesToLook(nodeId) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+    const node = s.graph.nodes.find((n) => n.id === nodeId);
+    if (!node || node.kind !== DEVELOP_KIND || !node.link) return;
+    const slug = node.link.look;
+    const lookText = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (!lookText) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" could not be read` });
+      return;
+    }
+    let parsed: ParsedPreset;
+    try {
+      parsed = parsePresetFile(lookText);
+    } catch (err) {
+      console.warn(`shared look "${slug}" could not be parsed:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" is corrupt` });
+      return;
+    }
+    const offeredFamilies = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+    if (offeredFamilies.length === 0) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" offers no develop families` });
+      return;
+    }
+    const lookDevelop = parsed.look.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(lookText).buffer);
+    const currentDevelop = node.develop ?? defaultDevelopParams();
+    const newDevelop = pickDevelopFamilies(lookDevelop, currentDevelop, new Set(offeredFamilies));
+    const newLink: DevelopLink = { look: slug, follows: [...offeredFamilies], materializedFrom };
+    const before = structuredClone(s.graph);
+    const after: GraphDoc = {
+      ...s.graph,
+      nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, develop: newDevelop, link: newLink } : n)),
+    };
+    set({ graph: after, graphDirty: true });
+    revalidateShaders(after);
+    await get().saveGraph();
+    const entry: SyncUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'sync',
+      label: 'Reset all families to shared look',
+      targets: [primaryPath],
+      before: { [primaryPath]: before },
+      after: { [primaryPath]: after },
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshPlaylistStatus();
+  },
+
+  async unlinkLook(nodeId) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const node = s.graph.nodes.find((n) => n.id === nodeId);
+    if (!node || node.kind !== DEVELOP_KIND || !node.link) return;
+    const before = structuredClone(s.graph);
+    const after = stripDevelopLink(s.graph, nodeId);
+    set({ graph: after, graphDirty: true });
+    revalidateShaders(after);
+    await get().saveGraph();
+    const entry: SyncUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'sync',
+      label: 'Unlink from shared look',
+      targets: [primaryPath],
+      before: { [primaryPath]: before },
+      after: { [primaryPath]: after },
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    await get().refreshPlaylistStatus();
+  },
+
+  async deleteSharedLook(slug) {
+    const s = get();
+    const project = s.project;
+    if (!project) return;
+
+    // Capture the file's own bytes BEFORE deleting it (conductor review
+    // finding): a follower's `link` REFERENCES the shared look — unlike a
+    // preset, which nothing references — so undo of a delete must
+    // resurrect the FILE too, or a restored `link` points at nothing (a
+    // user-reachable inconsistent state one ⌘Z away). See
+    // DeleteSharedLookUndoEntry's own doc comment.
+    const lookText = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (lookText === null) {
+      raiseNotice('projectNotice', { kind: 'error', message: `shared look "${slug}" could not be read — nothing deleted` });
+      return;
+    }
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    let errorCount = 0;
+    const openPath = s.imagePath;
+
+    for (const row of project.photos) {
+      const photoPath = resolveProjectPath(project.dir, row.path);
+      const isOpen = photoPath === openPath && s.imageStatus === 'ready';
+
+      if (isOpen) {
+        const node = s.graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+        if (!node) continue;
+        const stripped = stripDevelopLink(s.graph, node.id);
+        before[photoPath] = structuredClone(s.graph);
+        after[photoPath] = stripped;
+        set({ graph: stripped, graphDirty: true });
+        revalidateShaders(stripped);
+        await get().saveGraph();
+        continue;
+      }
+
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`deleteSharedLook: could not read ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      if (existingText === null) continue; // never saved — nothing to strip
+      let parsedLook: SidecarDoc;
+      try {
+        parsedLook = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`deleteSharedLook: ${lookPath} is unreadable by this build, skipping:`, err);
+        errorCount++;
+        continue;
+      }
+      const node = parsedLook.graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+      if (!node) continue; // not a follower of THIS look
+      const stripped = stripDevelopLink(parsedLook.graph, node.id);
+      const content = serializeGraphDoc(
+        stripped,
+        parsedLook.source ?? null,
+        parsedLook.createdAt ?? null,
+        parsedLook.unknown,
+        parsedLook.rating,
+        parsedLook.photo,
+        parsedLook.fingerprint,
+        parsedLook.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`deleteSharedLook: could not write ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      before[photoPath] = structuredClone(parsedLook.graph);
+      after[photoPath] = stripped;
+    }
+
+    // The file deletion IS covered by undo now (DeleteSharedLookUndoEntry) —
+    // unlike deletePreset, which nothing references, a follower's `link`
+    // would otherwise point at a file that's simply gone once undo restores
+    // it. Pushed unconditionally (even with zero followers): the delete
+    // itself, not merely a follower change, is what this entry restores.
+    await window.silverbox.sharedLookDelete(project.dir, slug);
+    await get().refreshSharedLooks();
+
+    const writtenTargets = Object.keys(after);
+    const entry: DeleteSharedLookUndoEntry = {
+      seq: nextUndoSeq(),
+      at: Date.now(),
+      kind: 'delete-shared-look',
+      label: `Delete shared look (${writtenTargets.length} follower${writtenTargets.length === 1 ? '' : 's'} unlinked)`,
+      projectDir: project.dir,
+      slug,
+      lookText,
+      targets: writtenTargets,
+      before,
+      after,
+    };
+    set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    if (writtenTargets.length > 0) await get().refreshPlaylistStatus();
+
+    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 ? 'error' : 'success',
+      message: `deleted shared look — ${writtenTargets.length} follower${writtenTargets.length === 1 ? '' : 's'} unlinked${errorSuffix}`,
+    });
   },
 
   previewLook: null,

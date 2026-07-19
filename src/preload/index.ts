@@ -36,6 +36,10 @@ const api: SilverboxApi = {
   presetRead: (slug) => ipcRenderer.invoke(IPC.presetRead, slug),
   presetWrite: (slug, content) => ipcRenderer.invoke(IPC.presetWrite, slug, content),
   presetDelete: (slug) => ipcRenderer.invoke(IPC.presetDelete, slug),
+  sharedLooksList: (projectDir) => ipcRenderer.invoke(IPC.sharedLooksList, projectDir),
+  sharedLookRead: (projectDir, slug) => ipcRenderer.invoke(IPC.sharedLookRead, projectDir, slug),
+  sharedLookWrite: (projectDir, slug, content) => ipcRenderer.invoke(IPC.sharedLookWrite, projectDir, slug, content),
+  sharedLookDelete: (projectDir, slug) => ipcRenderer.invoke(IPC.sharedLookDelete, projectDir, slug),
   // Static env-derived flags (sandbox:false → preload has process.env). See
   // SilverboxApi.testFlags. Read once at preload time — the verify scripts set
   // these before launching electron.

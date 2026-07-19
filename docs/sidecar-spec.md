@@ -292,6 +292,41 @@ key is additive to schema v4 with no version bump: an older build that
 doesn't know about it round-trips the key verbatim but renders every node
 active (forward-compat, not data loss).
 
+### 4.5 Linked look (`link`)
+
+(docs/brief-bank/linked-looks-stage-b.md, parent spec §4.) A `Develop` node
+may carry an optional `link`:
+
+```json
+"link": {
+  "look": "sunset-warm",
+  "follows": ["basic-tone", "wb"],
+  "materializedFrom": "<sha256 hex>"
+}
+```
+
+- `look` — the slug of a shared-look file at
+  `<projectDir>/shared-looks/<look>.json` (the SAME name+includes+graph
+  shape as a preset file — `presetDoc.ts`).
+- `follows` — which develop families (`presetFamilies.ts`'s `PresetFamilyId`,
+  develop-group only — structural families are never offered by a shared
+  look) are currently FOLLOWING that look; editing any param inside a
+  followed family removes it from this list (fork-on-touch) the moment the
+  edit happens.
+- `materializedFrom` — the sha256 of the shared-look file's own serialized
+  bytes at the last time this node's values were written from it (a future
+  stage's drift detection reads it; this stage only writes/maintains it).
+
+**The photo's own values are ALWAYS fully materialized regardless of
+`link`** — a look file naming a `link` renders identically whether or not
+the field is present or even understood: an old reader/the CLI ignores it
+entirely and still renders correctly (deleting the shared look, or opening
+the doc in a build that predates this field, both leave the render
+unchanged — only `link` itself is absent/stripped). Additive with no schema
+version bump, same posture as `disabled`/the DCP profile fields above — an
+older Silverbox round-trips `link` verbatim via ordinary unknown-field
+passthrough without acting on it.
+
 ---
 
 ## 5. Versioning & migration promises

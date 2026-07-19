@@ -101,3 +101,18 @@ export function resetTestProject() {
   rmSync(join(dir, 'looks'), { recursive: true, force: true });
   rmSync(join(dir, 'project.silverbox'), { force: true });
 }
+
+/** The shared-look path for `slug` under the active test project's `shared-looks/` (docs/brief-bank/linked-looks-stage-b.md) — presets.ts's twin, project-scoped. */
+export function sharedLookPathFor(slug) {
+  return join(projectDir(), 'shared-looks', `${slug}.json`);
+}
+
+/** True when shared look `slug` currently has a file in the active project. */
+export function hasSharedLook(slug) {
+  return existsSync(sharedLookPathFor(slug));
+}
+
+/** Parse shared look `slug`'s file (throws if absent/malformed). */
+export function readSharedLook(slug) {
+  return JSON.parse(readFileSync(sharedLookPathFor(slug), 'utf8'));
+}

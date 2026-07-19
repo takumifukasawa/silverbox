@@ -25,6 +25,10 @@ import { defaultExternalParams, EXTERNAL_KIND, isIdentityExternal, sanitizeExter
 import { defaultDenoiseParams, DENOISE_KIND, isIdentityDenoise, sanitizeDenoiseParams, type DenoiseParams } from './denoiseNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy, PhotoFlag } from '../../../../shared/ipc';
+// Type-only — presetFamilies.ts imports runtime symbols (DEVELOP_KIND etc.)
+// FROM this module, so a value-level import back here would be circular;
+// `import type` is erased at compile time and carries no runtime edge.
+import type { PresetFamilyId } from './presetFamilies';
 
 export const DEVELOP_KIND = 'Develop';
 
@@ -95,6 +99,61 @@ export interface GraphNode {
    * normalizes an all-absent payload back to `undefined`, same as `name`.
    */
   export?: ExportOverrides;
+  /**
+   * Linked-look state (docs/brief-bank/linked-looks.md §4, stage B): ONE
+   * additive optional field, only ever meaningful on a Develop node (the
+   * link is a property of the Develop node, per the parent spec's §4.3 —
+   * the graph around it stays entirely free). `look` is the shared-look
+   * slug (a file at `<projectDir>/shared-looks/<slug>.json`, the SAME
+   * name+includes+graph shape presetDoc.ts already parses/serializes —
+   * one format for presets and shared looks). `follows` lists the develop
+   * families currently FOLLOWING that look (fork-on-touch removes a family
+   * the moment any of its params are edited — see appStore.ts's
+   * forkLinkedFamilies); `materializedFrom` is the sha256 of the shared
+   * look file's own serialized bytes at the last time this node's values
+   * were written from it (stage D's future drift detection reads it; this
+   * stage only writes/maintains it).
+   *
+   * The photo's own values are ALWAYS fully materialized regardless of
+   * `link` (parent spec §4.1) — an old reader/the CLI renders correctly
+   * with this field entirely ignored, and deleting the shared look just
+   * strips this field (render never moves). Sanitized by
+   * sanitizeDevelopLink (never throws — a malformed/absent link degrades
+   * quietly to "not linked", since a photo's rendering must never depend
+   * on this metadata being well-formed).
+   */
+  link?: DevelopLink;
+}
+
+/**
+ * See GraphNode.link's doc comment. `follows` intentionally keeps any
+ * string a NEWER build wrote (not narrowed to known ids at the sanitizer
+ * level) — same forward-compat posture as ParsedPreset.includes; callers
+ * that need to act on it semantically filter with presetFamilies.ts's
+ * isKnownFamilyId/isDevelopFamily first.
+ */
+export interface DevelopLink {
+  look: string;
+  follows: PresetFamilyId[];
+  materializedFrom: string;
+}
+
+/**
+ * Normalize an untrusted `link` payload; NEVER throws (unlike sanitizeLens)
+ * — link metadata is purely additive sync state, and materialization
+ * (GraphNode.link's doc comment) means a photo's rendering is always
+ * correct with it dropped entirely, so a malformed value degrades quietly
+ * to "not linked" rather than taking the whole document down (same lenient
+ * posture as sanitizeRating/sanitizeFlag). Absent (every prior schema
+ * version, and any node this stage doesn't touch) sanitizes to `undefined`.
+ */
+export function sanitizeDevelopLink(raw: unknown): DevelopLink | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const src = raw as { look?: unknown; follows?: unknown; materializedFrom?: unknown };
+  if (typeof src.look !== 'string' || src.look.trim() === '') return undefined;
+  const follows = Array.isArray(src.follows) ? src.follows.filter((f): f is string => typeof f === 'string') : [];
+  const materializedFrom = typeof src.materializedFrom === 'string' ? src.materializedFrom : '';
+  return { look: src.look, follows: follows as PresetFamilyId[], materializedFrom };
 }
 
 export interface GraphEdge {
@@ -677,6 +736,7 @@ const KNOWN_NODE_KEYS = new Set([
   'disabled',
   'name',
   'export',
+  'link',
 ]);
 /** Edge-level keys the schema knows about; anything else round-trips verbatim per edge. */
 const KNOWN_EDGE_KEYS = new Set(['id', 'source', 'target', 'targetHandle']);
@@ -762,6 +822,7 @@ export function serializeGraphDoc(
           ...(n.disabled ? { disabled: true } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
+          ...(n.link ? { link: n.link } : {}),
         };
       }),
       edges: doc.edges.map((e) => {
@@ -884,6 +945,10 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     if (n.kind === DEVELOP_KIND) {
       // fill missing sections/keys with identity defaults; reject bad numbers
       n.develop = mergeDevelopParams(n.develop);
+      // Linked-look state (stage B) — additive, absent on every prior
+      // version and on any node this stage doesn't touch; never throws
+      // (see sanitizeDevelopLink's doc comment).
+      n.link = sanitizeDevelopLink(n.link);
     }
     if (n.kind === CUSTOM_KIND) {
       n.shader = sanitizeCustomShader(n.shader, n.id);

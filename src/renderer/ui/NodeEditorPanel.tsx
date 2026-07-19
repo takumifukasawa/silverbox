@@ -25,7 +25,7 @@ import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { computeAutoLayout, type LayoutEdgeInput, type LayoutNodeInput } from './nodeAutoLayout';
 
-/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's. */
+/** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's, `linkLabel` is a linked Develop node's own (docs/brief-bank/linked-looks-stage-b.md semantic 8). */
 interface OpNodeData {
   label: string;
   thumbUrl?: string;
@@ -34,6 +34,8 @@ interface OpNodeData {
   badge?: string;
   badgeTitle?: string;
   disabled?: boolean;
+  /** "共通ルック: <name>" — set only for a Develop node carrying `link` (linked-looks-stage-b.md semantic 8: subtle but visible, no new node class — still a plain Develop node, DESIGN.md principle 4). */
+  linkLabel?: string;
   [key: string]: unknown;
 }
 
@@ -106,7 +108,7 @@ function NodeThumb({
 
 /** Generic op-kind node: single in/out, live thumbnail + inspect eye (per-node-preview pack); an optional `badge` (external-tool hook node's needs-confirm/pending/error state, task #41) renders the same small corner glyph the image node's missing-file badge uses. `disabled` (node bypass feature) mutes the whole body and strikes the label. */
 function OpNode({ id, data, selected }: NodeProps) {
-  const { label, thumbUrl, inspecting, badge, badgeTitle, disabled } = data as unknown as OpNodeData;
+  const { label, thumbUrl, inspecting, badge, badgeTitle, disabled, linkLabel } = data as unknown as OpNodeData;
   return (
     <div
       className={`op-node${selected ? ' selected' : ''}${inspecting ? ' op-node--inspecting' : ''}${disabled ? ' op-node--disabled' : ''}`}
@@ -114,6 +116,11 @@ function OpNode({ id, data, selected }: NodeProps) {
       <Handle type="target" position={Position.Left} />
       <NodeThumb id={id} thumbUrl={thumbUrl} inspecting={inspecting} disabled={disabled} bypassable />
       <span className="op-node-label">{label}</span>
+      {linkLabel && (
+        <span className="op-node-link-label" data-testid={`node-link-label-${id}`} title={`${linkLabel} — linked-looks-stage-b.md`}>
+          🔗 {linkLabel}
+        </span>
+      )}
       {badge && (
         <span className="op-node-badge" data-testid={`external-node-badge-${id}`} title={badgeTitle}>
           {badge}
@@ -240,6 +247,11 @@ function buildNodes(
         badge,
         badgeTitle,
         disabled: n.disabled === true,
+        // Linked-look badge (semantic 8): only ever set for a Develop node
+        // carrying `link` — the graph is the review surface for auditing
+        // what an AI wrote, so a linked node's shared-look identity must be
+        // visible without opening the Inspector.
+        linkLabel: n.kind === DEVELOP_KIND && n.link ? `共通ルック: ${n.link.look}` : undefined,
       },
       position: n.position,
       selected: n.id === selectedNodeId,

@@ -109,13 +109,44 @@ export interface RemovePhotosUndoEntry extends UndoEntryBase {
   removed: { index: number; photo: ProjectPhoto }[];
 }
 
+/**
+ * Shared-look deletion (docs/brief-bank/linked-looks-stage-b.md semantic 7):
+ * the SyncUndoEntry shape doesn't fit here — a plain `before`/`after` graph
+ * pair per follower would restore every follower's `link` field on undo, but
+ * has nowhere to carry the deleted FILE's own bytes back. Conductor review
+ * finding: "the deletePreset analogy doesn't hold — nothing references a
+ * preset, but link fields REFERENCE the shared look", so undo of a delete
+ * must resurrect the FILE too, or a restored `link` points at nothing (a
+ * user-reachable inconsistent state one ⌘Z away, in the SAME session that
+ * created it — not stage D's separate missing-look-file problem). `lookText`
+ * is the shared-look file's own serialized bytes, captured BEFORE the
+ * delete; `targets`/`before`/`after` are the followers' graphs, same shape
+ * SyncUndoEntry's own pair uses (both sides known synchronously at push
+ * time, like a sync entry). Undo: re-write `lookText` to
+ * `<projectDir>/shared-looks/<slug>.json`, THEN restore every follower's
+ * `before` graph. Redo: write every follower's `after` (link stripped)
+ * graph, THEN delete the file again. `targets` may be empty (a look with no
+ * followers is still undoable — the delete itself, not just any follower
+ * change, is what this entry restores).
+ */
+export interface DeleteSharedLookUndoEntry extends UndoEntryBase {
+  kind: 'delete-shared-look';
+  projectDir: string;
+  slug: string;
+  lookText: string;
+  targets: string[];
+  before: Record<string, GraphDoc>;
+  after?: Record<string, GraphDoc>;
+}
+
 export type UndoEntry =
   | GraphUndoEntry
   | RatingUndoEntry
   | FlagUndoEntry
   | SyncUndoEntry
   | ArrangeUndoEntry
-  | RemovePhotosUndoEntry;
+  | RemovePhotosUndoEntry
+  | DeleteSharedLookUndoEntry;
 
 /** Bounded (~200 entries, oldest dropped — brief's "Bounded stack"), session-scoped (no persistence across restarts). */
 export const UNDO_STACK_LIMIT = 200;

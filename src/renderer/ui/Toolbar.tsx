@@ -9,6 +9,7 @@ import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { PresetsMenu } from './PresetsMenu';
+import { SharedLookMenu } from './SharedLookMenu';
 
 /**
  * "Add node ▾" menu (UI spec §2): customShader + blend + mask + output + the
@@ -525,6 +526,7 @@ export function Toolbar() {
         </button>
       </span>
       <PresetsMenu />
+      <SharedLookMenu />
       <button
         onClick={toggleMaskOverlay}
         // Round-7 fix: mirrors 'O' (App.tsx) — always clickable to turn OFF

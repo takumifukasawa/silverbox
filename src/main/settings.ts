@@ -119,6 +119,12 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.syncFamilies = Array.isArray(src.syncFamilies)
     ? src.syncFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.syncFamilies;
+  // Linked looks (docs/brief-bank/linked-looks-stage-b.md): last-used
+  // Create-shared-look dialog family checkboxes — same shape-only
+  // validation as presetSaveFamilies/syncFamilies above.
+  result.sharedLookFamilies = Array.isArray(src.sharedLookFamilies)
+    ? src.sharedLookFamilies.filter((id): id is string => typeof id === 'string')
+    : DEFAULT_SETTINGS.sharedLookFamilies;
   // Auto Sync (docs/brief-bank/multi-select-sync.md item E) — plain boolean,
   // same lenient "anything else degrades to the default" convention as
   // denoiseModelConsent above.

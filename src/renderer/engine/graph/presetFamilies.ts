@@ -85,6 +85,44 @@ export function isDevelopFamily(id: PresetFamilyId): boolean {
   return DEVELOP_FAMILY_IDS.has(id);
 }
 
+/**
+ * Every develop-group family id, in display order (docs/brief-bank/
+ * linked-looks-stage-b.md): a shared look's `includes` is drawn from this
+ * list ONLY — structural families (geometry/spots/masks/custom-nodes) are
+ * photo-dependent (linked-looks.md §2 principle 3/§8.3) and are never
+ * offered by a shared look; the create-shared-look dialog is scoped to
+ * this set so a structural checkbox never even appears (refuse/ignore at
+ * create time, per the brief).
+ */
+export const LOOK_FAMILY_IDS: readonly PresetFamilyId[] = PRESET_FAMILIES.filter((f) => f.group === 'develop').map(
+  (f) => f.id
+);
+
+/**
+ * Which develop family a `updateNodeParam`/`updateNodeParamsBatch` dot-path
+ * key belongs to — the SAME grouping pickDevelopFamilies's own section
+ * picks encode, read off the key instead of the section name (fork-on-touch,
+ * linked-looks-stage-b.md semantic 4): any edit to a param inside a
+ * FOLLOWED family forks it local. `basic.temp`/`basic.tint` are `wb`
+ * (disjoint from `basic-tone`, exactly like pickDevelopFamilies treats
+ * them); every other `basic.*` and `profile.*` key is `basic-tone` (the
+ * profile toggle/amount travels with basic-tone — see pickDevelopFamilies's
+ * own `basic-tone` branch, which copies `profile` too). Returns `null` for
+ * a key this build doesn't recognize as belonging to any family (defensive;
+ * never true for a key any shipped UI control actually writes).
+ */
+export function familyForDevelopKey(key: string): PresetFamilyId | null {
+  if (key === 'basic.temp' || key === 'basic.tint') return 'wb';
+  if (key.startsWith('basic.') || key.startsWith('profile.')) return 'basic-tone';
+  if (key.startsWith('toneCurve.')) return 'curves';
+  if (key.startsWith('hsl.')) return 'hsl';
+  if (key.startsWith('bw.')) return 'bw';
+  if (key.startsWith('grading.')) return 'grading';
+  if (key.startsWith('effects.')) return 'effects';
+  if (key.startsWith('detail.')) return 'detail';
+  return null;
+}
+
 // --- develop-param family picking --------------------------------------------
 
 /**

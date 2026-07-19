@@ -10,7 +10,9 @@ import {
   ALL_FAMILY_IDS,
   buildScopedLook,
   DEFAULT_CHECKED_FAMILY_IDS,
+  familyForDevelopKey,
   isKnownFamilyId,
+  LOOK_FAMILY_IDS,
   mergeScopedLook,
   pickDevelopFamilies,
   stripStructuralFamilies,
@@ -56,6 +58,43 @@ describe('DEFAULT_SETTINGS.presetSaveFamilies stays pinned to DEFAULT_CHECKED_FA
 describe('DEFAULT_SETTINGS.syncFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
   it('multi-select-sync.md\'s Sync… dialog starts with the same defaults as the preset Save dialog', () => {
     expect(DEFAULT_SETTINGS.syncFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
+  });
+});
+
+describe('DEFAULT_SETTINGS.sharedLookFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
+  it("linked-looks-stage-b.md's Create-shared-look dialog starts with the same defaults as the other two family dialogs", () => {
+    expect(DEFAULT_SETTINGS.sharedLookFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
+  });
+});
+
+describe('LOOK_FAMILY_IDS', () => {
+  it('is exactly the develop-group ids — no structural family is ever offered by a shared look', () => {
+    expect(LOOK_FAMILY_IDS).toEqual(DEFAULT_CHECKED_FAMILY_IDS); // develop-group ids happen to all be default-checked too
+    for (const id of LOOK_FAMILY_IDS) expect(['geometry', 'spots', 'masks', 'custom-nodes']).not.toContain(id);
+  });
+});
+
+describe('familyForDevelopKey (fork-on-touch, linked-looks-stage-b.md semantic 4)', () => {
+  it('wb keys are disjoint from basic-tone', () => {
+    expect(familyForDevelopKey('basic.temp')).toBe('wb');
+    expect(familyForDevelopKey('basic.tint')).toBe('wb');
+  });
+  it('every other basic.* and profile.* key is basic-tone', () => {
+    expect(familyForDevelopKey('basic.ev')).toBe('basic-tone');
+    expect(familyForDevelopKey('basic.contrast')).toBe('basic-tone');
+    expect(familyForDevelopKey('profile.amount')).toBe('basic-tone');
+    expect(familyForDevelopKey('profile.source')).toBe('basic-tone');
+  });
+  it('maps every other section prefix to its own family', () => {
+    expect(familyForDevelopKey('toneCurve.rgb')).toBe('curves');
+    expect(familyForDevelopKey('hsl.red.h')).toBe('hsl');
+    expect(familyForDevelopKey('bw.enabled')).toBe('bw');
+    expect(familyForDevelopKey('grading.blending')).toBe('grading');
+    expect(familyForDevelopKey('effects.grain.amount')).toBe('effects');
+    expect(familyForDevelopKey('detail.sharpen.amount')).toBe('detail');
+  });
+  it('returns null for an unrecognized key', () => {
+    expect(familyForDevelopKey('mystery.field')).toBeNull();
   });
 });
 

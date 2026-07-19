@@ -1,6 +1,12 @@
 # Brief: linked-look core (linked-looks stage B)
 
-Status: DRAFT — dispatch after stage A lands.
+Status: LANDED 2026-07-19 (SUITE 68/68, unit 242). Conductor review
+added one fix in-flight: deleteSharedLook undo restores the FILE too
+(typed DeleteSharedLookUndoEntry — the deletePreset analogy doesn't
+hold because links reference the look). Two documented deviations:
+createSharedLook links directly (fresh-seed comparison is a category
+error for the creator); Inspector's Basic section shows one combined
+badge for basic-tone+wb.
 Parent spec: docs/brief-bank/linked-looks.md (GO given 2026-07-19).
 Read the parent spec §2, §4 (all of it), §6, and the UI vocabulary
 table BEFORE writing anything. This stage builds the link itself; NO

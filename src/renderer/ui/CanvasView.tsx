@@ -69,7 +69,8 @@ import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { SpotBrushCursor } from './SpotBrushCursor';
 import { cpuRgb2hsl } from '../engine/graph/developOps';
-import type { PresetFamilyId } from '../engine/graph/presetFamilies';
+import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
+import { parsePresetFile } from '../engine/graph/presetDoc';
 import { isTextEntry } from './textEntry';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
@@ -366,6 +367,34 @@ declare global {
       deletePreset(slug: string): Promise<void>;
       /** Selected output node id (virtual-copy.md) — appStore.ts's activeOutputId; null = the doc's first output (activeOutputNode's own fallback rule). */
       activeOutputIdState(): string | null;
+      /** Linked looks (docs/brief-bank/linked-looks-stage-b.md): `<projectDir>/shared-looks/*.json` summaries currently in the store. */
+      sharedLooksState(): import('../../../shared/ipc').PresetSummary[];
+      /** Create a shared look from the current photo's checked develop families, then link the photo to it (mirrors the "Create shared look" button). */
+      createSharedLook(name: string, families: PresetFamilyId[]): Promise<void>;
+      /** Link `targets` (photo paths) to shared look `slug` (mirrors "共通ルックを使う"). */
+      linkPhotosToLook(targets: string[], slug: string): Promise<void>;
+      /** Revert one develop family on `nodeId` to the shared look it's linked to (mirrors "共通ルックに合わせる"). */
+      revertFamilyToLook(nodeId: string, family: PresetFamilyId): Promise<void>;
+      /** Revert every offered family on `nodeId` to the shared look (mirrors "共通ルックにリセット"). */
+      resetAllFamiliesToLook(nodeId: string): Promise<void>;
+      /** Strip link metadata from `nodeId`, values untouched (mirrors "共通ルックから外す"). */
+      unlinkLook(nodeId: string): Promise<void>;
+      /** Delete a shared look's file; strips `link` from every follower across the project (mirrors the shared-look list's Delete button). */
+      deleteSharedLook(slug: string): Promise<void>;
+      /**
+       * Linked-look badge state for `nodeId` (defaults to the current
+       * selection) — null when it isn't a Develop node or carries no `link`.
+       * `forked` lists the OFFERED families (the look's own `includes`,
+       * develop-only) currently NOT in `follows` — the badge state
+       * verify-linkedlooks.mjs queries directly, per the brief's "badge
+       * state queryable via __debug".
+       */
+      developLinkState(nodeId?: string): Promise<{
+        look: string;
+        follows: string[];
+        forked: string[];
+        materializedFrom: string;
+      } | null>;
     };
   }
 }
@@ -1848,6 +1877,48 @@ export function CanvasView() {
       },
       activeOutputIdState() {
         return useAppStore.getState().activeOutputId;
+      },
+      sharedLooksState() {
+        return useAppStore.getState().sharedLooks;
+      },
+      createSharedLook(name, families) {
+        return useAppStore.getState().createSharedLook(name, families);
+      },
+      linkPhotosToLook(targets, slug) {
+        return useAppStore.getState().linkPhotosToLook(targets, slug);
+      },
+      revertFamilyToLook(nodeId, family) {
+        return useAppStore.getState().revertFamilyToLook(nodeId, family);
+      },
+      resetAllFamiliesToLook(nodeId) {
+        return useAppStore.getState().resetAllFamiliesToLook(nodeId);
+      },
+      unlinkLook(nodeId) {
+        return useAppStore.getState().unlinkLook(nodeId);
+      },
+      deleteSharedLook(slug) {
+        return useAppStore.getState().deleteSharedLook(slug);
+      },
+      async developLinkState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (!node || node.kind !== DEVELOP_KIND || !node.link) return null;
+        const { look, follows, materializedFrom } = node.link;
+        let forked: string[] = [];
+        if (s.project) {
+          const text = await window.silverbox.sharedLookRead(s.project.dir, look);
+          if (text) {
+            try {
+              const parsed = parsePresetFile(text);
+              const offered = (parsed.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+              forked = offered.filter((f) => !follows.includes(f));
+            } catch {
+              // unreadable look file — nothing to report as forked (developLinkState's own doc comment)
+            }
+          }
+        }
+        return { look, follows, forked, materializedFrom };
       },
     };
     return () => {
