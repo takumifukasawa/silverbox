@@ -9,6 +9,12 @@ let worker: Worker | null = null;
 let nextId = 0;
 const pending = new Map<number, { resolve: (r: PreparedImage) => void; reject: (e: Error) => void }>();
 
+/** Verify-only: how many times `loadImage` has been called this session — a real decode-worker (libraw-wasm/JPEG) round trip. Lets a script prove a code path that claims "never decodes the RAW" (e.g. develop-aware filmstrip thumbnails, docs/brief-bank/develop-aware-thumbnails-impl.md) really doesn't touch this worker. */
+let decodeCallCount = 0;
+export function decodeWorkerCallCount(): number {
+  return decodeCallCount;
+}
+
 function getWorker(): Worker {
   if (worker) return worker;
   worker = new Worker(new URL('./decodeWorker.ts', import.meta.url), { type: 'module' });
@@ -41,6 +47,7 @@ export function loadImage(
   baselineExposureEV = 0
 ): Promise<PreparedImage> {
   const id = nextId++;
+  decodeCallCount++;
   const req: DecodeRequest = { id, kind, bytes, previewLongEdge: longEdge, baselineExposureEV };
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject });

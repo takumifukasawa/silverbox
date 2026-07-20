@@ -6,11 +6,11 @@ import {
   releaseOpeningPreviewUrl,
   useAppStore,
 } from '../store/appStore';
-import { getThumbnail, thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
+import { getThumbnail, plainThumbnailUrlFor, thumbnailRevocationLog } from '../engine/thumbnail/thumbnailCache';
 import { nodeThumbRevocationLog, updateNodeThumbs } from '../engine/thumbnail/nodeThumbCache';
 import { srgbDecode, srgbEncode } from '../engine/color/srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB, WORKING_LUMA, WORKING_SPACE_ID } from '../engine/color/workingSpace';
-import { loadImage } from '../engine/decoder/imageLoader';
+import { decodeWorkerCallCount, loadImage } from '../engine/decoder/imageLoader';
 import { solveNeutralWb } from '../engine/color/whiteBalance';
 import { DECODE_OUTPUT_COLOR, isRawFileName } from '../engine/decoder/librawDecoder';
 import { RenderWorkerClient } from '../engine/gpu/renderClient';
@@ -128,6 +128,12 @@ declare global {
       currentPhotoMissingState(): string | null;
       /** Verify-only: every thumbnail blob: URL revokeAllThumbnails has revoked so far, in order (proves a folder switch doesn't leak the previous folder's URLs). */
       thumbnailRevocations(): string[];
+      /** Verify-only (develop-aware-thumbnails-impl.md): how many times the decode worker (libraw-wasm/JPEG, imageLoader.ts's loadImage) has run this session — proves the develop-aware filmstrip pass never triggers an extra RAW decode. */
+      decodeWorkerCallCount(): number;
+      /** Verify-only: the PLAIN (non-develop-aware) cached preview blob: URL for `path`, or undefined — a default-look cell's <img> src must equal this exactly (thumbnailCache.ts's plainThumbnailUrlFor). */
+      plainThumbnailUrl(path: string): string | undefined;
+      /** Verify-only: appStore.ts's per-path lookVersions counters, exactly as Filmstrip.tsx's cells subscribe to them. */
+      lookVersionsState(): Record<string, number>;
       /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
       nodeThumbsState(): Record<string, string>;
       /** Verify-only: every node-thumbnail blob: URL updateNodeThumbs has revoked so far, in order. */
@@ -1386,6 +1392,15 @@ export function CanvasView() {
       },
       thumbnailRevocations() {
         return [...thumbnailRevocationLog()];
+      },
+      decodeWorkerCallCount() {
+        return decodeWorkerCallCount();
+      },
+      plainThumbnailUrl(path) {
+        return plainThumbnailUrlFor(path);
+      },
+      lookVersionsState() {
+        return useAppStore.getState().lookVersions;
       },
       /** Per-node-preview pack, tier 1: nodeId → blob: URL, exactly what the node editor's thumbnails read. */
       nodeThumbsState() {

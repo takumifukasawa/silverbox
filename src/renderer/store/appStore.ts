@@ -422,6 +422,27 @@ interface AppState {
    */
   lookPathForPhoto(photoPath: string): string | null;
   /**
+   * Develop-aware filmstrip thumbnails (docs/brief-bank/
+   * develop-aware-thumbnails-impl.md, semantic 3 — "the OTHER cells" trigger):
+   * a per-PATH counter, bumped by `bumpLookVersion` every time THIS session
+   * writes that path's look file. Filmstrip.tsx's FilmstripCell subscribes to
+   * its own path's entry and recomputes its develop-aware bitmap off the
+   * ALREADY-CACHED embedded preview (thumbnailCache.ts's
+   * getDevelopAwareThumbnail) whenever it changes — never a RAW decode.
+   * Session-only, never persisted, never read anywhere except that
+   * subscription (same spirit as `nodeThumbs`). Absent key reads as 0.
+   */
+  lookVersions: Record<string, number>;
+  /**
+   * Bump every path in `paths`'s `lookVersions` counter by 1 — the ONE write
+   * point every look-file-writing action calls (directly, or transitively
+   * through `saveGraph`/`writeGraphSaveSnapshot` for the currently open
+   * photo — see those call sites' own comments for exactly which). No-op for
+   * an empty list (every batch writer's own "nothing actually changed"
+   * shortcut already returns early with `after` empty, so this stays cheap).
+   */
+  bumpLookVersion(paths: string[]): void;
+  /**
    * "Remove from project" (UX pack round 2, item C — ⌫/Delete on the
    * filmstrip selection, or a cell's context-menu item): drops `paths` from
    * the ACTIVE project's playlist only. NEVER deletes/moves the original
@@ -1769,6 +1790,21 @@ async function writeGraphSaveSnapshot(
     snapshot.sidecarFlag ?? undefined
   );
   await window.silverbox.writeSidecar(snapshot.currentLookPath, content);
+  // Develop-aware filmstrip thumbnails (develop-aware-thumbnails-impl.md,
+  // semantic 3's single-photo-autosave trigger): this is the ONE low-level
+  // write shared by saveGraph, the autosave debounce, and
+  // flushPendingAutosave, so bumping here covers all three — plus every
+  // OTHER action that persists ITS primary photo through get().saveGraph()
+  // (revertFamilyToLook, resetAllFamiliesToLook, unlinkLook, and the primary
+  // leg of publishToSharedLook/applyPresetToSelection/applyRepairSheet/
+  // linkPhotosToLook — those four ALSO bump their own written SECONDARY
+  // targets separately, at their own `refreshPlaylistStatus()` call site,
+  // since this snapshot only ever covers the ONE currently-open photo).
+  // `writeGraphSaveSnapshot` is a free function (no `get()`/`set()` closure —
+  // see this function's own doc comment), so it reaches the store via
+  // `useAppStore.getState()`, the same idiom this file's module-level
+  // `subscribe` blocks already use.
+  useAppStore.getState().bumpLookVersion([snapshot.imagePath]);
   return { createdAt, fingerprint: fingerprint ?? null, photo: photo ?? null, content };
 }
 
@@ -3597,6 +3633,10 @@ export const useAppStore = create<AppState>((set, get) => {
       writes.push({ lookPath, content, photoPath });
     }
     for (const w of writes) await window.silverbox.writeSidecar(w.lookPath, w.content);
+    // Develop-aware filmstrip thumbnails (semantic 3): undo/redo of a batch
+    // sync entry rewrites every target's look file exactly like the batch
+    // action that created the entry did — same trigger, same targets.
+    get().bumpLookVersion(writes.map((w) => w.photoPath));
     // Self-write-suppression baseline (saveGraph/writeGraphSaveSnapshot's own
     // "record exactly what we just wrote" discipline — AppState.
     // lastSidecarText's doc comment): this is a DIRECT writeSidecar, not
@@ -3770,6 +3810,11 @@ export const useAppStore = create<AppState>((set, get) => {
         undoStack: pushUndoEntry(st.undoStack, entry),
         sharedLookTexts: { ...st.sharedLookTexts, [slug]: lookTextAfter },
       }));
+      // Develop-aware filmstrip thumbnails (semantic 3): this fan-out is the
+      // SAME shape publishToSharedLook's own fan-out uses (external edit /
+      // drift-at-open re-materialization) — every follower whose look file
+      // just changed needs its cell to repaint too.
+      get().bumpLookVersion(targets);
       await get().refreshPlaylistStatus();
     } else {
       // Nothing follows this look right now — still prime the cache (self-
@@ -3989,6 +4034,7 @@ export const useAppStore = create<AppState>((set, get) => {
   relinkMismatchNotice: null,
   folderDir: null,
   folderEntries: [],
+  lookVersions: {},
   filmstripSelection: [],
   filmstripSelectionAnchor: null,
   currentPhotoMissingNotice: null,
@@ -4427,6 +4473,15 @@ export const useAppStore = create<AppState>((set, get) => {
     } else if (get().currentPhotoMissingNotice) {
       set({ currentPhotoMissingNotice: null });
     }
+  },
+
+  bumpLookVersion(paths) {
+    if (paths.length === 0) return;
+    set((s) => {
+      const next = { ...s.lookVersions };
+      for (const p of paths) next[p] = (next[p] ?? 0) + 1;
+      return { lookVersions: next };
+    });
   },
 
   async openFolder(dir: string) {
@@ -6556,6 +6611,10 @@ export const useAppStore = create<AppState>((set, get) => {
         after,
       };
       set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+      // Develop-aware filmstrip thumbnails (semantic 3's repair-sheet-apply
+      // trigger) — every target's cell (primary AND every closed secondary)
+      // recomputes off its already-cached preview, no RAW decode.
+      get().bumpLookVersion(writtenTargets);
       await get().refreshPlaylistStatus();
     }
 
@@ -6951,6 +7010,8 @@ export const useAppStore = create<AppState>((set, get) => {
         after,
       };
       set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+      // Develop-aware filmstrip thumbnails (semantic 3's link trigger).
+      get().bumpLookVersion(writtenTargets);
       await get().refreshPlaylistStatus();
     }
 
@@ -7202,7 +7263,12 @@ export const useAppStore = create<AppState>((set, get) => {
       after,
     };
     set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
-    if (writtenTargets.length > 0) await get().refreshPlaylistStatus();
+    if (writtenTargets.length > 0) {
+      // Develop-aware filmstrip thumbnails (semantic 3's unlink trigger —
+      // every follower this delete just unlinked had its look file rewritten).
+      get().bumpLookVersion(writtenTargets);
+      await get().refreshPlaylistStatus();
+    }
 
     const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
     raiseNotice('projectNotice', {
@@ -7400,6 +7466,10 @@ export const useAppStore = create<AppState>((set, get) => {
       after,
     };
     set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    // Develop-aware filmstrip thumbnails (semantic 3's publish-fan-out
+    // trigger — the brief's own headline case: N closed followers repaint
+    // off their already-cached previews, zero RAW decodes).
+    get().bumpLookVersion(targets);
     await get().refreshSharedLooks();
     await get().refreshPlaylistStatus();
 
@@ -8399,6 +8469,9 @@ export const useAppStore = create<AppState>((set, get) => {
       after,
     };
     set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+    // Develop-aware filmstrip thumbnails (semantic 3's apply-preset-to-
+    // selection trigger).
+    get().bumpLookVersion(writtenTargets);
     await get().refreshPlaylistStatus();
 
     const skipParts = Object.entries(skippedByFamily).map(([fam, n]) => `${fam} on ${n} (incompatible chain)`);

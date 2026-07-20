@@ -1,8 +1,46 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
-import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
-import { describeExportOverridesRaw, MAX_RATING } from '../engine/graph/graphDoc';
+import { getThumbnail, getDevelopAwareThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
+import { buildPlan, describeExportOverridesRaw, MAX_RATING, parseGraphDoc, type RenderPlan } from '../engine/graph/graphDoc';
+
+/**
+ * Develop-aware thumbnail plan builder (docs/brief-bank/
+ * develop-aware-thumbnails-impl.md, semantic 2 — "build the RenderPlan from
+ * the photo's look file the same way the CLI/thumbnail-less paths do"):
+ * reads + parses `lookPath` and buildPlan's it exactly like every other
+ * CPU-mirror caller (CanvasView.tsx's cpuReferenceMean). Never throws — an
+ * unreadable file, a parse failure, or any other surprise all resolve to
+ * null, which FilmstripCell treats as "no develop-aware plan, show the
+ * plain preview" (same posture as thumbnailCache.ts's own getThumbnail).
+ * `cameraModel` rides along from the look's own wrapper metadata (`source.
+ * cameraModel`, written at seed/save time) when present — a closed photo
+ * has no decoded PreparedImage to read it from otherwise, so this is the
+ * one piece of real per-camera calibration this approximate pass gets for
+ * free; everything else (white balance model, in particular) falls back to
+ * buildPlan's own DEFAULT_WB_MODEL, part of the honesty cost documented in
+ * thumbnailCache.ts's own doc comment. `allowExternal: false` degrades an
+ * external-tool step to identity (skip it, keep evaluating the rest of the
+ * chain) rather than letting it become an unmirrorable step that aborts the
+ * whole CPU pass — buildPlan never actually RUNS the external command
+ * either way (that's graphRenderer.ts's job at real render time), so this
+ * is purely about which steps the CPU mirror below can walk through.
+ */
+async function buildDevelopPlanForLook(lookPath: string): Promise<RenderPlan | null> {
+  let text: string | null;
+  try {
+    text = await window.silverbox.readSidecar(lookPath);
+  } catch {
+    return null;
+  }
+  if (text === null) return null;
+  try {
+    const parsed = parseGraphDoc(text);
+    return buildPlan(parsed.graph, { cameraModel: parsed.source?.cameraModel ?? null, allowExternal: false });
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Missing-photo placeholder cell (project-storage migration §"Missing
@@ -102,6 +140,17 @@ function FilmstripCell({
 }) {
   const cellRef = useRef<HTMLButtonElement>(null);
   const [url, setUrl] = useState<string | null>(null);
+  // Develop-aware thumbnail (docs/brief-bank/develop-aware-thumbnails-impl.md):
+  // null keeps the cell on the plain preview `url` above (the default-look
+  // common case — zero CPU work, semantic 5); non-null overlays the develop
+  // pass's own blob: URL. `lookVersion` is the per-path counter appStore.ts
+  // bumps every time THIS session writes `entry.path`'s look file (semantic
+  // 3 — publish fan-out, apply-preset-to-selection, repair-sheet apply,
+  // link/revert/unlink, single-photo autosave); subscribing to it is what
+  // makes the OTHER (closed) cells repaint themselves.
+  const [developUrl, setDevelopUrl] = useState<string | null>(null);
+  const lookVersion = useAppStore((s) => s.lookVersions[entry.path] ?? 0);
+  const lookPathForPhoto = useAppStore((s) => s.lookPathForPhoto);
   // Fixed-position popup, anchored to the CLICK point (not to the cell via
   // `position:absolute`) — `.filmstrip`'s own `overflow-y: hidden` (needed so
   // the horizontally-scrolling strip doesn't grow the canvas column taller)
@@ -143,6 +192,52 @@ function FilmstripCell({
       observer.disconnect();
     };
   }, [entry.path, entry.missing]);
+
+  // Develop-aware recompute (semantic 3's "initial load + every look-file
+  // write" trigger): waits for the plain preview `url` above to exist first
+  // (the lazy IntersectionObserver load, unchanged) — a cell that hasn't
+  // scrolled into view yet simply has nothing cached to develop over, and
+  // this effect re-runs once `url` lands, same as any other dependency
+  // change. Re-runs on every `lookVersion` bump regardless of visibility,
+  // reusing the ALREADY-cached preview pixels (thumbnailCache.ts) — NEVER a
+  // RAW decode.
+  //
+  // Deliberately does NOT gate on `entry.hasLook`: `folderEntries` (which
+  // `entry` comes from) is a point-in-time snapshot, refreshed only by an
+  // explicit `refreshPlaylistStatus()` call — every batch write point this
+  // feature hooks (publish/apply-preset/repair-sheet/link) already calls it
+  // right where it bumps `lookVersion`, so `entry.hasLook` is fresh by the
+  // time THEIR bump lands. The one write point that does NOT —
+  // writeGraphSaveSnapshot (single-photo save/autosave, covering the
+  // CURRENTLY OPEN photo's own cell) — leaves `entry.hasLook` stale at
+  // whatever it was when the folder was last (re)opened, same known gap
+  // verify-filmstrip.mjs's own "edited dot" check documents for that badge.
+  // Gating on it here would silently break the open photo's own cell on its
+  // very first save. `buildDevelopPlanForLook`'s null-safety (a missing look
+  // file just resolves to null) already gives every OTHER cell the same
+  // "cheap, no-op for an untouched photo" cost this pre-filter would have —
+  // one readSidecar IPC round trip the first time `url` loads, never
+  // repeated for a path whose `lookVersion` never bumps.
+  useEffect(() => {
+    if (!url) {
+      setDevelopUrl(null);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      const lookPath = lookPathForPhoto(entry.path);
+      if (!lookPath) {
+        if (!cancelled) setDevelopUrl(null);
+        return;
+      }
+      const plan = await buildDevelopPlanForLook(lookPath);
+      const developed = plan ? await getDevelopAwareThumbnail(entry.path, plan) : null;
+      if (!cancelled) setDevelopUrl(developed);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [url, entry.path, lookVersion, lookPathForPhoto]);
 
   if (entry.missing) return <MissingFilmstripCell entry={entry} playlistIndex={playlistIndex} />;
 
@@ -191,7 +286,7 @@ function FilmstripCell({
         // at full opacity, so a rejected cell is still legible as a real
         // clickable cell, just visually de-emphasized.
         <img
-          src={url}
+          src={developUrl ?? url}
           alt=""
           className={`filmstrip-thumb${entry.flag === 'reject' ? ' filmstrip-thumb--rejected' : ''}`}
           data-testid="filmstrip-thumb"
