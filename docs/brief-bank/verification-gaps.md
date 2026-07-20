@@ -107,13 +107,19 @@ guards against an annoying every-open re-materialize.
 ## 6. Library migration idempotency + collision
 
 verify-library covers the one-time migration + dual-location reads.
-GAP: (a) the migration marker's idempotency across TWO app launches
-(second launch must not re-copy or clobber a library file the user
-edited between launches — the "never overwrite an existing library
-file" guard); (b) a slug that exists in BOTH legacy and library with
-DIFFERENT content (library must win on read; delete removes both).
-TEST TO ADD: a second-launch check (marker present → no re-copy) and a
-divergent-content collision check.
+VERIFIED GUARDED BY CODE INSPECTION (Fable, this audit,
+migrateLegacyPresetsIfNeeded in main/presets.ts:66): idempotency is
+guarded TWICE — (1) `if (pathExists(MIGRATION_MARKER)) return` so a
+second launch re-copies nothing; (2) even absent the marker,
+`if (pathExists(dest)) continue` never overwrites an existing library
+file. A divergent-content collision (same slug in both, different
+bytes) resolves by construction: migration skips the existing library
+file → the library copy is authoritative, which is exactly the
+dual-location "library wins on read" rule stage E verified, and
+deletePreset removes both copies. So both concerns are structurally
+handled — a COVERAGE gap, not a risk.
+TEST TO ADD (optional): an explicit second-launch assertion (marker
+present → zero copies) to pin the guard against a future refactor.
 
 ## 7. Publish undo across a photo the user closed mid-session
 
