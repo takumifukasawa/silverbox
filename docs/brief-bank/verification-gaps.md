@@ -70,11 +70,18 @@ E2E takes a LINKED photo, duplicates its output (virtual copy), and
 asserts (a) both chains carry the link, (b) editing one chain's
 followed family forks only that chain, (c) publish from one chain reads
 only that chain's linked node.
+VERIFIED CORRECT BY CODE INSPECTION (Fable, this audit): duplicateOutput
+(appStore.ts:5038) clones each upstream node via structuredClone,
+overriding only id + position — so a Develop's `link` field rides into
+the clone intact (a). Fork-on-touch mutators map by node id → editing
+the clone's followed family forks only its own link.follows (b).
+Publish scopes by chainScope(activeOutputId) → reads the linked node in
+that chain only (c). Two linked Develops in one photo following the
+SAME look, one per chain, is exactly what §4.3 allows. This is a
+COVERAGE gap, NOT a bug.
 TEST TO ADD: extend verify-virtualcopy.mjs or verify-linkedlooks.mjs
-with a duplicate-output-of-a-linked-photo scenario covering (a)-(c).
-This is the highest-value gap: two load-bearing features
-(active-chain scoping + links) intersect here and only their
-single-chain behaviors are directly tested.
+with a duplicate-output-of-a-linked-photo scenario covering (a)-(c)
+end-to-end.
 
 ## 5. Cross-machine drift no-op: assert the NEGATIVE
 
