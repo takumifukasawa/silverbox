@@ -1,6 +1,6 @@
 # Brief: look-extraction mode 2, stage 1 — signature + tone solve (the spike)
 
-Status: DISPATCHED 2026-07-20. Parent: docs/brief-bank/look-extraction.md
+Status: LANDED 2026-07-20 (SUITE 72/72, unit 270; conductor double-check passed — recovery proof real, placeholder honest). NEXT: Italy-set visual validation before stage 2. Parent: docs/brief-bank/look-extraction.md
 (Mode 2 + the "Mode 2 solve well-posedness" section — READ BOTH). This
 is the design's OWN checkpoint: "worth a spike checkpoint after the
 signature + curve-solve land (validate on the Italy set before building
