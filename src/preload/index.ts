@@ -46,6 +46,10 @@ const api: SilverboxApi = {
     ipcRenderer.on(IPC.sharedLooksChanged, listener);
     return () => ipcRenderer.removeListener(IPC.sharedLooksChanged, listener);
   },
+  repairSheetsList: (projectDir) => ipcRenderer.invoke(IPC.repairSheetsList, projectDir),
+  repairSheetRead: (projectDir, slug) => ipcRenderer.invoke(IPC.repairSheetRead, projectDir, slug),
+  repairSheetWrite: (projectDir, slug, content) => ipcRenderer.invoke(IPC.repairSheetWrite, projectDir, slug, content),
+  repairSheetDelete: (projectDir, slug) => ipcRenderer.invoke(IPC.repairSheetDelete, projectDir, slug),
   openLibraryImportDialog: () => ipcRenderer.invoke(IPC.openLibraryImportDialog),
   onLibraryChanged: (callback) => {
     const listener = () => callback();

@@ -41,6 +41,7 @@ import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
 import { deletePreset, listPresets, migrateLegacyPresetsIfNeeded, readPreset, writePreset } from './presets';
 import { deleteSharedLook, listSharedLooks, readSharedLook, writeSharedLook } from './sharedLooks';
+import { deleteRepairSheet, listRepairSheets, readRepairSheet, writeRepairSheet } from './repairSheets';
 import { readSettings, updateSettings } from './settings';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -885,6 +886,22 @@ function registerIpc(): void {
       throw new Error('watchSharedLooks: projectDir must be a string or null');
     }
     armSharedLooksWatch(projectDir);
+  });
+
+  // Repair sheets (docs/brief-bank/linked-looks-stage-f.md): sharedLooks.ts's
+  // twin, project-scoped, no watcher — see main/repairSheets.ts.
+  ipcMain.handle(IPC.repairSheetsList, async (_ev, projectDir: unknown): Promise<PresetSummary[]> => listRepairSheets(projectDir));
+
+  ipcMain.handle(IPC.repairSheetRead, async (_ev, projectDir: unknown, slug: unknown): Promise<string | null> =>
+    readRepairSheet(projectDir, slug)
+  );
+
+  ipcMain.handle(IPC.repairSheetWrite, async (_ev, projectDir: unknown, slug: unknown, content: unknown): Promise<void> => {
+    await writeRepairSheet(projectDir, slug, content);
+  });
+
+  ipcMain.handle(IPC.repairSheetDelete, async (_ev, projectDir: unknown, slug: unknown): Promise<void> => {
+    await deleteRepairSheet(projectDir, slug);
   });
 
   ipcMain.handle(IPC.goldenCheck, async (_ev, req: CliCheckImageRequest): Promise<CliCheckOutcome> => {

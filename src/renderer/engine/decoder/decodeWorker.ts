@@ -35,6 +35,15 @@ export interface PreparedImage {
   fullHeight: number;
   flip: number;
   color?: CameraColorInfo;
+  /**
+   * Readout-window origin in physical sensor px (RawDecoder.ts's readoutOrigin
+   * doc comment) — carried through the worker/IPC boundary for the repair-sheet
+   * sensor↔anchor transform (docs/brief-bank/linked-looks-stage-f.md semantic
+   * 2). Present for every RAW decode (a stable RAW-only gate), absent for JPEG.
+   * A plain {x,y} object structured-clones across postMessage with no extra
+   * wiring (only `data.buffer` is transferred).
+   */
+  readoutOrigin?: { x: number; y: number };
   capture?: CaptureInfo;
   /**
    * Sony embedded lens-correction splines (task #34), parsed from the ARW
@@ -181,6 +190,7 @@ async function prepareRaw(bytes: ArrayBuffer, previewLongEdge: number, baselineE
     fullHeight: decoded.height,
     flip: decoded.flip,
     color: decoded.color,
+    ...(decoded.readoutOrigin ? { readoutOrigin: decoded.readoutOrigin } : {}),
     capture: decoded.capture,
     ...(profile ? { profile } : {}),
     ...(lensModel ? { lensModel } : {}),

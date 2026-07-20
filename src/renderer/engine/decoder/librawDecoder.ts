@@ -126,6 +126,15 @@ export class LibrawDecoder implements RawDecoder {
       // doc comment) — re-open with it applied BEFORE the (expensive)
       // imageData() demosaic runs, so we only ever pay for one full decode.
       const cropbox = computeCropbox(meta);
+      // The readout-window origin in physical sensor px — retained for the
+      // repair-sheet transform (RawDecoder.ts's readoutOrigin doc comment,
+      // stage-F semantic 2). When libraw exposed a camera-recommended crop it's
+      // that crop's [left, top]; otherwise the decode covers the full active
+      // area whose (0,0) corner IS the sensor origin, so (0,0) is the accurate
+      // value — every RAW frame therefore carries a readout window (a stable
+      // RAW-only gate for repair sheets), while JPEG (which never reaches this
+      // decoder) leaves it absent.
+      const readoutOrigin = cropbox ? { x: cropbox[0], y: cropbox[1] } : { x: 0, y: 0 };
       if (cropbox) {
         await raw.open(bytesForCropPass, { ...OPEN_SETTINGS, cropbox });
         const croppedMeta = await raw.metadata(true);
@@ -163,6 +172,7 @@ export class LibrawDecoder implements RawDecoder {
         data: img.data,
         flip: meta.flip,
         color,
+        readoutOrigin,
         capture: {
           cameraMake: meta.camera_make,
           cameraModel: meta.camera_model,

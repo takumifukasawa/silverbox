@@ -73,6 +73,15 @@ export const IPC = {
   // arming a new watch (project close).
   watchSharedLooks: 'sharedLooks:watch',
   sharedLooksChanged: 'sharedLooks:changed',
+  // Repair sheets (ゴミ取りセット; docs/brief-bank/linked-looks-stage-f.md
+  // semantic 1): sharedLooks.ts's twin at `<projectDir>/repair-sheets/
+  // <slug>.json`, but its OWN tiny sensor-px schema (repairSheetDoc.ts), not a
+  // develop look — hence a `dir` argument on every call, same as sharedLooks*.
+  // No watcher: a sheet is make-and-discard, never followed (semantic 8).
+  repairSheetsList: 'repairSheets:list',
+  repairSheetRead: 'repairSheets:read',
+  repairSheetWrite: 'repairSheets:write',
+  repairSheetDelete: 'repairSheets:delete',
   // The visible library (docs/brief-bank/linked-looks-stage-e.md): a file
   // picker for "ライブラリに取り込む…" (Import), filtered to .json — reuses
   // readFile + presetWrite (below), so this channel is only the native
@@ -495,6 +504,14 @@ export interface SilverboxApi {
    * Returns an unsubscribe function.
    */
   onSharedLooksChanged(callback: () => void): () => void;
+  /** List `<projectDir>/repair-sheets/*.json` summaries; a malformed file is skipped (never crashes the list) — same convention as sharedLooksList. */
+  repairSheetsList(projectDir: string): Promise<PresetSummary[]>;
+  /** Read one repair sheet's raw JSON text by slug (project-scoped); null if it doesn't exist. */
+  repairSheetRead(projectDir: string, slug: string): Promise<string | null>;
+  /** Write (create or overwrite) one repair sheet's raw JSON text by slug (project-scoped). */
+  repairSheetWrite(projectDir: string, slug: string, content: string): Promise<void>;
+  /** Delete one repair sheet's file by slug (project-scoped) — make-and-discard, no undo (semantic 8). */
+  repairSheetDelete(projectDir: string, slug: string): Promise<void>;
   /** Native "ライブラリに取り込む…" file picker, filtered to `.json` (stage-e semantic 6) — the picked path is read via `readFile` and written into the library via `presetWrite`, same validated read-then-write every other save path here uses. */
   openLibraryImportDialog(): Promise<OpenImageDialogResult>;
   /**

@@ -161,6 +161,7 @@ const ALL_SCRIPTS = [
   { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
   { name: 'linkedlooks3', file: 'verify-linkedlooks3.mjs' },
   { name: 'library', file: 'verify-library.mjs' },
+  { name: 'repairsheet', file: 'verify-repairsheet.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

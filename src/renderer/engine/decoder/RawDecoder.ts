@@ -57,6 +57,20 @@ export interface DecodedImage {
   flip: number;
   /** Color calibration; absent for inputs without camera color data (e.g. JPEG). */
   color?: CameraColorInfo;
+  /**
+   * Readout-window origin in physical sensor px — the sensor-frame position of
+   * the decoded raster's (0,0) corner, i.e. `[cleft, ctop]` of the
+   * camera-recommended crop librawDecoder.ts's computeCropbox retains (the same
+   * pre-rotation active-area frame `flip` is applied on top of). Additive
+   * field carried for the repair-sheet sensor↔anchor transform
+   * (docs/brief-bank/linked-looks-stage-f.md semantic 2 — the §9-4 ⚠️): the
+   * rgbCam stage-2 additive pattern, threaded through the worker/IPC boundary.
+   * PRESENT for every RAW decode (the camera-recommended crop's [cleft, ctop]
+   * when libraw exposed one, else (0,0) — a full active-area decode's corner IS
+   * the sensor origin), so it is a stable RAW-only gate. ABSENT only for JPEG,
+   * which has no sensor readout window and cannot participate in a repair sheet.
+   */
+  readoutOrigin?: { x: number; y: number };
   capture: CaptureInfo;
 }
 

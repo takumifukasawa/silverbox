@@ -1,6 +1,14 @@
 # Brief: repair sheets / ゴミ取りセット (linked-looks stage F)
 
-Status: DISPATCHED 2026-07-20.
+Status: LANDED 2026-07-20 (SUITE 72/72 (1 known project flake), unit
+255 incl. 12 transform tests). Deviations accepted: readoutOrigin is
+present for EVERY RAW decode (0,0 when computeCropbox returns null —
+the honest full-active-area origin, makes "has readout window" a clean
+RAW-only gate); apply includes the open primary as a target (stage A
+batch shape). Conductor verified the orientation math self-consistency
+(forward∘inverse = identity for flip 3/5/6) and the SPOTS_CAP pre-write
+refusal. Fragile spot carried forward: only flip-0 is E2E-exercised;
+90°/180° rest on unit tests + derivation.
 Parent spec: docs/brief-bank/linked-looks.md §5 (all of it — the
 GO-time obligations are BINDING), §2 taxonomy row 2, §9-4. Scope
 guard: no Sync/Auto Sync changes (G). Project-local only — NO library

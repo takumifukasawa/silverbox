@@ -67,6 +67,12 @@ import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
+import {
+  anchorSpotToSensor,
+  sensorSpotToAnchor,
+  type ReadoutWindow,
+} from '../engine/graph/repairSheetTransform';
+import { parseRepairSheet, serializeRepairSheet, type RepairSheetDoc } from '../engine/graph/repairSheetDoc';
 import { defaultImageParams, dirnameOf, IMAGE_KIND } from '../engine/graph/imageNode';
 import { clearImageNodeSourceCache } from '../engine/graph/imageNodeSource';
 import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
@@ -962,6 +968,39 @@ interface AppState {
   sharedLooks: PresetSummary[];
   /** Re-read `<projectDir>/shared-looks/` into `sharedLooks`; no-op without an active project. */
   refreshSharedLooks(): Promise<void>;
+  /**
+   * Repair sheets (ゴミ取りセット — docs/brief-bank/linked-looks-stage-f.md
+   * semantic 8): `<projectDir>/repair-sheets/*.json` summaries in the store,
+   * refreshed on every project switch (project-scoped, same as `sharedLooks`).
+   */
+  repairSheets: PresetSummary[];
+  /** Re-read `<projectDir>/repair-sheets/` into `repairSheets`; no-op without an active project. */
+  refreshRepairSheets(): Promise<void>;
+  /**
+   * "ゴミ取りセットを保存" (create — semantic 4): map the OPEN photo's CURRENT
+   * spots (all of them, across the active chain's spots node) from anchor space
+   * into PHYSICAL SENSOR PX (repairSheetTransform.ts) and write them as a new
+   * sheet file. Requires a ready RAW photo carrying a readout window
+   * (image.readoutOrigin) AND ≥1 spot — else a notice, nothing written. Photo
+   * files are untouched (the sheet is a create-time transform, not storage).
+   */
+  saveRepairSheet(name: string): Promise<void>;
+  /**
+   * "ゴミ取りセットを適用" (apply, one-shot per-frame — semantic 5): stamp the
+   * sheet's sensor-px spots onto the whole filmstrip selection (primary + every
+   * secondary, stage A's batch shape), mapping sensor → each target's OWN
+   * anchor space through that target's readout window ∘ orientation. Spots
+   * whose destination maps outside a target's frame are DROPPED for it
+   * (semantic 3). Non-RAW / no-readout-window targets are SKIPPED with a loud
+   * per-target notice (semantic 5). If a target's existing spots + mapped sheet
+   * spots would exceed SPOTS_CAP the target is REFUSED loudly, never truncated
+   * (semantic 6). Applied spots become ordinary photo-local spots. ONE batch
+   * SyncUndoEntry covers every photo written; a completion notice reports the
+   * per-target skips/refusals.
+   */
+  applyRepairSheet(slug: string): Promise<void>;
+  /** Delete a repair sheet's file (semantic 8: file delete, notice, no undo — the apply itself is what's undoable). */
+  deleteRepairSheet(slug: string): Promise<void>;
   /**
    * "Create shared look" (共通ルック — linked-looks-stage-b.md semantic 1):
    * captures the CURRENTLY OPEN photo's checked develop families (SAME
@@ -2662,6 +2701,35 @@ export function buildSpotPreviewDoc(graph: GraphDoc, activeOutputId: string | nu
 }
 
 /**
+ * Append `spots` to the active chain's spots node (auto-creating one when
+ * absent, exactly like resolveSpotInsertion), with the SPOTS_CAP check done
+ * UPFRONT over the whole batch — used by repair-sheet apply
+ * (docs/brief-bank/linked-looks-stage-f.md semantic 6). Returns 'capped' when
+ * existing + `spots.length` would exceed SPOTS_CAP (so the caller can REFUSE
+ * that target loudly rather than let sanitizeSpotsParams's silent slice(0,32)
+ * be what trims it), or 'no-target' when there's no output/input/edge to splice
+ * into. An empty `spots` list is a no-op returning the graph unchanged.
+ */
+export function insertSpotsIntoChain(
+  graph: GraphDoc,
+  activeOutputId: string | null,
+  spots: Spot[]
+): { graph: GraphDoc } | 'capped' | 'no-target' {
+  if (spots.length === 0) return { graph };
+  const existingId = findActiveSpotsNodeId(graph, activeOutputId);
+  const existingCount = existingId ? (graph.nodes.find((n) => n.id === existingId)?.spots?.spots.length ?? 0) : 0;
+  if (existingCount + spots.length > SPOTS_CAP) return 'capped';
+  let g = graph;
+  for (const spot of spots) {
+    const result = resolveSpotInsertion(g, activeOutputId, spot);
+    if (result === 'capped') return 'capped'; // can't happen after the upfront check, but stays honest
+    if (result === null) return 'no-target';
+    g = result.graph;
+  }
+  return { graph: g };
+}
+
+/**
  * Sanitize to a filesystem/slug-safe token: letters/digits/underscore/hyphen
  * only, runs of anything else collapse to a single hyphen, and a result
  * that's empty after trimming falls back to `fallback`. Shared by
@@ -3402,6 +3470,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // project.silverbox lands here instead (quick project).
     void window.silverbox.watchSharedLooks(dir);
     void get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped, refresh on every project switch
+    void get().refreshRepairSheets(); // linked-looks-stage-f.md: repair-sheets/ is project-scoped, same refresh
     // Semantic 5 (drift-at-open): a quick project can already have a
     // shared-looks/ dir from a PRIOR session at the same path (e.g. reusing
     // `<userData>/quick-projects/<date>` across launches) — same drift scan
@@ -4585,6 +4654,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // as openImageByPath's own watchSidecar call.
     void window.silverbox.watchSharedLooks(dir);
     await get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped
+    void get().refreshRepairSheets(); // linked-looks-stage-f.md: repair-sheets/ is project-scoped, same refresh
     if (get().project !== project) return true; // superseded by a newer project/folder open meanwhile
     // Stage D semantic 5: drift-at-open — compare every known shared look's
     // current hash against every follower's materializedFrom BEFORE the
@@ -4638,6 +4708,7 @@ export const useAppStore = create<AppState>((set, get) => {
       filmstripSelectionAnchor: null,
       sharedLooks: [], // linked-looks-stage-b.md: shared-looks/ is project-scoped, gone with the project
       sharedLookTexts: {}, // linked-looks-stage-d.md: same reset, per-slug baseline cache
+      repairSheets: [], // linked-looks-stage-f.md: repair-sheets/ is project-scoped, gone with the project
     });
   },
 
@@ -6254,6 +6325,334 @@ export const useAppStore = create<AppState>((set, get) => {
       return;
     }
     set({ sharedLooks: await window.silverbox.sharedLooksList(project.dir) });
+  },
+
+  repairSheets: [],
+
+  async refreshRepairSheets() {
+    const project = get().project;
+    if (!project) {
+      set({ repairSheets: [] });
+      return;
+    }
+    set({ repairSheets: await window.silverbox.repairSheetsList(project.dir) });
+  },
+
+  async saveRepairSheet(name) {
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+
+    // Semantic 4: a sheet needs a RAW frame with a readout window (the
+    // sensor↔anchor transform's origin) — a JPEG or a RAW libraw exposed no
+    // crop for has none, so there's no sensor frame to anchor dust in.
+    const image = s.image;
+    if (!image || !image.readoutOrigin) {
+      raiseNotice('projectNotice', {
+        kind: 'error',
+        message: 'ゴミ取りセットは読み出し枠を持つ RAW 写真からのみ保存できます',
+      });
+      return;
+    }
+
+    // ALL of the open photo's spots, from the active chain's spots node.
+    const spotsNodeId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
+    const anchorSpots = spotsNodeId ? (s.graph.nodes.find((n) => n.id === spotsNodeId)?.spots?.spots ?? []) : [];
+    if (anchorSpots.length === 0) {
+      raiseNotice('projectNotice', { kind: 'error', message: 'この写真にはスポットがありません（先にゴミを取ってください）' });
+      return;
+    }
+
+    const window_: ReadoutWindow = {
+      originX: image.readoutOrigin.x,
+      originY: image.readoutOrigin.y,
+      orientedWidth: image.fullWidth,
+      orientedHeight: image.fullHeight,
+      flip: image.flip,
+    };
+    const sensorSpots = anchorSpots.map((sp) => anchorSpotToSensor(sp, window_));
+
+    const baseSlug = slugifyPresetName(trimmed);
+    const list = await window.silverbox.repairSheetsList(project.dir);
+    const sameName = list.find((p) => p.name === trimmed);
+    let slug = sameName?.slug ?? baseSlug;
+    if (!sameName) {
+      const taken = new Set(list.map((p) => p.slug));
+      for (let n = 2; taken.has(slug); n++) slug = `${baseSlug}-${n}`;
+    }
+    const doc: RepairSheetDoc = {
+      name: trimmed,
+      createdAt: new Date().toISOString(),
+      ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+      spots: sensorSpots,
+    };
+    await window.silverbox.repairSheetWrite(project.dir, slug, serializeRepairSheet(doc));
+    await get().refreshRepairSheets();
+    raiseNotice('projectNotice', {
+      kind: 'success',
+      message: `ゴミ取りセット「${trimmed}」を保存しました（${sensorSpots.length} 点）`,
+    });
+  },
+
+  async applyRepairSheet(slug) {
+    const s = get();
+    const primaryPath = s.imagePath;
+    if (!primaryPath || s.imageStatus !== 'ready') return;
+    const project = s.project;
+    if (!project) return;
+
+    const text = await window.silverbox.repairSheetRead(project.dir, slug);
+    if (!text) return;
+    let sheet: RepairSheetDoc;
+    try {
+      sheet = parseRepairSheet(text);
+    } catch (err) {
+      console.warn(`repair sheet "${slug}" could not be parsed:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `ゴミ取りセット「${slug}」を読み込めませんでした` });
+      return;
+    }
+
+    // Filmstrip selection = primary + every secondary (stage A's batch shape).
+    const secondaryTargets = s.filmstripSelection.filter((p) => p !== primaryPath);
+    const allTargets = [primaryPath, ...secondaryTargets];
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+    // Per-target skip lines (semantic 5/6), each naming the photo loudly.
+    const skips: string[] = [];
+    let errorCount = 0;
+    // Cache decode-derived readout windows per apply run (semantic 7).
+    const windowCache = new Map<string, ReadoutWindow | null>();
+
+    /** Decode (or reuse the open image for the primary) to get a target's readout window; null when it has none (non-RAW / no crop). */
+    const readoutWindowFor = async (photoPath: string): Promise<ReadoutWindow | null> => {
+      if (windowCache.has(photoPath)) return windowCache.get(photoPath)!;
+      let win: ReadoutWindow | null = null;
+      const img =
+        photoPath === primaryPath && s.image
+          ? s.image
+          : await (async () => {
+              const bytes = await window.silverbox.readFile(photoPath);
+              const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
+              return loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
+            })();
+      if (img.readoutOrigin) {
+        win = {
+          originX: img.readoutOrigin.x,
+          originY: img.readoutOrigin.y,
+          orientedWidth: img.fullWidth,
+          orientedHeight: img.fullHeight,
+          flip: img.flip,
+        };
+      }
+      windowCache.set(photoPath, win);
+      return win;
+    };
+
+    // Live-graph merge for the primary (open photo), file merge for secondaries
+    // — the exact primary/secondary split applyPresetToSelection uses.
+    let primaryAfter: GraphDoc | null = null;
+
+    for (const photoPath of allTargets) {
+      const shortName = photoPath.split('/').pop() ?? photoPath;
+      let win: ReadoutWindow | null;
+      try {
+        win = await readoutWindowFor(photoPath);
+      } catch (err) {
+        console.warn(`applyRepairSheet: could not decode ${photoPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      if (!win) {
+        // Semantic 5: non-RAW / no readout window — skipped loudly, never written.
+        skips.push(`${shortName}（RAW/読み出し枠なしのためスキップ）`);
+        continue;
+      }
+
+      // Map sensor → this target's anchor space; drop out-of-frame spots.
+      const mapped: Spot[] = [];
+      for (const sensorSpot of sheet.spots) {
+        const anchorSpot = sensorSpotToAnchor(sensorSpot, win);
+        if (anchorSpot) mapped.push(anchorSpot);
+      }
+      if (mapped.length === 0) {
+        skips.push(`${shortName}（枠内に入るスポットなし）`);
+        continue;
+      }
+
+      if (photoPath === primaryPath) {
+        // Primary: merge onto the LIVE graph (its own activeOutputId).
+        const existingId = findActiveSpotsNodeId(s.graph, s.activeOutputId);
+        const existingCount = existingId ? (s.graph.nodes.find((n) => n.id === existingId)?.spots?.spots.length ?? 0) : 0;
+        if (existingCount + mapped.length > SPOTS_CAP) {
+          // Semantic 6: REFUSE, never truncate.
+          skips.push(`${shortName}（既存 ${existingCount} + ${mapped.length} が上限 ${SPOTS_CAP} 超過のため拒否）`);
+          continue;
+        }
+        const inserted = insertSpotsIntoChain(s.graph, s.activeOutputId, mapped);
+        if (inserted === 'no-target' || inserted === 'capped') {
+          skips.push(`${shortName}（スポットノードに追加できませんでした）`);
+          continue;
+        }
+        before[photoPath] = structuredClone(s.graph);
+        after[photoPath] = inserted.graph;
+        primaryAfter = inserted.graph;
+        continue;
+      }
+
+      // Secondary: read/seed its look file, merge, write.
+      const row = findPlaylistPhoto(project, photoPath);
+      if (!row) {
+        errorCount++;
+        continue;
+      }
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null = null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`applyRepairSheet: could not read ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+
+      let baseGraph: GraphDoc;
+      let meta: {
+        source: SidecarSource | null;
+        createdAt: string | null;
+        unknown: Record<string, unknown> | undefined;
+        rating: number;
+        photo: string | undefined;
+        fingerprint: string | undefined;
+        flag: PhotoFlag | undefined;
+      };
+      if (existingText !== null) {
+        let parsedLook: SidecarDoc;
+        try {
+          parsedLook = parseGraphDoc(existingText);
+        } catch (err) {
+          console.warn(`applyRepairSheet: ${lookPath} is unreadable by this build, skipping:`, err);
+          errorCount++;
+          continue;
+        }
+        baseGraph = parsedLook.graph;
+        meta = {
+          source: parsedLook.source ?? null,
+          createdAt: parsedLook.createdAt ?? null,
+          unknown: parsedLook.unknown,
+          rating: parsedLook.rating,
+          photo: parsedLook.photo,
+          fingerprint: parsedLook.fingerprint,
+          flag: parsedLook.flag,
+        };
+      } else {
+        // No look yet — seed it exactly like a fresh open would (same as
+        // applyPresetToSelection), then merge the sheet's spots onto it.
+        try {
+          const bytes = await window.silverbox.readFile(photoPath);
+          const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
+          const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
+          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
+            usedSidecar: false,
+            kind,
+            testFlags: window.silverbox.testFlags,
+          }).graph;
+          const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
+          meta = {
+            source: {
+              fileName: shortName,
+              ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
+              kind,
+            },
+            createdAt: new Date().toISOString(),
+            unknown: undefined,
+            rating: 0,
+            photo: relativizeProjectPath(project.dir, photoPath),
+            fingerprint,
+            flag: undefined,
+          };
+        } catch (err) {
+          console.warn(`applyRepairSheet: could not decode ${photoPath} to seed a fresh look:`, err);
+          errorCount++;
+          continue;
+        }
+      }
+
+      // Cap check BEFORE writing (semantic 6): existing + mapped > SPOTS_CAP ⇒
+      // REFUSE, never let sanitizeSpotsParams's slice(0,32) be what trims it.
+      const existingId = findActiveSpotsNodeId(baseGraph, null);
+      const existingCount = existingId ? (baseGraph.nodes.find((n) => n.id === existingId)?.spots?.spots.length ?? 0) : 0;
+      if (existingCount + mapped.length > SPOTS_CAP) {
+        skips.push(`${shortName}（既存 ${existingCount} + ${mapped.length} が上限 ${SPOTS_CAP} 超過のため拒否）`);
+        continue;
+      }
+      const inserted = insertSpotsIntoChain(baseGraph, null, mapped);
+      if (inserted === 'no-target' || inserted === 'capped') {
+        skips.push(`${shortName}（スポットノードに追加できませんでした）`);
+        continue;
+      }
+      const content = serializeGraphDoc(
+        inserted.graph,
+        meta.source,
+        meta.createdAt,
+        meta.unknown,
+        meta.rating,
+        meta.photo,
+        meta.fingerprint,
+        meta.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`applyRepairSheet: could not write ${lookPath}:`, err);
+        errorCount++;
+        continue;
+      }
+      before[photoPath] = structuredClone(baseGraph);
+      after[photoPath] = inserted.graph;
+    }
+
+    // Persist the open photo's live graph now (flush discipline — same as
+    // applyPresetToSelection: the sheet applies TO the primary too).
+    if (primaryAfter) {
+      set({ graph: primaryAfter, graphDirty: true });
+      revalidateShaders(primaryAfter);
+      await get().saveGraph();
+    }
+
+    const writtenTargets = Object.keys(after);
+    if (writtenTargets.length > 0) {
+      const entry: SyncUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'sync',
+        label: `Apply repair sheet "${sheet.name}" to ${writtenTargets.length} photo${writtenTargets.length === 1 ? '' : 's'}`,
+        targets: writtenTargets,
+        before,
+        after,
+      };
+      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
+      await get().refreshPlaylistStatus();
+    }
+
+    const skipSuffix = skips.length > 0 ? `; スキップ: ${skips.join(', ')}` : '';
+    const errorSuffix = errorCount > 0 ? `（${errorCount} 件エラー）` : '';
+    raiseNotice('projectNotice', {
+      kind: errorCount > 0 || skips.length > 0 ? 'error' : 'success',
+      message: `ゴミ取りセット「${sheet.name}」を ${writtenTargets.length} 枚に適用しました${skipSuffix}${errorSuffix}`,
+    });
+  },
+
+  async deleteRepairSheet(slug) {
+    const project = get().project;
+    if (!project) return;
+    await window.silverbox.repairSheetDelete(project.dir, slug);
+    await get().refreshRepairSheets();
+    raiseNotice('projectNotice', { kind: 'success', message: `ゴミ取りセットを削除しました` });
   },
 
   async savePreset(name, families) {

@@ -328,6 +328,8 @@ declare global {
       spotsState(nodeId?: string): SpotsParams | null;
       /** Wholesale-replace a spots node's list — one undo entry (verify-only convenience; mirrors setMaskShape's pattern). */
       setSpots(nodeId: string, spots: Spot[]): void;
+      /** Verify-only: commit one spot (anchor-space dst/src centers, anchor radius) via the store's commitSpot — creates the active chain's spots node if absent, exactly like a canvas spot drag. */
+      commitSpot(dst: { x: number; y: number }, src: { x: number; y: number }, radius: number): void;
       /** The active chain's spots node id (see appStore.ts's findActiveSpotsNodeId), or null when none exists yet. */
       activeSpotsNodeId(): string | null;
       /** Spot-mode UI state: tool toggle, current brush radius, selected index, and any cap notice. */
@@ -408,6 +410,18 @@ declare global {
         forked: string[];
         materializedFrom: string;
       } | null>;
+      /** Repair sheets (linked-looks-stage-f.md): `<projectDir>/repair-sheets/*.json` summaries in the store. */
+      repairSheetsState(): import('../../../shared/ipc').PresetSummary[];
+      /** The current project-level notice banner (success/error + message), or null — used to assert repair-sheet per-target skip/refusal lines. */
+      projectNoticeState(): { kind: 'success' | 'error'; message: string } | null;
+      /** The open photo's decode readout window + orientation — `readoutOrigin` is null for JPEG / a RAW with no camera crop. Null when no image is ready. */
+      imageReadoutState(): { fullWidth: number; fullHeight: number; flip: number; readoutOrigin: { x: number; y: number } | null } | null;
+      /** Save the open photo's current spots as a sheet named `name` (mirrors "ゴミ取りセットを保存") — sensor-px, RAW-only. */
+      saveRepairSheet(name: string): Promise<void>;
+      /** Apply a repair sheet by slug to the filmstrip selection (mirrors "ゴミ取りセットを適用") — one batch undo entry. */
+      applyRepairSheet(slug: string): Promise<void>;
+      /** Delete a repair sheet's file by slug (mirrors the sheet list's Delete button) — no undo. */
+      deleteRepairSheet(slug: string): Promise<void>;
     };
   }
 }
@@ -1778,6 +1792,9 @@ export function CanvasView() {
       setSpots(nodeId, spots) {
         useAppStore.getState().setSpots(nodeId, spots, null);
       },
+      commitSpot(dst, src, radius) {
+        useAppStore.getState().commitSpot(dst, src, radius);
+      },
       activeSpotsNodeId() {
         const s = useAppStore.getState();
         return findActiveSpotsNodeId(s.graph, s.activeOutputId);
@@ -1948,6 +1965,31 @@ export function CanvasView() {
           }
         }
         return { look, follows, forked, materializedFrom };
+      },
+      repairSheetsState() {
+        return useAppStore.getState().repairSheets;
+      },
+      projectNoticeState() {
+        return useAppStore.getState().projectNotice;
+      },
+      imageReadoutState() {
+        const img = useAppStore.getState().image;
+        if (!img) return null;
+        return {
+          fullWidth: img.fullWidth,
+          fullHeight: img.fullHeight,
+          flip: img.flip,
+          readoutOrigin: img.readoutOrigin ?? null,
+        };
+      },
+      saveRepairSheet(name) {
+        return useAppStore.getState().saveRepairSheet(name);
+      },
+      applyRepairSheet(slug) {
+        return useAppStore.getState().applyRepairSheet(slug);
+      },
+      deleteRepairSheet(slug) {
+        return useAppStore.getState().deleteRepairSheet(slug);
       },
     };
     return () => {

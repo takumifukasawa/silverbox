@@ -1049,7 +1049,65 @@ function SpotsInspector({ node }: { node: GraphNode }) {
           Clear all
         </button>
       </Section>
+      <RepairSheetSection spotCount={count} />
     </>
+  );
+}
+
+/**
+ * ゴミ取りセット (repair sheet) controls, sitting under the Spot Removal
+ * inspector (parent spec §5: "UI near the spot tool"). Save the open photo's
+ * current spots as a sensor-anchored sheet, then apply/delete existing sheets.
+ * Apply stamps onto the whole filmstrip selection (primary + secondaries); the
+ * store action reports per-target skips/refusals via the project notice.
+ */
+function RepairSheetSection({ spotCount }: { spotCount: number }) {
+  const repairSheets = useAppStore((s) => s.repairSheets);
+  const saveRepairSheet = useAppStore((s) => s.saveRepairSheet);
+  const applyRepairSheet = useAppStore((s) => s.applyRepairSheet);
+  const deleteRepairSheet = useAppStore((s) => s.deleteRepairSheet);
+  const image = useAppStore((s) => s.image);
+  const [name, setName] = useState('');
+  // A sheet needs a RAW frame carrying a readout window + at least one spot.
+  const canSave = spotCount > 0 && !!image?.readoutOrigin && name.trim().length > 0;
+
+  return (
+    <Section title="ゴミ取りセット">
+      <div className="param-row">
+        <input
+          type="text"
+          className="param-number"
+          data-testid="repair-sheet-name"
+          placeholder="セット名"
+          value={name}
+          onChange={(ev) => setName(ev.target.value)}
+          style={{ flex: 1 }}
+        />
+        <button
+          data-testid="repair-sheet-save"
+          disabled={!canSave}
+          onClick={() => {
+            void saveRepairSheet(name).then(() => setName(''));
+          }}
+        >
+          保存
+        </button>
+      </div>
+      {!image?.readoutOrigin && <div className="spots-count">読み出し枠を持つ RAW 写真でのみ保存できます</div>}
+      {repairSheets.map((sheet) => (
+        <div key={sheet.slug} className="param-row" data-testid="repair-sheet-row" data-slug={sheet.slug}>
+          <span className="param-label" style={{ flex: 1 }}>
+            {sheet.name}
+          </span>
+          <button data-testid="repair-sheet-apply" onClick={() => void applyRepairSheet(sheet.slug)}>
+            適用
+          </button>
+          <button data-testid="repair-sheet-delete" onClick={() => void deleteRepairSheet(sheet.slug)}>
+            削除
+          </button>
+        </div>
+      ))}
+    </Section>
   );
 }
 
