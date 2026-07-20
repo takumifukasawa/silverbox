@@ -1,5 +1,25 @@
 # Brief: develop-aware filmstrip thumbnails — impl (in-memory (c))
 
+Status: LANDED 2026-07-20 BUT ⚠️ INEFFECTIVE IN PRACTICE — FIX PENDING
+(user hand-test 2026-07-21: "サムネに編集が反映されない"). ROOT CAUSE
+(Fable-direct, confirmed): the fallback is ALL-OR-NOTHING. getDevelop-
+AwareThumbnail runs the FULL plan through cpuEvalPlan, which THROWS on
+the first CPU-mirror-less (spatial) step; the catch then falls back to
+the plain preview for the WHOLE cell. But a real RAW's default look
+ALWAYS seeds Detail (sharpening amount 40, seedDefaultLook) — a spatial
+step — so cpuEvalPlan throws and EVERY real RAW cell shows the plain
+preview, discarding the exposure/contrast/WB/curve/HSL/grading edits
+that ARE mirrorable. FIX: build the thumbnail plan EXCLUDING spatial /
+no-CPU-mirror steps (Detail, spots, masks, position-dependent vignette,
+external/denoise) and cpuEvalPlan over the color/tone steps only —
+sharpening etc. is invisible at 160px anyway; the color DIRECTION (the
+whole point) then shows. Wire the exclusion in buildDevelopPlanForLook
+(Filmstrip.tsx) or getDevelopAwareThumbnail (thumbnailCache.ts) — NOT
+appStore. Update verify-develop-thumbnails: a look with BOTH a tonal
+edit AND Detail must show the tonal DIRECTION (not fall back to plain).
+The verify passed originally because its test looks were pure tonal/BW
+with no Detail — add the Detail-plus-tonal case.
+
 Status: LANDED 2026-07-20 (SUITE 71/71, unit 254; also fixed an independent bw.enabled sidecar-reparse bug, commit e3a4ed7). Implements the conductor recommendation
 in docs/brief-bank/develop-aware-thumbnails.md, scoped to the variant
 that needs NO user principle-call: (c) hybrid with an sRGB-correct (a)
