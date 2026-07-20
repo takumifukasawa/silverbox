@@ -849,8 +849,27 @@ export interface CliExtractLookJob {
   minAgreement: number | null;
 }
 
+/**
+ * The whole job for one `--from-references <image…> --out <path>` invocation
+ * (look extraction MODE 2, stage 1 — reference-set statistical solve,
+ * docs/brief-bank/look-extraction-mode2-stage1.md), built by main
+ * (src/main/cliArgs.ts's buildCliJob). Like CliExtractLookJob it is ONE job
+ * producing ONE outcome — but UNLIKE it (mode 1 is pure JSON math over sidecar
+ * params) this DECODES each reference image, aggregates a statistical
+ * signature (engine/look/signature.ts), and solves a tone curve
+ * (engine/look/solve.ts). Stage 1 solves ONLY the luma tone freeze stage; the
+ * color/grain stages are stage 2 (reported as deferred).
+ */
+export interface CliExtractReferencesJob {
+  mode: 'extract-references';
+  /** Absolute paths to each reference IMAGE (RAW/JPEG), in argv order (parseCliArgs' positional bucket, shared with CliRenderJob.images). At least one, enforced at parse time. */
+  references: string[];
+  /** Absolute path to the preset FILE this job writes (`--out <path>`, required — same mode-dependent meaning as CliExtractLookJob.outPath). */
+  outPath: string;
+}
+
 /** Either job shape `cli:run` can carry; the renderer branches on `mode`. */
-export type CliJob = CliRenderJob | CliCheckJob | CliDiffJob | CliExtractLookJob;
+export type CliJob = CliRenderJob | CliCheckJob | CliDiffJob | CliExtractLookJob | CliExtractReferencesJob;
 
 /** Golden-render outcome for one status that isn't a pass/fail ΔE comparison. */
 export type CliCheckStatus =
@@ -919,8 +938,37 @@ export interface CliExtractLookOutcome {
 /** CliExtractLookOutcome plus the same {input,error} failure shape every other CLI result uses — streamed via cliProgress. */
 export type CliExtractLookResult = CliExtractLookOutcome | { input: string; error: string };
 
+/**
+ * The one `--from-references` outcome (look extraction MODE 2, stage 1 — see
+ * CliExtractReferencesJob's doc comment). `input` holds the WRITTEN output path
+ * (same as `outputPath`), same uniform-addressing reason CliExtractLookOutcome
+ * gives. `solved`/`deferred` are the solve's freeze-stage report
+ * (engine/look/solve.ts) — stage 1 solves 'tone' and defers the rest; `report`
+ * is the human-readable per-percentile residual table (never a raw curve point
+ * dump, same restraint mode 1's report uses).
+ */
+export interface CliExtractReferencesOutcome {
+  input: string;
+  outputPath: string;
+  /** freeze stages solved (stage 1: ['tone']). */
+  solved: string[];
+  /** freeze stages deferred to stage 2 ('global-chroma','hsl-bands','grading-wheels','grain'). */
+  deferred: string[];
+  /** number of reference images aggregated into the signature. */
+  imageCount: number;
+  report: string[];
+}
+
+/** CliExtractReferencesOutcome plus the same {input,error} failure shape every other CLI result uses — streamed via cliProgress. */
+export type CliExtractReferencesResult = CliExtractReferencesOutcome | { input: string; error: string };
+
 /** Whatever cliProgress carries — main's formatter (cliArgs.ts's formatCliProgress) branches on shape. */
-export type CliProgressResult = CliRenderResult | CliCheckResult | CliDiffResult | CliExtractLookResult;
+export type CliProgressResult =
+  | CliRenderResult
+  | CliCheckResult
+  | CliDiffResult
+  | CliExtractLookResult
+  | CliExtractReferencesResult;
 
 /**
  * Request for one image's golden check/update (`window.silverbox.checkGoldenImage`

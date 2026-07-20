@@ -114,6 +114,8 @@ import {
 } from '../engine/graph/presetFamilies';
 import { diffLook } from '../engine/look/diffLook';
 import { computeLookConsensus, formatConsensusReport } from '../engine/look/consensus';
+import { aggregateSignature } from '../engine/look/signature';
+import { PLACEHOLDER_BASELINE_SIGNATURE, formatToneSolveReport, solveToneCurve } from '../engine/look/solve';
 import {
   DEFAULT_SETTINGS,
   PROJECT_MANIFEST_NAME,
@@ -124,6 +126,8 @@ import {
   type CliDiffResult,
   type CliExtractLookJob,
   type CliExtractLookResult,
+  type CliExtractReferencesJob,
+  type CliExtractReferencesResult,
   type CliRenderJob,
   type CliRenderResult,
   type FolderImageEntry,
@@ -1601,6 +1605,20 @@ interface AppState {
    * convention.
    */
   runCliExtractLook(job: CliExtractLookJob, onResult: (result: CliExtractLookResult) => void): Promise<void>;
+  /**
+   * Look extraction, MODE 2 stage 1 (main/index.ts's `--from-references` mode,
+   * docs/brief-bank/look-extraction-mode2-stage1.md — reference-set statistical
+   * solve): DECODES each `job.references` image (loadImage, no GPU/graph — the
+   * signature reads raw decoded pixels, exactly like the base-curve fitter
+   * samples the neutral decode), aggregates a luma signature
+   * (engine/look/signature.ts's aggregateSignature), solves the freeze-stage-1
+   * tone curve against the PLACEHOLDER neutral baseline
+   * (engine/look/solve.ts's solveToneCurve), and writes a `curves`-only preset.
+   * ONE job, ONE outcome (same shape as runCliExtractLook — `onResult` fires
+   * exactly once). Never renders; the color/grain freeze stages are stage 2
+   * (reported as deferred).
+   */
+  runCliExtractReferences(job: CliExtractReferencesJob, onResult: (result: CliExtractReferencesResult) => void): Promise<void>;
   /** Export dialog open/closed (Toolbar's "Export…" button / ⌘E — see App.tsx). */
   exportDialogOpen: boolean;
   setExportDialogOpen(open: boolean): void;
@@ -8031,6 +8049,59 @@ export const useAppStore = create<AppState>((set, get) => {
       const excluded = consensus.reports.filter((r) => !r.included).map((r) => r.family);
       const report = formatConsensusReport(consensus.reports);
       onResult({ input: job.outPath, outputPath: job.outPath, includes: consensus.includes, excluded, report });
+    } catch (err) {
+      onResult({ input: job.outPath, error: err instanceof Error ? err.message : String(err) });
+    }
+  },
+
+  async runCliExtractReferences(job, onResult) {
+    try {
+      // Decode each reference at the interactive preview resolution — a look
+      // signature is a percentile DISTRIBUTION, statistically identical at
+      // preview vs full res (imageLumaPercentiles strides to a sample cap
+      // regardless), and preview res bounds memory across a set. RAW gets the
+      // same baseline-exposure decode gain the app's normal open (and the base
+      // curve the tone solve reuses) uses; ignored for JPEG.
+      const { previewLongEdge, baselineExposureEV } = get().settings;
+      const images = [];
+      for (const path of job.references) {
+        const bytes = await window.silverbox.readFile(path);
+        const kind = isRawFileName(path) ? 'raw' : 'jpg';
+        let prepared;
+        try {
+          prepared = await loadImage(bytes, kind, previewLongEdge, baselineExposureEV);
+        } catch (err) {
+          throw new Error(`${path}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        images.push({ data: prepared.data, width: prepared.width, height: prepared.height });
+      }
+
+      // Freeze stage 1 (luma tone) ONLY — solve the tone curve that maps the
+      // PLACEHOLDER neutral baseline (stage-2 TODO: bundled corpus) toward the
+      // reference set's luma signature; the color/grain stages are deferred.
+      const signature = aggregateSignature(images);
+      const { curve, report } = solveToneCurve(PLACEHOLDER_BASELINE_SIGNATURE, signature);
+
+      const develop = defaultDevelopParams();
+      develop.toneCurve = { ...develop.toneCurve, rgb: curve };
+      const graph = defaultGraphDoc();
+      const devNode = graph.nodes.find((n) => n.kind === DEVELOP_KIND)!;
+      devNode.develop = develop;
+      const name = job.outPath.split(/[\\/]/).pop()?.replace(/\.json$/i, '') || 'Extracted look';
+      // A curves-only preset: only the tone curve was solved this stage, so
+      // that's the one family `includes` gates on apply (same scoping mode 1
+      // uses — everything else stays at identity/default).
+      const content = serializePreset(name, graph, new Date().toISOString(), undefined, ['curves']);
+      await window.silverbox.writeExtractedPreset(job.outPath, content);
+
+      onResult({
+        input: job.outPath,
+        outputPath: job.outPath,
+        solved: report.solved,
+        deferred: report.deferred,
+        imageCount: signature.imageCount,
+        report: formatToneSolveReport(report, signature.imageCount),
+      });
     } catch (err) {
       onResult({ input: job.outPath, error: err instanceof Error ? err.message : String(err) });
     }

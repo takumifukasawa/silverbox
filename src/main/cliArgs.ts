@@ -16,6 +16,7 @@ import {
   type CliCheckJob,
   type CliDiffJob,
   type CliExtractLookJob,
+  type CliExtractReferencesJob,
   type CliJob,
   type CliProgressResult,
   type CliRenderJob,
@@ -28,6 +29,7 @@ export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg|look.
        silverbox-render --check [--update] [--threshold <deltaE>] [--json] <image…>
        silverbox-render --diff <sidecarA> <sidecarB> [--image <arw>] [--json]
        silverbox-render --extract-look <look…> --out <preset.json> [--families <ids>] [--min-agreement <0-1>] [--json]
+       silverbox-render --from-references <image…> --out <preset.json> [--json]
 
   --project <dir>       resolve every plain-image input's look from this
                         project's playlist (<dir>/looks/) instead of the
@@ -202,10 +204,36 @@ Exit codes (--extract-look): 0 the preset was written (regardless of how
 many families got excluded — that's expected, not a failure), 1 a look file
 could not be read/parsed or named an unknown/structural --families id, 2 bad
 usage.
+
+Look extraction (--from-references): distill a preset from REFERENCE images
+that already HAVE a look — film scans, a downloaded Pinterest board, another
+shooter's JPEGs — with no pairing to your own photos (docs/brief-bank/
+look-extraction.md, mode 2 — statistical look solve). DECODES each image (a
+statistical signature, not a param diff), so unlike --extract-look it takes
+photos, not sidecars. Files only: no scraping, no network, no auth, ever —
+download the pins to a folder first, then point this at the files.
+
+STAGE 1 (the spike): solves ONLY the luma TONE curve, by matching the
+reference set's luma percentile distribution to a neutral baseline (the
+base-curve fitter's exact percentile→control-point method, reused). The
+color/grain stages (saturation, HSL bands, grading wheels, grain) are stage
+2 and reported as DEFERRED. White balance is deliberately never solved (a
+reference set's WB is the SCENE's, not the look's).
+
+  --from-references <image…>  one or more reference images (RAW/JPEG)
+  --out <path>                required: where to write the extracted preset
+
+Human output prints the written path plus the tone fit report (which stages
+were solved vs deferred, and the per-percentile residual after the fit);
+--json emits one NDJSON object {input,outputPath,solved,deferred,imageCount,
+report}.
+
+Exit codes (--from-references): 0 the preset was written, 1 a reference image
+could not be read/decoded, 2 bad usage.
 `;
 
 export interface CliParsedArgs {
-  mode: 'render' | 'check' | 'diff' | 'extract-look';
+  mode: 'render' | 'check' | 'diff' | 'extract-look' | 'extract-references';
   images: string[];
   /** `--out <path>`: a DIRECTORY for mode 'render' (CliRenderJob.outDir), a preset FILE path for mode 'extract-look' (CliExtractLookJob.outPath) — same flag, mode-dependent meaning; not valid with 'check'/'diff'. */
   outDir: string | null;
@@ -325,6 +353,9 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
         break;
       case '--extract-look':
         opts.mode = 'extract-look';
+        break;
+      case '--from-references':
+        opts.mode = 'extract-references';
         break;
       case '--families': {
         const v = argv[++i];
@@ -455,6 +486,25 @@ export function parseCliArgs(argv: string[]): CliParsedArgs | { error: string } 
     if (opts.diffImage !== null) return { error: '--image is not valid with --extract-look' };
     if (opts.update) return { error: '--update is not valid with --extract-look' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --extract-look' };
+  } else if (opts.mode === 'extract-references') {
+    // DECODES its inputs (a statistical signature — see CliExtractReferencesJob),
+    // but shares none of render's/check's per-image OUTPUT options.
+    if (opts.images.length < 1) return { error: '--from-references needs at least one reference image' };
+    if (opts.outDir === null) return { error: '--from-references requires --out <path>' };
+    if (opts.preset !== null) return { error: '--preset is not valid with --from-references' };
+    if (opts.output !== null) return { error: '--output is not valid with --from-references' };
+    if (opts.quality !== 90) return { error: '--quality is not valid with --from-references' };
+    if (opts.maxDim !== null) return { error: '--max-dim is not valid with --from-references' };
+    if (opts.metadata !== 'all') return { error: '--metadata is not valid with --from-references' };
+    if (opts.colorSpace !== 'srgb') return { error: '--colorspace is not valid with --from-references' };
+    if (opts.minRating !== null) return { error: '--min-rating is not valid with --from-references' };
+    if (opts.skipRejected) return { error: '--skip-rejected is not valid with --from-references' };
+    if (opts.allowExternal) return { error: '--allow-external is not valid with --from-references' };
+    if (opts.diffImage !== null) return { error: '--image is not valid with --from-references' };
+    if (opts.update) return { error: '--update is not valid with --from-references' };
+    if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold is not valid with --from-references' };
+    if (opts.families !== null) return { error: '--families requires --extract-look' };
+    if (opts.minAgreement !== null) return { error: '--min-agreement requires --extract-look' };
   } else {
     if (opts.update) return { error: '--update requires --check' };
     if (opts.threshold !== DEFAULT_DELTAE_THRESHOLD) return { error: '--threshold requires --check' };
@@ -534,6 +584,16 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
     };
     return job;
   }
+  if (parsed.mode === 'extract-references') {
+    // parseCliArgs' own validation guarantees outDir is set (--out required)
+    // and images has at least one entry.
+    const job: CliExtractReferencesJob = {
+      mode: 'extract-references',
+      references: images,
+      outPath: resolve(cwd, parsed.outDir!),
+    };
+    return job;
+  }
   const preset: CliRenderPresetRef | null =
     parsed.preset === null
       ? null
@@ -567,6 +627,17 @@ export function buildCliJob(parsed: CliParsedArgs, cwd: string): CliJob {
 export function formatCliProgress(result: CliProgressResult, json: boolean): { stderr: boolean; line: string } {
   if (json) return { stderr: false, line: JSON.stringify(result) };
   if ('error' in result) return { stderr: true, line: `${result.input}: ERROR ${result.error}` };
+  if ('outputPath' in result && 'solved' in result) {
+    // --from-references (CliExtractReferencesOutcome) — checked BEFORE the
+    // 'outputPath'-only extract-look branch below: 'solved' is the key that
+    // disambiguates mode 2 from mode 1 (which carries 'includes' instead).
+    // Never a failure (a written preset is the success — see CLI_USAGE's
+    // "Exit codes (--from-references)").
+    return {
+      stderr: false,
+      line: [`wrote ${result.outputPath} (solved: ${result.solved.join(', ')}; deferred: ${result.deferred.join(', ')})`, ...result.report.map((l) => `  ${l}`)].join('\n'),
+    };
+  }
   if ('outputPath' in result) {
     // --extract-look (CliExtractLookOutcome) — checked BEFORE 'lines' below:
     // a unique key, no other CliProgressResult variant carries it. Never a

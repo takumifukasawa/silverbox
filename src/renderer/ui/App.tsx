@@ -409,6 +409,8 @@ export function App() {
           await useAppStore.getState().runCliDiff(job, (result) => window.silverbox.cliProgress(result));
         } else if (job.mode === 'extract-look') {
           await useAppStore.getState().runCliExtractLook(job, (result) => window.silverbox.cliProgress(result));
+        } else if (job.mode === 'extract-references') {
+          await useAppStore.getState().runCliExtractReferences(job, (result) => window.silverbox.cliProgress(result));
         } else {
           await useAppStore.getState().runCliRender(job, (result) => window.silverbox.cliProgress(result));
         }

@@ -153,6 +153,7 @@ const ALL_SCRIPTS = [
   { name: 'undo', file: 'verify-undo.mjs' },
   { name: 'preset-selection', file: 'verify-preset-selection.mjs' },
   { name: 'lookextract', file: 'verify-lookextract.mjs' },
+  { name: 'lookextract2', file: 'verify-lookextract2.mjs' },
   { name: 'dcp', file: 'verify-dcp.mjs' },
   { name: 'virtualcopy', file: 'verify-virtualcopy.mjs' },
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
