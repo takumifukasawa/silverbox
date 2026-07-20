@@ -56,6 +56,80 @@ JPEGs); no pairing with our photos exists.
   hover-preview makes auditioning cheap). No claim of per-image
   optimality — same epistemic status as an LR preset.
 
+## Mode 2 solve well-posedness (conductor design, 2026-07-20)
+
+The naive "solve all Develop params to match the signature" is
+ILL-POSED — several param pairs are near-degenerate against the
+aggregate signature and a joint optimizer will trade them off
+arbitrarily, producing looks that match the numbers but read wrong and
+don't generalize. The fix is not a bigger optimizer; it is a
+DECOUPLING ORDER that makes each stage observe a signature component
+the earlier stages have already fixed, so each sub-solve is
+individually well-posed. Solve in this sequence, each stage FROZEN
+before the next:
+
+1. **Tone / luma first (achromatic).** Convert both the reference set
+   and the neutral baseline to luma and match the luma percentile
+   vector (p2..p98) by fitting the tone curve — the base-curve fitter's
+   exact percentile-matching method, reused. Rationale: tone is the
+   dominant degeneracy source (exposure, contrast, and curve shape all
+   live here); resolve it ONCE in the achromatic channel where
+   saturation/hue can't leak in. Do NOT also fit a separate exposure
+   scalar — exposure and a curve lift are the SAME degree of freedom
+   against a percentile vector; the curve absorbs it, and a post-hoc
+   step re-expresses the curve's average shift as the exposure slider
+   if a cleaner param split is wanted (presentation, not a second
+   solve).
+
+2. **Global chroma level (saturation/vibrance) second, on the
+   tone-fixed image.** With tone frozen, match the global chroma
+   distribution magnitude. Saturation and vibrance ARE degenerate
+   against a single global chroma statistic, so do not solve both from
+   it — solve SATURATION from the median chroma, and take vibrance from
+   the chroma distribution's SKEW (vibrance's definition is a
+   low-chroma-weighted boost, so it moves the low tail, not the
+   median). Two statistics, two params — now identifiable.
+
+3. **Per-band HSL (hue centroid + per-band sat) third.** With global
+   tone and global chroma fixed, the residual per-band hue-centroid
+   shift and per-band saturation ratio map directly onto the 8 HSL
+   bands — each band reads its own hue/sat/lum residual, no
+   cross-band degeneracy because the global level is already removed
+   (the bands solve the SHAPE of the chroma-vs-hue curve, not its
+   level).
+
+4. **Grading wheels (shadow/highlight chroma vectors) fourth.** The
+   a*b* means below p25 / above p75 give shadow and highlight color
+   directions. These are near-orthogonal to steps 1-3 by construction
+   (a mean chroma VECTOR in a luma zone, vs a global level or a
+   per-hue-band shape), so they're solved last with the least
+   interference — and midtone wheel = the residual global a*b* the
+   shadow/highlight zones didn't explain.
+
+5. **Grain amount last, from the band-limited high-freq energy** — a
+   scalar, fully decoupled from every color/tone stage.
+
+Only AFTER this staged closed-form pass does the small
+coordinate-descent refinement run (cpuEvalPlan against the full
+signature distance) — and it starts from a point that is already
+right per-family, so it polishes rather than searches, which is what
+keeps it fast AND stops it from re-entering the degeneracies the
+staging removed. The refinement's search radius per param should be
+BOUNDED (± a fraction of each slider's range) precisely to prevent it
+undoing the well-posed decomposition.
+
+Honesty corollary: the report states the solve ORDER and which
+signature component fixed each family, so an audit can see WHY a param
+landed where it did — not just its value. Same epistemic status as an
+LR preset, but with a traceable derivation.
+
+Degeneracies deliberately NOT solved (report as unsupported): absolute
+white balance (a reference set's WB is the SCENE's, not the look's —
+solving it would bake the references' lighting into every target);
+anything spatial (vignette/masks — no per-image pairing exists);
+clarity/texture/dehaze (their signature footprint overlaps contrast +
+grain too much to identify from aggregate stats alone in v1).
+
 ## Input channels (the boundary)
 
 Files only. Folder = expand to images. In-app entry ("Extract preset
