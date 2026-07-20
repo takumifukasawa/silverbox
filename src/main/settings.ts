@@ -132,10 +132,6 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.sharedLookFamilies = Array.isArray(src.sharedLookFamilies)
     ? src.sharedLookFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.sharedLookFamilies;
-  // Auto Sync (docs/brief-bank/multi-select-sync.md item E) — plain boolean,
-  // same lenient "anything else degrades to the default" convention as
-  // denoiseModelConsent above.
-  result.autoSyncEnabled = src.autoSyncEnabled === true;
   return result as unknown as Settings;
 }
 

@@ -3,7 +3,7 @@
  * linked-looks stage A): the one-shot no-asset batch case of linked-looks.md
  * §6 — apply a saved preset to EVERY photo in the filmstrip selection
  * (primary + secondaries) as ONE undoable gesture, no apply-time dialog (the
- * preset's own saved `includes` governs). Composes syncSelection's
+ * preset's own saved `includes` governs). Composes a
  * target-iteration/batch-undo/look-file-write pattern with applyPreset's
  * preset-parse/includes/merge path (appStore.ts's applyPresetToSelection).
  *
@@ -18,7 +18,7 @@
  *     node (with the primary's actual spot data) onto BOTH targets, neither
  *     of which had a spots node before — the seeded-fresh target (no prior
  *     look at all) proves the graft rides the same "seed like a fresh open,
- *     then merge" path syncSelection uses for a target with nothing on disk.
+ *     then merge" path this file's other batch writers use for a target with nothing on disk.
  *  3. ONE ⌘Z reverts all 3 (primary included — a same-path reopen, not a
  *     navigation jump) byte-identically to their pre-apply state; ⌘⇧Z
  *     (redo) re-applies all 3.

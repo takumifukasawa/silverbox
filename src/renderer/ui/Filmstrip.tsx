@@ -3,8 +3,6 @@ import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
 import { getThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
 import { describeExportOverridesRaw, MAX_RATING } from '../engine/graph/graphDoc';
-import { FamilyScopeDialog } from './FamilyScopeDialog';
-import type { PresetFamilyId } from '../engine/graph/presetFamilies';
 
 /**
  * Missing-photo placeholder cell (project-storage migration §"Missing
@@ -381,20 +379,10 @@ function FlagFilter({ value, onChange }: { value: FlagFilterValue; onChange: (va
 export function Filmstrip() {
   const folderEntries = useAppStore((s) => s.folderEntries);
   const imagePath = useAppStore((s) => s.imagePath);
-  const fileName = useAppStore((s) => s.fileName);
   // Multi-select (docs/brief-bank/multi-select-sync.md): SECONDARY paths
   // only — the primary is `imagePath` itself (see this field's own doc
   // comment in appStore.ts).
   const filmstripSelection = useAppStore((s) => s.filmstripSelection);
-  const syncSelection = useAppStore((s) => s.syncSelection);
-  // Auto Sync (item E): LR-style toggle beside Sync… — persisted, default
-  // off (today's explicit-only behavior unless the user opts in). The
-  // fan-out itself lives in appStore.ts's debounced subscriber (gesture-end
-  // proxy, same shape as sidecar autosave); this checkbox only flips the
-  // setting it reads.
-  const autoSyncEnabled = useAppStore((s) => s.settings.autoSyncEnabled);
-  const updateSettings = useAppStore((s) => s.updateSettings);
-  const [syncDialogOpen, setSyncDialogOpen] = useState(false);
   // ★n+ filter (ratings pack): strip-local view state, reset to "All" every
   // time this component remounts (a fresh folder — see the doc comment
   // above on `key={dir}`), never persisted.
@@ -436,7 +424,6 @@ export function Filmstrip() {
   // contains imagePath itself (see appStore.ts's own invariant), so no dedup
   // is needed here.
   const totalSelectedCount = (imagePath ? 1 : 0) + filmstripSelection.length;
-  const primaryName = fileName ?? 'the current photo';
 
   return (
     <div className="filmstrip-wrap" data-testid="filmstrip-wrap">
@@ -446,28 +433,6 @@ export function Filmstrip() {
             {totalSelectedCount} selected
           </span>
         )}
-        <button
-          type="button"
-          className="filmstrip-sync-button"
-          data-testid="filmstrip-sync-button"
-          disabled={totalSelectedCount < 2}
-          title="Copy checked develop families from the current photo to every other selected photo (undoable — ⌘Z)"
-          onClick={() => setSyncDialogOpen(true)}
-        >
-          Sync…
-        </button>
-        <label
-          className="filmstrip-autosync-toggle"
-          title="Auto Sync (LR-style): while on, every completed edit on the current photo fans out to the rest of the selection automatically (uses the same checked families as Sync…)"
-        >
-          <input
-            type="checkbox"
-            data-testid="filmstrip-autosync-toggle"
-            checked={autoSyncEnabled}
-            onChange={(ev) => void updateSettings({ autoSyncEnabled: ev.target.checked })}
-          />
-          Auto Sync
-        </label>
         <RatingFilter value={minRating} onChange={setMinRating} />
         <FlagFilter value={flagFilter} onChange={setFlagFilter} />
       </div>
@@ -483,18 +448,6 @@ export function Filmstrip() {
           />
         ))}
       </div>
-      <FamilyScopeDialog
-        open={syncDialogOpen}
-        title="Sync…"
-        targetDescription={`Copy from "${primaryName}" to ${filmstripSelection.length} other photo${filmstripSelection.length === 1 ? '' : 's'} (⌘Z reverts all of them):`}
-        settingsKey="syncFamilies"
-        confirmLabel="Sync"
-        onCancel={() => setSyncDialogOpen(false)}
-        onConfirm={(families: PresetFamilyId[]) => {
-          setSyncDialogOpen(false);
-          void syncSelection(families);
-        }}
-      />
     </div>
   );
 }

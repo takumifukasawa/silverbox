@@ -1,6 +1,11 @@
 # Brief: remove Sync + Auto Sync (linked-looks stage G)
 
-Status: DISPATCHED 2026-07-20 (the FINAL linked-looks stage).
+Status: LANDED 2026-07-20 (the FINAL linked-looks stage; SUITE 70/70
+(1 known project flake), unit 255). grep-clean confirmed (no
+autoSync/syncSelection/Auto Sync/flushPendingAutoSync in src/);
+SyncUndoEntry/applySyncEntryGraphs/kind:'sync' preserved and still
+referenced (21 in appStore, 6 in undoStack). verify-sync.mjs +
+verify-autosync.mjs deleted, suite 72→70.
 Parent spec: docs/brief-bank/linked-looks.md §6 (Sync removal + Auto
 Sync removal, both USER-DECIDED) and §10. The same-release ordering
 constraint is already satisfied — apply-preset-to-selection (stage A,

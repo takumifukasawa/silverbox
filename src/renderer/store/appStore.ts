@@ -103,7 +103,6 @@ import { parsePresetFile, serializePreset, type ParsedPreset } from '../engine/g
 import {
   ALL_FAMILY_IDS,
   buildScopedLook,
-  DEFAULT_CHECKED_FAMILY_IDS,
   familyForDevelopKey,
   isDevelopFamily,
   isKnownFamilyId,
@@ -422,24 +421,6 @@ interface AppState {
    * path drawn from the current project's own `folderEntries`).
    */
   lookPathForPhoto(photoPath: string): string | null;
-  /**
-   * "Sync…" (docs/brief-bank/multi-select-sync.md): copy `families` FROM the
-   * PRIMARY's live graph TO every SECONDARY-selected look, via the exact
-   * same applyLook/preset merge machinery (mergeScopedLook) preset-apply
-   * already uses — never opens a target, writes each one directly through
-   * the explicit-look-path seam (same shape as setFlag's "any other look"
-   * branch). A target with no look yet is seeded exactly like a fresh open
-   * (seedDefaultLook) before the families are merged onto it, so the file
-   * this creates is never a bare default doc. Structural families (masks/
-   * spots/custom-nodes) are skipped PER TARGET when that target's own chain
-   * isn't structurally compatible (presetFamilies.ts's
-   * structuralFamilyCompatible) — counted in the completion notice, never
-   * grafted in a way that would leave an orphaned node. Pushes ONE
-   * SyncUndoEntry (per-target before/after look contents) onto the global
-   * undo stack; a completion `projectNotice` reports counts. No-op without
-   * an open primary, an active project, or any secondary selected.
-   */
-  syncSelection(families: PresetFamilyId[]): Promise<void>;
   /**
    * "Remove from project" (UX pack round 2, item C — ⌫/Delete on the
    * filmstrip selection, or a cell's context-menu item): drops `paths` from
@@ -919,11 +900,11 @@ interface AppState {
    * secondary — docs/brief-bank/apply-preset-to-selection.md, linked-looks
    * stage A): the one-shot no-asset batch case of linked-looks.md §6,
    * REQUIRED for both look presets and repair-sheet-style spot batches
-   * («写真を複数選択してプリセットを一気に適用できる»). Composes syncSelection's
+   * («写真を複数選択してプリセットを一気に適用できる»). Composes a
    * target-iteration/batch-undo/look-file-write pattern with applyPreset's
    * own preset-parse/includes/merge path — SHARES both halves
-   * (mergeFamiliesWithSkipDetection, the module-level helper syncSelection
-   * itself now uses) rather than re-deriving either.
+   * (mergeFamiliesWithSkipDetection, the shared per-target scoped-merge
+   * helper below) rather than re-deriving either.
    *
    * No secondary selection (`filmstripSelection` empty): delegates to
    * `applyPreset` UNCHANGED — bit-identical behavior, no batch undo entry,
@@ -935,7 +916,7 @@ interface AppState {
    * structural families (spots/masks/custom-nodes) graft via the same
    * graftStructuralFamily machinery applyPreset already uses, skipped
    * per-target (and counted in the notice) when that target's own chain
-   * isn't structurally compatible, exactly like syncSelection. A preset with
+   * isn't structurally compatible. A preset with
    * no `includes` (a pre-scoping whole-look file) is treated as every
    * family except geometry — the same "whole look, geometry excluded" shape
    * applyLook's own historical behavior has always had for a single photo;
@@ -949,8 +930,8 @@ interface AppState {
    * open photo's look file is never left lagging the in-memory edit the way
    * the ordinary 1000ms autosave debounce would leave it.
    *
-   * ONE SyncUndoEntry (kind 'sync', reusing the exact batch-undo shape
-   * syncSelection's own targets carry) covers primary + every secondary
+   * ONE SyncUndoEntry (kind 'sync', the same batch-undo shape every
+   * multi-target write in this file uses) covers primary + every secondary
    * that actually got written — ⌘Z reverts all of them in place (no
    * cherry-picking), redo re-applies. A completion `projectNotice` reports
    * the target count + any structural skips/errors. No-op without an open
@@ -1019,11 +1000,11 @@ interface AppState {
   /**
    * "Link photo(s) to look" (共通ルックを使う — linked-looks-stage-b.md
    * semantic 2): attach `targets` (1..N photo paths, batch shape copied from
-   * applyPresetToSelection/syncSelection — stage A) to the shared look
+   * applyPresetToSelection — stage A) to the shared look
    * `slug`. Per photo, per family the look OFFERS (its own `includes`,
    * develop-only): if that family's CURRENT value differs from this
    * target's own FRESH-SEED DEFAULTS (seeded via the same decode +
-   * seedDefaultLook path syncSelection uses for an absent look), the photo
+   * seedDefaultLook path used elsewhere in this file for an absent look), the photo
    * already edited it — it stays 個別調整 (excluded from `follows`, values
    * untouched); an untouched family gets the look's own values WRITTEN in
    * (materialization) and enters `follows`. A target whose Develop node is
@@ -1663,54 +1644,6 @@ function cancelAutosaveTimer(): void {
     clearTimeout(autosaveTimer);
     autosaveTimer = null;
   }
-}
-
-// --- Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round
-// 2 — LR-style toggle beside the existing Sync… button) ---------------------
-//
-// "Every COMPLETED edit gesture on the primary… sliders sync once on gesture
-// end, never per tick" is the SAME problem sidecar autosave above already
-// solved (a graph mutation fires on every tick of a drag) — same fix, same
-// shape: debounce on `state.graph`'s own reference change, act once it
-// settles. Deliberately a SEPARATE timer/subscriber from autosave's own
-// (independent of `settings.autosaveSidecar`, a disk-write preference this
-// fan-out has nothing to do with), but same module-scope-above-the-store
-// declaration order, for the same reason (openImageByPath's own flush-on-
-// switch call needs it, and the post-creation subscriber schedules it).
-let autoSyncTimer: ReturnType<typeof setTimeout> | null = null;
-/**
- * Fire (or re-fire) the auto-sync fan-out NOW against whatever's current —
- * re-checks every gate at call time EXCEPT `graphDirty`, deliberately: the
- * subscriber below only ever ARMS this timer when the triggering graph
- * change was itself dirty (a real edit, not a fresh open/reset — see its own
- * comment), and re-reading `graphDirty` here, 1000ms later, would race the
- * SIDECAR AUTOSAVE subscriber's own independent 1000ms timer on the SAME
- * graph-changed event: whichever of the two timers happens to fire first
- * (autosave's `saveGraph()` clears `graphDirty` to false) would silently
- * starve the other if this re-checked it — a real bug caught by
- * verify-autosync.mjs's own rapid-tick check before this comment existed.
- */
-function runAutoSyncNow(): void {
-  autoSyncTimer = null;
-  const s = useAppStore.getState();
-  if (!s.settings.autoSyncEnabled) return;
-  if (!s.imagePath || s.imageStatus !== 'ready') return;
-  if (s.filmstripSelection.length === 0) return; // nothing to fan out to
-  const checked = s.settings.syncFamilies.filter(isKnownFamilyId);
-  const families = checked.length > 0 ? checked : [...DEFAULT_CHECKED_FAMILY_IDS];
-  void s.syncSelection(families);
-}
-/**
- * Flush-on-switch (autosave's own precedent, data-loss-in-a-race fix):
- * called from openImageByPath/openProjectByPath/newProject at the same
- * "this is a real switch, not a reopen" points sidecar autosave's own flush
- * is — a photo switch a moment after a gesture ends must not silently drop
- * the pending fan-out for whatever was just edited.
- */
-function flushPendingAutoSync(): void {
-  if (autoSyncTimer === null) return;
-  clearTimeout(autoSyncTimer);
-  runAutoSyncNow();
 }
 
 // --- Fingerprint (project-storage migration, stage 3) ----------------------
@@ -2505,10 +2438,11 @@ function forkValueDriftedFamilies(
 
 /**
  * Per-target scoped-family merge with structural skip-detection — shared by
- * syncSelection AND applyPresetToSelection (docs/brief-bank/
- * apply-preset-to-selection.md): both walk a target list, copying `families`
- * from one shared `source` doc onto each target's own graph, and both need
- * the SAME "don't graft an orphaned structural node" guard. Any family in
+ * applyPresetToSelection, linkPhotosToLook, and the other batch writers in
+ * this file (docs/brief-bank/apply-preset-to-selection.md): each walks a
+ * target list, copying `families` from one shared `source` doc onto each
+ * target's own graph, and all need the SAME "don't graft an orphaned
+ * structural node" guard. Any family in
  * `masks`/`spots`/`custom-nodes` whose graft would be structurally
  * incompatible with `baseGraph`'s own chain (structuralFamilyCompatible) is
  * dropped from the merge for THIS target and reported back in `skipped`, so
@@ -3666,9 +3600,9 @@ export const useAppStore = create<AppState>((set, get) => {
     // Self-write-suppression baseline (saveGraph/writeGraphSaveSnapshot's own
     // "record exactly what we just wrote" discipline — AppState.
     // lastSidecarText's doc comment): this is a DIRECT writeSidecar, not
-    // saveGraph, so nothing else updates lastSidecarText. Harmless while the
-    // currently open photo is never among `targets` (syncSelection's own
-    // case, since its targets always exclude the primary) — but
+    // saveGraph, so nothing else updates lastSidecarText. Harmless when the
+    // currently open photo isn't among `targets` (a batch write whose
+    // targets exclude the primary) — but
     // applyPresetToSelection's targets DO include the primary, and the
     // caller (undo()/redo()'s 'sync' case) reopens it right after this
     // returns ("the currently open photo happens to be one of the targets"
@@ -4145,7 +4079,6 @@ export const useAppStore = create<AppState>((set, get) => {
     const priorState = get();
     if (priorState.imagePath !== path) {
       void flushPendingAutosave(priorState);
-      flushPendingAutoSync(); // item E — a switch a moment after a gesture ends must not drop the pending fan-out
     }
     cancelAutosaveTimer();
     // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
@@ -4643,7 +4576,6 @@ export const useAppStore = create<AppState>((set, get) => {
     // path happens to repeat across projects.
     await flushPendingAutosave(get());
     cancelAutosaveTimer();
-    flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
     // sharedLookTexts is project-scoped (stage D's per-slug baseline cache) —
     // a fresh empty cache for the new project, same reset shared_Looks itself
@@ -4688,7 +4620,6 @@ export const useAppStore = create<AppState>((set, get) => {
     // pending belongs here just as much.
     await flushPendingAutosave(get());
     cancelAutosaveTimer();
-    flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
     // Reset the per-session quick-project cache (ensureActiveProject's own
     // module-scope variable) — the NEXT photo open/drop that needs a quick
     // project mints a FRESH dated subdirectory instead of resuming this one.
@@ -4721,19 +4652,9 @@ export const useAppStore = create<AppState>((set, get) => {
     if (next < 0 || next >= folderEntries.length) return;
     // The ⌘/⇧ multi-select is anchored to the CURRENT primary's context: a
     // plain cell click clears it before opening (Filmstrip.tsx), and an
-    // arrow switch changes the primary the same way, so it must clear too.
-    // Leaving it alive across arrow switches let (a) Auto Sync fan a newly
-    // edited photo's families onto the still-silently-selected previous one
-    // (user's hand-test 「編集して違う写真を触って編集して戻ってくると、
-    // そもそも反映されてない」 — the previous photo's edit was overwritten
-    // by the fan-out, not lost by the store) and (b) ⌫ remove photos whose
+    // arrow switch changes the primary the same way, so it must clear too —
+    // leaving it alive across arrow switches would let ⌫ remove photos whose
     // selection highlight was no longer on screen.
-    // Flush any pending fan-out BEFORE dissolving the selection — an edit
-    // made <1000ms ago still reaches the targets that were visibly selected
-    // when it was made (verify-autosync §5's flush-on-switch guarantee;
-    // clearing first would drop it, since the flush reads the live
-    // selection).
-    flushPendingAutoSync();
     set({ filmstripSelection: [], filmstripSelectionAnchor: folderEntries[next]!.path });
     void get().openImageByPath(folderEntries[next]!.path, { keepFolderContext: true });
   },
@@ -5948,7 +5869,7 @@ export const useAppStore = create<AppState>((set, get) => {
         return;
       }
       case 'sync': {
-        if (entry.after === undefined) return; // defensive: syncSelection always populates `after` eagerly (unlike photo-edit entries, both sides are known synchronously at push time)
+        if (entry.after === undefined) return; // defensive: every 'sync'-kind writer populates `after` eagerly (unlike photo-edit entries, both sides are known synchronously at push time)
         const result = await applySyncEntryGraphs(entry.targets, entry.after);
         if (!result.ok) {
           blockUndoRedo('redo', entry.label, result.failedTarget);
@@ -6020,7 +5941,6 @@ export const useAppStore = create<AppState>((set, get) => {
           } else {
             await flushPendingAutosave(get());
             cancelAutosaveTimer();
-            flushPendingAutoSync();
             set(emptyPhotoFields());
           }
         }
@@ -6943,8 +6863,8 @@ export const useAppStore = create<AppState>((set, get) => {
           };
         } else {
           // No look yet — same fresh-seed baseline IS the current graph, no
-          // separate decode (mirrors syncSelection's own "seed it exactly
-          // like a fresh open would" branch).
+          // separate decode (mirrors applyPresetToSelection's own "seed it
+          // exactly like a fresh open would" branch).
           baseGraph = seeded.graph;
           const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
           meta = {
@@ -8293,178 +8213,14 @@ export const useAppStore = create<AppState>((set, get) => {
     return row ? `${project.dir}/looks/${row.look}` : null;
   },
 
-  async syncSelection(families) {
-    const s = get();
-    const primaryPath = s.imagePath;
-    if (!primaryPath || s.imageStatus !== 'ready') return;
-    const project = s.project;
-    if (!project) return;
-    const targets = s.filmstripSelection.filter((p) => p !== primaryPath);
-    if (targets.length === 0) return; // the toolbar button is gated on 2+ selected; stay defensive if driven directly (verify hooks)
-
-    const checkedFamilies = new Set(families);
-    // geometry needs the UN-stripped graph — same conditional savePreset's
-    // own scoped-look branch uses (presetFamilies.ts's pickDevelopFamilies/
-    // buildScopedLook doc comments); captureLook only clears the input
-    // node's geometry, so every other family is unaffected either way.
-    // Multi-output scoping fix (virtual-copy.md): once the PRIMARY (this
-    // open doc) has 2+ outputs, "the primary's live graph" means "the
-    // primary's ACTIVE-output chain" — restricted here via chainScope/
-    // restrictToChain so a structural graft below never pulls in the
-    // inactive copy's own masks/spots/custom nodes (a no-op on a
-    // single-output primary, where the scope covers the whole graph).
-    const primaryScope = chainScope(s.graph, s.activeOutputId);
-    const rawPrimaryLook = checkedFamilies.has('geometry') ? s.graph : captureLook(s.graph);
-    const primaryLook = restrictToChain(rawPrimaryLook, primaryScope);
-
-    const before: Record<string, GraphDoc> = {};
-    const after: Record<string, GraphDoc> = {};
-    const skippedByFamily: Record<string, number> = {};
-    let errorCount = 0;
-
-    for (const photoPath of targets) {
-      const row = findPlaylistPhoto(project, photoPath);
-      if (!row) {
-        errorCount++;
-        continue;
-      }
-      const lookPath = `${project.dir}/looks/${row.look}`;
-      let existingText: string | null = null;
-      try {
-        existingText = await window.silverbox.readSidecar(lookPath);
-      } catch (err) {
-        console.warn(`syncSelection: could not read ${lookPath}:`, err);
-        errorCount++;
-        continue;
-      }
-
-      let baseGraph: GraphDoc;
-      let meta: {
-        source: SidecarSource | null;
-        createdAt: string | null;
-        unknown: Record<string, unknown> | undefined;
-        rating: number;
-        photo: string | undefined;
-        fingerprint: string | undefined;
-        flag: PhotoFlag | undefined;
-      };
-      if (existingText !== null) {
-        let parsed: SidecarDoc;
-        try {
-          parsed = parseGraphDoc(existingText);
-        } catch (err) {
-          console.warn(`syncSelection: ${lookPath} is unreadable by this build, skipping:`, err);
-          errorCount++;
-          continue;
-        }
-        baseGraph = parsed.graph;
-        meta = {
-          source: parsed.source ?? null,
-          createdAt: parsed.createdAt ?? null,
-          unknown: parsed.unknown,
-          rating: parsed.rating,
-          photo: parsed.photo,
-          fingerprint: parsed.fingerprint,
-          flag: parsed.flag,
-        };
-      } else {
-        // No look yet — seed it exactly like a fresh open would (mechanism
-        // note: "the seeded default when absent — same seeding as a fresh
-        // open of that photo"), THEN merge the checked families onto it, so
-        // the file this sync creates is never a bare default doc.
-        try {
-          const bytes = await window.silverbox.readFile(photoPath);
-          const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
-          const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
-          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
-            usedSidecar: false,
-            kind,
-            testFlags: window.silverbox.testFlags,
-          }).graph;
-          const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
-          meta = {
-            source: {
-              fileName: photoPath.split('/').pop() ?? photoPath,
-              ...(image.capture?.cameraModel ? { cameraModel: image.capture.cameraModel } : {}),
-              kind,
-            },
-            createdAt: new Date().toISOString(),
-            unknown: undefined,
-            rating: 0,
-            photo: relativizeProjectPath(project.dir, photoPath),
-            fingerprint,
-            flag: undefined,
-          };
-        } catch (err) {
-          console.warn(`syncSelection: could not decode ${photoPath} to seed a fresh look:`, err);
-          errorCount++;
-          continue;
-        }
-      }
-
-      // Target-side scoping fix (virtual-copy.md): a TARGET photo isn't open,
-      // so there's no live activeOutputId for it — default to its own first
-      // output, the same "activeOutputId ?? first" fallback rule
-      // activeOutputNode always applies (chainScope with `null`). Per-target
-      // structural skip-counting (masks/spots/custom-nodes incompatible with
-      // THIS target's own chain) is the shared helper's job now —
-      // applyPresetToSelection below walks the exact same shape.
-      const targetScope = chainScope(baseGraph, null);
-      const { merged: mergedGraph, skipped } = mergeFamiliesWithSkipDetection(baseGraph, primaryLook, checkedFamilies, targetScope);
-      for (const fam of skipped) skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
-      const content = serializeGraphDoc(
-        mergedGraph,
-        meta.source,
-        meta.createdAt,
-        meta.unknown,
-        meta.rating,
-        meta.photo,
-        meta.fingerprint,
-        meta.flag
-      );
-      try {
-        await window.silverbox.writeSidecar(lookPath, content);
-      } catch (err) {
-        console.warn(`syncSelection: could not write ${lookPath}:`, err);
-        errorCount++;
-        continue;
-      }
-      before[photoPath] = structuredClone(baseGraph);
-      after[photoPath] = mergedGraph;
-    }
-
-    const writtenTargets = Object.keys(after);
-    if (writtenTargets.length > 0) {
-      const entry: SyncUndoEntry = {
-        seq: nextUndoSeq(),
-        at: Date.now(),
-        kind: 'sync',
-        label: `Sync ${families.join(', ')} to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}`,
-        targets: writtenTargets,
-        before,
-        after,
-      };
-      set((st) => ({ undoStack: pushUndoEntry(st.undoStack, entry) }));
-      await get().refreshPlaylistStatus();
-    }
-
-    const skipParts = Object.entries(skippedByFamily).map(([fam, n]) => `${fam} on ${n} (incompatible chain)`);
-    const skipSuffix = skipParts.length > 0 ? `; skipped ${skipParts.join(', ')}` : '';
-    const errorSuffix = errorCount > 0 ? ` (${errorCount} error${errorCount === 1 ? '' : 's'})` : '';
-    raiseNotice('projectNotice', {
-      kind: errorCount > 0 ? 'error' : 'success',
-      message: `synced ${families.length} famil${families.length === 1 ? 'y' : 'ies'} to ${writtenTargets.length} look${writtenTargets.length === 1 ? '' : 's'}${skipSuffix}${errorSuffix}`,
-    });
-  },
-
   async applyPresetToSelection(slug) {
     const s = get();
     const primaryPath = s.imagePath;
     if (!primaryPath || s.imageStatus !== 'ready') return;
     const project = s.project;
     if (!project) return;
-    // Same membership rule syncSelection uses (primary excluded, everything
-    // else in filmstripSelection is a secondary target).
+    // Primary excluded, everything else in filmstripSelection is a
+    // secondary target.
     const secondaryTargets = s.filmstripSelection.filter((p) => p !== primaryPath);
     if (secondaryTargets.length === 0) {
       // No secondary selection: brief's explicit "no behavior change for the
@@ -8503,7 +8259,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // --- Primary (the open photo): merge onto its LIVE graph, the same
     // scoped-merge path applyPreset's own scoped branch (applyParsedPreset)
     // uses — chainScope'd to the active-output chain exactly like that
-    // branch, via the SAME shared helper syncSelection's loop below uses.
+    // branch, via the SAME shared helper the secondaries' loop below uses.
     const primaryScope = chainScope(s.graph, s.activeOutputId);
     const { merged: primaryAfter, skipped: primarySkipped } = mergeFamiliesWithSkipDetection(
       s.graph,
@@ -8515,9 +8271,9 @@ export const useAppStore = create<AppState>((set, get) => {
     before[primaryPath] = structuredClone(s.graph);
     after[primaryPath] = primaryAfter;
 
-    // --- Secondaries: syncSelection's own read-existing/seed-if-absent/
-    // merge/write loop, with the preset's OWN `look` playing the role
-    // syncSelection's captured primaryLook plays.
+    // --- Secondaries: the shared read-existing/seed-if-absent/merge/write
+    // loop this file's batch writers all follow, with the preset's OWN
+    // `look` playing the role a captured primary look plays elsewhere.
     for (const photoPath of secondaryTargets) {
       const row = findPlaylistPhoto(project, photoPath);
       if (!row) {
@@ -8564,9 +8320,9 @@ export const useAppStore = create<AppState>((set, get) => {
           flag: parsedLook.flag,
         };
       } else {
-        // No look yet — seed it exactly like a fresh open would (same as
-        // syncSelection), THEN merge the preset's families onto it, so the
-        // file this creates is never a bare default doc.
+        // No look yet — seed it exactly like a fresh open would, THEN merge
+        // the preset's families onto it, so the file this creates is never
+        // a bare default doc.
         try {
           const bytes = await window.silverbox.readFile(photoPath);
           const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
@@ -8597,10 +8353,9 @@ export const useAppStore = create<AppState>((set, get) => {
         }
       }
 
-      // Target-side scoping fix (virtual-copy.md): same "activeOutputId ??
-      // first" fallback rule as syncSelection's own loop (chainScope with
-      // `null` — this target photo isn't open, so there's no live
-      // activeOutputId for it).
+      // Target-side scoping fix (virtual-copy.md): "activeOutputId ??
+      // first" fallback rule (chainScope with `null` — this target photo
+      // isn't open, so there's no live activeOutputId for it).
       const targetScope = chainScope(baseGraph, null);
       const { merged: mergedGraph, skipped } = mergeFamiliesWithSkipDetection(baseGraph, parsed.look, families, targetScope);
       for (const fam of skipped) skippedByFamily[fam] = (skippedByFamily[fam] ?? 0) + 1;
@@ -8626,11 +8381,9 @@ export const useAppStore = create<AppState>((set, get) => {
     }
 
     // --- Apply to the live graph + persist the open photo right away
-    // (flush discipline — see this action's own doc comment): unlike
-    // syncSelection (which never touches the primary's own file, since it
-    // only ever copies FROM the primary), the preset applies TO the primary
-    // too, so its look file must land on disk now, not 1000ms later on the
-    // ordinary autosave debounce.
+    // (flush discipline — see this action's own doc comment): the preset
+    // applies TO the primary too, so its look file must land on disk now,
+    // not 1000ms later on the ordinary autosave debounce.
     set({ graph: primaryAfter, graphDirty: true });
     revalidateShaders(primaryAfter);
     await get().saveGraph();
@@ -8714,7 +8467,6 @@ export const useAppStore = create<AppState>((set, get) => {
         // opening anything, so flush explicitly first).
         await flushPendingAutosave(get());
         cancelAutosaveTimer();
-        flushPendingAutoSync();
         set(emptyPhotoFields());
       }
     }
@@ -9310,30 +9062,6 @@ useAppStore.subscribe((state) => {
     autosaveTimer = null;
     void useAppStore.getState().saveGraph();
   }, 1000);
-});
-
-// Auto Sync (docs/brief-bank/multi-select-sync.md item E) — same "watch
-// `graph`'s own reference change" shape as the autosave subscriber just
-// above, but its OWN timer/gates (runAutoSyncNow/flushPendingAutoSync,
-// declared near cancelAutosaveTimer): independent of
-// `settings.autosaveSidecar`, gated on `settings.autoSyncEnabled` instead.
-// Deliberately does NOT also watch sidecarRating/sidecarFlag — a rating/flag
-// key already fans out to the whole selection directly (App.tsx), it isn't
-// what this "completed edit gesture" fan-out is for.
-//
-// `state.graphDirty` is checked HERE, at arm time, and deliberately NEVER
-// again at fire time (see runAutoSyncNow's own doc comment for the autosave-
-// race this avoids): a graph change that ISN'T dirty (a fresh photo open/
-// reset, which replaces `graph` too) must never arm a sync attempt at all —
-// syncing a just-opened, unedited photo's identity graph onto the rest of
-// the selection would be exactly wrong.
-let lastAutoSyncGraph: GraphDoc | null = null;
-useAppStore.subscribe((state) => {
-  if (state.graph === lastAutoSyncGraph) return;
-  lastAutoSyncGraph = state.graph;
-  if (autoSyncTimer !== null) clearTimeout(autoSyncTimer);
-  if (!state.graphDirty) return;
-  autoSyncTimer = setTimeout(runAutoSyncNow, 1000);
 });
 
 // Mask overlay auto-clear (round-7 hand-test fix, "0キーでのオーバーレイは切り替わらないかも？

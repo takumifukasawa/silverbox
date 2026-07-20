@@ -1151,18 +1151,6 @@ export interface Settings {
    * only surfaces if a future caller ever opens the dialog without one.
    */
   publishFamilies: string[];
-  /**
-   * Auto Sync (docs/brief-bank/multi-select-sync.md item E, UX pack round 2
-   * — LR-style toggle beside the existing Sync… button): while true, every
-   * COMPLETED edit gesture on the primary fans its checked `syncFamilies`
-   * out to the rest of the filmstrip selection automatically (appStore.ts's
-   * auto-sync subscriber calls the SAME `syncSelection` the Sync… button
-   * uses — no second implementation). Persists across sessions, default off
-   * (today's explicit-only Sync… behavior is unchanged unless the user opts
-   * in). Independent of `autosaveSidecar` — a disk-write preference
-   * unrelated to this fan-out.
-   */
-  autoSyncEnabled: boolean;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -1195,7 +1183,6 @@ export const DEFAULT_SETTINGS: Settings = {
   // checked the same way, on the rare occasion its own per-look default
   // (the look's current `includes`) isn't available.
   publishFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
-  autoSyncEnabled: false,
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */
