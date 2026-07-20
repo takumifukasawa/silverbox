@@ -172,6 +172,15 @@ declare global {
       setRating(rating: number, lookPath?: string): Promise<void>;
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState(): { kind: 'reloaded' | 'pending' | 'malformed'; message: string } | null;
+      /** Shared-look hot-reload/drift notice state (linked-looks-stage-d.md) — see appStore.ts's sharedLookHotReloadNotice. */
+      sharedLookHotReloadState():
+        | { kind: 'applied' | 'missing'; slug: string; message: string }
+        | { kind: 'pending'; slug: string; message: string; label: string }
+        | null;
+      /** The `'pending'` shared-look notice's reflect button (mirrors the toolbar's own). */
+      reflectPendingSharedLook(): Promise<void>;
+      /** Per-slug last-seen shared-look text cache (linked-looks-stage-d.md) — slugs only, for verify assertions that don't need the raw text. */
+      sharedLookTextsKnown(): string[];
       /** Sidecar visual diff dialog state (git-native completion brief §1) — see appStore.ts's sidecarDiffDialog. */
       sidecarDiffState(): { lines: string[] } | null;
       shaderErrors(): Record<string, string>;
@@ -1475,6 +1484,16 @@ export function CanvasView() {
       /** Sidecar hot-reload notice state (AI-editing loop) — see appStore.ts's sidecarHotReloadNotice. */
       hotReloadState() {
         return useAppStore.getState().sidecarHotReloadNotice;
+      },
+      /** Shared-look hot-reload/drift notice state (linked-looks-stage-d.md) — see appStore.ts's sharedLookHotReloadNotice. */
+      sharedLookHotReloadState() {
+        return useAppStore.getState().sharedLookHotReloadNotice;
+      },
+      reflectPendingSharedLook() {
+        return useAppStore.getState().reflectPendingSharedLook();
+      },
+      sharedLookTextsKnown() {
+        return Object.keys(useAppStore.getState().sharedLookTexts);
       },
       /** Sidecar visual diff dialog state (git-native completion brief §1) — structured line list, robust for verify against DOM text scraping. */
       sidecarDiffState() {

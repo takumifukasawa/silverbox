@@ -377,6 +377,8 @@ export function Toolbar() {
   const currentPhotoMissingNotice = useAppStore((s) => s.currentPhotoMissingNotice);
   const sidecarUnreadable = useAppStore((s) => s.sidecarUnreadable);
   const sidecarHotReloadNotice = useAppStore((s) => s.sidecarHotReloadNotice);
+  const sharedLookHotReloadNotice = useAppStore((s) => s.sharedLookHotReloadNotice);
+  const reflectPendingSharedLook = useAppStore((s) => s.reflectPendingSharedLook);
   const sidecarRating = useAppStore((s) => s.sidecarRating);
   const sidecarFlag = useAppStore((s) => s.sidecarFlag);
   const reloadSidecarNow = useAppStore((s) => s.reloadSidecarNow);
@@ -590,6 +592,23 @@ export function Toolbar() {
                   Reload
                 </button>
               </>
+            )}
+          </span>
+        )}
+        {sharedLookHotReloadNotice && (
+          // Shared-look hot-reload/drift (linked-looks-stage-d.md, semantics
+          // 3/4/7) — same "button as a sibling of the ellipsis span" shape as
+          // the sidecar hot-reload notice above, for the same clipped-
+          // ancestor reason. 'pending' (semantic 4's clean/dirty guard) is
+          // the only kind with a button — the reflect action.
+          <span className="toolbar-hotreload-notice" data-sharedlook-notice-kind={sharedLookHotReloadNotice.kind}>
+            <span className="toolbar-warn" data-testid="sharedlook-notice" title={sharedLookHotReloadNotice.message}>
+              {sharedLookHotReloadNotice.message}
+            </span>
+            {sharedLookHotReloadNotice.kind === 'pending' && (
+              <button onClick={() => void reflectPendingSharedLook()} data-testid="sharedlook-reflect-button">
+                反映
+              </button>
             )}
           </span>
         )}

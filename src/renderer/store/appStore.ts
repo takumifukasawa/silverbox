@@ -1021,6 +1021,57 @@ interface AppState {
    */
   publishToSharedLook(families: PresetFamilyId[]): Promise<void>;
   /**
+   * Per-slug last-seen shared-look TEXT cache (linked-looks-stage-d.md
+   * semantic 2) — the per-slug analog of `lastSidecarText`: self-write
+   * suppression for the shared-looks watch (a slug's cache entry is updated
+   * on every app-side read/write/publish/materialization of that look, so
+   * the watch's own echo of our own write compares equal and is ignored)
+   * AND the source of `lookTextBefore` for the re-materialization undo entry
+   * below. A slug with NO entry yet is "unknown this session" — the watch
+   * handler primes it silently rather than treating a first sighting as a
+   * change to fan out (there is nothing to have drifted FROM). Reset to `{}`
+   * on every project switch (project-scoped, same as `sharedLooks`).
+   */
+  sharedLookTexts: Record<string, string>;
+  /**
+   * Shared-look hot-reload/drift notice (linked-looks-stage-d.md semantics
+   * 3/4/7) — the per-slug analog of `sidecarHotReloadNotice`. `'applied'` is
+   * transient (auto-clears, like the sidecar notice's `'reloaded'`) after an
+   * automatic re-materialization (watch-triggered or drift-at-open).
+   * `'pending'` is persistent (the clean/dirty guard, semantic 4): the OPEN
+   * photo is a follower of the changed look AND the session is dirty, so the
+   * fan-out is deferred behind a reflect button — `lookTextBefore`/
+   * `lookTextAfter`/`label` carry exactly what `reflectPendingSharedLook`
+   * needs to run the SAME re-materialization the moment the user asks for
+   * it. `'missing'` is persistent (until superseded) — a link whose slug has
+   * no backing file at load (semantic 7); metadata is kept, never
+   * auto-stripped. Cleared on every image switch, same as
+   * `sidecarHotReloadNotice`. Single-slot (the newest notice wins) — same
+   * simplification `sidecarHotReloadNotice` already makes.
+   */
+  sharedLookHotReloadNotice:
+    | { kind: 'applied'; slug: string; message: string }
+    | { kind: 'pending'; slug: string; message: string; label: string; lookTextBefore: string; lookTextAfter: string }
+    | { kind: 'missing'; slug: string; message: string }
+    | null;
+  /**
+   * The `'pending'` notice's reflect button (semantic 4): runs the deferred
+   * re-materialization using the EXACT before/after text captured at
+   * detection time (not a fresh re-read — the notice already named a
+   * specific transition). No-op without a pending notice.
+   */
+  reflectPendingSharedLook(): Promise<void>;
+  /**
+   * Route a debounced shared-looks-directory-change push from main (see
+   * preload's onSharedLooksChanged, subscribed once at module scope below):
+   * re-reads every KNOWN look (one with an entry in `sharedLookTexts`) and
+   * re-materializes followers of any whose content genuinely changed
+   * (semantics 2/3) — the SAME fan-out path drift-at-open (semantic 5) uses.
+   * A look with no cache entry yet is primed silently, never fanned out (see
+   * `sharedLookTexts`'s own doc comment). No-op without an active project.
+   */
+  handleSharedLooksChanged(): Promise<void>;
+  /**
    * LR-style preset hover preview (round-7 UX pack G §4): the RAW captured
    * look (pre-geometry-merge) a preset row is currently hovered over, or null
    * between hovers. Transient UI state ONLY — never serialized, never pushed
@@ -1920,6 +1971,7 @@ function emptyPhotoFields(): Partial<AppState> {
     lastSidecarText: null,
     sidecarHotReloadNotice: null,
     sidecarDiffDialog: null,
+    sharedLookHotReloadNotice: null,
     exportInfo: null,
     wbModel: DEFAULT_WB_MODEL,
     activeOutputId: null,
@@ -2303,6 +2355,57 @@ function developFamilyUntouched(develop: DevelopParams, fresh: DevelopParams, fa
   const a = pickDevelopFamilies(develop, base, new Set([family]));
   const b = pickDevelopFamilies(fresh, base, new Set([family]));
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** A shared-look file's own Develop node's params (defaulting for a look body that, oddly, has none — same defensive fallback publishToSharedLook/revertFamilyToLook already use inline). */
+function lookDevelopOf(parsed: ParsedPreset): DevelopParams {
+  return parsed.look.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+}
+
+/**
+ * Value-drift-implies-fork (linked-looks-stage-d.md semantic 6, parent spec
+ * §9-6): a FOLLOWER's own file was changed externally (its develop values
+ * for a followed family no longer match what the look body they claim to
+ * follow actually contains) while `node.link.materializedFrom` still equals
+ * `referenceHash` — i.e. nothing has re-materialized this node since, so the
+ * disagreement can only be an independent hand-edit of the follower itself,
+ * not staleness. Normalize by UNLISTING those families from `follows`
+ * (個別調整) rather than clobbering them at the next re-materialization —
+ * "editing a followed group means also unlisting it; the sanitizer forgives
+ * the omission in this direction" (parent spec's documented contract for
+ * external editors).
+ *
+ * `referenceDevelop`/`referenceHash` must be the ACTUAL content the node's
+ * `materializedFrom` claims to point at — callers pass either "whatever the
+ * shared look currently contains on disk" (photo-load/hot-reload path) or
+ * "the look's content immediately before this particular re-materialization
+ * pass" (the watch-triggered fan-out's own `lookTextBefore`, still what
+ * every not-yet-bumped follower's marker points at). A node whose marker
+ * doesn't match `referenceHash` at all is untouched here — that mismatch is
+ * drift-at-open/the fan-out's OWN job (catching the node up), not this
+ * check's; without the matching content this function has nothing sound to
+ * compare against anyway.
+ *
+ * No-op (returns `node` unchanged, `forked: []`) when the node isn't linked,
+ * its marker doesn't match `referenceHash`, or every followed family still
+ * agrees.
+ */
+function forkValueDriftedFamilies(
+  node: GraphNode,
+  referenceDevelop: DevelopParams,
+  referenceHash: string
+): { node: GraphNode; forked: PresetFamilyId[] } {
+  if (!node.link || node.link.materializedFrom !== referenceHash) return { node, forked: [] };
+  const develop = node.develop ?? defaultDevelopParams();
+  const forked: PresetFamilyId[] = [];
+  const nextFollows = node.link.follows.filter((f) => {
+    if (!isDevelopFamily(f)) return true; // non-develop family ids (shouldn't occur on a develop link, forward-compat only) pass through untouched
+    const same = developFamilyUntouched(develop, referenceDevelop, f);
+    if (!same) forked.push(f);
+    return same;
+  });
+  if (forked.length === 0) return { node, forked: [] };
+  return { node: { ...node, link: { ...node.link, follows: nextFollows } }, forked };
 }
 
 /**
@@ -3232,8 +3335,20 @@ export const useAppStore = create<AppState>((set, get) => {
       manifest = defaultProjectManifest('Quick');
     }
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
-    set({ project });
+    set({ project, sharedLookTexts: {} }); // stage D: fresh per-project baseline cache, same reset openProjectByPath's own activation gets
+    // Stage D semantic 1: arm the shared-looks watcher for THIS (quick or
+    // resolved) project too — openProjectByPath isn't the only path that
+    // activates a project; a folder/single-photo open with no existing
+    // project.silverbox lands here instead (quick project).
+    void window.silverbox.watchSharedLooks(dir);
     void get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped, refresh on every project switch
+    // Semantic 5 (drift-at-open): a quick project can already have a
+    // shared-looks/ dir from a PRIOR session at the same path (e.g. reusing
+    // `<userData>/quick-projects/<date>` across launches) — same drift scan
+    // openProjectByPath runs, fire-and-forget here since ensureActiveProject
+    // itself must stay fast (it's on the hot path of every ordinary photo
+    // open, not just project-level ones).
+    void checkSharedLookDriftAtOpen();
     return project;
   };
 
@@ -3438,6 +3553,362 @@ export const useAppStore = create<AppState>((set, get) => {
     const openWrite = writes.find((w) => w.photoPath === openPath);
     if (openWrite) set({ lastSidecarText: openWrite.content });
     return { ok: true };
+  };
+
+  // --- Shared-look hot-reload & drift (linked-looks-stage-d.md) ------------
+
+  /**
+   * ONE re-materialization path (the brief's "Key constraints") shared by
+   * the watch handler (semantic 3), its deferred 'pending' reflect button
+   * (semantic 4), AND drift-at-open (semantic 5) — the exact fan-out shape
+   * publishToSharedLook uses (read every follower, rewrite `follows ∩
+   * offered` from the NEW look body, bump `materializedFrom` on every
+   * follower including an empty intersection), plus the value-drift-fork
+   * check (semantic 6) run against `lookTextBefore` before any follower is
+   * overwritten (skipped when `lookTextBefore === lookTextAfter` — nothing
+   * to have drifted FROM, see checkSharedLookDriftAtOpen's own doc comment).
+   * Pushes ONE PublishUndoEntry — kind reused VERBATIM (same shape, same
+   * undo/redo cases already wired for 'publish'; only `label` distinguishes
+   * an external/drift re-materialization from an actual publish gesture) —
+   * whose `lookTextBefore`/`lookTextAfter` restore the shared-look FILE
+   * itself on undo/redo, file-first, exactly like a real publish. No entry
+   * is pushed when nothing follows this look (nothing to undo). Returns the
+   * follower count, or `null` if `lookTextAfter` doesn't parse (a malformed
+   * external edit — logged, left alone, never crashes) or there's no active
+   * project.
+   */
+  const reMaterializeSharedLook = async (
+    slug: string,
+    lookTextBefore: string,
+    lookTextAfter: string,
+    label: string
+  ): Promise<{ targetCount: number } | null> => {
+    const project = get().project;
+    if (!project) return null;
+    let parsedAfter: ParsedPreset;
+    try {
+      parsedAfter = parsePresetFile(lookTextAfter);
+    } catch (err) {
+      console.warn(`shared look "${slug}": external content could not be parsed, skipping re-materialization:`, err);
+      return null;
+    }
+    let referenceDevelop: DevelopParams | null = null;
+    let referenceHash: string | null = null;
+    if (lookTextBefore !== lookTextAfter) {
+      try {
+        referenceDevelop = lookDevelopOf(parsePresetFile(lookTextBefore));
+        referenceHash = await sha256Hex(new TextEncoder().encode(lookTextBefore).buffer);
+      } catch {
+        // cached "before" text somehow doesn't parse — skip the value-drift-fork check, still re-materialize
+      }
+    }
+    const offeredFamilies = (parsedAfter.includes ?? []).filter(isKnownFamilyId).filter(isDevelopFamily);
+    const newLookDevelop = lookDevelopOf(parsedAfter);
+    const materializedFrom = await sha256Hex(new TextEncoder().encode(lookTextAfter).buffer);
+
+    /** Compute one follower node's re-materialized develop+link, running the value-drift-fork check first — shared by both the live-graph and on-disk branches below. */
+    const materializeNode = (node: GraphNode): { develop: DevelopParams; link: DevelopLink } | null => {
+      if (!node.link) return null;
+      let working = node;
+      if (referenceDevelop && referenceHash) {
+        working = forkValueDriftedFamilies(node, referenceDevelop, referenceHash).node;
+      }
+      const intersect = working.link!.follows.filter((f) => offeredFamilies.includes(f));
+      const newDevelop =
+        intersect.length > 0
+          ? pickDevelopFamilies(newLookDevelop, working.develop ?? defaultDevelopParams(), new Set(intersect))
+          : (working.develop ?? defaultDevelopParams());
+      return { develop: newDevelop, link: { ...working.link!, materializedFrom } };
+    };
+
+    const before: Record<string, GraphDoc> = {};
+    const after: Record<string, GraphDoc> = {};
+
+    for (const row of project.photos) {
+      const photoPath = resolveProjectPath(project.dir, row.path);
+      const isOpen = photoPath === get().imagePath && get().imageStatus === 'ready';
+
+      if (isOpen) {
+        const liveGraph = get().graph;
+        const node = liveGraph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+        const materialized = node && materializeNode(node);
+        if (!node || !materialized) continue;
+        const nextGraph: GraphDoc = {
+          ...liveGraph,
+          nodes: liveGraph.nodes.map((n) => (n.id === node.id ? { ...n, ...materialized } : n)),
+        };
+        before[photoPath] = structuredClone(liveGraph);
+        after[photoPath] = nextGraph;
+        set({ graph: nextGraph, graphDirty: true });
+        revalidateShaders(nextGraph);
+        await get().saveGraph();
+        continue;
+      }
+
+      const lookPath = `${project.dir}/looks/${row.look}`;
+      let existingText: string | null;
+      try {
+        existingText = await window.silverbox.readSidecar(lookPath);
+      } catch (err) {
+        console.warn(`reMaterializeSharedLook: could not read ${lookPath}:`, err);
+        continue;
+      }
+      if (existingText === null) continue; // never saved — nothing to re-materialize
+      let parsedLook: SidecarDoc;
+      try {
+        parsedLook = parseGraphDoc(existingText);
+      } catch (err) {
+        console.warn(`reMaterializeSharedLook: ${lookPath} is unreadable by this build, skipping:`, err);
+        continue;
+      }
+      const node = parsedLook.graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+      const materialized = node && materializeNode(node);
+      if (!node || !materialized) continue; // not a follower of THIS look
+      const nextGraph: GraphDoc = {
+        ...parsedLook.graph,
+        nodes: parsedLook.graph.nodes.map((n) => (n.id === node.id ? { ...n, ...materialized } : n)),
+      };
+      const content = serializeGraphDoc(
+        nextGraph,
+        parsedLook.source ?? null,
+        parsedLook.createdAt ?? null,
+        parsedLook.unknown,
+        parsedLook.rating,
+        parsedLook.photo,
+        parsedLook.fingerprint,
+        parsedLook.flag
+      );
+      try {
+        await window.silverbox.writeSidecar(lookPath, content);
+      } catch (err) {
+        console.warn(`reMaterializeSharedLook: could not write ${lookPath}:`, err);
+        continue;
+      }
+      before[photoPath] = structuredClone(parsedLook.graph);
+      after[photoPath] = nextGraph;
+    }
+
+    const targets = Object.keys(after);
+    if (targets.length > 0) {
+      const entry: PublishUndoEntry = {
+        seq: nextUndoSeq(),
+        at: Date.now(),
+        kind: 'publish',
+        label,
+        projectDir: project.dir,
+        slug,
+        lookTextBefore,
+        lookTextAfter,
+        targets,
+        before,
+        after,
+      };
+      set((st) => ({
+        undoStack: pushUndoEntry(st.undoStack, entry),
+        sharedLookTexts: { ...st.sharedLookTexts, [slug]: lookTextAfter },
+      }));
+      await get().refreshPlaylistStatus();
+    } else {
+      // Nothing follows this look right now — still prime the cache (self-
+      // write-suppression baseline), just nothing to undo.
+      set((st) => ({ sharedLookTexts: { ...st.sharedLookTexts, [slug]: lookTextAfter } }));
+    }
+    await get().refreshSharedLooks();
+    return { targetCount: targets.length };
+  };
+
+  /** reMaterializeSharedLook + the transient 'applied' notice (semantic 3) — shared by the watch handler, the drift checks, and the pending notice's reflect button. Silent (no notice, no undo entry) when nothing follows the look. */
+  const runSharedLookReMaterialization = async (
+    slug: string,
+    lookName: string,
+    lookTextBefore: string,
+    lookTextAfter: string,
+    label: string
+  ): Promise<void> => {
+    const result = await reMaterializeSharedLook(slug, lookTextBefore, lookTextAfter, label);
+    if (!result || result.targetCount === 0) return;
+    const notice = {
+      kind: 'applied' as const,
+      slug,
+      message: `共通ルック「${lookName}」が変更されました — ${result.targetCount}枚に反映 (⌘Zで取り消し)`,
+    };
+    set({ sharedLookHotReloadNotice: notice });
+    setTimeout(() => {
+      if (get().sharedLookHotReloadNotice === notice) set({ sharedLookHotReloadNotice: null });
+    }, 4000);
+  };
+
+  /**
+   * Clean/dirty guard (semantic 4, parent §4.4): when the OPEN photo is
+   * itself a follower of `slug` AND the session is dirty, the WHOLE fan-out
+   * is deferred behind a persistent 'pending' notice with a reflect button
+   * (autosave-ON makes this the rare path — dirty windows are transient); a
+   * clean session (or a change to a look the open photo doesn't follow at
+   * all) runs the re-materialization immediately, same as publish.
+   */
+  const maybeDeferOrReMaterialize = async (
+    slug: string,
+    lookName: string,
+    lookTextBefore: string,
+    lookTextAfter: string,
+    label: string
+  ): Promise<void> => {
+    const s = get();
+    const openIsFollower =
+      s.imageStatus === 'ready' && s.graph.nodes.some((n) => n.kind === DEVELOP_KIND && n.link?.look === slug);
+    if (openIsFollower && s.graphDirty) {
+      set({
+        sharedLookHotReloadNotice: {
+          kind: 'pending',
+          slug,
+          message: `共通ルック「${lookName}」が変更されました — 未保存の編集があります (反映で適用)`,
+          label,
+          lookTextBefore,
+          lookTextAfter,
+        },
+      });
+      return;
+    }
+    await runSharedLookReMaterialization(slug, lookName, lookTextBefore, lookTextAfter, label);
+  };
+
+  /**
+   * Drift-at-open (semantic 5, parent §4.5's git-pull story): for every
+   * shared look in the project, compare its CURRENT on-disk hash against
+   * every follower's `materializedFrom` (the live graph for the open photo,
+   * each OTHER follower's own look file on disk). Any mismatch
+   * re-materializes the WHOLE look uniformly via reMaterializeSharedLook —
+   * not just the mismatched followers, same "bump every follower regardless"
+   * contract publish/the watch handler both follow.
+   *
+   * No usable `lookTextBefore` exists for a look that drifted while the app
+   * wasn't running (no session cache yet, by construction — a fresh
+   * project open starts `sharedLookTexts` empty) — `lookTextBefore ===
+   * lookTextAfter` is passed instead. This is deliberate, not a shortcut:
+   * our own app never wrote the shared-look FILE in this scenario (an
+   * external actor already did, before we ever saw it), so there is no
+   * sound "before" text to restore on undo for the FILE side — the follower
+   * graphs' before/after are the substantive, fully-recoverable undo
+   * payload here (see reMaterializeSharedLook's own value-drift-fork
+   * short-circuit on `lookTextBefore === lookTextAfter`, which correctly
+   * never fires in this path either — there is nothing sound to compare a
+   * drifted-from-when follower's OWN values against).
+   *
+   * Every slug's cache entry is primed with its current content regardless
+   * of drift (avoids a false-positive fan-out from the FIRST watch event
+   * that lands afterward). No-op without an active project.
+   */
+  const checkSharedLookDriftAtOpen = async (): Promise<void> => {
+    const project = get().project;
+    if (!project) return;
+    for (const { slug, name } of get().sharedLooks) {
+      let text: string | null;
+      try {
+        text = await window.silverbox.sharedLookRead(project.dir, slug);
+      } catch (err) {
+        console.warn(`checkSharedLookDriftAtOpen: could not read shared look "${slug}":`, err);
+        continue;
+      }
+      if (text === null) continue; // missing — semantic 7 surfaces this per-photo at load, not here
+      const hash = await sha256Hex(new TextEncoder().encode(text).buffer);
+      let anyMismatch = false;
+      for (const row of project.photos) {
+        const photoPath = resolveProjectPath(project.dir, row.path);
+        const isOpen = photoPath === get().imagePath && get().imageStatus === 'ready';
+        let link: DevelopLink | undefined;
+        if (isOpen) {
+          link = get().graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug)?.link;
+        } else {
+          const lookPath = `${project.dir}/looks/${row.look}`;
+          try {
+            const t = await window.silverbox.readSidecar(lookPath);
+            if (t) link = parseGraphDoc(t).graph.nodes.find((n) => n.kind === DEVELOP_KIND && n.link?.look === slug)?.link;
+          } catch {
+            // unreadable by this build — not this check's job, same posture publishToSharedLook/deleteSharedLook's own sweeps take
+          }
+        }
+        if (link && link.materializedFrom !== hash) {
+          anyMismatch = true;
+          break;
+        }
+      }
+      set((st) => ({ sharedLookTexts: { ...st.sharedLookTexts, [slug]: text! } }));
+      if (!anyMismatch) continue;
+      await runSharedLookReMaterialization(slug, name, text, text, `共通ルック「${name}」のドリフトを検出 (project open)`);
+    }
+  };
+
+  /**
+   * Per-photo link validation at open/hot-reload (semantics 5-belt/6/7): for
+   * every Develop node carrying a `link`, read the shared look it names ONCE
+   * (shared across every node naming the same slug, even across separate
+   * chains of a multi-output doc) and:
+   *  - semantic 7 (missing look): no backing file — metadata kept (stage
+   *    B's quiet degradation already renders correctly with `link` simply
+   *    ignored); returns a notice to surface, never strips anything.
+   *  - semantic 6 (value-drift-implies-fork): the node's own marker matches
+   *    the look's CURRENT hash but its own develop values for a followed
+   *    family disagree — unlist that family (forkValueDriftedFamilies).
+   *  - semantic 5 ("as a belt"): the node's marker does NOT match the
+   *    look's current hash — a project-wide re-materialization for that
+   *    slug hasn't caught this node up yet (this photo opened directly,
+   *    bypassing/racing checkSharedLookDriftAtOpen's own project-open
+   *    sweep) — trigger the SAME project-wide fan-out, fire-and-forget; the
+   *    graph THIS function returns never carries re-materialized values
+   *    itself (those land via that fan-out's own write, same timing as any
+   *    other cross-photo update reaching the currently open photo).
+   * Returns the graph with fork changes applied and at most one missing-look
+   * notice (first one found — single-slot, same simplification
+   * sharedLookHotReloadNotice makes generally).
+   */
+  const validatePhotoLinks = async (
+    graph: GraphDoc,
+    project: ActiveProject
+  ): Promise<{ graph: GraphDoc; missingNotice: { slug: string; message: string } | null }> => {
+    const linkedNodes = graph.nodes.filter((n) => n.kind === DEVELOP_KIND && n.link);
+    if (linkedNodes.length === 0) return { graph, missingNotice: null };
+    type LookInfo = { text: string; hash: string; develop: DevelopParams; name: string } | null;
+    const cache = new Map<string, LookInfo>();
+    let working = graph;
+    let missingNotice: { slug: string; message: string } | null = null;
+    for (const node of linkedNodes) {
+      const slug = node.link!.look;
+      if (!cache.has(slug)) {
+        let text: string | null;
+        try {
+          text = await window.silverbox.sharedLookRead(project.dir, slug);
+        } catch {
+          text = null;
+        }
+        if (text === null) {
+          cache.set(slug, null);
+        } else {
+          try {
+            const parsed = parsePresetFile(text);
+            const hash = await sha256Hex(new TextEncoder().encode(text).buffer);
+            cache.set(slug, { text, hash, develop: lookDevelopOf(parsed), name: parsed.name });
+          } catch {
+            cache.set(slug, null); // unreadable — never crash the open, same posture as missing
+          }
+        }
+      }
+      const info = cache.get(slug) ?? null;
+      if (!info) {
+        if (!missingNotice) missingNotice = { slug, message: `共通ルック「${slug}」が見つかりません — リンクは保持されます` };
+        continue;
+      }
+      const current = working.nodes.find((n) => n.id === node.id);
+      if (!current || current.kind !== DEVELOP_KIND || !current.link) continue;
+      const { node: forkedNode, forked } = forkValueDriftedFamilies(current, info.develop, info.hash);
+      const effective = forked.length > 0 ? forkedNode : current;
+      if (forked.length > 0) {
+        working = { ...working, nodes: working.nodes.map((n) => (n.id === node.id ? forkedNode : n)) };
+      }
+      if (effective.link && effective.link.materializedFrom !== info.hash) {
+        void runSharedLookReMaterialization(slug, info.name, info.text, info.text, `共通ルック「${info.name}」の変更を検出 (photo open)`);
+      }
+    }
+    return { graph: working, missingNotice };
   };
 
   return {
@@ -3722,6 +4193,18 @@ export const useAppStore = create<AppState>((set, get) => {
       const seeded = seedDefaultLook(graph, image, { usedSidecar, kind, testFlags: window.silverbox.testFlags });
       graph = seeded.graph;
       const wbModel = seeded.wbModel;
+      // Linked-look validation at open (linked-looks-stage-d.md semantics
+      // 5-belt/6/7): only a genuinely loaded sidecar could carry a `link` at
+      // all (a fresh default doc never does), and only meaningful with a
+      // resolved project (shared looks live inside one) — skip the extra
+      // round trip otherwise. session.guard: a slower validation read must
+      // not land after a newer open has already superseded this one.
+      let sharedLookMissingNotice: { slug: string; message: string } | null = null;
+      if (usedSidecar && projectPatch) {
+        const validated = await session.guard(validatePhotoLinks(graph, projectPatch));
+        graph = validated.graph;
+        sharedLookMissingNotice = validated.missingNotice;
+      }
       // node ids of the previous doc must never alias into stale shaders
       clearCustomShaderArtifacts();
       mirrorShaderArtifactClear();
@@ -3802,6 +4285,12 @@ export const useAppStore = create<AppState>((set, get) => {
         lastSidecarText: sidecarRawText,
         sidecarHotReloadNotice: null,
         sidecarDiffDialog: null,
+        // semantic 7: a missing linked look's notice, if validatePhotoLinks
+        // found one above — null (cleared) otherwise, same "every open
+        // resets this" rule sidecarHotReloadNotice already follows.
+        sharedLookHotReloadNotice: sharedLookMissingNotice
+          ? { kind: 'missing' as const, slug: sharedLookMissingNotice.slug, message: sharedLookMissingNotice.message }
+          : null,
         exportInfo: null,
         wbModel,
         activeOutputId: null,
@@ -4027,13 +4516,38 @@ export const useAppStore = create<AppState>((set, get) => {
     cancelAutosaveTimer();
     flushPendingAutoSync(); // item E — same reasoning as openImageByPath's own call
     const project: ActiveProject = { dir, name: manifest.name, photos: manifest.photos, unknown: manifest.unknown ?? null };
-    set({ project, folderDir: dir, folderEntries: [] });
-    void get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped
+    // sharedLookTexts is project-scoped (stage D's per-slug baseline cache) —
+    // a fresh empty cache for the new project, same reset shared_Looks itself
+    // already gets below.
+    set({ project, folderDir: dir, folderEntries: [], sharedLookTexts: {}, sharedLookHotReloadNotice: null });
+    // Stage D semantic 1: (re-)arm the main-process shared-looks watcher for
+    // THIS project's shared-looks/ directory — fire-and-forget, same posture
+    // as openImageByPath's own watchSidecar call.
+    void window.silverbox.watchSharedLooks(dir);
+    await get().refreshSharedLooks(); // linked-looks-stage-b.md: shared-looks/ is project-scoped
+    if (get().project !== project) return true; // superseded by a newer project/folder open meanwhile
+    // Stage D semantic 5: drift-at-open — compare every known shared look's
+    // current hash against every follower's materializedFrom BEFORE the
+    // first photo opens, so that open sees already-caught-up looks (the
+    // per-photo "belt" check in openImageByPath/validatePhotoLinks is the
+    // redundant backstop for a photo opened directly, not the primary path).
+    await checkSharedLookDriftAtOpen();
+    if (get().project !== project) return true; // superseded while the drift scan was in flight
+    // Captured BEFORE opening the first photo — openImageByPath's own commit
+    // unconditionally resets sharedLookHotReloadNotice (same "cleared on
+    // every image switch" rule sidecarHotReloadNotice already follows), which
+    // would otherwise wipe out whatever checkSharedLookDriftAtOpen just
+    // raised before it's ever paintable.
+    const driftNotice = get().sharedLookHotReloadNotice;
     const entries = await buildPlaylistEntries(project);
     if (get().project !== project) return true; // superseded by a newer project/folder open meanwhile
     set({ folderEntries: entries });
     const first = entries.find((e) => !e.missing);
     if (first) await get().openImageByPath(first.path, { keepFolderContext: true });
+    // Restore the drift notice UNLESS the just-opened photo raised its own
+    // (a missing-look notice for THIS specific photo is more actionable than
+    // an already-completed drift fan-out's transient confirmation).
+    if (driftNotice && !get().sharedLookHotReloadNotice) set({ sharedLookHotReloadNotice: driftNotice });
     return true;
   },
 
@@ -4049,6 +4563,8 @@ export const useAppStore = create<AppState>((set, get) => {
     // module-scope variable) — the NEXT photo open/drop that needs a quick
     // project mints a FRESH dated subdirectory instead of resuming this one.
     quickSessionDir = null;
+    // Stage D: no project, nothing to watch (armSharedLooksWatch(null) just tears down).
+    void window.silverbox.watchSharedLooks(null);
     set({
       ...emptyPhotoFields(),
       project: null,
@@ -4061,6 +4577,7 @@ export const useAppStore = create<AppState>((set, get) => {
       filmstripSelection: [],
       filmstripSelectionAnchor: null,
       sharedLooks: [], // linked-looks-stage-b.md: shared-looks/ is project-scoped, gone with the project
+      sharedLookTexts: {}, // linked-looks-stage-d.md: same reset, per-slug baseline cache
     });
   },
 
@@ -5197,6 +5714,12 @@ export const useAppStore = create<AppState>((set, get) => {
           return;
         }
         await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookText);
+        // Stage D echo suppression (linked-looks-stage-d.md semantic 2): this
+        // write, like any app-side shared-look write, will echo back through
+        // the shared-looks watch — prime the baseline now so that echo
+        // compares equal and is ignored, not misread as a genuine external
+        // change.
+        set((s) => ({ sharedLookTexts: { ...s.sharedLookTexts, [entry.slug]: entry.lookText } }));
         if (entry.targets.length > 0) {
           const result = await applySyncEntryGraphs(entry.targets, entry.before);
           if (!result.ok) {
@@ -5229,6 +5752,8 @@ export const useAppStore = create<AppState>((set, get) => {
           return;
         }
         await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookTextBefore);
+        // Stage D echo suppression — same reasoning as delete-shared-look's own undo above.
+        set((s) => ({ sharedLookTexts: { ...s.sharedLookTexts, [entry.slug]: entry.lookTextBefore } }));
         const result = await applySyncEntryGraphs(entry.targets, entry.before);
         if (!result.ok) {
           blockUndoRedo('undo', entry.label, result.failedTarget);
@@ -5393,6 +5918,11 @@ export const useAppStore = create<AppState>((set, get) => {
         // a follower's link points at a file the delete hasn't reached yet
         // in either direction).
         await window.silverbox.sharedLookDelete(entry.projectDir, entry.slug);
+        // Stage D: nothing left on disk — drop the baseline cache entry (same as deleteSharedLook's own action-side handling).
+        set((s) => {
+          const { [entry.slug]: _dropped, ...rest } = s.sharedLookTexts;
+          return { sharedLookTexts: rest };
+        });
         await get().refreshSharedLooks();
         set((s) => ({ undoStack: moveTopToUndo(s.undoStack, entry) }));
         const openPath = get().imagePath;
@@ -5422,6 +5952,8 @@ export const useAppStore = create<AppState>((set, get) => {
         // shared-look file's own `lookTextAfter` — the delete-shared-look
         // precedent's exact mirror-order shape.
         await window.silverbox.sharedLookWrite(entry.projectDir, entry.slug, entry.lookTextAfter);
+        // Stage D echo suppression — same reasoning as the undo side above.
+        set((s) => ({ sharedLookTexts: { ...s.sharedLookTexts, [entry.slug]: entry.lookTextAfter } }));
         await get().refreshSharedLooks();
         set((s) => ({ undoStack: moveTopToUndo(s.undoStack, entry) }));
         const openPath = get().imagePath;
@@ -5720,6 +6252,16 @@ export const useAppStore = create<AppState>((set, get) => {
     }
     const content = serializePreset(trimmed, look, new Date().toISOString(), undefined, developFamilies);
     await window.silverbox.sharedLookWrite(project.dir, slug, content);
+    // Stage D echo suppression — same reasoning as publishToSharedLook's own priming.
+    set((st) => ({ sharedLookTexts: { ...st.sharedLookTexts, [slug]: content } }));
+    // Re-arm the shared-looks watch: `shared-looks/` may not have existed
+    // yet the first time a project activated (armSharedLooksWatch fails
+    // silently on a missing directory, same posture as armSidecarWatch on a
+    // missing one) — the write above is what just created it (its own
+    // mkdir-before-write), so THIS is the first point a watch is guaranteed
+    // to succeed for a project that never had a shared look before. A
+    // harmless no-op re-arm for every subsequent creation.
+    void window.silverbox.watchSharedLooks(project.dir);
     await get().refreshSharedLooks();
 
     // "creating a look you don't follow yourself is meaningless" (semantic
@@ -6189,6 +6731,11 @@ export const useAppStore = create<AppState>((set, get) => {
     // it. Pushed unconditionally (even with zero followers): the delete
     // itself, not merely a follower change, is what this entry restores.
     await window.silverbox.sharedLookDelete(project.dir, slug);
+    // Stage D: drop the baseline cache entry too — nothing left on disk to compare a future watch echo against.
+    set((st) => {
+      const { [slug]: _dropped, ...rest } = st.sharedLookTexts;
+      return { sharedLookTexts: rest };
+    });
     await get().refreshSharedLooks();
 
     const writtenTargets = Object.keys(after);
@@ -6286,6 +6833,12 @@ export const useAppStore = create<AppState>((set, get) => {
     const materializedFrom = await sha256Hex(new TextEncoder().encode(lookTextAfter).buffer);
 
     await window.silverbox.sharedLookWrite(project.dir, slug, lookTextAfter);
+    // Stage D echo suppression (linked-looks-stage-d.md semantic 2): prime
+    // the per-slug baseline BEFORE the shared-looks watch's own debounced
+    // echo of this exact write can arrive — otherwise handleSharedLooksChanged
+    // would see "different from cache" and fan out a SECOND time from our
+    // own publish.
+    set((st) => ({ sharedLookTexts: { ...st.sharedLookTexts, [slug]: lookTextAfter } }));
 
     // Fan-out re-materialization (semantic 4) — same playlist-scan shape as
     // deleteSharedLook, but every row whose Develop node follows THIS slug
@@ -6405,6 +6958,45 @@ export const useAppStore = create<AppState>((set, get) => {
       kind: errorCount > 0 ? 'error' : 'success',
       message: `published "${parsedBefore.name}" — applied to ${targets.length} photo${targets.length === 1 ? '' : 's'}${errorSuffix}`,
     });
+  },
+
+  sharedLookTexts: {},
+  sharedLookHotReloadNotice: null,
+
+  async handleSharedLooksChanged() {
+    const project = get().project;
+    if (!project) return;
+    await get().refreshSharedLooks();
+    for (const { slug, name } of get().sharedLooks) {
+      const cached = get().sharedLookTexts[slug];
+      let text: string | null;
+      try {
+        text = await window.silverbox.sharedLookRead(project.dir, slug);
+      } catch (err) {
+        console.warn(`handleSharedLooksChanged: could not read shared look "${slug}":`, err);
+        continue;
+      }
+      // Deleted externally: out of stage D's explicit scope (semantic 7's
+      // missing-look posture is a per-photo LOAD-time concern) — the next
+      // photo that loads this link surfaces the notice on its own.
+      if (text === null) continue;
+      if (cached === undefined) {
+        // First sighting this session — establish the baseline silently,
+        // nothing to fan out FROM (sharedLookTexts's own doc comment).
+        set((s) => ({ sharedLookTexts: { ...s.sharedLookTexts, [slug]: text! } }));
+        continue;
+      }
+      if (text === cached) continue; // our own write's echo, or truly unchanged
+      await maybeDeferOrReMaterialize(slug, name, cached, text, `共通ルック「${name}」の外部編集`);
+    }
+  },
+
+  async reflectPendingSharedLook() {
+    const pending = get().sharedLookHotReloadNotice;
+    if (!pending || pending.kind !== 'pending') return;
+    set({ sharedLookHotReloadNotice: null });
+    const lookName = get().sharedLooks.find((l) => l.slug === pending.slug)?.name ?? pending.slug;
+    await runSharedLookReMaterialization(pending.slug, lookName, pending.lookTextBefore, pending.lookTextAfter, pending.label);
   },
 
   previewLook: null,
@@ -8075,6 +8667,14 @@ if (typeof window !== 'undefined' && window.silverbox) {
   // current when the push arrives.
   window.silverbox.onSidecarChanged(() => {
     void useAppStore.getState().handleExternalSidecarChange();
+  });
+  // Shared-look hot-reload (linked-looks-stage-d.md, semantic 1): same
+  // "one subscription for the whole app lifetime" shape as onSidecarChanged
+  // above — main re-arms its OWN watcher per project (openProjectByPath's
+  // watchSharedLooks call), this listener just always routes to whatever
+  // project is current when the push arrives.
+  window.silverbox.onSharedLooksChanged(() => {
+    void useAppStore.getState().handleSharedLooksChanged();
   });
 }
 

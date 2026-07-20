@@ -358,6 +358,65 @@ look + every follower, per parent spec §4.1's "a publish diff touches N+1
 files" observation) even when some of those N followers' own rendered
 pixels don't move at all.
 
+#### Hot-reload & drift (docs/brief-bank/linked-looks-stage-d.md)
+
+An external change to a shared-look FILE — an AI editing it directly, a
+`git pull`/checkout, a manual edit — is treated as equivalent to an app-side
+publish: it re-materializes every follower automatically, through the exact
+same fan-out `materializedFrom` maintenance section above describes (rewrite
+`follows ∩` the look's current `includes`, bump `materializedFrom` on every
+follower unconditionally), with a notice and one undoable entry. ONE
+mechanism covers three triggers:
+
+- **Watch** — the app watches the active project's `shared-looks/`
+  directory; a debounced push tells the renderer to re-check every shared
+  look it already holds a baseline for. A look it has never read this
+  session is a new baseline, not a change to react to.
+- **Drift-at-open** — on project open (and, redundantly, on each photo
+  open), every shared look's current hash is compared against its
+  followers' `materializedFrom`. A mismatch re-materializes the whole look;
+  a look whose followers already match (the ordinary case — a publish
+  commit pulled from another machine already brought matching followers
+  with it) is a no-op.
+- **App-side publish** (previous section) is itself the THIRD trigger of
+  the same underlying mechanism, from the writer's side.
+
+**Self-write suppression**: the app keeps a per-slug cache of the last text
+it has seen/written for each shared look. A write it just made (publish,
+this hot-reload machinery's own re-materialization, undo/redo of either)
+updates that cache immediately, so the watch's own echo of that write reads
+as "unchanged" and never double-fans-out.
+
+**Clean/dirty guard**: if the currently open photo follows the changed look
+AND the session has unsaved edits, the fan-out is deferred behind a notice
+with a reflect action instead of running automatically — the exact posture
+the sidecar hot-reload rule (§4.4 above) already established for a single
+photo's own file, extended to a look-wide fan-out. A clean session applies
+immediately, no notice needed beyond the completion message.
+
+**Value-drift-implies-fork** (parent spec §9-6): a FOLLOWER's own file can
+also be changed externally. If a followed group's values in that file no
+longer match the look body it claims to follow, WHILE its `materializedFrom`
+still equals that look body's hash (i.e. nothing has re-materialized this
+follower since — the mismatch can only be an independent hand-edit of the
+follower itself), that group is unlisted from `follows` (individual
+adjustment) rather than clobbered at the next re-materialization. The
+documented contract for external editors: editing a followed group means
+also unlisting it from `follows`; this rule is exactly the sanitizer
+forgiving that omission, in this one direction. Checked whenever a photo's
+own look is loaded/hot-reloaded, and again per-follower inside the fan-out
+itself (before overwriting) so an un-reopened follower isn't missed either.
+
+**Missing look file**: a `link` naming a slug with no backing file at load
+(a `git checkout` of a commit predating the look, an external delete) keeps
+the link's metadata untouched — never auto-stripped, since a later pull may
+restore the file — with one non-error notice naming the look. Rendering
+already degrades quietly regardless (§4.5 above: `link` simply doesn't
+affect the photo's own materialized values). This is distinct from an
+app-side shared-look DELETE (stage B), which explicitly strips `link` from
+every follower it finds — an intentional local-ization, not a "the file
+might come back" posture.
+
 ---
 
 ## 5. Versioning & migration promises

@@ -63,6 +63,16 @@ export const IPC = {
   sharedLookRead: 'sharedLooks:read',
   sharedLookWrite: 'sharedLooks:write',
   sharedLookDelete: 'sharedLooks:delete',
+  // Shared-look hot-reload (docs/brief-bank/linked-looks-stage-d.md): the
+  // SAME "watch the containing directory, debounce, push a payload-free
+  // event" shape as watchSidecar/sidecarChanged above, but scoped to a whole
+  // PROJECT's `shared-looks/` directory (any file in it, not one basename) —
+  // an external edit to ANY shared look is worth a re-check, and the
+  // renderer already knows which slugs it cares about (appStore.ts's
+  // sharedLookTexts cache). `watchSharedLooks(null)` tears down without
+  // arming a new watch (project close).
+  watchSharedLooks: 'sharedLooks:watch',
+  sharedLooksChanged: 'sharedLooks:changed',
   // Headless CLI renderer (`electron . --render …` — see main/index.ts):
   // main pushes ONE job to the renderer once it signals ready, then the
   // renderer streams results back one at a time as they render.
@@ -453,6 +463,23 @@ export interface SilverboxApi {
   sharedLookWrite(projectDir: string, slug: string, content: string): Promise<void>;
   /** Delete one shared look's file by slug (project-scoped). */
   sharedLookDelete(projectDir: string, slug: string): Promise<void>;
+  /**
+   * Arm the main-process shared-looks watcher for `projectDir`'s
+   * `shared-looks/` directory (docs/brief-bank/linked-looks-stage-d.md,
+   * semantic 1) — re-armed on every project open, same "tears down whatever
+   * this window was previously watching first" discipline as watchSidecar.
+   * `null` tears down without arming a new watch (project close/no active
+   * project).
+   */
+  watchSharedLooks(projectDir: string | null): Promise<void>;
+  /**
+   * Subscribe to main's debounced "something in the watched project's
+   * shared-looks/ directory changed" push. Carries no payload, same as
+   * onSidecarChanged — the renderer re-reads whichever looks it already
+   * knows about (sharedLookTexts) and decides what genuinely changed.
+   * Returns an unsubscribe function.
+   */
+  onSharedLooksChanged(callback: () => void): () => void;
   /**
    * Test-harness flags read from the main-process env at preload time; all
    * false in normal use. `isTest` mirrors SILVERBOX_TEST (the verify suite);

@@ -1,6 +1,14 @@
 # Brief: shared-look hot-reload & drift detection (linked-looks stage D)
 
-Status: DISPATCHED 2026-07-20.
+Status: LANDED 2026-07-20 (SUITE 70/70, unit 243). Reuses
+PublishUndoEntry's 'publish' kind (no new type). Deviations accepted:
+ensureActiveProject (quick-project path) also arms the watch + drift
+scan; watch re-arms after createSharedLook (dir may not exist at first
+arm); drift-at-open passes lookTextBefore===lookTextAfter (the app
+never wrote the file — an external actor did before open, so only
+follower graphs are the recoverable undo payload); missing-look =
+graceful no-op + notice (stage B/C guards already present), not
+reactive button-disable.
 Parent spec: docs/brief-bank/linked-looks.md §4.4 (external-edit
 bullet), §4.5, §9-5/9-6. Builds on stages B (3cf7bae) and C (0fb8068)
 — read publishToSharedLook, PublishUndoEntry + undo/redo cases, the

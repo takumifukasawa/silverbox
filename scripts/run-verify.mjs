@@ -158,6 +158,7 @@ const ALL_SCRIPTS = [
   { name: 'virtualcopy', file: 'verify-virtualcopy.mjs' },
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
   { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
+  { name: 'linkedlooks3', file: 'verify-linkedlooks3.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 

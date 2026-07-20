@@ -158,6 +158,13 @@ export interface DeleteSharedLookUndoEntry extends UndoEntryBase {
  * `before` graph (DeleteSharedLookUndoEntry's own "file first" order,
  * exactly). Redo: mirror order — every follower's `after` graph FIRST, then
  * `lookTextAfter`.
+ *
+ * Reused verbatim by linked-looks-stage-d.md (hot-reload/drift
+ * re-materialization — appStore.ts's reMaterializeSharedLook): the brief's
+ * "reuse 'publish' with a label prefix" option, since the fan-out shape and
+ * undo/redo mechanics are identical whether the shared-look content changed
+ * via an app-side publish or an external edit/git pull — only `label`
+ * distinguishes them (no new undo/redo switch case needed).
  */
 export interface PublishUndoEntry extends UndoEntryBase {
   kind: 'publish';

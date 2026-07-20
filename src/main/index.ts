@@ -277,6 +277,51 @@ function armSidecarWatch(sidecarPath: string): void {
   }
 }
 
+// --- Shared-looks hot-reload watcher (linked-looks-stage-d.md, semantic 1) --
+//
+// Same "watch the containing directory, debounce, push a payload-free event"
+// shape as the sidecar watcher above, but scoped to a whole PROJECT's
+// `shared-looks/` directory rather than one file's basename — an external
+// edit to ANY shared look in the project is worth a re-check, and the
+// renderer already knows which slugs it holds a baseline for
+// (appStore.ts's sharedLookTexts). One watch lives at a time, scoped to this
+// window: armSharedLooksWatch tears down whatever was watched before,
+// re-armed on every project open.
+let sharedLooksWatcher: FSWatcher | null = null;
+let sharedLooksWatchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function teardownSharedLooksWatch(): void {
+  if (sharedLooksWatchDebounce !== null) {
+    clearTimeout(sharedLooksWatchDebounce);
+    sharedLooksWatchDebounce = null;
+  }
+  sharedLooksWatcher?.close();
+  sharedLooksWatcher = null;
+}
+
+/** Arm the shared-looks watcher for `<projectDir>/shared-looks/`; `null` just tears down (project close/no active project). */
+function armSharedLooksWatch(projectDir: string | null): void {
+  teardownSharedLooksWatch();
+  if (projectDir === null) return;
+  const dir = join(projectDir, 'shared-looks');
+  try {
+    sharedLooksWatcher = watch(dir, () => {
+      // Unlike the sidecar watcher, every event in this directory is
+      // relevant (any *.json here is a shared look) — no basename filter.
+      if (sharedLooksWatchDebounce !== null) clearTimeout(sharedLooksWatchDebounce);
+      sharedLooksWatchDebounce = setTimeout(() => {
+        sharedLooksWatchDebounce = null;
+        mainWindow?.webContents.send(IPC.sharedLooksChanged);
+      }, SIDECAR_WATCH_DEBOUNCE_MS);
+    });
+  } catch (err) {
+    // shared-looks/ may not exist yet (a project with no shared look ever
+    // created) — nothing to watch until it does; same net effect as no
+    // watcher, matches armSidecarWatch's own posture on a missing dir.
+    console.warn(`shared-looks watch failed for ${dir}:`, err);
+  }
+}
+
 function registerIpc(): void {
   // CLI tooling parity (project-storage.md stage 2): a warning that isn't
   // any one file's structured result (currently just "--project playlist
@@ -777,6 +822,13 @@ function registerIpc(): void {
     await deleteSharedLook(projectDir, slug);
   });
 
+  ipcMain.handle(IPC.watchSharedLooks, async (_ev, projectDir: unknown): Promise<void> => {
+    if (projectDir !== null && typeof projectDir !== 'string') {
+      throw new Error('watchSharedLooks: projectDir must be a string or null');
+    }
+    armSharedLooksWatch(projectDir);
+  });
+
   ipcMain.handle(IPC.goldenCheck, async (_ev, req: CliCheckImageRequest): Promise<CliCheckOutcome> => {
     return checkGoldenImage(req);
   });
@@ -897,6 +949,7 @@ function createWindow(): BrowserWindow {
   mainWindow = win;
   win.on('closed', () => {
     teardownSidecarWatch();
+    teardownSharedLooksWatch();
     if (mainWindow === win) mainWindow = null;
   });
 
@@ -1039,5 +1092,6 @@ void app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   teardownSidecarWatch();
+  teardownSharedLooksWatch();
   if (process.platform !== 'darwin') app.quit();
 });
