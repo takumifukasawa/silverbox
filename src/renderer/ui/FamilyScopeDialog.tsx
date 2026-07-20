@@ -24,12 +24,11 @@ import type { Settings } from '../../../shared/ipc';
  *    PRESET_FAMILY_DEFS) — overridable only if some future caller ever
  *    needs a subset, not expected to be used yet.
  *  - `settingsKey`: which `Settings` field remembers the last-used
- *    checkboxes (LR-style) — `'presetSaveFamilies'` today, a future
- *    `'syncFamilies'` once the sync feature adds that field to
- *    shared/ipc.ts + main/settings.ts (the same additive pattern
- *    `presetSaveFamilies` itself followed — see that field's doc comment).
- *    Loosely typed as `string` (not `keyof Settings`) so this component
- *    doesn't need to know about a Settings field that doesn't exist yet;
+ *    checkboxes (LR-style) — `'presetSaveFamilies'`, `'sharedLookFamilies'`,
+ *    and `'publishFamilies'` today (each an additive Settings field following
+ *    the same pattern — see those fields' doc comments).
+ *    Loosely typed as `string` (not `keyof Settings`) so a new caller can
+ *    add its own remembered field without this component needing to know;
  *    the read/write below both degrade quietly (empty/malformed →
  *    DEFAULT_CHECKED_FAMILY_IDS) exactly like every other settings field's
  *    own sanitizer.

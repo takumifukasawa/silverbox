@@ -119,16 +119,9 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.presetSaveFamilies = Array.isArray(src.presetSaveFamilies)
     ? src.presetSaveFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.presetSaveFamilies;
-  // Multi-select sync (docs/brief-bank/multi-select-sync.md): last-used Sync…
-  // dialog family checkboxes — same shape-only validation as
-  // presetSaveFamilies just above (semantic filtering of unknown ids happens
-  // at presetFamilies.ts's isKnownFamilyId, not here).
-  result.syncFamilies = Array.isArray(src.syncFamilies)
-    ? src.syncFamilies.filter((id): id is string => typeof id === 'string')
-    : DEFAULT_SETTINGS.syncFamilies;
   // Linked looks (docs/brief-bank/linked-looks-stage-b.md): last-used
   // Create-shared-look dialog family checkboxes — same shape-only
-  // validation as presetSaveFamilies/syncFamilies above.
+  // validation as presetSaveFamilies above.
   result.sharedLookFamilies = Array.isArray(src.sharedLookFamilies)
     ? src.sharedLookFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.sharedLookFamilies;

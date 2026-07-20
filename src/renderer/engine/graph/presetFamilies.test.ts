@@ -55,12 +55,6 @@ describe('DEFAULT_SETTINGS.presetSaveFamilies stays pinned to DEFAULT_CHECKED_FA
   });
 });
 
-describe('DEFAULT_SETTINGS.syncFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
-  it('multi-select-sync.md\'s Sync… dialog starts with the same defaults as the preset Save dialog', () => {
-    expect(DEFAULT_SETTINGS.syncFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
-  });
-});
-
 describe('DEFAULT_SETTINGS.sharedLookFamilies stays pinned to DEFAULT_CHECKED_FAMILY_IDS', () => {
   it("linked-looks-stage-b.md's Create-shared-look dialog starts with the same defaults as the other two family dialogs", () => {
     expect(DEFAULT_SETTINGS.sharedLookFamilies).toEqual(DEFAULT_CHECKED_FAMILY_IDS);
