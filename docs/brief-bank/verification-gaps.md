@@ -187,6 +187,29 @@ CONFIRMED matching, no spec drift:
   on slug collision); linking happens against the project-local copy,
   so following never crosses the project boundary.
 
+## Geometry / seeded-default sibling audit (Fable direct, 2026-07-20)
+
+Hunted for siblings of the DCP double-tone bug (class: "a seeded
+default not reset when a related MODE changes → double/stale apply"):
+
+- **Lens-profile seed — NOT a sibling (clean).** seedDefaultLook seeds
+  `lens.profile.enabled = true` on the input node (appStore.ts:2168) —
+  a plain on/off flag (graphDoc.ts:637), NOT a value seed, and there is
+  NO lens "source mode" toggle analogous to profile.source that should
+  reset it. Manual lens sliders are a separate input-node param that
+  stacks LR-style (intended). No mode-switch double-apply path exists.
+- **DCP double-tone mechanism triple-confirmed** at the compile site:
+  graphDoc.ts:1468 `profileSource(params.profile) === 'dcp' ?
+  ctx.dcpLattice : profileForModel(...)` — the profile stage swaps to
+  the DCP lattice, while toneCurve (carrying the seeded base curve)
+  is a SEPARATE downstream stage, so it is applied in ADDITION to the
+  DCP lattice's baked tone. See dcp-profile.md's finding.
+- **Repair-sheet anchor-space composition — verified** (earlier):
+  sensorSpotToAnchor normalizes against orientedWidth/Height
+  (= fullWidth/fullHeight = the anchor frame anchorSpace.ts uses), so
+  applied spots ride the existing anchor→output conversion correctly
+  under crop/rotate.
+
 ## Not gaps (checked, clean)
 
 - SyncUndoEntry producers after the Sync removal: all 7 belong to live
