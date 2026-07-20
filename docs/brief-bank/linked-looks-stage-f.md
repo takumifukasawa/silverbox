@@ -1,6 +1,6 @@
 # Brief: repair sheets / ゴミ取りセット (linked-looks stage F)
 
-Status: DRAFT — dispatch after stage E lands.
+Status: DISPATCHED 2026-07-20.
 Parent spec: docs/brief-bank/linked-looks.md §5 (all of it — the
 GO-time obligations are BINDING), §2 taxonomy row 2, §9-4. Scope
 guard: no Sync/Auto Sync changes (G). Project-local only — NO library
