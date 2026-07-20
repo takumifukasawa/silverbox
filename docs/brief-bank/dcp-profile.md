@@ -176,6 +176,18 @@ forkLinkedFamilies-aware, idempotent, and it heals old source=dcp docs
 on open. Tone-less DCPs keep the base curve. verify-dcp-doubletone.mjs
 proves all three guards. The finding record below is kept for history.
 
+PRE-EXISTING SCOPING LIMITATION (surfaced by the fix's double-check,
+NOT introduced by it): refreshDcpProfile resolves its target Develop as
+`graph.nodes.find(n => kind===DEVELOP && n.develop)` — the FIRST Develop
+node, not the active-output chain's — and mirrorDcpLattice is a SINGLE
+global lattice. So DCP mode (and now the flatten) is not active-chain-
+scoped: a multi-output/virtual-copy doc whose active output's Develop is
+not the first, or whose chains want different DCPs, is unsupported. This
+is the DCP feature's original single-Develop assumption (the bake used
+the same resolution before the fix); the flatten inherits it
+consistently. Fixing it = active-chain-scope DCP resolution + per-chain
+lattices, a separate DCP-feature enhancement, unscheduled.
+
 ⚠️ **DOUBLE-TONE BUG (historical record) — was DOCUMENTED but NOT
 IMPLEMENTED (Fable double-check 2026-07-20; now fixed above).** The
 "visible tone curve starts flat on top" invariant does not hold:
