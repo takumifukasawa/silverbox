@@ -109,12 +109,43 @@ catalog territory) and revoked on every folder switch. A single-file open
 folder-browsing and shows no strip, matching today's exact experience.
 Ratings persisted in the sidecar (so they stay git-native) are explicit
 future work, not v1.
+Shared looks (共通ルック — the linked-look / material-instance system):
+a shared look is a preset-format file inside the project
+(`<project>/shared-looks/<slug>.json`); a photo's Develop node carries an
+additive `link` (which look, which adjustment groups it follows, and a
+`materializedFrom` hash) — one linked Develop per chain, added Develops
+are local tweak layers. Editing a followed group forks it local
+(「この写真だけ個別調整中」badge); revert per-group or reset-all resumes
+following. Publish writes the open photo's chosen groups into the shared
+look and re-materializes every follower (one ⌘Z reverts the whole
+fan-out, look file included). Photo files stay FULLY MATERIALIZED — the
+link is additive sync metadata, so the CLI and any older reader render a
+linked photo correctly with the field ignored; deleting a shared look
+leaves every follower's rendering untouched and independent. External
+edits to a shared-look file (an AI, a git pull) re-materialize followers
+through the same path, with a clean/dirty guard and drift detection at
+project open; a follower whose followed values were edited externally
+forks rather than being clobbered. A visible library at
+`~/Silverbox/Library/` (one-time migration of the old
+`<userData>/presets`, dual-location reads) is where looks/presets live to
+travel between projects and machines — vendor-in copies a library look
+into a project, publish-to-library copies one out, and dropping a file in
+the folder IS the import. Apply-preset-to-selection stamps a saved preset
+onto the whole filmstrip selection as one undoable batch. Repair sheets
+(ゴミ取りセット): a dust-spot set stored in PHYSICAL SENSOR PIXELS
+(`<project>/repair-sheets/`), stamped one-shot onto a RAW selection
+through each frame's own readout-window∘orientation transform (spots
+outside a frame drop; a target over the 32-spot cap is refused loudly,
+never truncated); applied spots become ordinary editable photo-local
+spots. The old Sync button and Auto Sync toggle are removed — fully
+subsumed by apply-preset-to-selection and repair sheets.
 
 ## In flight / agreed order
 
 Nothing currently in flight — every previously agreed item above has
-shipped. See "Nice to have" below for what's next; Image node (composite
-with / mask by another file) and Denoise both moved there, unstarted.
+shipped, including linked looks (共通ルック) A-G. See "Nice to have"
+below for what's next; Image node (composite with / mask by another
+file) and Denoise both moved there, unstarted.
 
 Other-maker lens correction (DNG opcodes — the semi-universal path — then
 per-maker parsing on demand; contactless/vintage glass keeps the manual
