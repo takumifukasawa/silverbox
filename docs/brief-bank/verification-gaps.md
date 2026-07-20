@@ -34,9 +34,18 @@ absolute mapping against the hand-computed values above).
 FIXED this session (e3a4ed7): mergeSection had no boolean branch, so
 any boolean develop leaf silently reset to its default on sidecar
 reparse. bw.enabled was the only such leaf and reopened as color.
+RESOLVED (Fable, follow-up audit): bw.enabled IS the only boolean leaf
+that flows through mergeSection. The other boolean field near
+DevelopParams — GraphNode.disabled (the 'm'-key node bypass) — is a
+NODE-level field, not a DevelopParams section leaf: it has its own
+parse/serialize path (graphDoc.ts KNOWN_NODE_KEYS + the node-level
+`n.disabled = n.disabled ? true : undefined` sanitize, single writer
+toggleNodeDisabled), never touches mergeSection, and round-trips
+correctly on its own. So no other leaf shares bw.enabled's bug class
+today.
 GAP: the fix is verified for bw.enabled, but the next boolean leaf
-added to DevelopParams would be the first to exercise the new branch —
-and nothing pins the general behavior.
+added to a DevelopParams SECTION would be the first to exercise the new
+mergeSection branch — nothing pins the general behavior.
 TEST TO ADD: a unit test on mergeDevelopParams that sets a boolean leaf
 to the NON-default value, round-trips through serialize→parseGraphDoc,
 and asserts it survives — written generically enough that a future
