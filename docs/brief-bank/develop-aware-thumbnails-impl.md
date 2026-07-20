@@ -1,6 +1,6 @@
 # Brief: develop-aware filmstrip thumbnails — impl (in-memory (c))
 
-Status: DISPATCHED 2026-07-20. Implements the conductor recommendation
+Status: LANDED 2026-07-20 (SUITE 71/71, unit 254; also fixed an independent bw.enabled sidecar-reparse bug, commit e3a4ed7). Implements the conductor recommendation
 in docs/brief-bank/develop-aware-thumbnails.md, scoped to the variant
 that needs NO user principle-call: (c) hybrid with an sRGB-correct (a)
 layer, thumbs held IN MEMORY only (no persistent files — the visible
