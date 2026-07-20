@@ -33,6 +33,40 @@ Then the small BOUNDED coordinate-descent polish (cpuEvalPlan against
 the full signature distance, ± a fraction of each slider's range so it
 polishes without re-entering the degeneracies the staging removed).
 
+## Domain consistency — REQUIRED, surfaced by a stage-1 double-check
+
+⚠️ (Fable double-check 2026-07-20) Stage 1's signature is computed in
+the base-curve-fitter's domain — decoded working-linear → display-luma
+(signature.ts encodedLuma255), which is PRE-profile / PRE-base-curve.
+But the extracted curve is written to develop.toneCurve.rgb and applied
+as the user ToneCurve op, which runs DOWNSTREAM of the profile/base-
+curve stage (developNode.ts chain: profile/base-curve → basic-tone →
+toneCurve → …). So the curve is FIT in one tonal domain and APPLIED in
+another; the base curve's contribution sits between them.
+- Stage 1's recovery unit test is unaffected (baseline = the image's
+  own signature, so profile/base-curve cancel on both sides — the proof
+  is valid).
+- But absolute APPLICATION on a fresh photo is offset by the base
+  curve. This is the sharp form of stage 1's "uncalibrated absolute
+  landing" caveat, and the Italy validation must read a systematic
+  offset as EXPECTED, not a fit failure.
+STAGE 2 MUST RESOLVE THIS, pick one and document it:
+(a) compute the bundled-corpus baseline signature (and the reference
+signatures) in the SAME domain the curve applies in — i.e. over pixels
+that already have the profile/base-curve applied (run the default-look
+develop prefix before sampling), so fit-domain == apply-domain; OR
+(b) keep the pre-base-curve fit domain but APPLY the extracted curve
+pre-base-curve (a different insertion point than the user ToneCurve),
+which changes where the node lands in the chain; OR
+(c) explicitly compose the base curve into the solve so the emitted
+user ToneCurve is the residual on top of it.
+Option (a) is the most consistent with the rest of the develop-feel
+calibration (everything else is measured post-profile). Whichever is
+chosen, add a unit test that fits AND applies through the full default
+prefix and asserts the applied result's percentiles land on the
+reference within tolerance — closing the fit-domain/apply-domain gap
+the stage-1 recovery test does not exercise.
+
 ## The real neutral baseline (replaces stage 1's placeholder)
 
 Stage 1 shipped a placeholder baseline. Stage 2 builds the real one:
