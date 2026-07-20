@@ -168,6 +168,24 @@ CONFIRMED matching, no spec drift:
 - **Materialization (§4.1)** — every link write carries the full
   resolved develop set + `materializedFrom`; sanitizeDevelopLink never
   throws, absent ⇒ not-linked (graphDoc.ts) — standalone render holds.
+- **Unlink keeps values (§6)** — unlinkLook applies stripDevelopLink,
+  which deletes ONLY the `link` key; develop values untouched
+  (見た目は変わらない).
+- **Revert per family (§4.2/§6)** — revertFamilyToLook rewrites ONLY
+  that family from the look (`pickDevelopFamilies(lookDevelop, current,
+  {family})`), re-adds it to `follows`, refreshes materializedFrom; if
+  the look no longer offers the family, it notices and leaves the fork
+  (orphaned-override rule §4.2). resetAllFamiliesToLook is the all-
+  families form.
+- **Delete localizes all (§4.4)** — deleteSharedLook strips the link
+  from every follower; values were already materialized, so no
+  follower's render changes (verified stage-B; the undo restores the
+  FILE too via DeleteSharedLookUndoEntry).
+- **Vendor-in copies, never references (§6, principle 5)** —
+  vendorPresetIntoProject reads the library file's text and
+  sharedLookWrite's a COPY into `<project>/shared-looks/` (auto-suffix
+  on slug collision); linking happens against the project-local copy,
+  so following never crosses the project boundary.
 
 ## Not gaps (checked, clean)
 
