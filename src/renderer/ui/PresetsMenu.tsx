@@ -49,10 +49,23 @@ const HOVER_PREVIEW_DELAY_MS = 120;
  * (overwrite the selected preset via the same savePreset name-collision
  * path); §4 adds the hover preview itself (now family-scope-aware — see
  * previewParsedPreset in appStore.ts).
+ *
+ * The visible library (docs/brief-bank/linked-looks-stage-e.md): this list
+ * (`presets`, backed by `presetsList()`) is now the union of the library
+ * (`~/Silverbox/Library/` by default) and the legacy `<userData>/presets`
+ * dir — Save/Update/Delete above all resolve to the library only (semantic
+ * 2), and "プロジェクトに取り込む"/"ライブラリに取り込む…" below are this
+ * stage's two new gestures (vendor-in and file-picker import — semantics 4
+ * and 6). Presets and shared-look TEMPLATES are the same file format
+ * (semantic 7), so this one list is also the closest thing to a "library
+ * browser" the app has — no separate UI for it.
  */
 export function PresetsMenu() {
   const imageStatus = useAppStore((s) => s.imageStatus);
   const imagePath = useAppStore((s) => s.imagePath);
+  const project = useAppStore((s) => s.project);
+  const vendorPresetIntoProject = useAppStore((s) => s.vendorPresetIntoProject);
+  const importPresetFile = useAppStore((s) => s.importPresetFile);
   // Apply-to-selection (docs/brief-bank/apply-preset-to-selection.md,
   // linked-looks stage A): same total-selected-count shape Filmstrip.tsx's
   // own "N selected" badge uses (imagePath counts once, filmstripSelection
@@ -253,6 +266,22 @@ export function PresetsMenu() {
               >
                 Delete
               </button>
+              {/* Vendor in (linked-looks-stage-e.md semantic 4, parent §6):
+                  copy this library row into the active project's
+                  shared-looks/ — it then appears in SharedLookMenu, and
+                  linking happens against the copy via the ordinary flow. */}
+              <button
+                type="button"
+                data-testid="preset-vendor-in"
+                disabled={!project || !selected}
+                onClick={() => {
+                  const slug = selected;
+                  void vendorPresetIntoProject(slug);
+                }}
+                title="プロジェクトに取り込む — copy this library file into the active project's shared-looks/, so it can be linked from here"
+              >
+                プロジェクトに取り込む
+              </button>
             </div>
             <div className="presets-menu-row">
               <input
@@ -270,6 +299,19 @@ export function PresetsMenu() {
                 title="Choose which develop families to save as a named preset (same name overwrites it)"
               >
                 Save
+              </button>
+              {/* Import (linked-looks-stage-e.md semantic 6): a native file
+                  picker whose implementation is a file copy into the
+                  library — the other half of "putting a file in the folder
+                  IS the import" is the library's own dir-watch (external
+                  drops need no button at all). */}
+              <button
+                type="button"
+                data-testid="preset-import"
+                onClick={() => void importPresetFile()}
+                title="ライブラリに取り込む… — pick a preset/look .json file and copy it into the library"
+              >
+                ライブラリに取り込む…
               </button>
             </div>
             <FamilyScopeDialog

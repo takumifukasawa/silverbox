@@ -66,7 +66,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, lookPathFor, resetTestProject, writeLookFixture } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, lookPathFor, resetTestProject, seedLibraryDir, writeLookFixture } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
@@ -580,6 +580,10 @@ const cliOutDir = join(cliWorkDir, 'out');
 mkdirSync(cliOutDir, { recursive: true });
 const ownCliUserData = !process.env.SILVERBOX_USER_DATA;
 const cliUserData = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-flags-cli-userdata-'));
+// The visible library (docs/brief-bank/linked-looks-stage-e.md) — see
+// verify-cli.mjs's own identical comment: an isolated libraryDir keeps a
+// standalone run off the real ~/Silverbox/Library.
+if (ownCliUserData) seedLibraryDir(cliUserData);
 const ELECTRON_BIN = join(projectRoot, 'node_modules', '.bin', 'electron');
 
 function cliLink(name) {

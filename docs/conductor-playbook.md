@@ -244,6 +244,21 @@ conflate "round 3" of one with "round 3" of the other.
 - Playwright: `fill()` mis-validates some range-input steps; SVG `<g>` in
   React Flow needs `waitFor({state:'attached'})`; sharp `stats()` ignores
   `extract()` unless you `toBuffer()` the crop first.
+- `shared/ipc.ts` `IPC` const object: a comment block longer than ~5 lines
+  immediately before a property triggers a Rollup/esbuild bug in
+  `electron-vite build`'s main bundle that SILENTLY TRUNCATES the next
+  string literal → "Unterminated string literal" at build time (loud, not a
+  runtime bug, but baffling to bisect). Keep IPC-property comments ≤4 lines
+  (found stage E, 2026-07-20). `interface` doc comments are erased by TS and
+  safe at any length — this is specific to the runtime `const` object.
+- Any verify script that mints its OWN `SILVERBOX_USER_DATA` (bypassing the
+  pool's `setupIsolation`) must ALSO seed an isolated `libraryDir` in that
+  userData's settings.json — else boot-time preset migration mkdir+writes
+  into the real `~/Silverbox/Library` (stage E made `setupIsolation` do this
+  for pooled runs; standalone-minting scripts each needed the same, and a
+  residual set — verify-bw/virtualcopy/preset-selection and the early
+  launches in flags/ratings — still don't isolate userData AT ALL, a
+  pre-existing hazard flagged for a follow-up sweep).
 
 ## Memory & docs
 

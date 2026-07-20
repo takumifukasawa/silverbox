@@ -1,6 +1,13 @@
 # Brief: the visible library (linked-looks stage E)
 
-Status: DISPATCHED 2026-07-20.
+Status: LANDED 2026-07-20 (SUITE 71/71, unit 243). Deviations
+accepted: deletePreset removes BOTH copies when a slug exists in
+library+legacy (prevents legacy resurrection); import slug = picked
+file's basename; import shares vendor-in's auto-suffix collision
+handling. Conductor verified the agent's real-home cleanup (~/Silverbox
+= Quick/ only, userData presets intact). Two hazards recorded in
+playbook: the ipc.ts comment-length build bug; the unisolated-userData
+verify scripts needing libraryDir seeding.
 Parent spec: docs/brief-bank/linked-looks.md §9-7 (RESOLVED,
 USER-DECIDED: visible folder), §6 vendor-in / publish-to-library
 rows, §4.5 last bullet. Scope guard: no repair sheets (F), no

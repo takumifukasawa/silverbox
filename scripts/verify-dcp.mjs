@@ -52,6 +52,7 @@ import { join } from 'node:path';
 import { build } from 'esbuild';
 import sharp from 'sharp';
 import { buildFixtureDcp, buildPlainTiffBytes, buildTruncatedDcpBytes } from './fixtures/build-dcp-fixture.mjs';
+import { seedLibraryDir } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
@@ -500,7 +501,12 @@ const fixturePath = join(workDir, 'silverbox-test.dcp');
 writeFileSync(fixturePath, buildFixtureDcp());
 const arwPath = join(workDir, 'DSC-DCP.ARW');
 linkSync(SRC_ARW, arwPath);
+const ownUserData = !process.env.SILVERBOX_USER_DATA;
 const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-dcp-userdata-'));
+// The visible library (docs/brief-bank/linked-looks-stage-e.md) — see
+// verify-cli.mjs's own identical comment: an isolated libraryDir keeps a
+// standalone run off the real ~/Silverbox/Library.
+if (ownUserData) seedLibraryDir(userDataDir);
 
 const nowIso = () => new Date().toISOString();
 function simpleLook(develop) {

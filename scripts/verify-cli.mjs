@@ -46,6 +46,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sta
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import sharp from 'sharp';
+import { seedLibraryDir } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
@@ -76,6 +77,14 @@ const check = (name, cond, actual) => {
 const workDir = mkdtempSync(join(tmpdir(), 'silverbox-cli-verify-'));
 const ownUserData = !process.env.SILVERBOX_USER_DATA;
 const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-cli-userdata-'));
+// The visible library (docs/brief-bank/linked-looks-stage-e.md): the CLI's
+// own preset resolution (readCliPresetText) now goes through the same
+// dual-location presetsList()/presetRead() the GUI uses — without an
+// isolated libraryDir, EVERY spawned --render call below would resolve it
+// from the real ~/Silverbox/Library the moment it boots (seedLibraryDir's
+// own doc comment). Only needed when this script owns userDataDir — a
+// pooled run already has run-verify.mjs's own pre-seed.
+if (ownUserData) seedLibraryDir(userDataDir);
 const outDir = join(workDir, 'out');
 mkdirSync(outDir, { recursive: true });
 

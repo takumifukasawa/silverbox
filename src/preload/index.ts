@@ -46,6 +46,12 @@ const api: SilverboxApi = {
     ipcRenderer.on(IPC.sharedLooksChanged, listener);
     return () => ipcRenderer.removeListener(IPC.sharedLooksChanged, listener);
   },
+  openLibraryImportDialog: () => ipcRenderer.invoke(IPC.openLibraryImportDialog),
+  onLibraryChanged: (callback) => {
+    const listener = () => callback();
+    ipcRenderer.on(IPC.libraryChanged, listener);
+    return () => ipcRenderer.removeListener(IPC.libraryChanged, listener);
+  },
   // Static env-derived flags (sandbox:false → preload has process.env). See
   // SilverboxApi.testFlags. Read once at preload time — the verify scripts set
   // these before launching electron.

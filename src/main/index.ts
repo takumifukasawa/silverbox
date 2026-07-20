@@ -39,7 +39,7 @@ import { externalToolSpawnCount, runExternalTool } from './externalTool';
 import { checkGoldenImage } from './goldenRender';
 import { encodeExport } from './imageExport';
 import { encodeLutExport } from './lutExport';
-import { deletePreset, listPresets, readPreset, writePreset } from './presets';
+import { deletePreset, listPresets, migrateLegacyPresetsIfNeeded, readPreset, writePreset } from './presets';
 import { deleteSharedLook, listSharedLooks, readSharedLook, writeSharedLook } from './sharedLooks';
 import { readSettings, updateSettings } from './settings';
 
@@ -322,6 +322,43 @@ function armSharedLooksWatch(projectDir: string | null): void {
   }
 }
 
+// --- Library dir hot-reload watcher (linked-looks-stage-e.md, semantic 6) ---
+//
+// Same "watch the containing directory, debounce, push a payload-free
+// event" shape as the shared-looks watcher above, but the library is a
+// single GLOBAL folder (not per-project) — armed ONCE at boot with whatever
+// `settings.libraryDir` resolves to, and re-armed only if the setting itself
+// changes at runtime (settingsUpdate handler below). "Putting a file in the
+// folder IS the import" — any external drop shows up in the presets list
+// without a restart.
+let libraryWatcher: FSWatcher | null = null;
+let libraryWatchDebounce: ReturnType<typeof setTimeout> | null = null;
+
+function teardownLibraryWatch(): void {
+  if (libraryWatchDebounce !== null) {
+    clearTimeout(libraryWatchDebounce);
+    libraryWatchDebounce = null;
+  }
+  libraryWatcher?.close();
+  libraryWatcher = null;
+}
+
+/** Arm the library watcher for `dir` — migrateLegacyPresetsIfNeeded (called right before this at boot) guarantees the dir already exists, but a defensive try/catch matches the other two watchers' posture regardless. */
+function armLibraryWatch(dir: string): void {
+  teardownLibraryWatch();
+  try {
+    libraryWatcher = watch(dir, () => {
+      if (libraryWatchDebounce !== null) clearTimeout(libraryWatchDebounce);
+      libraryWatchDebounce = setTimeout(() => {
+        libraryWatchDebounce = null;
+        mainWindow?.webContents.send(IPC.libraryChanged);
+      }, SIDECAR_WATCH_DEBOUNCE_MS);
+    });
+  } catch (err) {
+    console.warn(`library watch failed for ${dir}:`, err);
+  }
+}
+
 function registerIpc(): void {
   // CLI tooling parity (project-storage.md stage 2): a warning that isn't
   // any one file's structured result (currently just "--project playlist
@@ -377,6 +414,17 @@ function registerIpc(): void {
 
   ipcMain.handle(IPC.openDcpDialog, async (): Promise<OpenImageDialogResult> => {
     const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'DNG Camera Profile', extensions: ['dcp'] }] });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return { canceled: true };
+    return { canceled: false, path, fileName: basename(path) };
+  });
+
+  ipcMain.handle(IPC.openLibraryImportDialog, async (): Promise<OpenImageDialogResult> => {
+    // "ライブラリに取り込む…" (stage-e semantic 6): filtered to .json — the
+    // library holds presets AND shared-look templates, one file format
+    // (semantic 7). The picked path is read + written by the renderer
+    // (readFile + presetWrite), same as every other preset save path.
+    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Preset / Look', extensions: ['json'] }] });
     const path = result.filePaths[0];
     if (result.canceled || !path) return { canceled: true };
     return { canceled: false, path, fileName: basename(path) };
@@ -791,7 +839,17 @@ function registerIpc(): void {
     if (typeof partial !== 'object' || partial === null) {
       throw new Error('settingsUpdate: partial must be an object');
     }
-    return updateSettings(partial as Partial<Settings>);
+    const result = await updateSettings(partial as Partial<Settings>);
+    // libraryDir can change at runtime (SettingsDialog) — re-run the
+    // migration for whatever dir it now points at (a fresh library the user
+    // re-points at gets its own independent one-time copy, per
+    // migrateLegacyPresetsIfNeeded's own doc comment) and re-arm the watch
+    // at the new location; a no-op re-arm otherwise.
+    if ('libraryDir' in (partial as Record<string, unknown>)) {
+      await migrateLegacyPresetsIfNeeded();
+      armLibraryWatch(result.libraryDir);
+    }
+    return result;
   });
 
   ipcMain.handle(IPC.presetsList, async (): Promise<PresetSummary[]> => listPresets());
@@ -1075,7 +1133,14 @@ void app.whenReady().then(async () => {
   if (isCliRenderMode) Menu.setApplicationMenu(null);
   // Load (and, on first run, create) settings.json before the renderer can
   // possibly ask for it over IPC.
-  await readSettings();
+  const settings = await readSettings();
+  // The visible library (linked-looks-stage-e.md): one-time legacy-presets
+  // copy + mkdir -p on first use (semantics 2/8), then arm the dir-watch
+  // (semantic 6) — both BEFORE registerIpc so a presetsList()/presetRead()
+  // call that races the renderer's very first paint already sees a
+  // migrated, watched library.
+  await migrateLegacyPresetsIfNeeded();
+  armLibraryWatch(settings.libraryDir);
   registerIpc();
 
   if (isCliRenderMode) {
@@ -1093,5 +1158,6 @@ void app.whenReady().then(async () => {
 app.on('window-all-closed', () => {
   teardownSidecarWatch();
   teardownSharedLooksWatch();
+  teardownLibraryWatch();
   if (process.platform !== 'darwin') app.quit();
 });

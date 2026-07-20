@@ -48,7 +48,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unl
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, lookPathFor, seedLibraryDir } from './lib/testProject.mjs';
 
 /**
  * Fresh `<userData>/external-cache` per Electron launch (main/index.ts's
@@ -62,7 +62,10 @@ import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
  * whole point (a brand-new session must genuinely re-run once confirmed).
  */
 function freshUserDataDir() {
-  return mkdtempSync(join(tmpdir(), 'silverbox-external-userdata-'));
+  // seedLibraryDir (docs/brief-bank/linked-looks-stage-e.md) — this script's
+  // OWN independent userData dirs bypass run-verify.mjs's pool-wide
+  // libraryDir pre-seed; see that helper's doc comment.
+  return seedLibraryDir(mkdtempSync(join(tmpdir(), 'silverbox-external-userdata-')));
 }
 
 process.env.SILVERBOX_TEST = '1';

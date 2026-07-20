@@ -69,6 +69,7 @@ import {
   openSync,
   renameSync,
   rmSync,
+  writeFileSync,
   writeSync,
   closeSync,
 } from 'node:fs';
@@ -159,6 +160,7 @@ const ALL_SCRIPTS = [
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
   { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
   { name: 'linkedlooks3', file: 'verify-linkedlooks3.mjs' },
+  { name: 'library', file: 'verify-library.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 
@@ -194,10 +196,22 @@ function setupIsolation(name) {
     // some environments may lack the JPG fixture; scripts that need it will
     // fail loudly on their own, which is the correct behavior here.
   }
+  // The visible library (docs/brief-bank/linked-looks-stage-e.md): main
+  // resolves settings.libraryDir from os.homedir() when unset, same as
+  // quickProjectDir — WITHOUT an override every script that saves a preset
+  // (or just launches the app at all, via the one-time migration's mkdir)
+  // would write into this MACHINE'S real ~/Silverbox/Library. Pre-seed
+  // userDataDir's settings.json with an isolated libraryDir BEFORE launch,
+  // same "quickProjectDir test pattern" verify-project3.mjs's own
+  // writeSettingsJson helper established.
+  const libraryDir = mkdtempSync(join(tmpdir(), `silverbox-library-${name}-`));
+  mkdirSync(userDataDir, { recursive: true });
+  writeFileSync(join(userDataDir, 'settings.json'), JSON.stringify({ settingsVersion: 1, libraryDir }, null, 2) + '\n', 'utf8');
   return {
     workDir,
     userDataDir,
     projectDir,
+    libraryDir,
     env: {
       ...process.env,
       SILVERBOX_TEST: '1',
@@ -211,6 +225,7 @@ function setupIsolation(name) {
       rmSync(workDir, { recursive: true, force: true });
       rmSync(userDataDir, { recursive: true, force: true });
       rmSync(projectDir, { recursive: true, force: true });
+      rmSync(libraryDir, { recursive: true, force: true });
     },
   };
 }

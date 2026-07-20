@@ -116,3 +116,25 @@ export function hasSharedLook(slug) {
 export function readSharedLook(slug) {
   return JSON.parse(readFileSync(sharedLookPathFor(slug), 'utf8'));
 }
+
+/**
+ * The visible library (docs/brief-bank/linked-looks-stage-e.md): pre-seed
+ * `<userDataDir>/settings.json` with a `libraryDir` NESTED inside
+ * `userDataDir` (cleaned up automatically whenever the caller rmSync's its
+ * own userDataDir — no separate cleanup needed here) — same "quickProjectDir
+ * test pattern" reasoning as that setting's own default: without an
+ * explicit value, main resolves libraryDir from `os.homedir()`, and this
+ * one-time migration would mkdir + write a sentinel into THIS MACHINE'S real
+ * `~/Silverbox/Library` the moment the app boots. run-verify.mjs's own
+ * setupIsolation does this for every POOLED script's assigned userData dir
+ * already; a script that mints its OWN additional, independent userData
+ * dir(s) (bypassing that pool assignment — e.g. verify-denoise.mjs/
+ * verify-external.mjs's consent-flow fresh-state checks) needs to call this
+ * itself for each one, BEFORE the app is launched against it.
+ */
+export function seedLibraryDir(userDataDir) {
+  mkdirSync(userDataDir, { recursive: true });
+  const libraryDir = join(userDataDir, '__test-library__');
+  writeFileSync(join(userDataDir, 'settings.json'), JSON.stringify({ settingsVersion: 1, libraryDir }, null, 2) + '\n', 'utf8');
+  return userDataDir;
+}

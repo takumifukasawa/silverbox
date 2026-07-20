@@ -73,6 +73,13 @@ export const IPC = {
   // arming a new watch (project close).
   watchSharedLooks: 'sharedLooks:watch',
   sharedLooksChanged: 'sharedLooks:changed',
+  // The visible library (docs/brief-bank/linked-looks-stage-e.md): a file
+  // picker for "ライブラリに取り込む…" (Import), filtered to .json — reuses
+  // readFile + presetWrite (below), so this channel is only the native
+  // dialog. The library's own dir-watch reuses sharedLooksChanged's shape,
+  // armed once at boot (main/index.ts's armLibraryWatch), not per project.
+  openLibraryImportDialog: 'dialog:openLibraryImport',
+  libraryChanged: 'library:changed',
   // Headless CLI renderer (`electron . --render …` — see main/index.ts):
   // main pushes ONE job to the renderer once it signals ready, then the
   // renderer streams results back one at a time as they render.
@@ -447,13 +454,21 @@ export interface SilverboxApi {
   settingsGet(): Promise<Settings>;
   /** Merge `partial` into the persisted settings; returns the full, sanitized result. */
   settingsUpdate(partial: Partial<Settings>): Promise<Settings>;
-  /** List `<userData>/presets/*.json` summaries; a malformed file is skipped (never crashes the list). */
+  /**
+   * List every preset/library-template summary — DUAL-LOCATION since the
+   * visible library landed (docs/brief-bank/linked-looks-stage-e.md semantic
+   * 2): the union of `<libraryDir>/*.json` and the legacy `<userData>/presets/
+   * *.json` (library wins on a slug collision); a malformed file is skipped
+   * (never crashes the list). Presets and shared-look templates are the SAME
+   * species/file format (semantic 7) — this one list backs both PresetsMenu
+   * and the "vendor in"/"import" gestures, no separate library browser.
+   */
   presetsList(): Promise<PresetSummary[]>;
-  /** Read one preset's raw JSON text by slug; null if it doesn't exist. */
+  /** Read one preset's raw JSON text by slug — library first, then the legacy `<userData>/presets` dir; null if it exists in neither. */
   presetRead(slug: string): Promise<string | null>;
-  /** Write (create or overwrite) one preset's raw JSON text by slug. */
+  /** Write (create or overwrite) one preset's raw JSON text by slug — ALWAYS to the library (stage-e semantic 2: writes go to the new location only, never back into the legacy dir). */
   presetWrite(slug: string, content: string): Promise<void>;
-  /** Delete one preset file by slug. */
+  /** Delete one preset file by slug — the library's copy if it has one, else the legacy copy (a legacy-only slug's only copy — see main/presets.ts's deletePreset doc comment). */
   presetDelete(slug: string): Promise<void>;
   /** List `<projectDir>/shared-looks/*.json` summaries; a malformed file is skipped (never crashes the list) — same convention as presetsList. */
   sharedLooksList(projectDir: string): Promise<PresetSummary[]>;
@@ -480,6 +495,16 @@ export interface SilverboxApi {
    * Returns an unsubscribe function.
    */
   onSharedLooksChanged(callback: () => void): () => void;
+  /** Native "ライブラリに取り込む…" file picker, filtered to `.json` (stage-e semantic 6) — the picked path is read via `readFile` and written into the library via `presetWrite`, same validated read-then-write every other save path here uses. */
+  openLibraryImportDialog(): Promise<OpenImageDialogResult>;
+  /**
+   * Subscribe to main's debounced "something in the library dir changed"
+   * push (stage-e semantic 6: the library's fs.watch, armed ONCE at boot —
+   * unlike onSharedLooksChanged this is never project-scoped/re-armed, the
+   * library is a single global folder). Carries no payload; the renderer
+   * just re-reads `presetsList()`. Returns an unsubscribe function.
+   */
+  onLibraryChanged(callback: () => void): () => void;
   /**
    * Test-harness flags read from the main-process env at preload time; all
    * false in normal use. `isTest` mirrors SILVERBOX_TEST (the verify suite);
@@ -1016,6 +1041,24 @@ export interface Settings {
    */
   quickProjectDir: string;
   /**
+   * The visible library (docs/brief-bank/linked-looks-stage-e.md, semantic
+   * 1): `~/Silverbox/Library/` — a real, VISIBLE, git/sync-able folder the
+   * user owns (same "never a hidden app cache" reasoning as
+   * `quickProjectDir` above), holding every develop preset AND every shared-
+   * look TEMPLATE (semantic 7: one file format, one folder — presets.ts's
+   * `listPresets`/`readPreset`/`writePreset`/`deletePreset` are the only
+   * readers/writers). Empty string here means "not yet resolved" — same
+   * isomorphic-file constraint as `quickProjectDir` (this file can't call
+   * `os.homedir()`); main's sanitizeSettings (src/main/settings.ts) computes
+   * the real default (`join(homedir(), 'Silverbox', 'Library')`) whenever
+   * this field is absent/blank. A one-time migration (semantic 2) COPIES
+   * `<userData>/presets/*.json` into this dir the first time it's ever seen
+   * (a `.migrated-presets` sentinel marks "already done") — the app never
+   * touches git; it only mkdir's this folder on first use and writes nothing
+   * else new anywhere (semantic 8).
+   */
+  libraryDir: string;
+  /**
    * In-engine ML denoise (denoise v2, stage 1): "Download denoise model
    * (~112 MB)?" one-time consent (docs/brief-bank/denoise-v2.md's SECURITY
    * section) — false until the user explicitly clicks the Inspector's
@@ -1114,6 +1157,7 @@ export const DEFAULT_SETTINGS: Settings = {
   export: { quality: 90, maxDim: null, metadata: 'all', colorSpace: 'srgb' },
   exportPresets: [],
   quickProjectDir: '',
+  libraryDir: '',
   denoiseModelConsent: false,
   denoiseModelUrl: '',
   // Keep in sync with presetFamilies.ts's DEFAULT_CHECKED_FAMILY_IDS (the

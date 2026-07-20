@@ -87,9 +87,16 @@ const TODAY = todayLocal();
 
 function writeSettingsJson(userDataDir, quickProjectDir) {
   mkdirSync(userDataDir, { recursive: true });
+  // libraryDir (docs/brief-bank/linked-looks-stage-e.md): this script hand-
+  // authors its own settings.json for each of its several independent
+  // userData dirs, bypassing run-verify.mjs's own pool-wide pre-seed — same
+  // "pin it or it resolves to the real ~/Silverbox/Library" hazard
+  // quickProjectDir itself would have without an explicit value here.
+  // Nested inside userDataDir so it's cleaned up by that dir's own rmSync.
+  const libraryDir = join(userDataDir, '__test-library__');
   writeFileSync(
     join(userDataDir, 'settings.json'),
-    JSON.stringify({ settingsVersion: 1, quickProjectDir }, null, 2) + '\n',
+    JSON.stringify({ settingsVersion: 1, quickProjectDir, libraryDir }, null, 2) + '\n',
     'utf8'
   );
 }
@@ -390,6 +397,14 @@ const overrideDir = mkdtempSync(join(tmpdir(), 'silverbox-project3-override-'));
 const overrideUserData = mkdtempSync(join(tmpdir(), 'silverbox-project3-override-userdata-'));
 const overrideWorkDir = mkdtempSync(join(tmpdir(), 'silverbox-project3-override-work-'));
 mkdirSync(join(overrideDir, 'looks'), { recursive: true });
+// This launch doesn't go through writeSettingsJson (it only cares about
+// SILVERBOX_TEST_PROJECT) — pre-seed libraryDir directly so it doesn't fall
+// through to the real ~/Silverbox/Library default either.
+writeFileSync(
+  join(overrideUserData, 'settings.json'),
+  JSON.stringify({ settingsVersion: 1, libraryDir: join(overrideUserData, '__test-library__') }, null, 2) + '\n',
+  'utf8'
+);
 const overridePhoto = join(overrideWorkDir, 'override_photo.ARW');
 linkSync(ARW_PATH, overridePhoto);
 

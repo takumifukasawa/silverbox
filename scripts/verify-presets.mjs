@@ -38,7 +38,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, lookPathFor, seedLibraryDir } from './lib/testProject.mjs';
 
 // never steal focus while the suite runs (see testMode in src/main/index.ts)
 process.env.SILVERBOX_TEST = '1';
@@ -89,6 +89,13 @@ if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 const ownUserData = !process.env.SILVERBOX_USER_DATA;
 const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-presets-verify-'));
 process.env.SILVERBOX_USER_DATA = userDataDir;
+// The visible library (docs/brief-bank/linked-looks-stage-e.md): saves now
+// target settings.libraryDir, not <userData>/presets — a STANDALONE run
+// (own fresh userDataDir) needs its own isolated libraryDir pre-seeded the
+// same way run-verify.mjs's pool assignment already does for a pooled run,
+// or this script would resolve to the real ~/Silverbox/Library the moment
+// the app boots (see seedLibraryDir's own doc comment).
+if (ownUserData) seedLibraryDir(userDataDir);
 
 const app = await electron.launch({ args: [projectRoot] });
 const pageErrors = [];
@@ -103,7 +110,12 @@ try {
     basename(realUserData) === basename(userDataDir),
     { realUserData, userDataDir }
   );
-  const presetsDir = join(realUserData, 'presets');
+  // Saves land in the library now, wherever settings.libraryDir actually
+  // resolved to (this script's own seedLibraryDir above when standalone, or
+  // run-verify.mjs's pool-wide pre-seed when pooled) — ask the app itself
+  // rather than re-deriving the path, so this stays correct either way.
+  await page.waitForFunction(() => window.__debug?.settingsState() != null, { timeout: 15_000 });
+  const presetsDir = await page.evaluate(() => window.__debug.settingsState().libraryDir);
 
   const openAndWait = async (path) => {
     await page.evaluate((p) => {

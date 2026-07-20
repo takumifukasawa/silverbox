@@ -38,6 +38,7 @@ export function SharedLookMenu() {
   const linkPhotosToLook = useAppStore((s) => s.linkPhotosToLook);
   const deleteSharedLook = useAppStore((s) => s.deleteSharedLook);
   const publishToSharedLook = useAppStore((s) => s.publishToSharedLook);
+  const publishSharedLookToLibrary = useAppStore((s) => s.publishSharedLookToLibrary);
   // activeLinkedDevelopNode() is a synchronous getter (appStore.ts's own doc
   // comment) — calling it FROM INSIDE the selector (not just reading the
   // method reference) is what makes this reactive: zustand recomputes the
@@ -148,6 +149,20 @@ export function SharedLookMenu() {
                 title="Delete this shared look's file — every follower loses its link (values unchanged); undo restores the link fields, not the file"
               >
                 Delete
+              </button>
+              {/* Publish to library (linked-looks-stage-e.md semantic 5,
+                  parent §6) — distinct from the "publish" button below
+                  (which pushes THIS PHOTO's adjustments into the look this
+                  photo follows): this one copies the SELECTED row's file
+                  out to the visible library, overwriting the template. */}
+              <button
+                type="button"
+                data-testid="shared-look-publish-to-library"
+                disabled={!selected}
+                onClick={() => void publishSharedLookToLibrary(selected)}
+                title="ライブラリに反映 — copy this project's shared look out to the library, overwriting the template if it already exists there"
+              >
+                ライブラリに反映
               </button>
             </div>
             <div className="presets-menu-row">

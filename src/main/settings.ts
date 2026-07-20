@@ -98,6 +98,13 @@ export function sanitizeSettings(raw: unknown): Settings {
     typeof src.quickProjectDir === 'string' && src.quickProjectDir.trim() !== ''
       ? src.quickProjectDir
       : join(homedir(), 'Silverbox', 'Quick');
+  // The visible library (docs/brief-bank/linked-looks-stage-e.md semantic
+  // 1): same "this file can't call os.homedir(), so THIS is the one place
+  // the real default gets resolved" reasoning as quickProjectDir just above.
+  // A real, visible folder under the user's home — see Settings.libraryDir's
+  // doc comment.
+  result.libraryDir =
+    typeof src.libraryDir === 'string' && src.libraryDir.trim() !== '' ? src.libraryDir : join(homedir(), 'Silverbox', 'Library');
   // In-engine ML denoise (denoise v2, stage 1): consent is a plain boolean
   // (see Settings.denoiseModelConsent's doc comment for why it persists
   // forever once true — "once per install, not per session"); the URL

@@ -44,8 +44,12 @@ export const CLI_USAGE = `Usage: silverbox-render [options] <image.arw|jpg|look.
   --out <dir>          output directory (default: alongside each input)
   --preset <name|path> apply a preset instead of the image's own sidecar.
                         A value ending in .json is read as a preset FILE;
-                        anything else is looked up by NAME in
-                        <userData>/presets (falling back to slug). Applies
+                        anything else is looked up by NAME in the visible
+                        library (~/Silverbox/Library/ by default — see
+                        Settings.libraryDir), falling back to the legacy
+                        <userData>/presets dir, then by slug in each
+                        (docs/brief-bank/linked-looks-stage-e.md — the
+                        library wins a same-slug collision). Applies
                         exactly like the UI's "Apply preset" on a fresh
                         open: there is no interactive crop to preserve in a
                         batch, so the preset's look lands on identity

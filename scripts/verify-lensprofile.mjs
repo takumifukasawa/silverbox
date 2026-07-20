@@ -31,7 +31,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createRequire } from 'node:module';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, lookPathFor, seedLibraryDir } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 // Re-enable the fresh-open default INSIDE the suite for this script only.
@@ -330,7 +330,12 @@ if (!existsSync(LENS50_ARW) || !existsSync(LENS50_JPG)) {
   // if this script is running inside the suite, else mint a fresh temp dir —
   // the CLI is a brand-new spawned process either way, not the Playwright
   // app above (which is already closed by this point).
+  const ownLens50UserData = !process.env.SILVERBOX_USER_DATA;
   const lens50UserData = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-lens50-userdata-'));
+  // The visible library (docs/brief-bank/linked-looks-stage-e.md) — see
+  // verify-cli.mjs's own identical comment: an isolated libraryDir keeps a
+  // standalone run off the real ~/Silverbox/Library.
+  if (ownLens50UserData) seedLibraryDir(lens50UserData);
   const electronBin = join(projectRoot, 'node_modules', '.bin', 'electron');
   const lens50Render = spawnSync(electronBin, [projectRoot, '--render', '--out', lens50Out, lens50Linked], {
     env: { ...process.env, SILVERBOX_USER_DATA: lens50UserData },

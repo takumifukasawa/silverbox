@@ -73,6 +73,16 @@ export function SettingsDialog() {
             />
           </label>
           <span className="toolbar-dim">only affects a NEW quick project, not the one already active</span>
+          <label className="export-dialog-row" title="Where saved presets and shared-look templates live (docs/brief-bank/linked-looks-stage-e.md) — a real, visible folder you can open in Finder/git, never a hidden app cache. Changing this re-runs the one-time legacy-presets migration for the new location and re-arms its folder watch.">
+            Library folder
+            <input
+              type="text"
+              value={settings.libraryDir}
+              data-testid="settings-library-dir"
+              onChange={(ev) => void updateSettings({ libraryDir: ev.target.value })}
+            />
+          </label>
+          <span className="toolbar-dim">presets/shared-look templates read from here + the legacy presets dir, written here only</span>
         </div>
         <div className="export-dialog-footer">
           <div className="export-dialog-footer-buttons">

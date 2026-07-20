@@ -72,10 +72,14 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, rmSync, sta
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { _electron as electron } from 'playwright';
-import { ensureTestProjectEnv, lookPathFor } from './lib/testProject.mjs';
+import { ensureTestProjectEnv, lookPathFor, seedLibraryDir } from './lib/testProject.mjs';
 
 function freshUserDataDir() {
-  return mkdtempSync(join(tmpdir(), 'silverbox-denoise-userdata-'));
+  // seedLibraryDir (docs/brief-bank/linked-looks-stage-e.md): this script
+  // mints several fully independent userData dirs (fresh-consent-state
+  // checks), bypassing run-verify.mjs's own pool-wide libraryDir pre-seed —
+  // see that helper's doc comment for why every one needs its own.
+  return seedLibraryDir(mkdtempSync(join(tmpdir(), 'silverbox-denoise-userdata-')));
 }
 
 process.env.SILVERBOX_TEST = '1';
@@ -412,7 +416,7 @@ console.log('verify-denoise (7. no model + no consent ⇒ passthrough + badge; t
 console.log('verify-denoise (8. CLI: model absent + no consent ⇒ passthrough + warning, no new flag needed):');
 {
   const workDir = mkdtempSync(join(tmpdir(), 'silverbox-denoise-cli-'));
-  const userDataDir = mkdtempSync(join(tmpdir(), 'silverbox-denoise-cli-userdata-'));
+  const userDataDir = seedLibraryDir(mkdtempSync(join(tmpdir(), 'silverbox-denoise-cli-userdata-')));
   const outDirBaseline = join(workDir, 'out-baseline');
   const outDirDenoise = join(workDir, 'out-denoise');
   mkdirSync(outDirBaseline, { recursive: true });

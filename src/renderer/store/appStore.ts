@@ -816,8 +816,64 @@ interface AppState {
    * develop node.
    */
   resetDevelopNode(nodeId: string): void;
-  /** `<userData>/presets/*.json` summaries (task #37); refreshed after save/delete and once at boot. */
+  /**
+   * The library ∪ legacy-userData preset/template summaries (task #37;
+   * dual-location since docs/brief-bank/linked-looks-stage-e.md — see
+   * main/presets.ts's listPresets); refreshed after save/delete/vendor-in/
+   * import, once at boot, and on the library's own external-drop watch
+   * (onLibraryChanged).
+   */
   presets: PresetSummary[];
+  /** Re-read the library ∪ legacy dir into `presets` — the boot load + every write path's own refresh factored out so the external-drop watch (onLibraryChanged) can reuse it too. */
+  refreshPresets(): Promise<void>;
+  /**
+   * "プロジェクトに取り込む" (vendor in — linked-looks-stage-e.md semantic 4,
+   * parent spec §6): copy library row `slug`'s raw file text into the ACTIVE
+   * PROJECT's `shared-looks/` dir verbatim (no parsing/rescoping — presets
+   * and shared-look templates are the same file format, semantic 7). A
+   * project-slug collision auto-suffixes (-2, -3…, same disambiguation as
+   * savePreset/createSharedLook) rather than overwriting a differently-
+   * sourced project look that happens to share the name; either way a
+   * completion notice names the destination slug actually used. The vendored
+   * copy then shows up in `sharedLooks`/SharedLookMenu — linking happens
+   * against it via the ordinary `linkPhotosToLook` flow, unchanged. No undo
+   * entry (additive file copy, render-neutral until something is explicitly
+   * linked to it — notice only, per the brief). No-op (with an error notice)
+   * without an active project or a slug this build can't read.
+   */
+  vendorPresetIntoProject(slug: string): Promise<void>;
+  /**
+   * "ライブラリに反映" (publish to library — linked-looks-stage-e.md semantic
+   * 5, parent spec §6): copy the ACTIVE PROJECT's shared look `slug`'s raw
+   * file text OUT to the library verbatim, at the SAME slug — overwriting
+   * the library template if it already exists (that IS "updating the
+   * template"; every OTHER project that vendored a copy earlier is
+   * untouched, since vendoring already made them independent files). No
+   * undo entry — the library is a visible, git/sync-able folder, the safety
+   * net per parent spec §9-7's RESOLVED decision, same reasoning as
+   * deleteSharedLook's own file-deletion half. No-op (with an error notice)
+   * without an active project or a slug that fails to read.
+   */
+  publishSharedLookToLibrary(slug: string): Promise<void>;
+  /**
+   * "ライブラリに取り込む…" (Import — linked-looks-stage-e.md semantic 6):
+   * opens a native file picker (filtered to .json) and copies the picked
+   * file's raw text into the library. The slug is derived from the picked
+   * file's OWN basename (sanitized via slugifyPresetName — same identity a
+   * plain Finder drop into the folder would keep, matching "putting a file
+   * in the folder IS the import"), auto-suffixed on a slug collision (same
+   * disambiguation as vendorPresetIntoProject/savePreset) rather than
+   * silently overwriting an unrelated same-named library file. The content
+   * is still validated parseable (parsePresetFile) before writing — every
+   * other save path in this store validates before it writes, and a picker-
+   * driven import is no different — an unparseable pick is rejected with an
+   * error notice, nothing is written. A no-dialog external drop straight
+   * into the library folder (the OTHER half of "putting a file in the
+   * folder IS the import") is unvalidated by contrast — it goes through
+   * main's fs.watch (onLibraryChanged) untouched, exactly like a hand-edited
+   * sidecar. No-op if the picker is canceled.
+   */
+  importPresetFile(): Promise<void>;
   /**
    * Save the CURRENT graph as a preset file named `name`. Same display name
    * as an existing preset overwrites it (its slug/createdAt/unknown wrapper
@@ -3226,10 +3282,14 @@ export const useAppStore = create<AppState>((set, get) => {
 
   /**
    * Resolve `job.preset` (headless CLI, `--preset`) to its raw JSON text: a
-   * PATH reads the file directly; a NAME looks it up against
-   * `<userData>/presets` by display name first, then by slug (a user who
-   * already knows a preset's slug — e.g. copy-pasted from another sidecar —
-   * shouldn't have to know its display name too).
+   * PATH reads the file directly; a NAME looks it up by display name first,
+   * then by slug (a user who already knows a preset's slug — e.g.
+   * copy-pasted from another sidecar — shouldn't have to know its display
+   * name too), against `presetsList()`/`presetRead()` — which, since the
+   * visible library landed (docs/brief-bank/linked-looks-stage-e.md), are
+   * themselves dual-location (library first, then the legacy
+   * `<userData>/presets` dir) — this function gets that resolution for free,
+   * no change needed here.
    */
   const readCliPresetText = async (ref: NonNullable<CliRenderJob['preset']>): Promise<string> => {
     if (ref.kind === 'path') {
@@ -6114,6 +6174,77 @@ export const useAppStore = create<AppState>((set, get) => {
 
   presets: [],
 
+  async refreshPresets() {
+    set({ presets: await window.silverbox.presetsList() });
+  },
+
+  async vendorPresetIntoProject(slug) {
+    const project = get().project;
+    if (!project) return;
+    const text = await window.silverbox.presetRead(slug);
+    if (text === null) {
+      raiseNotice('projectNotice', { kind: 'error', message: `"${slug}" could not be read from the library` });
+      return;
+    }
+    const sourceName = get().presets.find((p) => p.slug === slug)?.name ?? slug;
+    const existing = await window.silverbox.sharedLooksList(project.dir);
+    const taken = new Set(existing.map((p) => p.slug));
+    let destSlug = slug;
+    for (let n = 2; taken.has(destSlug); n++) destSlug = `${slug}-${n}`;
+    await window.silverbox.sharedLookWrite(project.dir, destSlug, text);
+    // Stage D echo suppression — same reasoning as createSharedLook's own priming.
+    set((st) => ({ sharedLookTexts: { ...st.sharedLookTexts, [destSlug]: text } }));
+    // shared-looks/ may not have existed yet for this project — the write
+    // above is what just created it (own mkdir-before-write); harmless
+    // no-op re-arm otherwise, same posture as createSharedLook's own re-arm.
+    void window.silverbox.watchSharedLooks(project.dir);
+    await get().refreshSharedLooks();
+    raiseNotice('projectNotice', {
+      kind: 'success',
+      message:
+        destSlug === slug
+          ? `vendored "${sourceName}" into this project`
+          : `vendored "${sourceName}" into this project as "${destSlug}" (name already used here)`,
+    });
+  },
+
+  async publishSharedLookToLibrary(slug) {
+    const project = get().project;
+    if (!project) return;
+    const text = await window.silverbox.sharedLookRead(project.dir, slug);
+    if (text === null) {
+      raiseNotice('projectNotice', { kind: 'error', message: `"${slug}" could not be read from this project's shared looks` });
+      return;
+    }
+    const name = get().sharedLooks.find((p) => p.slug === slug)?.name ?? slug;
+    await window.silverbox.presetWrite(slug, text);
+    await get().refreshPresets();
+    raiseNotice('projectNotice', { kind: 'success', message: `published "${name}" to the library` });
+  },
+
+  async importPresetFile() {
+    const result = await window.silverbox.openLibraryImportDialog();
+    if (result.canceled) return;
+    const bytes = await window.silverbox.readFile(result.path);
+    const text = new TextDecoder().decode(bytes);
+    let name: string;
+    try {
+      name = parsePresetFile(text).name;
+    } catch (err) {
+      console.warn(`importPresetFile: "${result.fileName}" could not be parsed as a preset/look file:`, err);
+      raiseNotice('projectNotice', { kind: 'error', message: `"${result.fileName}" is not a valid preset/look file — nothing imported` });
+      return;
+    }
+    const baseSlug = slugifyPresetName(result.fileName.replace(/\.json$/i, ''));
+    const existing = await window.silverbox.presetsList();
+    const taken = new Set(existing.map((p) => p.slug));
+    let slug = baseSlug;
+    for (let n = 2; taken.has(slug); n++) slug = `${baseSlug}-${n}`;
+    await window.silverbox.presetWrite(slug, text);
+    await get().refreshPresets();
+    raiseNotice('projectNotice', { kind: 'success', message: `imported "${name}" into the library` });
+  },
+
   sharedLooks: [],
 
   async refreshSharedLooks() {
@@ -8675,6 +8806,15 @@ if (typeof window !== 'undefined' && window.silverbox) {
   // project is current when the push arrives.
   window.silverbox.onSharedLooksChanged(() => {
     void useAppStore.getState().handleSharedLooksChanged();
+  });
+  // Library hot-reload (linked-looks-stage-e.md semantic 6): same one-
+  // subscription-for-the-app-lifetime shape as the two watchers above, but
+  // the library is a single GLOBAL folder (armed once at main's boot, not
+  // per project) — "putting a file in the folder IS the import" needs no
+  // per-slug diffing the way sidecar/shared-look hot-reload do, a plain
+  // list refresh is the whole reaction.
+  window.silverbox.onLibraryChanged(() => {
+    void useAppStore.getState().refreshPresets();
   });
 }
 

@@ -44,6 +44,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readdirSync, readFileSync
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import sharp from 'sharp';
+import { seedLibraryDir } from './lib/testProject.mjs';
 
 process.env.SILVERBOX_TEST = '1';
 
@@ -68,6 +69,10 @@ const check = (name, cond, actual) => {
 const workDir = mkdtempSync(join(tmpdir(), 'silverbox-cli-project-verify-'));
 const ownUserData = !process.env.SILVERBOX_USER_DATA;
 const userDataDir = process.env.SILVERBOX_USER_DATA ?? mkdtempSync(join(tmpdir(), 'silverbox-cli-project-userdata-'));
+// The visible library (docs/brief-bank/linked-looks-stage-e.md) — see
+// verify-cli.mjs's own identical comment: an isolated libraryDir keeps a
+// standalone run off the real ~/Silverbox/Library.
+if (ownUserData) seedLibraryDir(userDataDir);
 
 function link(name, src = SRC_ARW) {
   const dst = join(workDir, name);
