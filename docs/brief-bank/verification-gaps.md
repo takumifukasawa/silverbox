@@ -62,12 +62,16 @@ throws, caught, returns null. This is COMMON in production (Detail
 sharpening is part of the real default RAW look outside the test
 suite's suppression flags), so the fallback is a main path, not an
 edge.
-TEST TO ADD: verify-develop-thumbnails check that a look containing a
-Detail/spots node yields the plain-preview bytes (not a threw/blank
-cell) — assert the cell equals the plain preview AND no exception
-surfaced. Without it, a regression that makes cpuEvalPlan throw a
-DIFFERENT error (not the spatial-op contract) would silently blank
-those cells instead of falling back.
+VERIFIED CORRECT BY CODE INSPECTION (Fable, this audit): cpuEvalPlan
+(graphDoc.ts) THROWS `Error("step … has no CPU reference")` for any
+step with null `cpu` — spatial ops, image, custom-shader, external/
+denoise (explicit throw sites, documented contract). getDevelopAware-
+Thumbnail's try/catch catches exactly this and returns null → plain-
+preview fallback. So the fallback works by the throw contract; no bug.
+TEST TO ADD: a verify-develop-thumbnails check that a look with a
+Detail/spots node yields the plain-preview bytes (not a blank cell) —
+guards against a future refactor where cpuEvalPlan throws a DIFFERENT
+error class the catch still swallows but the intent changed.
 
 ## 4. Linked looks × virtual copies: the interaction is specified, lightly tested
 
@@ -98,11 +102,16 @@ verify-linkedlooks3 covers drift-at-open re-materialization and
 value-drift-implies-fork. The design also promises a NO-OP: a publish
 commit pulled from another machine (followers already carry the new
 materializedFrom) must NOT trigger a spurious fan-out at open.
-CONFIRM/ADD: an explicit assertion that opening a project whose
+VERIFIED CORRECT BY CODE INSPECTION (Fable, this audit):
+checkSharedLookDriftAtOpen (appStore.ts:3927) re-materializes only when
+`link.materializedFrom !== hash` — a follower already carrying the
+current look hash (the pulled-publish case) fails the condition and
+triggers nothing; the cache is primed either way to suppress the first
+watch echo. So the no-op holds by construction; no bug.
+TEST TO ADD: an explicit assertion that opening a project whose
 followers' materializedFrom already matches the look hash pushes ZERO
-undo entries and rewrites ZERO files. The positive (drift detected)
-is tested; the negative (no false-positive drift) is the one that
-guards against an annoying every-open re-materialize.
+undo entries and rewrites ZERO files — pins the negative against a
+future refactor.
 
 ## 6. Library migration idempotency + collision
 
@@ -126,10 +135,15 @@ present → zero copies) to pin the guard against a future refactor.
 Publish/DeleteSharedLook/re-materialize undo entries carry follower
 graphs and (for publish/delete) the look-file text. Global undo JUMPS
 to a different photo when reverting its entry (DESIGN.md global-undo).
+VERIFIED CORRECT BY CODE INSPECTION (Fable, this audit): the publish
+undo case (appStore.ts:5865) restores the look file (lookTextBefore),
+applySyncEntryGraphs reverts ALL targets in place, and reopens the open
+photo ONLY `if (entry.targets.includes(openPath))` — navigated away to
+a non-follower ⇒ no jump, just file reverts + playlist refresh, exactly
+the global-undo batch rule (DESIGN.md). No bug.
 GAP: an E2E that publishes, NAVIGATES AWAY to a non-follower photo,
-then ⌘Z — asserting the fan-out reverts in place (batch entries revert
-all targets without a single-photo jump, per the global-undo batch
-rule) and the shared-look file is restored byte-identical.
+then ⌘Z — pins the in-place batch revert + byte-identical look-file
+restore against a refactor.
 
 ## Not gaps (checked, clean)
 
