@@ -46,6 +46,18 @@ corrected image), but the graph lets the user put it anywhere.
 4. **GPU + CPU mirror (engine invariant).** GPU: upload the 3D LUT as a
    `texture_3d<f32>` and trilinearly sample (the hardware sampler does
    the interpolation); 1D LUT = three `texture_1d` or a small uniform.
+   ⚠️ PREMISE CORRECTION (Fable brief-audit 2026-07-20): the engine has
+   NO 3D-texture infrastructure today — every current texture binding is
+   2D (grep for texture_3d is empty). So the 3D path is NET-NEW plumbing
+   (WebGPU 3D texture creation + a `texture_3d<f32>` WGSL binding + a
+   sampler), NOT "follow the existing texture-binding pattern" — size the
+   GPU side accordingly. Two de-risking options: (a) ship the 1D LUT
+   first (a small uniform array, no 3D texture — covers per-channel tone
+   .cubes) and add 3D as a follow-up; (b) if 3D-texture support proves
+   fiddly on the WebGPU/Electron stack, an interim 3D LUT can be sampled
+   from a 2D "tiled" texture (the Unity/Unreal strip layout the LUT
+   EXPORT already emits — reuse that packing) with manual trilinear in
+   WGSL. The CPU mirror (trilinear in JS) is straightforward either way.
    CPU mirror: matched trilinear (3D) / linear (1D) interpolation with
    the SAME encode/sample/decode order, GPU↔CPU within 1/255 (the op is
    a per-pixel color transform WITH a CPU mirror — unlike blur/resample,
