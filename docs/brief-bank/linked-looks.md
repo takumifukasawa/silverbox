@@ -453,11 +453,15 @@ third layer). This spec deliberately adds NO sharing on top of it.
    feedback); publish's group-choice UI is FamilyScopeDialog reuse
    (the shared component preset scoping landed, 2e2cd0b).
 
-## 10. Interim operation (today, no new code)
+## 10. Interim operation (superseded by the stage landings)
 
-- Look distribution: presets (develop families only).
-- Dust: select affected frames → Sync with ONLY the spots family.
-- Auto Sync: unused; removal awaiting the user's explicit call.
+- Look distribution: presets (develop families only) — now also
+  apply-preset-to-selection (stage A) and shared looks (stages B-C).
+- Dust: select affected frames → Sync with ONLY the spots family —
+  replaced by repair sheets at stage F.
+- Auto Sync: **removal USER-DECIDED 2026-07-20 («削除でok»)** — goes
+  out in stage G together with the Sync button (per §6's same-release
+  constraint, satisfied since stage A landed).
 
 ## 11. Explicitly deferred / rejected
 
