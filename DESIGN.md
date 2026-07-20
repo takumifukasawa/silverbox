@@ -184,6 +184,22 @@ Two compatibility promises, kept forever:
   newer document must carry fields it doesn't understand through
   load→save untouched, instead of silently deleting a future feature's
   data. Not knowing what something means is no excuse for destroying it.
+- **Every document renders standalone — shared references are
+  MATERIALIZED, never resolved-at-open** (established by linked looks,
+  2026-07-20). When a photo follows a shared look, its own JSON still
+  holds the complete resolved parameter set; the link is *additive sync
+  metadata* (which look, which adjustment groups a publish may rewrite,
+  a materialized-from hash), never the only place a followed value
+  lives. Propagation happens by WRITING new values into each follower at
+  an explicit moment (publish, or an external look-file edit picked up by
+  hot-reload), not by resolving a reference every time the file opens.
+  The consequence is the invariant: the CLI, an old reader, or a fresh
+  `git checkout` renders any photo correctly with all link metadata
+  ignored, and deleting a shared look never changes a single follower's
+  rendering. The reference-resolved alternative (store only the local
+  overrides, resolve the shared part at open) was deliberately REJECTED —
+  it breaks this standalone-readability guarantee and the two promises
+  above.
 
 ### 10. Performance model: display-resolution editing, honest pixels on demand
 
