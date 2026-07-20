@@ -1826,6 +1826,44 @@ async function writeGraphSaveSnapshot(
   return { createdAt, fingerprint: fingerprint ?? null, photo: photo ?? null, content };
 }
 
+/** Order-insensitive canonical form of a develop `link`, for comparing two link snapshots (`follows` is a set — element order is not significant). */
+function canonicalDevelopLink(link: DevelopLink | undefined): string {
+  if (!link) return '';
+  return JSON.stringify({ look: link.look, follows: [...link.follows].sort(), materializedFrom: link.materializedFrom });
+}
+
+/**
+ * True when the open photo's live graph carries a develop-link change (a FORK
+ * — `link.follows` shrinking via forkLinkedFamilies, or any other link edit)
+ * that is NOT yet on disk, measured against the exact text last read/written
+ * for this photo (`lastSidecarText`). Only the link METADATA is compared —
+ * ordinary develop value edits are deliberately excluded, so this gates ONLY
+ * the fork/link case (see flushPendingAutosave's caller for why value edits
+ * keep riding the autosave setting).
+ *
+ * Conservative on any uncertainty (no baseline, or an unparseable one ⇒
+ * false): a never-saved photo has no on-disk look file for a later publish to
+ * misread, so an unflushed fork on it is not at risk regardless.
+ */
+function graphHasUnsavedDevelopLinkChange(state: AppState): boolean {
+  if (!state.lastSidecarText) return false;
+  let baseline: SidecarDoc;
+  try {
+    baseline = parseGraphDoc(state.lastSidecarText);
+  } catch {
+    return false;
+  }
+  const baselineLinks = new Map<string, string>();
+  for (const n of baseline.graph.nodes) {
+    if (n.kind === DEVELOP_KIND) baselineLinks.set(n.id, canonicalDevelopLink(n.link));
+  }
+  for (const n of state.graph.nodes) {
+    if (n.kind !== DEVELOP_KIND) continue;
+    if (canonicalDevelopLink(n.link) !== (baselineLinks.get(n.id) ?? '')) return true;
+  }
+  return false;
+}
+
 /**
  * Flush whatever autosave the timer `cancelAutosaveTimer` is about to cancel
  * would have performed for the photo that's closing (openImageByPath /
@@ -1863,7 +1901,18 @@ async function writeGraphSaveSnapshot(
  * nothing.
  */
 function flushPendingAutosave(state: AppState): Promise<void> {
-  if (!state.graphDirty || !state.settings.autosaveSidecar) return Promise.resolve();
+  if (!state.graphDirty) return Promise.resolve();
+  // Ordinary develop VALUE edits ride the autosave setting — with autosave
+  // off they are intentionally discarded on switch (verify-exportsettings's
+  // own contract). A pending FORK (docs/brief-bank/linked-looks-forkbug.md),
+  // by contrast, must persist on switch REGARDLESS of the setting: it is a
+  // deliberate 個別調整 that publish / re-materialize read straight off the
+  // follower's file on disk (they never see this photo's in-memory graph once
+  // it's switched away), so a fork left only in memory is silently overwritten
+  // by the next publish, which re-follows the family and clobbers the photo
+  // with the look's value — the exact user-reported bug. This project's own
+  // settings ship autosaveSidecar OFF, so that is the primary path here.
+  if (!state.settings.autosaveSidecar && !graphHasUnsavedDevelopLinkChange(state)) return Promise.resolve();
   const snapshot = captureGraphSaveSnapshot(state);
   if (!snapshot) return Promise.resolve();
   // Epoch token (conductor review finding #2): `imagePath` equality alone

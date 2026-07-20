@@ -1,6 +1,6 @@
 # Debug+fix: publish overwrites a forked (個別調整) follower
 
-Status: DISPATCHED 2026-07-21. USER-REPORTED bug (hand-test), core
+Status: FIXED+LANDED 2026-07-21 (root cause: fork rode the autosave pipeline; with autosave OFF - the user config - it never flushed, so publish read stale disk state. Fix: fork/link changes persist on switch regardless of autosave. SUITE 74/74). USER-REPORTED bug (hand-test), core
 linked-looks correctness. REPRO-FIRST: build the exact scenario as a
 deterministic verify check BEFORE theorizing — the static read of the
 fan-out filter looks correct, so the bug is subtle (persistence / flush

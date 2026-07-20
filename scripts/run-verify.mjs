@@ -160,6 +160,7 @@ const ALL_SCRIPTS = [
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
   { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
   { name: 'linkedlooks3', file: 'verify-linkedlooks3.mjs' },
+  { name: 'linkedlooks-forkbug', file: 'verify-linkedlooks-forkbug.mjs' },
   { name: 'library', file: 'verify-library.mjs' },
   { name: 'repairsheet', file: 'verify-repairsheet.mjs' },
   { name: 'develop-thumbnails', file: 'verify-develop-thumbnails.mjs' },
