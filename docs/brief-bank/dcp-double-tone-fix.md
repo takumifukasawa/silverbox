@@ -1,6 +1,6 @@
 # Brief: fix the DCP double-tone bug (option a' — flatten to identity)
 
-Status: DISPATCHED 2026-07-20. Fixes the CONFIRMED bug recorded in
+Status: LANDED 2026-07-20 (SUITE 73/73, unit 270; all 3 guards proven by verify-dcp-doubletone.mjs). Fixes the CONFIRMED bug recorded in
 dcp-profile.md's "Layering decision" section (Fable double-check). USER-
 DECIDED approach: **a'** — when a tone-carrying DCP becomes active, the
 visible tone curve actually goes flat (matches the documented "the

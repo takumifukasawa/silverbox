@@ -165,8 +165,19 @@ tone curve starts flat on top), because the DCP curve is defined in
 a specific space and surfacing it as editable points would break
 exact reproduction. Builtin mode keeps today's visible seeded curve.
 
-⚠️ **DOUBLE-TONE BUG — this layering decision is DOCUMENTED but NOT
-IMPLEMENTED (Fable double-check 2026-07-20; not yet fixed).** The
+✅ **DOUBLE-TONE BUG — FIXED 2026-07-20** (option a', commit pending at
+write time; SUITE 73/73). refreshDcpProfile (appStore.ts, the choke
+point both setDevelopProfileSource and setDevelopProfileDcpPath route
+through) now flattens toneCurve.rgb to identity when the active DCP
+carries a ProfileToneCurve (parsed.toneCurve != null) AND the curve
+still deep-equals the seeded base curve (curvePointsEqual vs
+baseCurveForModel) — one undoable entry + notice, master curve only,
+forkLinkedFamilies-aware, idempotent, and it heals old source=dcp docs
+on open. Tone-less DCPs keep the base curve. verify-dcp-doubletone.mjs
+proves all three guards. The finding record below is kept for history.
+
+⚠️ **DOUBLE-TONE BUG (historical record) — was DOCUMENTED but NOT
+IMPLEMENTED (Fable double-check 2026-07-20; now fixed above).** The
 "visible tone curve starts flat on top" invariant does not hold:
 1. seedDefaultLook (appStore.ts:2188) UNCONDITIONALLY seeds
    baseCurveForModel into `toneCurve.rgb` on every fresh RAW open,

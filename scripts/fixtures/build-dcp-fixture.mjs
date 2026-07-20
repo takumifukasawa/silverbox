@@ -165,6 +165,19 @@ export function buildFixtureDcp() {
   return buildFixtureDcpBytes(fixtureEntries());
 }
 
+/**
+ * A tone-LESS variant of the fixture — identical to fixtureEntries() but with
+ * the ProfileToneCurve tag (50940) removed, so parseDcp() returns
+ * `toneCurve: null`. Models the "Camera matching" / Adobe Standard family
+ * that ship COLOR ONLY (parser.ts:56 — the tag is optional). Used by
+ * verify-dcp-doubletone.mjs to prove the flatten is SUPPRESSED for a
+ * tone-less DCP: its base curve is the only tone and must stay. Still OURS,
+ * zero Adobe content.
+ */
+export function buildTonelessFixtureDcp() {
+  return buildFixtureDcpBytes(fixtureEntries().filter((e) => e.tag !== 50940));
+}
+
 // --- malformed-file fixtures (verify-dcp.mjs's error-path checks) ----------
 
 /** A well-formed TIFF/DNG (correct magic 42, NOT the DCP "RC" marker) — the "wrong file type" error path. */

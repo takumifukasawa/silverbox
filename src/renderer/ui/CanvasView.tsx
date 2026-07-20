@@ -255,6 +255,11 @@ declare global {
       canvasView(): ViewportState & { dpr: number };
       wbState(): { asShot: { temp: number; tint: number }; mccamyCct: number };
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
+      /** DCP camera-profile mode (docs/brief-bank/dcp-double-tone-fix.md) — drives the SAME store actions the inspector's source select / file picker do. */
+      setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp'): void;
+      setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
+      /** DCP bake status + rev (`dcpProfileRev` ticks once each bake lands) — verify waits on this before asserting the tone-curve flatten. */
+      dcpProfileState(): { status: string; error: string | null; rev: number };
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
       /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null only for a batch entry (`sync`, which carries `targets` instead) — every other kind, including `arrange`, carries a single photo-path `target` like `photo-edit`/`rating`/`flag`; `targets` is null for every non-batch kind. */
@@ -1638,6 +1643,16 @@ export function CanvasView() {
       },
       setToneCurvePoints(nodeId, channel, points) {
         useAppStore.getState().setToneCurvePoints(nodeId, channel, points, Date.now());
+      },
+      setDevelopProfileSource(nodeId, source) {
+        useAppStore.getState().setDevelopProfileSource(nodeId, source);
+      },
+      setDevelopProfileDcpPath(nodeId, dcpPath) {
+        useAppStore.getState().setDevelopProfileDcpPath(nodeId, dcpPath);
+      },
+      dcpProfileState() {
+        const s = useAppStore.getState();
+        return { status: s.dcpProfileStatus, error: s.dcpProfileError, rev: s.dcpProfileRev };
       },
       histogramState() {
         return useAppStore.getState().histogram;

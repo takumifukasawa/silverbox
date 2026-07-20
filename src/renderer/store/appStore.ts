@@ -62,7 +62,7 @@ import {
   type ProjectManifest,
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
-import { defaultDevelopParams, profileSource, type DevelopParams } from '../engine/graph/developNode';
+import { defaultDevelopParams, identityCurvePoints, profileSource, type CurvePoints, type DevelopParams } from '../engine/graph/developNode';
 import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
@@ -2106,6 +2106,18 @@ function pushHistory(
 
 export function isJpegFileName(name: string): boolean {
   return /\.(jpg|jpeg)$/i.test(name);
+}
+
+/**
+ * Exact point-by-point curve equality. The base-curve seed
+ * (seedDefaultLook) and identityCurvePoints() both live in integer point
+ * space, so a plain compare is enough — used to decide whether a Develop
+ * node's `toneCurve.rgb` is STILL the untouched fresh-open seed (safe to
+ * flatten for DCP mode) or a curve the user has since edited (never touch).
+ */
+function curvePointsEqual(a: CurvePoints, b: CurvePoints): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((p, i) => p[0] === b[i]![0] && p[1] === b[i]![1]);
 }
 
 /**
@@ -5571,6 +5583,7 @@ export const useAppStore = create<AppState>((set, get) => {
       set((s) => ({ dcpProfileStatus: 'idle', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
       return;
     }
+    const nodeId = devNode!.id; // devNode is defined here (the guard above returns when it isn't)
     set({ dcpProfileStatus: 'loading', dcpProfileError: null });
     try {
       const buf = await window.silverbox.readFile(profile.dcpPath);
@@ -5587,6 +5600,48 @@ export const useAppStore = create<AppState>((set, get) => {
       const lattice = bakeDcpLattice(parsed, cameraFromWorking, wbModel.asShot.temp, PROFILE_LATTICE_N);
       mirrorDcpLattice(lattice);
       set((s) => ({ dcpProfileStatus: 'ready', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
+      // DCP double-tone fix (docs/brief-bank/dcp-double-tone-fix.md, option a').
+      // bakeDcpLattice above bakes the DCP's OWN ProfileToneCurve INTO the
+      // lattice, so the fresh-open base curve seeded into toneCurve.rgb
+      // (seedDefaultLook) would apply tone a SECOND time. When the active DCP
+      // carries a tone curve AND toneCurve.rgb is still EXACTLY the untouched
+      // seed for this photo's camera, flatten the master curve to identity so
+      // the DCP's tone is the only tone (one undoable step + a notice). Three
+      // guards, each load-bearing:
+      //   1. hasToneCurve — a tone-LESS DCP provides COLOR only; its base
+      //      curve is the sole tone and MUST stay (flattening it renders flat).
+      //   2. equals-the-seed — never clobber a curve the user edited themselves.
+      //   3. only toneCurve.rgb (the master) — r/g/b channel curves are untouched.
+      // Switching back to builtin leaves the curve flat (documented posture —
+      // we deliberately keep no "was-this-our-flatten?" state to re-seed from).
+      // Reached by BOTH trigger paths (setDevelopProfileSource on a photo with
+      // a dcpPath already set, and setDevelopProfileDcpPath followed by the
+      // source→dcp switch): they both route through this refreshDcpProfile bake.
+      if (parsed.toneCurve != null) {
+        const cameraModel = get().image?.capture?.cameraModel ?? null;
+        const seed = baseCurveForModel(cameraModel);
+        const node = get().graph.nodes.find((n) => n.id === nodeId);
+        const isUntouchedSeed =
+          node?.kind === DEVELOP_KIND && node.develop != null && curvePointsEqual(node.develop.toneCurve.rgb, seed);
+        if (isUntouchedSeed) {
+          set((s) => ({
+            ...pushHistory(s, null, { label: 'Flatten tone curve for DCP profile' }),
+            graph: {
+              ...s.graph,
+              nodes: s.graph.nodes.map((n) => {
+                if (n.id !== nodeId || n.kind !== DEVELOP_KIND || !n.develop) return n;
+                const develop = { ...n.develop, toneCurve: { ...n.develop.toneCurve, rgb: identityCurvePoints() } };
+                return forkLinkedFamilies({ ...n, develop }, ['toneCurve.rgb']);
+              }),
+            },
+            graphDirty: true,
+          }));
+          raiseNotice('projectNotice', {
+            kind: 'success',
+            message: 'DCPプロファイルのトーンカーブを使用中 — 写真側のトーンカーブはフラットにしました（元に戻すには ⌘Z）',
+          });
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       mirrorDcpLattice(null);

@@ -155,6 +155,7 @@ const ALL_SCRIPTS = [
   { name: 'lookextract', file: 'verify-lookextract.mjs' },
   { name: 'lookextract2', file: 'verify-lookextract2.mjs' },
   { name: 'dcp', file: 'verify-dcp.mjs' },
+  { name: 'dcp-doubletone', file: 'verify-dcp-doubletone.mjs' },
   { name: 'virtualcopy', file: 'verify-virtualcopy.mjs' },
   { name: 'linkedlooks', file: 'verify-linkedlooks.mjs' },
   { name: 'linkedlooks2', file: 'verify-linkedlooks2.mjs' },
