@@ -145,6 +145,30 @@ GAP: an E2E that publishes, NAVIGATES AWAY to a non-follower photo,
 then ⌘Z — pins the in-place batch revert + byte-identical look-file
 restore against a refactor.
 
+## Spec conformance spot-audit (linked-looks.md ↔ code, Fable direct)
+
+Traced load-bearing DECIDED clauses to their implementation — each
+CONFIRMED matching, no spec drift:
+
+- **Link-time default (§4.2)** — linkPhotosToLook (appStore.ts:6837)
+  computes a fresh-seed baseline per target and, per offered family,
+  `developFamilyUntouched(currentDevelop, freshDevelop, fam) ? follows
+  : individual`; then `pickDevelopFamilies(lookDevelop, currentDevelop,
+  follows)` writes the look's values ONLY for followed families. Edited
+  groups stay 個別調整, untouched groups follow — exactly as decided.
+- **Constraint 3, ≤1 linked Develop (§4.3)** — `if (devNode.link) {
+  alreadyLinkedCount++; continue; }`: a chain whose Develop is already
+  linked is skipped + reported, never silently double-linked or
+  re-pointed. (The photo-level "all linked Develops share one look"
+  invariant is maintained by duplicateOutput's clone, audited in §4.)
+- **Publish reads only the linked node (§4.3)** — activeLinkedDevelop-
+  Node + publishToSharedLook filter on `chainScope(activeOutputId)` AND
+  `!!n.link`; a tweak-layer Develop is never read (confirmed stage-C
+  review).
+- **Materialization (§4.1)** — every link write carries the full
+  resolved develop set + `materializedFrom`; sanitizeDevelopLink never
+  throws, absent ⇒ not-linked (graphDoc.ts) — standalone render holds.
+
 ## Not gaps (checked, clean)
 
 - SyncUndoEntry producers after the Sync removal: all 7 belong to live
