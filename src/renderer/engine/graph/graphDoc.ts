@@ -1097,6 +1097,20 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
         // rule 7) — enum-specific sanitizing (profile.source) happens as a
         // targeted post-pass below, same pattern toneCurve points use.
         if (typeof s === 'string') (target as Record<string, unknown>)[key] = s;
+      } else if (typeof t === 'boolean') {
+        // Bug fix (found while implementing develop-aware-thumbnails-impl.md
+        // — a fresh parseGraphDoc read is the ONLY thing this function's own
+        // caller does that re-derives DevelopParams from raw JSON, and this
+        // branch was simply missing): every boolean develop leaf (currently
+        // just bw.enabled) fell through every prior branch untouched, so a
+        // saved `true` silently reverted to the default `false` on every
+        // reparse — invisible in the live session (the in-memory graph never
+        // round-trips through this function), but real on any actual sidecar
+        // re-read (closing/reopening the photo, or this feature's own CPU
+        // mirror over a closed photo's look file). Same lenient-on-garbage
+        // posture as the string branch above — a non-boolean value quietly
+        // keeps the default rather than rejecting the whole document.
+        if (typeof s === 'boolean') (target as Record<string, unknown>)[key] = s;
       } else if (Array.isArray(t)) {
         if (s !== undefined) (target as Record<string, unknown>)[key] = s; // curve points; sanitized at use
       } else if (typeof t === 'object' && t !== null) {
