@@ -164,6 +164,37 @@ profile stage (hidden, LR-identical layering — the user's visible
 tone curve starts flat on top), because the DCP curve is defined in
 a specific space and surfacing it as editable points would break
 exact reproduction. Builtin mode keeps today's visible seeded curve.
+
+⚠️ **DOUBLE-TONE BUG — this layering decision is DOCUMENTED but NOT
+IMPLEMENTED (Fable double-check 2026-07-20; not yet fixed).** The
+"visible tone curve starts flat on top" invariant does not hold:
+1. seedDefaultLook (appStore.ts:2188) UNCONDITIONALLY seeds
+   baseCurveForModel into `toneCurve.rgb` on every fresh RAW open,
+   alongside profile.amount=100 (source defaults to 'builtin').
+2. bakeDcpLattice (dcp/pipeline.ts:34) bakes the DCP's ProfileToneCurve
+   INTO the profile lattice: `if (dcp.toneCurve) applyToneCurve(...)`.
+3. setDevelopProfileSource / setDevelopProfileDcpPath (appStore.ts) only
+   set profile.source / profile.dcpPath — neither flattens toneCurve,
+   and compileDevelop has no dcp-suppresses-toneCurve branch.
+⇒ Switching a fresh-opened RAW to DCP mode with a tone-carrying profile
+applies the DCP tone (in the lattice) AND the seeded base curve (in
+toneCurve) = TONE APPLIED TWICE. Only bites the DCP-mode path with a
+ProfileToneCurve-carrying profile (many Adobe/Camera-matching DCPs do
+carry one; some don't — those escape it), which is why verify-dcp
+(lattice-bake numerics, not the switch-to-DCP end-to-end render) never
+caught it. FIX OPTIONS: (a) setDevelopProfileSource flattens
+toneCurve.rgb to identity when switching TO 'dcp' IF it still equals
+the seeded base curve (don't clobber a user's own curve edits) —
+undoable, and note switching back does not re-seed; (b) compileDevelop
+skips the seeded base-curve tone stage when profileSource==='dcp' AND
+the DCP carries a toneCurve (keeps the stored curve, suppresses at
+render — cleaner, non-destructive, but the "visible curve" then lies
+about what renders); (c) surface a UI note. Recommend (a) as the most
+literal implementation of the documented "starts flat on top", with
+the equals-seed guard so it never eats real edits. Add an E2E: open a
+RAW (base curve seeded), switch to a tone-carrying DCP, assert the
+rendered tone is NOT double-applied (percentiles match the DCP-only
+reference, not a doubled-contrast result).
 The user connected the dots himself: "profileの中にトーンカーブを
 埋め込めば構造的には同じ". Geometry counterpart noted: Adobe also
 ships LCP (Lens Correction Profile) files — if an "LR-geometry mode"
