@@ -189,12 +189,34 @@ undoable, and note switching back does not re-seed; (b) compileDevelop
 skips the seeded base-curve tone stage when profileSource==='dcp' AND
 the DCP carries a toneCurve (keeps the stored curve, suppresses at
 render — cleaner, non-destructive, but the "visible curve" then lies
-about what renders); (c) surface a UI note. Recommend (a) as the most
-literal implementation of the documented "starts flat on top", with
-the equals-seed guard so it never eats real edits. Add an E2E: open a
+about what renders); (c) surface a UI note. Add an E2E: open a
 RAW (base curve seeded), switch to a tone-carrying DCP, assert the
 rendered tone is NOT double-applied (percentiles match the DCP-only
 reference, not a doubled-contrast result).
+
+⚠️ FIX-DESIGN WRINKLE (Fable, follow-up 2026-07-20 — this is why it is
+NOT a clean one-liner): the correct behavior DEPENDS ON WHETHER THE
+CHOSEN DCP CARRIES A ProfileToneCurve. A DCP with NO tone curve
+(parser.ts:21 — optional; the "Camera matching" family and Adobe
+Standard may omit it) provides COLOR ONLY, so the seeded base curve is
+the ONLY tone and MUST be kept — a naive "flatten on switch to dcp"
+would strip all tone and render flat/wrong. So the flatten must be
+gated on `dcp.toneCurve != null` AND `toneCurve.rgb === the seeded base
+curve` (don't eat user edits). The has-toneCurve fact is known only
+where the DCP is PARSED (main process, bakeDcpLattice sees dcp.toneCurve
+at pipeline.ts:34) — it is NOT recoverable from the baked lattice alone
+downstream. So the fix needs that fact surfaced: either (a') flatten in
+the DcpPath-set flow AFTER the parse returns whether the DCP has a tone
+curve (a main→renderer round-trip on the existing dcpLattice bake path
+— thread a `hasToneCurve` boolean alongside the lattice), or (b')
+thread the same `hasToneCurve` to compileDevelop and suppress the
+seeded base-curve tone stage at render when source==='dcp' &&
+hasToneCurve && curve===seed. (a') is destructive-with-undo and matches
+the documented "visible curve goes flat"; (b') is non-destructive but
+the panel then shows a curve that doesn't render. Either way the
+`hasToneCurve` plumbing on the bake path is the prerequisite — size the
+fix to include it, and do NOT ship a switch-time flatten that ignores
+the tone-less-DCP case.
 The user connected the dots himself: "profileの中にトーンカーブを
 埋め込めば構造的には同じ". Geometry counterpart noted: Adobe also
 ships LCP (Lens Correction Profile) files — if an "LR-geometry mode"
