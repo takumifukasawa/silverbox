@@ -1,6 +1,6 @@
 # Brief: the visible library (linked-looks stage E)
 
-Status: DRAFT — dispatch after stage D lands.
+Status: DISPATCHED 2026-07-20.
 Parent spec: docs/brief-bank/linked-looks.md §9-7 (RESOLVED,
 USER-DECIDED: visible folder), §6 vendor-in / publish-to-library
 rows, §4.5 last bullet. Scope guard: no repair sheets (F), no
