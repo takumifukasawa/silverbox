@@ -296,6 +296,31 @@ export function isIdentityEffectsSpatial(e: EffectsParams): boolean {
   return e.clarity === 0 && e.texture === 0;
 }
 
+/**
+ * Zero exactly the fields `isIdentityDetail`/`isIdentityEffectsSpatial`
+ * check, leaving every OTHER section (profile, tone, tone curve, HSL, B&W,
+ * saturation/vibrance, grading, dehaze/vignette/grain) untouched. Used ONLY
+ * by the develop-aware filmstrip thumbnail (Filmstrip.tsx's
+ * buildDevelopPlanForLook, docs/brief-bank/develop-aware-thumbnails-impl.md's
+ * bug fix) to get a NON-null `compileDevelop().cpu` out of an otherwise-
+ * spatial Develop node: `cpu` is an ALL-OR-NOTHING property of the whole
+ * node (`detailActive || fxSpatialActive` nulls the WHOLE mirror, even
+ * though the tone/color sections the same node also carries are each
+ * independently mirrorable — see compileDevelop) — so this has to flip
+ * those two booleans false without discarding any tone/color edit.
+ */
+export function stripSpatialDevelopParams(params: DevelopParams): DevelopParams {
+  return {
+    ...params,
+    detail: {
+      sharpen: { ...params.detail.sharpen, amount: 0 },
+      noiseLuminance: { ...params.detail.noiseLuminance, amount: 0 },
+      noiseColor: { ...params.detail.noiseColor, amount: 0 },
+    },
+    effects: { ...params.effects, clarity: 0, texture: 0 },
+  };
+}
+
 // --- GPU passes --------------------------------------------------------------
 
 // Profile: the fitted camera-color residual, applied FIRST on the decoded

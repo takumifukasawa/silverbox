@@ -47,11 +47,18 @@
  *     consulted (cpuEvalPlan itself never reads them, so this needs no
  *     special-casing here).
  *  3. Spatial (neighborhood) ops have no CPU mirror by construction (Detail,
- *     spots, masks' blend consumer, custom WGSL, external, denoise — see
- *     graphDoc.ts's PlanStep/cpuEvalPlan doc comments); a look whose active
- *     chain contains one throws when cpuEvalPlan reaches that step. Caught
- *     here and treated as "can't mirror this one, fall back to the plain
- *     preview" — same never-throw posture as an unparseable look file.
+ *     spots, custom WGSL, external, denoise — see graphDoc.ts's PlanStep/
+ *     cpuEvalPlan doc comments); cpuEvalPlan THROWS when it reaches one.
+ *     BUG FIX (2026-07-21): this used to hand cpuEvalPlan the look's FULL
+ *     plan, so a real RAW's default-seeded Detail step (sharpening amount
+ *     40) made EVERY real-RAW cell's CPU pass throw and fall back to the
+ *     plain preview — discarding the exposure/contrast/WB/curve/HSL/grading
+ *     edits that ARE mirrorable. The caller (Filmstrip.tsx's
+ *     buildDevelopPlanForLook) now BYPASSES every no-CPU-mirror step before
+ *     handing the plan here (graphDoc.ts's stripNoCpuMirrorSteps +
+ *     developNode.ts's stripSpatialDevelopParams), so the try/catch below
+ *     is a defensive backstop, not the steady-state path — it still exists
+ *     for the same never-throw posture as an unparseable look file.
  * A plan compiled from the look's ACTIVE output chain that resolves to ZERO
  * steps (buildPlan's own identity-resolution invariant — untouched op ⇒ no
  * step emitted) is the DEFAULT case: `getDevelopAwareThumbnail` returns null
@@ -273,13 +280,16 @@ const clamp255 = (v: number): number => Math.max(0, Math.min(255, Math.round(v))
  * batch write touches many cells at once).
  *
  * Returns null (caller falls back to the plain preview, zero further work)
- * when: the plan is the identity plan (`plan.steps.length === 0` — buildPlan
- * already resolved every node to a bit-exact pass-through, i.e. the look IS
- * the default — this is also what makes "revert to default" work for free),
- * there are no cached pixels to develop yet, or the plan's active chain
- * contains a step with no CPU mirror (a spatial op — cpuEvalPlan throws,
- * caught here rather than propagated, same never-throw posture as an
- * unparseable look file).
+ * when: the plan is the identity plan (`plan.steps.length === 0` — either
+ * buildPlan already resolved every node to a bit-exact pass-through, i.e.
+ * the look IS the default, OR the look's only edits were spatial and got
+ * bypassed to nothing by the caller's stripNoCpuMirrorSteps — both cases
+ * mean "no color/tone edit to show", correctly falling back to plain; this
+ * is also what makes "revert to default" work for free), there are no
+ * cached pixels to develop yet, or (defensive backstop only — the caller
+ * should already have stripped every no-CPU-mirror step, see this file's
+ * own header comment) cpuEvalPlan still throws, caught here rather than
+ * propagated, same never-throw posture as an unparseable look file.
  */
 export async function getDevelopAwareThumbnail(path: string, plan: RenderPlan): Promise<string | null> {
   if (plan.steps.length === 0) return null; // identity plan — the look IS the default, zero CPU work (semantics 1/3/5)
@@ -309,11 +319,12 @@ export async function getDevelopAwareThumbnail(path: string, plan: RenderPlan): 
         }
       }
     } catch {
-      // A spatial op (Detail, spots, a mask-consuming blend, custom WGSL) or
-      // an out-of-process step (external/denoise) has no CPU mirror —
-      // cpuEvalPlan throws by design (graphDoc.ts's own contract). This
-      // direction indicator simply can't mirror it; fall back to the plain
-      // preview rather than propagate.
+      // Defensive backstop only (see this file's header comment) — the
+      // caller (Filmstrip.tsx's buildDevelopPlanForLook) already bypassed
+      // every no-CPU-mirror step before handing `plan` here, so this
+      // shouldn't fire in steady state. If it somehow does anyway, same
+      // never-throw posture as everywhere else in this file: fall back to
+      // the plain preview rather than propagate.
       return null;
     }
     const canvas = new OffscreenCanvas(width, height);

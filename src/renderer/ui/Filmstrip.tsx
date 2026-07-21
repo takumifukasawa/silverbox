@@ -2,7 +2,16 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import type { FolderImageEntry } from '../../../shared/ipc';
 import { getThumbnail, getDevelopAwareThumbnail, revokeAllThumbnails } from '../engine/thumbnail/thumbnailCache';
-import { buildPlan, describeExportOverridesRaw, MAX_RATING, parseGraphDoc, type RenderPlan } from '../engine/graph/graphDoc';
+import {
+  buildPlan,
+  describeExportOverridesRaw,
+  DEVELOP_KIND,
+  MAX_RATING,
+  parseGraphDoc,
+  stripNoCpuMirrorSteps,
+  type RenderPlan,
+} from '../engine/graph/graphDoc';
+import { stripSpatialDevelopParams } from '../engine/graph/developNode';
 
 /**
  * Develop-aware thumbnail plan builder (docs/brief-bank/
@@ -25,6 +34,32 @@ import { buildPlan, describeExportOverridesRaw, MAX_RATING, parseGraphDoc, type 
  * whole CPU pass — buildPlan never actually RUNS the external command
  * either way (that's graphRenderer.ts's job at real render time), so this
  * is purely about which steps the CPU mirror below can walk through.
+ *
+ * BUG FIX (2026-07-21, brief's own "ROOT CAUSE" — see the brief's top
+ * block): this used to buildPlan the look's FULL chain and hand it straight
+ * to cpuEvalPlan, which THROWS on the first no-CPU-mirror step — and a real
+ * RAW's default look ALWAYS seeds Detail (sharpening amount 40,
+ * appStore.seedDefaultLook), a spatial step, so getDevelopAwareThumbnail's
+ * catch fell back to the plain preview for EVERY real-RAW cell, discarding
+ * the exposure/contrast/WB/curve/HSL/grading edits that ARE mirrorable.
+ * Two-part fix, in compile order:
+ *  1. `stripSpatialDevelopParams` zeroes Detail (NR + sharpen) and the
+ *     spatial Effects ops (clarity/texture) on every Develop node BEFORE
+ *     buildPlan runs — compileDevelop's `cpu` is an ALL-OR-NOTHING property
+ *     of the WHOLE Develop node (one 'passes' step bundles tone/curve/HSL/
+ *     BW/grading/etc. together with Detail), so leaving Detail active would
+ *     null out the CPU mirror for the mirrorable sections too, not just
+ *     Detail's own contribution — see that function's own doc comment.
+ *  2. `stripNoCpuMirrorSteps` then bypasses any REMAINING no-CPU-mirror
+ *     step from a DIFFERENT node (spots with spots present, a custom WGSL
+ *     node, external, denoise, an image-composite node) rather than
+ *     aborting the whole plan — it reuses cpuEvalPlan's own "no CPU mirror"
+ *     criterion (graphDoc.ts's stepHasCpuMirror), never a separately-
+ *     maintained list, so it can never drift from what actually throws.
+ * A look whose ONLY edits are spatial ends up with `steps.length === 0`
+ * after both steps — getDevelopAwareThumbnail's existing identity-plan
+ * check already treats that as "nothing to show, fall back to the plain
+ * preview", which is correct: there IS no color/tone edit to show.
  */
 async function buildDevelopPlanForLook(lookPath: string): Promise<RenderPlan | null> {
   let text: string | null;
@@ -36,7 +71,13 @@ async function buildDevelopPlanForLook(lookPath: string): Promise<RenderPlan | n
   if (text === null) return null;
   try {
     const parsed = parseGraphDoc(text);
-    return buildPlan(parsed.graph, { cameraModel: parsed.source?.cameraModel ?? null, allowExternal: false });
+    for (const node of parsed.graph.nodes) {
+      if (node.kind === DEVELOP_KIND && node.develop) {
+        node.develop = stripSpatialDevelopParams(node.develop);
+      }
+    }
+    const plan = buildPlan(parsed.graph, { cameraModel: parsed.source?.cameraModel ?? null, allowExternal: false });
+    return stripNoCpuMirrorSteps(plan);
   } catch {
     return null;
   }

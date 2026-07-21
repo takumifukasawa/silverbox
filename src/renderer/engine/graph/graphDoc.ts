@@ -1669,18 +1669,90 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
 }
 
 /**
- * True when every step in the plan has a CPU mirror (geometry/lens have none
- * — like spatial ops). Analytic masks always carry a CPU mirror (see
- * buildPlan's mask branch), so a masked blend keeps the CPU reference alive
+ * Whether ONE compiled step has a CPU mirror — the single source of truth
+ * cpuEvalPlan's own throw sites (above) key off. `planHasCpuReference` and
+ * `stripNoCpuMirrorSteps` below both call this rather than each keeping
+ * their own list, so "what counts as spatial/no-CPU-mirror" is defined
+ * exactly once. Analytic masks are 'passes' steps with a real `cpu`
+ * (cpuMaskShape, buildPlan's mask branch) — NOT excluded, despite reading
+ * like a "spatial" concept; a masked blend keeps its CPU reference alive
  * exactly like an unmasked one.
+ */
+function stepHasCpuMirror(s: PlanStep): boolean {
+  if (s.type === 'passes') return s.cpu !== null;
+  if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
+  if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
+  if (s.type === 'denoise') return false; // no CPU mirror — see PlanStep's doc comment
+  return true; // blend (always has a CPU-evaluable inline mix)
+}
+
+/**
+ * True when every step in the plan has a CPU mirror (geometry/lens have none
+ * — like spatial ops).
  */
 export function planHasCpuReference(plan: RenderPlan): boolean {
   if (plan.geometry || plan.lens) return false;
-  return plan.steps.every((s) => {
-    if (s.type === 'passes') return s.cpu !== null;
-    if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
-    if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
-    if (s.type === 'denoise') return false; // no CPU mirror — see PlanStep's doc comment
-    return true; // blend (always has a CPU-evaluable inline mix)
+  return plan.steps.every(stepHasCpuMirror);
+}
+
+/**
+ * Build a variant of `plan` with every no-CPU-mirror step BYPASSED rather
+ * than left in (which would make cpuEvalPlan throw) or refusing the whole
+ * plan (planHasCpuReference's all-or-nothing check, right for callers that
+ * need an EXACT reference — CanvasView.tsx's cpuReferenceMean, lutExport.ts
+ * — or nothing). Used ONLY by the develop-aware filmstrip thumbnail
+ * (Filmstrip.tsx's buildDevelopPlanForLook, docs/brief-bank/
+ * develop-aware-thumbnails-impl.md's bug fix): that feature is a direction
+ * indicator that would rather show the mirrorable color/tone edits (EV,
+ * contrast, WB, curves, HSL, B&W, grading, dehaze/vignette/grain — sharpening
+ * etc. is invisible at ~160px anyway) than show nothing just because the
+ * look also carries a spatial op (Detail, spots, custom WGSL, external,
+ * denoise, an image-composite node).
+ *
+ * A dropped step BYPASSES to whatever it read from — the exact "identity
+ * node resolves to its own source" mechanism buildPlan's own `resolve()`
+ * already uses for a default-valued op, just applied post-compile instead
+ * of pre-compile. A dropped 'passes'/'external'/'denoise' step (single
+ * input) bypasses to its own `src`. A dropped 'image' step is a zero-input
+ * SOURCE, not a transform of one (see PlanStep's doc comment) — it has no
+ * upstream to bypass to at all, so it falls back to the raw input pixel
+ * (-1); a rare, deliberately-approximate edge case (an image/composite node
+ * inside an otherwise-mirrorable chain), not this feature's target scenario.
+ *
+ * `geometry`/`lens` are dropped from the result (cpuEvalPlan never reads
+ * them anyway — see thumbnailCache.ts's own doc comment on why geometry is
+ * never applied to a thumbnail); `nodeSteps` comes back empty since it would
+ * otherwise carry stale ORIGINAL-plan indices (per-node-preview's own
+ * concern, unused by cpuEvalPlan).
+ */
+export function stripNoCpuMirrorSteps(plan: RenderPlan): RenderPlan {
+  const resolvedAncestor: number[] = []; // old index -> old index of the nearest KEPT ancestor, or -1
+  const newIndexOf = new Map<number, number>(); // old KEPT index -> new index
+  const newSteps: PlanStep[] = [];
+  const resolveOld = (oldIdx: number): number => (oldIdx < 0 ? -1 : resolvedAncestor[oldIdx]!);
+  const toNew = (oldResolved: number): number => (oldResolved < 0 ? -1 : newIndexOf.get(oldResolved)!);
+
+  plan.steps.forEach((step, i) => {
+    if (!stepHasCpuMirror(step)) {
+      resolvedAncestor[i] =
+        step.type === 'passes' || step.type === 'external' || step.type === 'denoise'
+          ? resolveOld(step.src)
+          : -1; // 'image' — zero-input source, no upstream to bypass to
+      return;
+    }
+    if (step.type === 'passes') {
+      newSteps.push({ ...step, src: toNew(resolveOld(step.src)) });
+    } else if (step.type === 'blend') {
+      // The only OTHER kind stepHasCpuMirror keeps — but its own inputs may
+      // still need bypassing.
+      const srcA = toNew(resolveOld(step.srcA));
+      const srcB = toNew(resolveOld(step.srcB));
+      const srcMask = step.srcMask !== undefined ? toNew(resolveOld(step.srcMask)) : undefined;
+      newSteps.push({ ...step, srcA, srcB, ...(srcMask !== undefined ? { srcMask } : {}) });
+    }
+    newIndexOf.set(i, newSteps.length - 1);
+    resolvedAncestor[i] = i;
   });
+
+  return { steps: newSteps, output: toNew(resolveOld(plan.output)), nodeSteps: {} };
 }

@@ -18,6 +18,17 @@
  *     bitmap in the expected direction — mean luma rises with +EV, RGB
  *     channels converge with B&W — with the decode-worker call count
  *     unchanged throughout (the CPU pass never decodes the RAW).
+ *  2b. REGRESSION for the bug this script's own history caught: turning on
+ *      spatial Detail (sharpening) ON TOP of the EV+B&W edit from check 2
+ *      must NOT fall back to the plain preview — the ORIGINAL implementation
+ *      ran cpuEvalPlan over the look's FULL plan (which throws on the first
+ *      no-CPU-mirror step), and every fixture below this line used to be
+ *      pure tonal/BW with Detail left at 0, so it never exercised that path;
+ *      a real RAW's default-seeded look always carries Detail, so in
+ *      practice EVERY real-RAW cell hit the throw. The fix (graphDoc.ts's
+ *      stripNoCpuMirrorSteps + developNode.ts's stripSpatialDevelopParams,
+ *      wired in Filmstrip.tsx's buildDevelopPlanForLook) bypasses the
+ *      no-mirror step instead of aborting the whole plan.
  *  3. The OTHER-cells case (the whole point): two CLOSED photos, each
  *     pre-touched so applyPresetToSelection's own existing-look branch
  *     never needs to decode them for ITS purposes either, get a strong
@@ -245,6 +256,51 @@ try {
     { before: statsBeforeBw.chanDiff, after: statsAfterBw.chanDiff }
   );
   check('still no RAW decode fired (B&W step too)', (await decodeCount()) === decodeCountBeforeEdit, { before: decodeCountBeforeEdit, after: await decodeCount() });
+
+  // ---------------------------------------------------------------------
+  // REGRESSION (the brief's own "ROOT CAUSE"): the ORIGINAL implementation
+  // ran cpuEvalPlan over the look's FULL plan, which THROWS on the first
+  // no-CPU-mirror (spatial) step — and every check above so far used pure
+  // tonal/BW edits with Detail left at its identity default (amount 0), so
+  // it never actually exercised that throw. A real RAW's default-seeded
+  // look ALWAYS carries Detail (sharpening amount 40), so in practice EVERY
+  // real-RAW cell hit the throw and fell back to the plain preview,
+  // discarding the tonal edit entirely. This turns Detail ON here, on top
+  // of the already-active EV+B&W edit, and asserts the cell KEEPS showing
+  // the tonal direction rather than reverting to plain — the exact case the
+  // original verify script's pure-tonal/BW-only fixtures never caught.
+  console.log('verify-develop-thumbnails (2b. REGRESSION — a tonal edit PLUS spatial Detail must still show the tonal DIRECTION, not fall back to plain):');
+  const srcBeforeDetail = await cellImgSrc(PRIMARY);
+  const statsBeforeDetail = await cellStats(PRIMARY); // EV=1.8, B&W on (from checks above)
+  const decodeCountBeforeDetail = await decodeCount();
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'detail.sharpen.amount', 100));
+  await waitFor(async () => (await cellImgSrc(PRIMARY)) !== srcBeforeDetail);
+  const srcWithDetail = await cellImgSrc(PRIMARY);
+  check(
+    'adding spatial Detail on top of the tonal edit does NOT fall back to the plain preview',
+    srcWithDetail !== plainPrimary && srcWithDetail?.startsWith('blob:'),
+    { plainPrimary, srcWithDetail }
+  );
+  const statsWithDetail = await cellStats(PRIMARY);
+  check(
+    'the +EV brightening still shows with Detail active (mean luma stays elevated, > 128)',
+    statsWithDetail.luma > 128,
+    statsWithDetail
+  );
+  check(
+    'the B&W channel convergence still shows with Detail active (chanDiff stays near the pre-Detail value)',
+    Math.abs(statsWithDetail.chanDiff - statsBeforeDetail.chanDiff) < 10,
+    { before: statsBeforeDetail.chanDiff, after: statsWithDetail.chanDiff }
+  );
+  check(
+    'no RAW decode fired for the Detail-plus-tonal recompute either (still a pure CPU pass over the cached preview)',
+    (await decodeCount()) === decodeCountBeforeDetail,
+    { before: decodeCountBeforeDetail, after: await decodeCount() }
+  );
+  // Turn Detail back off so the rest of this script's baseline/revert
+  // assumptions (captured before Detail ever entered the picture) hold.
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'detail.sharpen.amount', 0));
+  await waitFor(async () => (await cellImgSrc(PRIMARY)) !== srcWithDetail);
 
   // ---------------------------------------------------------------------
   console.log('verify-develop-thumbnails (3. the OTHER cells — apply a strong preset to 2 CLOSED photos via apply-to-selection):');
