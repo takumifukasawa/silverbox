@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { watch, type FSWatcher } from 'node:fs';
+import { mkdirSync, watch, type FSWatcher } from 'node:fs';
 import { copyFile, mkdir, mkdtemp, open, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -259,6 +259,13 @@ function armSidecarWatch(sidecarPath: string): void {
   const dir = dirname(sidecarPath);
   const base = basename(sidecarPath);
   try {
+    // Ensure the looks/ dir exists before watching — a fresh Quick project
+    // has no looks/ until the first photo is saved, and fs.watch on a missing
+    // dir throws ENOENT (was only caught+warned, leaving sidecar hot-reload
+    // inactive + noisy on a fresh-project open). mkdir -p is a no-op for an
+    // existing dir (incl. an adjacent-sidecar photo folder) and never writes
+    // into a photo folder that already exists.
+    mkdirSync(dir, { recursive: true });
     sidecarWatcher = watch(dir, (_eventType, filename) => {
       // Some platforms don't always supply `filename` for a directory watch;
       // when absent, don't filter it out — worst case is one harmless extra
@@ -306,6 +313,12 @@ function armSharedLooksWatch(projectDir: string | null): void {
   if (projectDir === null) return;
   const dir = join(projectDir, 'shared-looks');
   try {
+    // Ensure the dir exists before watching — a fresh project has no
+    // shared-looks/ until the first shared look is created, and fs.watch on a
+    // missing dir throws ENOENT (was only caught+warned below, leaving the
+    // watcher inactive + noisy on every fresh-project open). mkdir -p makes
+    // the watch arm immediately; the project owns this folder anyway.
+    mkdirSync(dir, { recursive: true });
     sharedLooksWatcher = watch(dir, () => {
       // Unlike the sidecar watcher, every event in this directory is
       // relevant (any *.json here is a shared look) — no basename filter.
