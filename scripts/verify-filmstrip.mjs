@@ -38,6 +38,21 @@
  *     a debug hook — this exercises the real drop path end to end): dropping
  *     2 fresh files adds BOTH to the active project's playlist (exact +2,
  *     against the authoritative projectState().photoCount).
+ *  8. (env-gated) a portrait ARW's filmstrip thumbnail renders portrait, not
+ *     landscape.
+ *  9. Open-time filmstrip jank fix (docs/brief-bank/open-filmstrip-jank.md):
+ *     a non-keepFolderContext open of a DIFFERENT (fresh, uncached) photo
+ *     never ticks folderDir to null mid-decode, and the Filmstrip element
+ *     never leaves the DOM mid-decode — polled at high frequency across the
+ *     whole RAW decode.
+ *  10. Unsupported-kind open (fix edit 3): ends with folderDir null / strip
+ *      hidden, same terminal state as before the fix, just without the
+ *      mid-decode tick.
+ *  11. A failed open — nonexistent file (fix edit 4): same terminal state.
+ *
+ * The folder A→B switch (check 5 above) additionally polls the strip's DOM
+ * presence across the whole switch — exactly one remount at the end, never a
+ * blank gap mid-switch (same fix).
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -288,11 +303,25 @@ try {
   console.log("verify-filmstrip (switching folders extends the playlist, re-renders the strip, revokes folder A's thumbnail URLs):");
   const priorThumbUrls = await page.$$eval('[data-testid="filmstrip-thumb"]', (els) => els.map((e) => e.src));
   const revocationsBefore = await page.evaluate(() => window.__debug.thumbnailRevocations().length);
+  // open-filmstrip-jank fix: a genuine folder switch must still show exactly
+  // ONE remount at the end (folderA -> folderB), never a blank gap where the
+  // strip is absent from the DOM mid-switch — poll across the whole thing.
+  await page.evaluate(() => {
+    window.__filmstripSwitchTicks = [];
+    window.__filmstripSwitchPoll = setInterval(() => {
+      window.__filmstripSwitchTicks.push(!!document.querySelector('[data-testid="filmstrip"]'));
+    }, 15);
+  });
   await openFolderFireAndForget(folderB);
   await waitReadyOrError();
   await page.waitForFunction(() => document.querySelectorAll('[data-testid="filmstrip-cell"]').length === 6, {
     timeout: 15_000,
   });
+  const switchTicks = await page.evaluate(() => {
+    clearInterval(window.__filmstripSwitchPoll);
+    return window.__filmstripSwitchTicks;
+  });
+  check('the strip never goes blank mid-switch (no unmount gap, just the one remount)', switchTicks.every(Boolean), switchTicks);
   const cellsB = await page.$$eval('[data-testid="filmstrip-cell"]', (els) => els.map((e) => e.dataset.path));
   check(
     'the strip now shows all 6 accumulated cells (folder A\'s 4 + folder B\'s 2, in playlist order)',
@@ -436,6 +465,83 @@ try {
       rmSync(folderC, { recursive: true, force: true });
     }
   }
+
+  // === 9. Open-time filmstrip jank fix (docs/brief-bank/
+  // open-filmstrip-jank.md): a non-keepFolderContext open of a DIFFERENT
+  // photo (the folder/dialog/drop path — openImageByPath called WITHOUT
+  // `keepFolderContext`) must never tick folderDir to null mid-decode, and
+  // the Filmstrip element itself must never leave the DOM mid-decode. Before
+  // the fix, folderDir was cleared to null at the very TOP of
+  // openImageByPath, 2-4s BEFORE the RAW decode's success commit re-set it —
+  // App.tsx's `folderDir !== null && <Filmstrip key={folderDir} />` gate
+  // unmounted the strip for the WHOLE decode and remounted it after ("catalog
+  // closes then reopens" — the user's own hand-test report). Polls both
+  // signals at high frequency across the full decode of a FRESH, never-
+  // before-opened file (a warm/cached decode would resolve too fast to catch
+  // the bug in the sample window). ===
+  console.log('verify-filmstrip (9. non-keepFolderContext open never nulls folderDir / unmounts the strip mid-decode):');
+  const nonKeepFolder = mkdtempSync(join(tmpdir(), 'silverbox-filmstrip-nonkeep-'));
+  const jDsc10 = join(nonKeepFolder, 'j_DSC10.ARW');
+  linkSync(ARW_PATH, jDsc10);
+  try {
+    await page.evaluate(() => {
+      window.__filmstripJankTicks = [];
+      window.__filmstripJankPoll = setInterval(() => {
+        window.__filmstripJankTicks.push({
+          dir: window.__debug.folderState().dir,
+          stripPresent: !!document.querySelector('[data-testid="filmstrip"]'),
+        });
+      }, 15);
+    });
+    await openImageFireAndForget(jDsc10); // NO opts — the folder/dialog/drop path
+    await waitReadyOrError();
+    await page.waitForFunction((p) => window.__debug.folderState().currentPath === p, jDsc10, { timeout: 120_000 });
+    const jankTicks = await page.evaluate(() => {
+      clearInterval(window.__filmstripJankPoll);
+      return window.__filmstripJankTicks;
+    });
+    check('the poll actually sampled during the decode (a suspiciously-instant decode would make this check meaningless)', jankTicks.length > 0, jankTicks.length);
+    check('folderDir never ticks null mid-decode', jankTicks.every((t) => t.dir !== null), jankTicks);
+    check('the filmstrip DOM node never disappears mid-decode (no unmount/remount jank)', jankTicks.every((t) => t.stripPresent), jankTicks);
+  } finally {
+    rmSync(nonKeepFolder, { recursive: true, force: true });
+  }
+
+  // === 10. Unsupported-kind open (edit 3 of the fix — the early return
+  // BEFORE any decode, for a filename that's neither RAW nor JPEG): must
+  // still end with folderDir null and the strip hidden, the same terminal
+  // state the deleted top-of-function clear used to produce (terminal-state
+  // matrix, open-filmstrip-jank.md) — just without the mid-decode tick (kind
+  // resolves from the filename alone, so this never touches the filesystem;
+  // the path doesn't need to exist). ===
+  console.log('verify-filmstrip (10. unsupported-kind open ends with folderDir null, strip hidden):');
+  await openImageFireAndForget('/nonexistent/not-a-photo.txt'); // NO opts
+  await waitReadyOrError();
+  const afterUnsupported = await page.evaluate(() => ({
+    folder: window.__debug.folderState(),
+    image: window.__debug.imageState(),
+    stripPresent: !!document.querySelector('[data-testid="filmstrip"]'),
+  }));
+  check('unsupported-kind open reports an error status', afterUnsupported.image.status === 'error', afterUnsupported.image);
+  check('folderDir ends null', afterUnsupported.folder.dir === null, afterUnsupported.folder);
+  check('the strip is hidden', afterUnsupported.stripPresent === false, afterUnsupported);
+
+  // === 11. A failed open (edit 4 of the fix — the outer catch, AFTER the
+  // session.stale() guard) of a nonexistent file with a valid RAW extension
+  // (so kind resolves fine and readFile is what actually fails) must also
+  // end with folderDir null and the strip hidden — same terminal-state row. ===
+  console.log('verify-filmstrip (11. a failed open (nonexistent file) ends with folderDir null, strip hidden):');
+  const missingPath = join(folderA, 'zzz-does-not-exist_DSC99.ARW');
+  await openImageFireAndForget(missingPath); // NO opts
+  await waitReadyOrError();
+  const afterError = await page.evaluate(() => ({
+    folder: window.__debug.folderState(),
+    image: window.__debug.imageState(),
+    stripPresent: !!document.querySelector('[data-testid="filmstrip"]'),
+  }));
+  check('the failed open reports an error status', afterError.image.status === 'error', afterError.image);
+  check('folderDir ends null', afterError.folder.dir === null, afterError.folder);
+  check('the strip is hidden', afterError.stripPresent === false, afterError);
 } finally {
   await app.close();
 }

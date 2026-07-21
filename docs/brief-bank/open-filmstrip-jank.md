@@ -25,29 +25,56 @@ The jank hits the non-keepFolderContext paths (folder open, native
 dialog, drag-drop, and any open that forgot the flag while a strip is
 showing).
 
-## The fix (path-agnostic)
+## The fix (PRECISE — a prior naive attempt FAILED; follow this exactly)
 
-Stop nulling folderDir/folderEntries at the TOP of openImageByPath.
-Keep the CURRENT strip visible through the decode and only UPDATE
-folderDir/folderEntries at the SUCCESS commit — to the new folder (or
-the same one). Net: folderDir transitions X → Y (or X → X) with no null
-in between, so the Filmstrip never unmounts mid-decode. On a genuine
-folder CHANGE the strip content swaps once at the end (key changes X→Y,
-one clean remount) instead of blanking for the whole decode; on a
-same-folder open it stays put.
-- Preserve the existing thumbnail-cache cleanup semantics: the
-  `key={folderDir}` remount is what drives revokeAllThumbnails on a real
-  folder switch (Filmstrip.tsx doc comment) — that still fires when the
-  key actually changes to a new folder, just not on a same-folder open
-  or mid-decode.
-- Failure path: if the open FAILS, don't leave a stale strip pointing
-  at a folder that changed — restore/refresh folderEntries in the error
-  branch as today's top-clear implicitly did.
-- Watch the single-file / no-folder open case: a dialog/drop of a
-  lone file legitimately has folderDir null (no strip) — that must
-  still end with folderDir null (don't resurrect a strip). So the
-  "update at success" must set null when the open is folder-less, not
-  keep a stale folder.
+The prior agent removed the top-clear and relied on the SUCCESS commit's
+existing `...(projectPatch ? { folderDir: projectPatch.dir } : {})`
+spread. That FAILED verify because the success spread only sets folderDir
+when a project resolved — so the "no project resolved" and error/unsupported
+paths (which the top-clear used to null) were left pointing at a STALE
+folder. Its own words: "my appStore.ts change alone causes this."
+
+The top-clear at appStore.ts:4211
+(`if (!opts?.keepFolderContext) set({ folderDir: null, folderEntries: [] })`)
+is the DEFAULT "exit folder-browsing" semantic, fired 2-4s before the new
+value — that early tick is the whole bug. Remove it, and reproduce the
+SAME end-state at each of the THREE terminal points instead, so there is
+never a null tick mid-decode but every terminal state is byte-identical
+to today:
+
+Terminal-state matrix (MUST all hold after the fix):
+
+| open kind | during decode | terminal folderDir |
+|---|---|---|
+| keepFolderContext=true (filmstrip click / arrow key) | retained (already smooth today) | retained (untouched) |
+| !keep, project RESOLVED (folder open / dialog / drop into a project) | OLD folder retained (no unmount) | projectPatch.dir — one clean key-remount at the end |
+| !keep, NO project resolved (lone single file) | old folder retained | **null** (strip hidden) |
+| error / unsupported-kind, !keep | (n/a) | **null** |
+| error / unsupported-kind, keepFolderContext=true | retained | retained (untouched) |
+
+Concretely:
+1. DELETE the top-clear at ~4211.
+2. SUCCESS commit (~4443): replace the spread with a three-way —
+   `...(projectPatch ? { project: projectPatch, folderDir: projectPatch.dir }
+   : (opts?.keepFolderContext ? {} : { folderDir: null, folderEntries: [] }))`.
+   (projectPatch → new dir; keepFolderContext same-project click → untouched
+   so it stays put; else → null, matching the old top-clear end-state but with
+   NO mid-decode tick.)
+3. UNSUPPORTED-KIND early return (~4214-4216): when `!opts?.keepFolderContext`,
+   also `folderDir: null, folderEntries: []` in that error `set` (the top-clear
+   used to have already nulled it).
+4. ERROR branch (~4521, AFTER the `if (session.stale()) return;` guard — a
+   stale/superseded open must still touch NOTHING): when
+   `!opts?.keepFolderContext`, add `folderDir: null, folderEntries: []` to the
+   error `set` (same reason).
+- Preserve the thumbnail-cache cleanup: the `key={folderDir}` remount drives
+  revokeAllThumbnails on a real folder switch (Filmstrip.tsx doc comment) — it
+  still fires when the key changes X→Y at the success commit, just not on a
+  null tick or same-folder open.
+- openFolder/openProjectByPath (~4603/4660) already `set({ folderDir, ... })`
+  THEN call openImageByPath with keepFolderContext:true → they take the
+  "untouched" row above, unchanged. Verify no other folderDir writer depended
+  on the top-clear.
 
 ## Verify (extend verify-filmstrip.mjs)
 

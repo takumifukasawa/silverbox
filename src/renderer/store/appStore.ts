@@ -1210,18 +1210,22 @@ interface AppState {
    * exactly as a truly-fresh open would, and the input node's geometry stays
    * identity, which is what a preset's applyLook then preserves.
    *
-   * `opts.keepFolderContext` (folder filmstrip, ROADMAP "nice to have"): by
-   * default this function clears folderDir/folderEntries at the very TOP,
-   * before the (possibly slow) decode/project-resolution work below — but
-   * (UX pack round 2, item B) the SUCCESS commit re-sets `folderDir` to the
-   * resolved project's own directory regardless of this flag, since ANY
+   * `opts.keepFolderContext` (folder filmstrip, ROADMAP "nice to have"):
+   * folderDir/folderEntries are ONLY ever touched at the three TERMINAL
+   * points of this function (the unsupported-kind early return, the success
+   * commit, and the error branch) — never eagerly at the top, before the
+   * (possibly slow) decode/project-resolution work (open-filmstrip-jank fix:
+   * an early null tick used to unmount the Filmstrip for the ENTIRE 2-4s RAW
+   * decode and remount it after — the "catalog closes then reopens" jank).
+   * At each terminal point: a resolved project always wins (`folderDir` set
+   * to its directory, regardless of this flag — UX pack round 2, item B, ANY
    * resolved photo open activates/re-affirms a project and the strip must
-   * show it. What this flag actually controls now is a brief MID-FLIGHT
-   * flicker of the OLD strip during the switch (cleared at the top, restored
-   * a moment later) — true keeps the strip's stale content from flashing
-   * away and back for callers that already know they're staying in the same
-   * project (a filmstrip cell click, ←/→ (stepFilmstrip), openFolder's own
-   * "open the first entry", and every other project-aware caller).
+   * show it); otherwise `true` leaves folderDir/folderEntries untouched
+   * (callers that already know they're staying in the same project — a
+   * filmstrip cell click, ←/→ (stepFilmstrip), openFolder's own "open the
+   * first entry", and every other project-aware caller), `false`/unset nulls
+   * them (matching the old top-clear's end-state, just without the mid-
+   * decode tick).
    *
    * `opts.legacySidecarOnly` (headless CLI ONLY — runCliRender/runCliCheck/
    * runCliDiff's own internal calls, WITHOUT `--project`): bypasses the
@@ -4206,13 +4210,22 @@ export const useAppStore = create<AppState>((set, get) => {
       void flushPendingAutosave(priorState);
     }
     cancelAutosaveTimer();
-    // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
-    // default — see this method's `keepFolderContext` doc comment.
-    if (!opts?.keepFolderContext) set({ folderDir: null, folderEntries: [] });
     const fileName = path.split('/').pop() ?? path;
     const kind = isRawFileName(fileName) ? 'raw' : isJpegFileName(fileName) ? 'jpg' : null;
     if (!kind) {
-      set({ imageStatus: 'error', imageError: `unsupported file type: ${fileName}` });
+      set({
+        imageStatus: 'error',
+        imageError: `unsupported file type: ${fileName}`,
+        // Folder filmstrip (ROADMAP "nice to have"): exit folder-browsing by
+        // default, same end-state the old top-of-function clear used to
+        // produce unconditionally — reproduced HERE (a terminal point)
+        // instead, so a non-keepFolderContext open never ticks folderDir to
+        // null 2-4s BEFORE this branch could even be reached (that early
+        // tick was the open-filmstrip-jank bug — see this method's
+        // `keepFolderContext` doc comment and docs/brief-bank/
+        // open-filmstrip-jank.md).
+        ...(opts?.keepFolderContext ? {} : { folderDir: null, folderEntries: [] }),
+      });
       return;
     }
     // A preset hover preview (round-7 UX pack G §4) belongs to whatever image
@@ -4434,13 +4447,18 @@ export const useAppStore = create<AppState>((set, get) => {
         // Filmstrip-always-visible (UX pack round 2, item B): ANY successful
         // photo open that resolved a project (every interactive open except
         // the CLI-internal branches above) activates/re-affirms it, so the
-        // strip must show it — including a lone single-file open, which used
-        // to clear `folderDir` to null a moment ago (line above,
-        // `!opts?.keepFolderContext`) and never set it back. Superseding
-        // that here means "no project active" is the only remaining case the
-        // strip stays hidden for (folderDir's own doc comment has the full
-        // rule).
-        ...(projectPatch ? { project: projectPatch, folderDir: projectPatch.dir } : {}),
+        // strip must show it — including a lone single-file open. When NO
+        // project resolved (CLI-internal branches only) and this wasn't a
+        // keepFolderContext open, reproduce the "exit folder-browsing"
+        // end-state the deleted top-of-function clear used to produce (open-
+        // filmstrip-jank fix — see this method's `keepFolderContext` doc
+        // comment): a keepFolderContext open with no project stays exactly
+        // where it was (untouched), since there's nothing to switch it to.
+        ...(projectPatch
+          ? { project: projectPatch, folderDir: projectPatch.dir }
+          : opts?.keepFolderContext
+            ? {}
+            : { folderDir: null, folderEntries: [] }),
         currentLookPath: watchPath,
         legacySidecarImportNotice,
         selectedNodeId: null,
@@ -4523,6 +4541,11 @@ export const useAppStore = create<AppState>((set, get) => {
         imageStatus: 'error',
         image: null,
         imageError: err instanceof Error ? err.message : String(err),
+        // Same "exit folder-browsing" end-state the deleted top-of-function
+        // clear used to produce for a failed non-keepFolderContext open (open-
+        // filmstrip-jank fix — see this method's `keepFolderContext` doc
+        // comment); a keepFolderContext open's failure stays put, untouched.
+        ...(opts?.keepFolderContext ? {} : { folderDir: null, folderEntries: [] }),
       });
     }
   },

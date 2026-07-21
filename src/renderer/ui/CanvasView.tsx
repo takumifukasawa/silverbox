@@ -2383,6 +2383,36 @@ export function CanvasView() {
   useEffect(() => {
     if (readyButPending) suppressedRevealCountRef.current++;
   }, [readyButPending]);
+  // Backstop release (open-filmstrip-jank fix's fallout — verify-preview.mjs
+  // check 4, "rapid consecutive opens": a real, reproduced leak, not
+  // theoretical): the inline release above reads `pendingSwitchRef.current`
+  // (the REF, not the `pendingSwitch` STATE — see that block's own doc
+  // comment for why) and only takes effect the NEXT time this component
+  // happens to re-render for some OTHER reason. Ordinarily some other render
+  // arrives quickly enough (an edit, a status change, …) that this is
+  // unobservable. But when the SAME image path is opened twice in rapid
+  // succession and the FIRST attempt dies before ever installing a preview
+  // (superseded at its very first `await`, before touching `image`), the
+  // WINNING open's own preview can end up as the only thing left to react
+  // to — and once its real frame presents, nothing forces another render:
+  // `pendingSwitchRef.current` flips to `false` inside the imperative
+  // `setFramePresentedHandler` callback, but the inline check above only
+  // reruns opportunistically, so the frozen URL can sit un-revoked until
+  // whatever the NEXT unrelated open happens to be (reproduced: the leak
+  // resolved itself the moment check 6 below fired its own open). This
+  // effect is keyed on `pendingSwitch` (the STATE, which React GUARANTEES a
+  // fresh effect pass for on every real transition, unlike the ref) as a
+  // deterministic fallback — by the time this effect body runs, the commit
+  // it's reacting to has already painted with `pendingSwitch` false, so
+  // there is no "one commit early" risk (see the inline block's own doc
+  // comment on that hazard): `showOpeningPreview` in that SAME commit was
+  // already gated false by the state read, this only catches up the ref.
+  useEffect(() => {
+    if (!pendingSwitch && !openingPreview && frozenOpeningPreviewRef.current) {
+      urlToReleaseRef.current = frozenOpeningPreviewRef.current.url;
+      frozenOpeningPreviewRef.current = null;
+    }
+  }, [pendingSwitch, openingPreview]);
   // Item F: the ACTUAL revocation, as a side effect (never inline during
   // render, which must stay pure) — runs after every commit, but the common
   // case is a cheap ref-check + early return (nothing queued). No deps array
