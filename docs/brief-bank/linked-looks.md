@@ -149,6 +149,37 @@ standalone readability and old-reader compatibility.
   photo forked, the fork SURVIVES as local (UE silently drops; our
   non-destructive stance doesn't).
 
+#### 4.2.1 Per-parameter override — design direction (deferred, user 2026-07-21)
+
+Not v1, but the intended shape when the refinement path (§11) is taken.
+The user's anchor: **UE MaterialInstance** — the shared look is the
+PARENT material; a linked photo's Develop is the INSTANCE; every
+exposed parameter carries an explicit **override flag**. Unchecked ⇒
+the value INHERITS the look (follows). Checked ⇒ local override. The
+key affordance the user wants: **reset a single parameter back to the
+look's value with one gesture** (uncheck = revert-to-parent), WITHOUT
+dragging the rest of its 調整グループ along.
+- Today's coarser rule (whole 調整グループ forks together, revert drops
+  the whole group) is the group-level projection of this. The pain it
+  can cause: editing contrast forks all of basic-tone, so reverting
+  basic-tone also discards an exposure tweak the user wanted to keep.
+- **Data-model implication**: `link.follows` (a list of GROUP ids
+  today) becomes, per group, a set of overridden PARAMETER keys — i.e.
+  follow-state resolves at the leaf, not the group. `familyForDevelop
+  Key` already maps every key → group, so the leaf identity exists;
+  what's new is storing/serializing per-key override state and
+  round-tripping it (sanitizeDevelopLink / serializeGraphDoc).
+- **UI implication**: a per-parameter "overridden" dot + a
+  reset-to-look control on each slider (the MaterialInstance checkbox),
+  in addition to the group-level 個別調整 badge. Group badge = "some
+  param in this group is overridden".
+- **Recommended first step when it lands**: elevate ONLY the
+  most-edited group (basic-tone) to per-parameter; keep the rest
+  group-level (hybrid). Matches §4.2's "only where real usage demands
+  it" — avoids a 30-key UI/serialization jump before it's proven
+  needed. Trigger to pick this up: Italy validation (or real use)
+  actually hits the "group revert took my other param with it" pain.
+
 ### 4.3 Node-graph rules (the link is a property of the DEVELOP NODE)
 
 (Provenance: user, 2026-07-19 — 「ノードベースとの両立がどうなるか」
@@ -467,6 +498,8 @@ third layer). This spec deliberately adds NO sharing on top of it.
 
 True cross-project following (REJECTED, not deferred — it breaks
 self-containedness). Repair-sheet library. Per-parameter override
-granularity (refinement path). The third asset kind (shared
+granularity (refinement path — design direction sketched in §4.2.1,
+UE-MaterialInstance model: per-param override flag + reset-to-look).
+The third asset kind (shared
 node/subgraph — likely identity recorded in §3, unscheduled). Level ②
 frozen-skeleton looks (SHELVED with ready design, §8.2).
