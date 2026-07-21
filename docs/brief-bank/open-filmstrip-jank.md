@@ -1,6 +1,6 @@
 # Fix: filmstrip unmounts during decode (open-time layout jank)
 
-Status: ROOT-CAUSED (Fable-direct, 2026-07-21) — user hand-test:
+Status: DISPATCHED 2026-07-21 (root cause confirmed, fix plan below). User hand-test:
 "openするとき、decodeしてる時、カタログビューが一瞬閉じた後にまた
 decode後に開く感じで、表示領域がガタガタして気持ちが悪い". Fix
 pending; dispatch AFTER the fork-bug agent lands (both touch
