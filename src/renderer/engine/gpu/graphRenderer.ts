@@ -732,6 +732,60 @@ function getGpuDevice(): Promise<GPUDevice> {
   return devicePromise;
 }
 
+// --- Dev/test-only WGSL compile diagnostics (docs/brief-bank/wgsl-compile-diagnostics.md) ---
+// Real bug found this session: the LUT node's WGSL had a struct field named
+// `meta` (a reserved WGSL identifier). Dawn produced an INVALID pipeline with
+// NO surfaced error — the pass just rendered black, and the only symptom was
+// a failing verify script with no diagnostic. Custom-shader-node WGSL is
+// already checked (engine/shader/validateWgsl.ts, a DEDICATED device + error
+// scope); every built-in pass shader's createShaderModule call in THIS file
+// was not. This closes that gap without touching the hot synchronous
+// createShaderModule/createRenderPipeline path: getCompilationInfo() is
+// queried on the MODULE itself (module-scoped, not a device error scope —
+// error scopes are stateful and could entangle with a real render error on
+// the LIVE device), fired fire-and-forget so pipeline creation stays
+// synchronous; only the (async) result of the check is loud.
+//
+// Gated on `shaderDiagnosticsEnabled`, mirrored from the SAME SILVERBOX_TEST
+// flag every other test-only lever in this codebase already reuses (see
+// shared/ipc.ts's SilverboxApi.testFlags.isTest) — set once via
+// setShaderDiagnosticsEnabled() from renderWorker.ts's 'init' handler (see
+// renderProtocol.ts's 'init' command doc comment). This codebase has no
+// OTHER dev/test signal that reaches the render worker's realm
+// (import.meta.env is unused anywhere under src/, and this worker's own
+// tsconfig — tsconfig.web.json — doesn't list the vite/client types), so
+// SILVERBOX_TEST alone gates BOTH "should this check run at all" (the
+// no-op-in-prod requirement) and "should a failure throw" — see this
+// feature's report for that reasoning.
+let shaderDiagnosticsEnabled = false;
+
+/** Mirror testFlags.isTest into this worker realm — see the section doc comment above. */
+export function setShaderDiagnosticsEnabled(enabled: boolean): void {
+  shaderDiagnosticsEnabled = enabled;
+}
+
+/**
+ * Fire-and-forget async compile check for a BUILT-IN pass shader module — a
+ * pure no-op when diagnostics are disabled (normal interactive use), so
+ * every caller's synchronous createShaderModule/createRenderPipeline path is
+ * completely unaffected. `shaderId` should be the same stable id the caller
+ * uses to cache its pipeline, so the message names the culprit. Returns the
+ * check's own promise (rejecting on a compile error) purely so a unit test
+ * can await it directly — every real call site ignores the return value
+ * (`void assertShaderCompiles(...)`); pipeline creation itself never
+ * becomes async.
+ */
+export function assertShaderCompiles(module: GPUShaderModule, shaderId: string): Promise<void> {
+  if (!shaderDiagnosticsEnabled) return Promise.resolve();
+  return module.getCompilationInfo().then((info) => {
+    const errors = info.messages.filter((m) => m.type === 'error');
+    if (errors.length === 0) return;
+    const detail = errors.map((m) => `L${m.lineNum}: ${m.message}`).join('\n');
+    console.error(`[wgsl] built-in shader "${shaderId}" failed to compile:\n${detail}`);
+    throw new Error(`WGSL compile error in "${shaderId}":\n${detail}`);
+  });
+}
+
 interface ExecPhase {
   pipeline: GPURenderPipeline;
   /** null when the pass declares no uniform. */
@@ -899,8 +953,9 @@ export class GraphRenderer {
     if (!context) throw new Error('webgpu canvas context unavailable');
     const canvasFormat = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format: canvasFormat, alphaMode: 'opaque' });
-    const makeEncodePipeline = (code: string, format: GPUTextureFormat) => {
+    const makeEncodePipeline = (code: string, format: GPUTextureFormat, shaderId: string) => {
       const module = device.createShaderModule({ code });
+      void assertShaderCompiles(module, shaderId);
       return device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -911,9 +966,9 @@ export class GraphRenderer {
       device,
       context,
       canvasFormat,
-      makeEncodePipeline(ENCODE_SHADER, canvasFormat),
-      makeEncodePipeline(GRAYSCALE_ENCODE_SHADER, canvasFormat),
-      makeEncodePipeline(ENCODE_SHADER, 'rgba8unorm')
+      makeEncodePipeline(ENCODE_SHADER, canvasFormat, 'encode/canvas'),
+      makeEncodePipeline(GRAYSCALE_ENCODE_SHADER, canvasFormat, 'encode/grayscale'),
+      makeEncodePipeline(ENCODE_SHADER, 'rgba8unorm', 'encode/readback')
     );
   }
 
@@ -968,6 +1023,7 @@ export class GraphRenderer {
     let pipeline = this.passPipelines.get(shaderId);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code: wgsl });
+      void assertShaderCompiles(module, shaderId);
       pipeline = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1114,6 +1170,7 @@ export class GraphRenderer {
   private imageGrayPipeline(): GPURenderPipeline {
     if (!this.imageGrayPipelineCache) {
       const module = this.device.createShaderModule({ code: IMAGE_GRAY_SHADER });
+      void assertShaderCompiles(module, 'imageGray');
       this.imageGrayPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1127,6 +1184,7 @@ export class GraphRenderer {
   private imageCoverPipeline(): GPURenderPipeline {
     if (!this.imageCoverPipelineCache) {
       const module = this.device.createShaderModule({ code: IMAGE_COVER_SHADER });
+      void assertShaderCompiles(module, 'imageCover');
       this.imageCoverPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1140,6 +1198,7 @@ export class GraphRenderer {
   private externalPassthroughPipeline(): GPURenderPipeline {
     if (!this.externalPassthroughPipelineCache) {
       const module = this.device.createShaderModule({ code: EXTERNAL_PASSTHROUGH_SHADER });
+      void assertShaderCompiles(module, 'externalPassthrough');
       this.externalPassthroughPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1153,6 +1212,7 @@ export class GraphRenderer {
   private externalEncodePipeline(): GPURenderPipeline {
     if (!this.externalEncodePipelineCache) {
       const module = this.device.createShaderModule({ code: ENCODE_SHADER });
+      void assertShaderCompiles(module, 'externalEncode');
       this.externalEncodePipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1166,6 +1226,7 @@ export class GraphRenderer {
   private externalDecodePipeline(): GPURenderPipeline {
     if (!this.externalDecodePipelineCache) {
       const module = this.device.createShaderModule({ code: EXTERNAL_DECODE_SHADER });
+      void assertShaderCompiles(module, 'externalDecode');
       this.externalDecodePipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1179,6 +1240,7 @@ export class GraphRenderer {
   private denoiseBlendPipeline(): GPURenderPipeline {
     if (!this.denoiseBlendPipelineCache) {
       const module = this.device.createShaderModule({ code: DENOISE_BLEND_SHADER });
+      void assertShaderCompiles(module, 'denoiseBlend');
       this.denoiseBlendPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1192,6 +1254,7 @@ export class GraphRenderer {
   private lut3dPipeline(): GPURenderPipeline {
     if (!this.lut3dPipelineCache) {
       const module = this.device.createShaderModule({ code: LUT3D_SHADER });
+      void assertShaderCompiles(module, 'lut3d');
       this.lut3dPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1505,6 +1568,7 @@ export class GraphRenderer {
   private resamplePipeline(): GPURenderPipeline {
     if (!this.resamplePipelineCache) {
       const module = this.device.createShaderModule({ code: RESAMPLE_SHADER });
+      void assertShaderCompiles(module, 'resample');
       this.resamplePipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1526,6 +1590,7 @@ export class GraphRenderer {
     let pipeline = this.exportEncodePipelines.get(shaderId);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code: colorSpace === 'p3' ? ENCODE_SHADER_P3 : ENCODE_SHADER });
+      void assertShaderCompiles(module, shaderId);
       pipeline = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1626,6 +1691,7 @@ export class GraphRenderer {
   private blendPipeline(): GPURenderPipeline {
     if (!this.blendPipelineCache) {
       const module = this.device.createShaderModule({ code: BLEND_SHADER });
+      void assertShaderCompiles(module, 'blend');
       this.blendPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1639,6 +1705,7 @@ export class GraphRenderer {
   private blendMaskPipeline(): GPURenderPipeline {
     if (!this.blendMaskPipelineCache) {
       const module = this.device.createShaderModule({ code: BLEND_MASK_SHADER });
+      void assertShaderCompiles(module, 'blendMask');
       this.blendMaskPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1652,6 +1719,7 @@ export class GraphRenderer {
   private maskOverlayPipeline(): GPURenderPipeline {
     if (!this.maskOverlayPipelineCache) {
       const module = this.device.createShaderModule({ code: MASK_OVERLAY_ENCODE_SHADER });
+      void assertShaderCompiles(module, 'maskOverlay');
       this.maskOverlayPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1665,6 +1733,7 @@ export class GraphRenderer {
   private thumbnailPipeline(): GPURenderPipeline {
     if (!this.thumbnailPipelineCache) {
       const module = this.device.createShaderModule({ code: THUMBNAIL_SHADER });
+      void assertShaderCompiles(module, 'thumbnail');
       this.thumbnailPipelineCache = this.device.createRenderPipeline({
         layout: 'auto',
         vertex: { module, entryPoint: 'vs' },
@@ -1678,6 +1747,7 @@ export class GraphRenderer {
   private histogramPipeline(): GPUComputePipeline {
     if (!this.histogramPipelineCache) {
       const module = this.device.createShaderModule({ code: HISTOGRAM_SHADER });
+      void assertShaderCompiles(module, 'histogram');
       this.histogramPipelineCache = this.device.createComputePipeline({
         layout: 'auto',
         compute: { module, entryPoint: 'cs' },
@@ -1690,6 +1760,7 @@ export class GraphRenderer {
   private scopePipeline(): GPUComputePipeline {
     if (!this.scopePipelineCache) {
       const module = this.device.createShaderModule({ code: SCOPE_SAMPLE_SHADER });
+      void assertShaderCompiles(module, 'scopeSample');
       this.scopePipelineCache = this.device.createComputePipeline({
         layout: 'auto',
         compute: { module, entryPoint: 'cs' },

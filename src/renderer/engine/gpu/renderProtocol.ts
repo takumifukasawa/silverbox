@@ -29,7 +29,17 @@ import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../
 
 /** Fire-and-forget commands: main → worker, no response expected. */
 export type RenderWorkerCommand =
-  | { type: 'init'; canvas: OffscreenCanvas }
+  /**
+   * `isTest` mirrors window.silverbox.testFlags.isTest (SILVERBOX_TEST) —
+   * the render worker is a separate realm with no `window`, so this is how
+   * the ONE existing dev/test signal this codebase has reaches
+   * graphRenderer.ts's setShaderDiagnosticsEnabled (see its doc comment,
+   * docs/brief-bank/wgsl-compile-diagnostics.md). Always sent before any
+   * 'initCompare' in practice (the main canvas mounts first — see
+   * renderWorker.ts's own doc comment), so the compare GraphRenderer picks
+   * up the same module-scoped flag with no separate plumbing.
+   */
+  | { type: 'init'; canvas: OffscreenCanvas; isTest: boolean }
   | { type: 'image'; gen: number; image: PreparedImage }
   /**
    * Image node (composite/mask-by-another-file feature): the main thread

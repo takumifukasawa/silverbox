@@ -39,7 +39,7 @@
  * compareRender's staleness check never gets confused by an unrelated main
  * 'render' bumping the shared client-side counter, and vice versa.
  */
-import { GraphRenderer } from './graphRenderer';
+import { GraphRenderer, setShaderDiagnosticsEnabled } from './graphRenderer';
 import { buildPlan, type CompileContext, type GraphDoc, type RenderPlan } from '../graph/graphDoc';
 import { setCustomShaderArtifact, clearCustomShaderArtifacts } from '../graph/customShaderNode';
 import { createWbModel, type WbModel } from '../color/whiteBalance';
@@ -286,6 +286,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
   switch (msg.type) {
     case 'init': {
       offscreenCanvas = msg.canvas;
+      setShaderDiagnosticsEnabled(msg.isTest);
       GraphRenderer.create(msg.canvas).then(resolveRenderer!, (err) => {
         post({ type: 'initError', message: err instanceof Error ? err.message : String(err) });
       });

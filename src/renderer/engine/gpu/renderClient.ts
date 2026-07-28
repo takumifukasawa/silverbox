@@ -135,7 +135,9 @@ export class RenderWorkerClient {
     w.onmessage ??= routeMessage;
     activeClient = this;
     const offscreen = canvas.transferControlToOffscreen();
-    const msg: RenderWorkerCommand = { type: 'init', canvas: offscreen };
+    // isTest mirrors window.silverbox.testFlags.isTest — see renderProtocol.ts's
+    // 'init' command doc comment (wgsl-compile-diagnostics.md).
+    const msg: RenderWorkerCommand = { type: 'init', canvas: offscreen, isTest: window.silverbox.testFlags.isTest };
     w.postMessage(msg, [offscreen]);
   }
 
