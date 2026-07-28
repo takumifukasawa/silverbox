@@ -1,8 +1,28 @@
 # Brief: LUT import node — apply a .cube film-sim inside the graph
 
-Status: DESIGN-READY (Fable, 2026-07-20) — dispatchable. The mirror of
-the shipped LUT EXPORT (buildLutExport): where export BAKES our chain
-to a .cube, this READS someone else's .cube into the chain as a node.
+Status: IMPLEMENTED+LANDED 2026-07-28 (commit e23b4b9, SUITE 75/75) +
+DOUBLE-CHECKED 2026-07-28. The mirror of the shipped LUT EXPORT
+(buildLutExport): where export BAKES our chain to a .cube, this READS
+someone else's .cube into the chain as a node.
+
+## Double-check verdict (2026-07-28, export-composition path)
+
+The agent added LUT→export composition beyond the brief (un-briefed
+extra code — the highest-risk surface). Re-derived from source: SOUND.
+- buildPlan's LUT_KIND branch degrades to `index = src` (bit-exact
+  pass-through) on `isIdentityLut || !path || !table` — a PLAN-level
+  decision, so GPU and CPU agree on identity; no crash, no garbage.
+- An unloaded referenced .cube at export time degrades to the node's own
+  identity fallback — the SAME eventual-consistency tolerance the DCP
+  lattice + image-node texture caches already accept project-wide, not a
+  new LUT-specific defect. A missing/unloaded LUT reads identity in the
+  live preview too, so the exported .cube matches what the user sees
+  (consistent, not wrong-output).
+- Only theoretical gap: export-before-first-render could omit a
+  present-but-not-yet-loaded LUT silently — bounded by that same
+  pre-accepted tolerance (DCP/image-node share it). Not re-litigated.
+Verdict: clean. rec709-as-srgb no-op remains the one documented v1
+limitation (§4).
 
 ## What it is
 
