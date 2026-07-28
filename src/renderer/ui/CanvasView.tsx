@@ -65,6 +65,8 @@ import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
 import { handleDenoiseRunRequest } from '../engine/graph/denoiseNodeRunner';
+import { LUT_KIND } from '../engine/graph/lutNode';
+import { lutSourceDecodeCount, lutTableCache, syncLutSources } from '../engine/graph/lutSource';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
 import { SpotBrushCursor } from './SpotBrushCursor';
@@ -349,6 +351,16 @@ declare global {
       setImagePath(nodeId: string, path: string): void;
       /** Verify-only render-worker-cache check: how many times imageNodeSource.ts has actually decoded (cache misses only) — see its own doc comment. */
       imageNodeDecodeCount(): number;
+      /** LUT import node (docs/brief-bank/lut-import-node.md): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'lut'. */
+      lutNodeState(nodeId?: string): { path: string; inputSpace: 'srgb' | 'rec709'; amount: number; missing: boolean } | null;
+      /** Verify-only: set a LUT node's referenced-file path — one undo entry (bypasses the Inspector's native "Choose…" dialog). */
+      setLutPath(nodeId: string, path: string): void;
+      /** Verify-only: set a LUT node's amount — one undo entry. */
+      setLutAmount(nodeId: string, amount: number): void;
+      /** Verify-only: set a LUT node's input-space selector. */
+      setLutInputSpace(nodeId: string, inputSpace: 'srgb' | 'rec709'): void;
+      /** Verify-only load-cache check: how many times lutSource.ts has actually attempted a parse (cache misses only) — see its own doc comment. */
+      lutSourceDecodeCount(): number;
       /** External-tool hook node (task #41): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'external'. */
       externalNodeState(
         nodeId?: string
@@ -648,6 +660,13 @@ export function CanvasView() {
   // synchronous) — dcpProfileRev is what makes this effect re-run and repost
   // 'render' once a bake actually lands, same role as the three revs above.
   const dcpProfileRev = useAppStore((s) => s.dcpProfileRev);
+  // LUT import node (docs/brief-bank/lut-import-node.md): same "an async
+  // load settled, re-render" role as imageNodeRev/externalNodeRev/
+  // denoiseNodeRev above — lutSource.ts's load is fire-and-forget from this
+  // effect's own point of view.
+  const lutNodeRev = useAppStore((s) => s.lutNodeRev);
+  const bumpLutNodeRev = useAppStore((s) => s.bumpLutNodeRev);
+  const setLutNodeMissing = useAppStore((s) => s.setLutNodeMissing);
   const setImageNodeMissing = useAppStore((s) => s.setImageNodeMissing);
   const wbModel = useAppStore((s) => s.wbModel);
   const showBefore = useAppStore((s) => s.showBefore);
@@ -1109,6 +1128,17 @@ export function CanvasView() {
         setImageNodeMissing,
         bumpImageNodeRev
       );
+      // LUT import node: load (parse) any referenced .cube THIS doc needs,
+      // lazily, cached per path — see lutSource.ts. Same fire-and-forget/
+      // staleness-guard/rev-bump shape as syncImageNodeSources above.
+      syncLutSources(
+        planDoc,
+        imagePath ? dirnameOf(imagePath) : null,
+        client,
+        () => useAppStore.getState().image !== image,
+        setLutNodeMissing,
+        bumpLutNodeRev
+      );
       const renderScale = Math.max(image.width, image.height) / Math.max(image.fullWidth, image.fullHeight);
       // a broken input→output path renders as pass-through with a banner in
       // the node editor instead of killing the preview. buildPlan is pure and
@@ -1127,6 +1157,13 @@ export function CanvasView() {
           outputId: activeOutputId ?? undefined,
           srcWidth: image.width,
           srcHeight: image.height,
+          // LUT import node: without this, a lut node with a REAL table
+          // loaded would resolve as identity in THIS (main-thread) plan
+          // while the render worker's own copy correctly emits a step for
+          // it — nodeSteps (below) is what the per-node thumbnail request
+          // keys off, so the two must agree on which nodes got their own
+          // step.
+          lutTables: lutTableCache(),
         });
         nodeSteps = localPlan.nodeSteps;
         useAppStore.getState().setGraphBroken(false);
@@ -1285,6 +1322,7 @@ export function CanvasView() {
     externalNodeRev,
     denoiseNodeRev,
     dcpProfileRev,
+    lutNodeRev,
   ]);
 
   // Round-11 fix pack item 4 ("PNG chosen on an Image node showed no node
@@ -1476,6 +1514,11 @@ export function CanvasView() {
           srcWidth: width,
           srcHeight: height,
           cameraModel: s.image.capture?.cameraModel ?? null,
+          // LUT import node: this buildPlan call runs on the MAIN thread
+          // (unlike the render worker's own copy — see renderWorker.ts),
+          // so it needs the main-thread table cache, not the worker's
+          // isolated one (see lutSource.ts's lutTableCache doc comment).
+          lutTables: lutTableCache(),
         });
         // custom WGSL (and not-yet-mirrored Develop sections) have no CPU reference
         if (!planHasCpuReference(plan)) return null;
@@ -1845,6 +1888,31 @@ export function CanvasView() {
       /** Verify-only render-worker-cache check: bumped once per REAL decode (cache miss) — see imageNodeSource.ts. */
       imageNodeDecodeCount() {
         return imageNodeDecodeCount();
+      },
+      /** LUT import node: path/input-space/amount + missing-badge state for `nodeId` (defaults to the current selection); null when it isn't a lut node. */
+      lutNodeState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (node?.kind !== LUT_KIND) return null;
+        const lut = node.lut ?? { path: '', inputSpace: 'srgb' as const, amount: 1 };
+        return { path: lut.path, inputSpace: lut.inputSpace, amount: lut.amount, missing: s.lutNodeMissing[node.id] === true };
+      },
+      /** Verify-only: set a LUT node's referenced-file path without driving the Inspector's "Choose…" native dialog. */
+      setLutPath(nodeId, path) {
+        useAppStore.getState().setLutPath(nodeId, path, null);
+      },
+      /** Verify-only: set a LUT node's amount without driving the Inspector's slider. */
+      setLutAmount(nodeId, amount) {
+        useAppStore.getState().setLutAmount(nodeId, amount, null);
+      },
+      /** Verify-only: set a LUT node's input-space selector. */
+      setLutInputSpace(nodeId, inputSpace) {
+        useAppStore.getState().setLutInputSpace(nodeId, inputSpace);
+      },
+      /** Verify-only load-cache check: bumped once per REAL parse attempt (cache miss) — see lutSource.ts. */
+      lutSourceDecodeCount() {
+        return lutSourceDecodeCount();
       },
       /** External-tool hook node (task #41): command/encoded + needs-confirm/error/running badge state for `nodeId` (defaults to the current selection); null when it isn't an external node. */
       externalNodeState(nodeId) {

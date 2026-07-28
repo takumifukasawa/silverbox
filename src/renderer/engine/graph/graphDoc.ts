@@ -23,6 +23,16 @@ import { defaultSpotsParams, packSpotsUniform, sanitizeSpotsParams, SPOTS_KIND, 
 import { defaultImageParams, IMAGE_KIND, imageBaseName, sanitizeImageParams, type ImageParams } from './imageNode';
 import { defaultExternalParams, EXTERNAL_KIND, isIdentityExternal, sanitizeExternalParams, type ExternalParams } from './externalNode';
 import { defaultDenoiseParams, DENOISE_KIND, isIdentityDenoise, sanitizeDenoiseParams, type DenoiseParams } from './denoiseNode';
+import {
+  buildLut1DWgsl,
+  defaultLutParams,
+  isIdentityLut,
+  LUT_KIND,
+  packLut1DStorage,
+  sanitizeLutParams,
+  type LutParams,
+} from './lutNode';
+import { applyCubeLutCpu, type CubeLut } from '../color/lutCube';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy, PhotoFlag } from '../../../../shared/ipc';
 // Type-only — presetFamilies.ts imports runtime symbols (DEVELOP_KIND etc.)
@@ -43,7 +53,8 @@ export type GraphNodeKind =
   | typeof SPOTS_KIND
   | typeof IMAGE_KIND
   | typeof EXTERNAL_KIND
-  | typeof DENOISE_KIND;
+  | typeof DENOISE_KIND
+  | typeof LUT_KIND;
 
 export interface GraphNode {
   id: string;
@@ -69,6 +80,8 @@ export interface GraphNode {
   external?: ExternalParams;
   /** In-engine ML denoise (denoise v2, stage 1): output-blend strength; only for kind 'denoise'. */
   denoise?: DenoiseParams;
+  /** LUT import node (docs/brief-bank/lut-import-node.md): referenced .cube file + input-space selector + amount; only for kind 'lut'. */
+  lut?: LutParams;
   /**
    * Bypass toggle (node bypass feature, Resolve's Ctrl+D): absent/false =
    * active (default). Legal on every 1-in/1-out chain kind (ops, custom,
@@ -186,6 +199,7 @@ export type AddableKind =
   | typeof IMAGE_KIND
   | typeof EXTERNAL_KIND
   | typeof DENOISE_KIND
+  | typeof LUT_KIND
   | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
@@ -213,6 +227,10 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
   }
   if (node.kind === EXTERNAL_KIND) return 'external';
   if (node.kind === DENOISE_KIND) return 'denoise';
+  if (node.kind === LUT_KIND) {
+    const path = node.lut?.path ?? '';
+    return path ? `lut — ${imageBaseName(path)}` : 'lut';
+  }
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
 }
@@ -350,6 +368,7 @@ export function defaultParams(
     | typeof IMAGE_KIND
     | typeof EXTERNAL_KIND
     | typeof DENOISE_KIND
+    | typeof LUT_KIND
     | 'output'
   >
 ): Record<string, number> {
@@ -733,6 +752,7 @@ const KNOWN_NODE_KEYS = new Set([
   'image',
   'external',
   'denoise',
+  'lut',
   'disabled',
   'name',
   'export',
@@ -819,6 +839,7 @@ export function serializeGraphDoc(
           ...(n.image ? { image: n.image } : {}),
           ...(n.external ? { external: n.external } : {}),
           ...(n.denoise ? { denoise: n.denoise } : {}),
+          ...(n.lut ? { lut: n.lut } : {}),
           ...(n.disabled ? { disabled: true } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
@@ -923,6 +944,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
       n.kind !== IMAGE_KIND &&
       n.kind !== EXTERNAL_KIND &&
       n.kind !== DENOISE_KIND &&
+      n.kind !== LUT_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -971,6 +993,16 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     }
     if (n.kind === DENOISE_KIND) {
       n.denoise = sanitizeDenoiseParams(n.denoise, n.id);
+    }
+    // LUT import node (docs/brief-bank/lut-import-node.md): additive node
+    // kind to schemaVersion 4 (no version bump) — same "extend the
+    // recognized-kind list, sanitize when present" pattern IMAGE_KIND/
+    // EXTERNAL_KIND/DENOISE_KIND already followed when THEY were added; an
+    // older build reading a doc with a 'lut' node fails this very check
+    // above ("unknown node kind"), same forward-compat posture those three
+    // accepted too.
+    if (n.kind === LUT_KIND) {
+      n.lut = sanitizeLutParams(n.lut, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -1200,6 +1232,31 @@ export type PlanStep =
       src: number;
       /** 0–100 output-blend strength (denoiseNode.ts's DenoiseParams.strength) — carried into the plan so the GPU re-entry blend pass (graphRenderer.ts) knows how much of the full-strength inference result to mix in; the runtime round trip itself (readback → main-process ORT inference → GPU re-entry) is keyed by a content hash computed separately (not part of the plan — see graphRenderer.ts's checkDenoiseNodes), same "plan is pure, hash depends on pixels" split as the 'external' step. */
       strength: number;
+    }
+  | {
+      nodeId: string;
+      type: 'lut3d';
+      src: number;
+      /**
+       * Raw (as-authored) `lut.path` — the render worker's per-path GPU
+       * strip-texture cache key (see graphRenderer.ts's setLutTexture,
+       * mirroring imageNodeTextures). Unlike 'image', this step is a
+       * TRANSFORM of `src` (one input), not a zero-input source — a
+       * not-yet-uploaded texture falls back to a plain pass-through of
+       * `src` (see graphRenderer.ts's resolveSteps), never a placeholder
+       * color.
+       */
+      path: string;
+      /** 0..1 mix vs identity — same role as blend's uniform.x. */
+      amount: number;
+      /**
+       * CPU mirror: exact trilinear match of graphRenderer.ts's
+       * LUT3D_SHADER (see engine/color/lutCube.ts's applyCubeLutCpu). The
+       * LUT import node is a per-pixel color transform WITH a CPU mirror
+       * (NOT spatial, unlike 'image'/'external'/'denoise' above) — an
+       * engine invariant (docs/brief-bank/lut-import-node.md item 4).
+       */
+      cpu: (px: Rgb) => Rgb;
     };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -1285,6 +1342,21 @@ export interface CompileContext {
    * in-flight or failed load renders as a safe no-op, never a crash.
    */
   dcpLattice?: readonly number[] | null;
+  /**
+   * LUT import node (docs/brief-bank/lut-import-node.md): parsed .cube
+   * tables, keyed by the SAME raw (as-authored) `lut.path` string a 'lut'
+   * node carries — resolved OUTSIDE buildPlan (file IO + parsing, see
+   * lutSource.ts, which posts each result into the render worker's own map
+   * threaded in here) the SAME "resolved elsewhere, threaded through ctx"
+   * shape `dcpLattice` uses. A path with NO entry (map absent, or present
+   * but not containing this path — still loading) or an entry of `null`
+   * (load failed / malformed .cube) both fall back to IDENTITY — the
+   * "missing .cube = pass-through, never a crash" contract (unlike
+   * dcpLattice's own all-zero-lattice fallback, a LUT's safe fallback is
+   * simply "don't emit the pass at all", since there is no meaningful
+   * identity LUT table to substitute).
+   */
+  lutTables?: ReadonlyMap<string, CubeLut | null>;
   /**
    * Selects which output node to resolve when the doc has more than one
    * (named-outputs, spec §6) — matched against a node's `id`. Default (or no
@@ -1555,6 +1627,50 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           steps.push({ nodeId: id, type: 'denoise', src, strength: params.strength });
           index = steps.length - 1;
         }
+      } else if (node.kind === LUT_KIND) {
+        // LUT import node (docs/brief-bank/lut-import-node.md): identity at
+        // amount 0 (isIdentityLut), no path chosen, or the table hasn't
+        // loaded/failed to load yet (ctx.lutTables — see its own doc
+        // comment) — every one of these is a bit-exact pass-through, the
+        // same invariant every other node kind upholds for its own identity
+        // condition. 1D tables (LUT_1D_SIZE) reuse the generic 'passes'
+        // step (a small storage-buffer pass, no extra GPU binding needed —
+        // see lutNode.ts's buildLut1DWgsl); 3D tables (LUT_3D_SIZE, the
+        // common film-sim case) need a dedicated 'lut3d' step because the
+        // strip-texture sample needs a SECOND texture binding the generic
+        // 'passes' shape doesn't have (mirrors 'denoise's own re-entry
+        // texture bind, see graphRenderer.ts's LUT3D_SHADER).
+        const params = node.lut ?? defaultLutParams();
+        const table = params.path ? ctx?.lutTables?.get(params.path) : undefined;
+        if (isIdentityLut(params) || !params.path || !table) {
+          index = src;
+        } else if (table.kind === '1d') {
+          steps.push({
+            nodeId: id,
+            type: 'passes',
+            passes: [
+              {
+                shaderId: `lut/1d-${table.size}`,
+                wgsl: buildLut1DWgsl(table.size),
+                uniforms: packLut1DStorage(table, params.amount),
+                storage: true,
+              },
+            ],
+            src,
+            cpu: (px) => applyCubeLutCpu(table, params.amount, px),
+          });
+          index = steps.length - 1;
+        } else {
+          steps.push({
+            nodeId: id,
+            type: 'lut3d',
+            src,
+            path: params.path,
+            amount: params.amount,
+            cpu: (px) => applyCubeLutCpu(table, params.amount, px),
+          });
+          index = steps.length - 1;
+        }
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip
@@ -1654,6 +1770,10 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
       // round trip depends on main-process ORT inference over GPU-readback
       // pixels, nothing a JS reference could mirror even in principle.
       throw new Error(`step ${step.nodeId} has no CPU reference`);
+    } else if (step.type === 'lut3d') {
+      // Real CPU mirror (unlike 'image'/'external'/'denoise' above) — see
+      // PlanStep's 'lut3d' doc comment.
+      outputs.push(step.cpu(at(step.src)));
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -1683,6 +1803,7 @@ function stepHasCpuMirror(s: PlanStep): boolean {
   if (s.type === 'image') return false; // no CPU mirror — see PlanStep's doc comment
   if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
   if (s.type === 'denoise') return false; // no CPU mirror — see PlanStep's doc comment
+  if (s.type === 'lut3d') return true; // real CPU mirror — see PlanStep's 'lut3d' doc comment
   return true; // blend (always has a CPU-evaluable inline mix)
 }
 
@@ -1740,7 +1861,7 @@ export function stripNoCpuMirrorSteps(plan: RenderPlan): RenderPlan {
           : -1; // 'image' — zero-input source, no upstream to bypass to
       return;
     }
-    if (step.type === 'passes') {
+    if (step.type === 'passes' || step.type === 'lut3d') {
       newSteps.push({ ...step, src: toNew(resolveOld(step.src)) });
     } else if (step.type === 'blend') {
       // The only OTHER kind stepHasCpuMirror keeps — but its own inputs may

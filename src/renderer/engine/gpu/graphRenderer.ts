@@ -29,6 +29,7 @@ import {
   type LensProfile,
 } from '../lens/sonyLensProfile';
 import { WGSL_SRGB_TO_WORK, WGSL_WORK_TO_P3, WGSL_WORK_TO_SRGB, WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
+import { buildLutStripPixels, type CubeLut3D } from '../color/lutCube';
 import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import { DENOISE_MODEL_SHA256 } from '../../../../shared/denoiseModel';
@@ -181,6 +182,59 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let a = textureLoad(srcA, vec2i(pos.xy), 0);
   let b = textureLoad(srcB, vec2i(pos.xy), 0);
   return vec4f(mix(a.rgb, b.rgb, params.x), 1.0);
+}
+`;
+
+// --- LUT import node (docs/brief-bank/lut-import-node.md) --------------------
+//
+// A 3D LUT (LUT_3D_SIZE, the common film-sim case) samples a "strip" 2D
+// texture with MANUAL trilinear (textureLoad only, no filtering sampler) —
+// the engine has no native texture_3d infrastructure, and the strip-packing
+// convention is REUSED verbatim from lutExport.ts's write side (see
+// engine/color/lutCube.ts's buildLutStripPixels doc comment: tile = BLUE,
+// within-tile x = RED, within-tile y = GREEN, row 0 = top = green 0). `n`
+// (the LUT's size) is read from the texture's own height at RUNTIME
+// (textureDimensions), not baked as a WGSL compile-time constant — unlike
+// PROFILE_WGSL/develop's per-size shaderId cache, this means ONE pipeline
+// serves every LUT size, compiled once. Same two-texture-plus-uniform
+// binding shape as DENOISE_BLEND_SHADER above (src@0, second texture@1,
+// uniform@2) — a genuinely NEW GPU-texture-cache/pipeline (unlike the 1D
+// case, which reuses the generic 'passes' storage-buffer path with zero
+// renderer changes — see lutNode.ts's buildLut1DWgsl).
+const LUT3D_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var lutTex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> params: vec4f; // x = amount (0..1)
+${FULLSCREEN_VS}
+${WGSL_SRGB_ENCODE}
+${WGSL_SRGB_DECODE}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let c0 = textureLoad(src, vec2i(pos.xy), 0);
+  let n = i32(textureDimensions(lutTex).y);
+  let lin = ${WGSL_WORK_TO_SRGB} * c0.rgb;
+  let enc = clamp(srgbEncode(lin), vec3f(0.0), vec3f(1.0));
+  let coord = enc * f32(n - 1);
+  let i0 = min(vec3i(coord), vec3i(n - 2));
+  let f = coord - vec3f(i0);
+  var sampled = vec3f(0.0);
+  for (var dr = 0; dr < 2; dr = dr + 1) {
+    let wr = select(1.0 - f.x, f.x, dr == 1);
+    for (var dg = 0; dg < 2; dg = dg + 1) {
+      let wg = select(1.0 - f.y, f.y, dg == 1);
+      for (var db = 0; db < 2; db = db + 1) {
+        let wb = select(1.0 - f.z, f.z, db == 1);
+        let ir = i0.x + dr;
+        let ig = i0.y + dg;
+        let ib = i0.z + db;
+        let texel = textureLoad(lutTex, vec2i(ib * n + ir, ig), 0);
+        sampled += (wr * wg * wb) * texel.rgb;
+      }
+    }
+  }
+  let outWork = ${WGSL_SRGB_TO_WORK} * srgbDecode(sampled);
+  let result = mix(c0.rgb, outWork, params.x);
+  return vec4f(result, c0.a);
 }
 `;
 
@@ -701,6 +755,8 @@ interface ExecStep {
   externalResultView?: GPUTextureView;
   /** Denoise step (denoise v2, stage 1) with a FRESH cached FULL-STRENGTH result available: blend it against `src` by strength/100 (DENOISE_BLEND_SHADER) instead of a plain pass-through — see resolveSteps' 'denoise' branch. Absent = plain pass-through of `src` (no result yet, or still stale). */
   denoiseResultView?: GPUTextureView;
+  /** LUT import node (3D case) with its strip texture ALREADY uploaded (setLutTexture landed before this render): sample it against `src` via LUT3D_SHADER — see resolveSteps' 'lut3d' branch. Absent = plain pass-through of `src` (texture not yet uploaded — a transient race, self-healing on the next render once setLutTexture lands; never a crash). */
+  lutView?: GPUTextureView;
 }
 
 
@@ -772,6 +828,10 @@ export class GraphRenderer {
   /** Per-node idle-debounce timers (DENOISE_DEBOUNCE_MS) — same role as `externalDebounceTimers`. */
   private denoiseDebounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private denoiseBlendPipelineCache: GPURenderPipeline | null = null;
+  // --- LUT import node (docs/brief-bank/lut-import-node.md) ------------------
+  /** Per-path strip-texture cache for the 3D case, keyed by the SAME raw path a PlanStep 'lut3d' carries — mirrors `imageNodeTextures`'s shape exactly. 1D tables never appear here (no GPU texture needed — see lutNode.ts). */
+  private lutTextures = new Map<string, GPUTexture>();
+  private lut3dPipelineCache: GPURenderPipeline | null = null;
   private steps: ExecStep[] = [];
   private outputIndex = -1;
   private blendPipelineCache: GPURenderPipeline | null = null;
@@ -962,6 +1022,11 @@ export class GraphRenderer {
     this.denoiseNodeCacheKey.clear();
     for (const t of this.denoiseDebounceTimers.values()) clearTimeout(t);
     this.denoiseDebounceTimers.clear();
+    // LUT import node cache invalidation on main-image switch — same
+    // rationale as imageNodeTextures above (sidecar-relative LUT paths can
+    // resolve to a different file per photo).
+    for (const t of this.lutTextures.values()) this.destroyTexture(t);
+    this.lutTextures.clear();
     this.destroyTexture(this.baseTexture);
     this.baseTexture = null;
     this.destroyBuffer(this.resampleUniform);
@@ -1000,6 +1065,33 @@ export class GraphRenderer {
     half.set(data);
     this.device.queue.writeTexture({ texture: tex }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [width, height]);
     this.imageNodeTextures.set(path, tex);
+  }
+
+  /**
+   * Upload (or replace) the strip texture for one 3D LUT path — see
+   * `lutTextures`'s doc comment. Packs `table` via
+   * engine/color/lutCube.ts's buildLutStripPixels (the SAME axis
+   * convention lutExport.ts's write side emits) and uploads as rgba16float
+   * (LUT3D_SHADER samples it with textureLoad only — no filtering sampler,
+   * so the format's filterability never matters). Same "eventually
+   * consistent" tolerance every other async-resource upload in this class
+   * gets — a render that starts before this lands simply reads the OLD
+   * cached texture (or falls back to pass-through if there is none yet, see
+   * resolveSteps' 'lut3d' branch), and the next render picks up the fresh
+   * one.
+   */
+  setLutTexture(path: string, table: CubeLut3D): void {
+    const { data, width, height } = buildLutStripPixels(table);
+    this.destroyTexture(this.lutTextures.get(path));
+    const tex = this.createTexture({
+      size: [width, height],
+      format: 'rgba16float',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    const half = new Float16Array(data.length);
+    half.set(data);
+    this.device.queue.writeTexture({ texture: tex }, half, { bytesPerRow: width * 8, rowsPerImage: height }, [width, height]);
+    this.lutTextures.set(path, tex);
   }
 
   /**
@@ -1094,6 +1186,19 @@ export class GraphRenderer {
       });
     }
     return this.denoiseBlendPipelineCache;
+  }
+
+  /** LUT import node, 3D case: manual-trilinear strip-texture sample against `src`, mixed by amount — see LUT3D_SHADER. One pipeline for every LUT size (n is read from the texture itself at runtime). */
+  private lut3dPipeline(): GPURenderPipeline {
+    if (!this.lut3dPipelineCache) {
+      const module = this.device.createShaderModule({ code: LUT3D_SHADER });
+      this.lut3dPipelineCache = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format: 'rgba16float' }] },
+      });
+    }
+    return this.lut3dPipelineCache;
   }
 
   /**
@@ -1712,6 +1817,28 @@ export class GraphRenderer {
           src: op.src,
         };
       }
+      if (op.type === 'lut3d') {
+        // A strip texture ALREADY uploaded for this path (setLutTexture —
+        // see renderWorker.ts's 'lutTable' handler) samples via LUT3D_SHADER;
+        // not yet uploaded (a transient race: buildPlan emitted this step
+        // because the CPU-side parsed table had already landed in
+        // ctx.lutTables, but the separate GPU-texture upload message hasn't
+        // arrived yet) ⇒ plain pass-through of `src`, same "never crash,
+        // self-heals next render" posture as the external/denoise "no result
+        // yet" cases above.
+        const tex = this.lutTextures.get(op.path);
+        if (tex) {
+          return {
+            phases: [{ pipeline: this.lut3dPipeline(), uniformBuffer: this.vec4Buffer([op.amount, 0, 0, 0]) }],
+            src: op.src,
+            lutView: tex.createView(),
+          };
+        }
+        return {
+          phases: [{ pipeline: this.externalPassthroughPipeline(), uniformBuffer: null }],
+          src: op.src,
+        };
+      }
       const hasMask = op.srcMask !== undefined;
       return {
         phases: [{ pipeline: hasMask ? this.blendMaskPipeline() : this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
@@ -1878,6 +2005,18 @@ export class GraphRenderer {
         addPass(encoder, views[i]!, phase.pipeline, [
           { binding: 0, resource: at(step.src) },
           { binding: 1, resource: step.denoiseResultView },
+          { binding: 2, resource: { buffer: phase.uniformBuffer! } },
+        ]);
+        return;
+      }
+      if (step.lutView) {
+        // LUT import node (3D case) with its strip texture uploaded: sample
+        // it against `at(step.src)` via LUT3D_SHADER — same three-binding
+        // shape as the denoise re-entry blend just above.
+        const phase = step.phases[0]!;
+        addPass(encoder, views[i]!, phase.pipeline, [
+          { binding: 0, resource: at(step.src) },
+          { binding: 1, resource: step.lutView },
           { binding: 2, resource: { buffer: phase.uniformBuffer! } },
         ]);
         return;

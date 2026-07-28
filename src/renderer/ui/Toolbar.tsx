@@ -8,6 +8,7 @@ import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
+import { LUT_KIND } from '../engine/graph/lutNode';
 import { PresetsMenu } from './PresetsMenu';
 import { SharedLookMenu } from './SharedLookMenu';
 
@@ -28,6 +29,7 @@ import { SharedLookMenu } from './SharedLookMenu';
 function AddNodeMenu() {
   const addOpNode = useAppStore((s) => s.addOpNode);
   const duplicateOutput = useAppStore((s) => s.duplicateOutput);
+  const addLutNodeFromDialog = useAppStore((s) => s.addLutNodeFromDialog);
   const [open, setOpen] = useState(false);
   const kinds: AddableKind[] = [
     CUSTOM_KIND,
@@ -37,6 +39,7 @@ function AddNodeMenu() {
     IMAGE_KIND,
     EXTERNAL_KIND,
     DENOISE_KIND,
+    LUT_KIND,
     'output',
     ...(Object.keys(OPS) as AddableKind[]),
   ];
@@ -48,6 +51,21 @@ function AddNodeMenu() {
         onClick={() => setOpen(!open)}
       >
         Add node ▾
+      </button>
+      {/* LUT import node (docs/brief-bank/lut-import-node.md): the "+ LUT…"
+          one-click picker — opens the native .cube dialog and, on a real
+          pick, creates the node ALREADY pointed at the chosen file, spliced
+          into the active output's chain (see appStore.ts's
+          addLutNodeFromDialog). Japanese label per this feature's UI
+          convention; sits next to "Add node ▾" (the generic dropdown ALSO
+          offers a bare 'lut' entry — kinds above — for the "add empty, wire
+          the file later via the Inspector" path). */}
+      <button
+        data-testid="add-lut-button"
+        title="LUT を選んでノードを追加（アクティブな出力に接続）"
+        onClick={() => void addLutNodeFromDialog()}
+      >
+        + LUT…
       </button>
       {open && (
         <>

@@ -433,6 +433,13 @@ function registerIpc(): void {
     return { canceled: false, path, fileName: basename(path) };
   });
 
+  ipcMain.handle(IPC.openLutDialog, async (): Promise<OpenImageDialogResult> => {
+    const result = await dialog.showOpenDialog({ properties: ['openFile'], filters: [{ name: 'Cube LUT', extensions: ['cube'] }] });
+    const path = result.filePaths[0];
+    if (result.canceled || !path) return { canceled: true };
+    return { canceled: false, path, fileName: basename(path) };
+  });
+
   ipcMain.handle(IPC.openLibraryImportDialog, async (): Promise<OpenImageDialogResult> => {
     // "ライブラリに取り込む…" (stage-e semantic 6): filtered to .json — the
     // library holds presets AND shared-look templates, one file format

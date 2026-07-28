@@ -23,6 +23,7 @@ import { SPOTS_KIND } from '../engine/graph/spotsNode';
 import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
+import { LUT_KIND } from '../engine/graph/lutNode';
 import { computeAutoLayout, type LayoutEdgeInput, type LayoutNodeInput } from './nodeAutoLayout';
 
 /** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's, `linkLabel` is a linked Develop node's own (docs/brief-bank/linked-looks-stage-b.md semantic 8). */
@@ -191,7 +192,8 @@ function buildNodes(
   imageNodeSourceThumbs: Record<string, string>,
   denoiseNodeNeedsConsent: Record<string, boolean>,
   denoiseNodeErrors: Record<string, string>,
-  denoiseNodeRunning: Record<string, boolean>
+  denoiseNodeRunning: Record<string, boolean>,
+  lutNodeMissing: Record<string, boolean>
 ): Node[] {
   // outputs are deletable only while another one remains (removeOpNode
   // enforces the same rule — the doc must always keep at least one output)
@@ -230,6 +232,14 @@ function buildNodes(
         badgeTitle = 'Download the denoise model to run this node (see the Inspector)';
       }
     }
+    // LUT import node (docs/brief-bank/lut-import-node.md): same badge
+    // mechanism as the image node's own missing-file glyph, reused via
+    // OpNode's generic badge/badgeTitle (a LUT node is 1-in/1-out, unlike
+    // the zero-input ImageSourceNode).
+    if (n.kind === LUT_KIND && lutNodeMissing[n.id]) {
+      badge = '⚠';
+      badgeTitle = 'referenced .cube not found';
+    }
     return {
       id: n.id,
       type:
@@ -267,6 +277,7 @@ function buildNodes(
         n.kind === IMAGE_KIND ||
         n.kind === EXTERNAL_KIND ||
         n.kind === DENOISE_KIND ||
+        n.kind === LUT_KIND ||
         (n.kind === 'output' && outputCount > 1),
     };
   }) as Node[];
@@ -320,6 +331,9 @@ export function NodeEditorPanel() {
   const denoiseNodeNeedsConsent = useAppStore((s) => s.denoiseNodeNeedsConsent);
   const denoiseNodeErrors = useAppStore((s) => s.denoiseNodeErrors);
   const denoiseNodeRunning = useAppStore((s) => s.denoiseNodeRunning);
+  // LUT import node (docs/brief-bank/lut-import-node.md): missing-file badge
+  // state, resynced the same debounced way as imageNodeMissing above.
+  const lutNodeMissing = useAppStore((s) => s.lutNodeMissing);
   // edge selection is transient UI state — the GraphDoc doesn't carry it
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
 
@@ -348,7 +362,8 @@ export function NodeEditorPanel() {
       imageNodeSourceThumbs,
       denoiseNodeNeedsConsent,
       denoiseNodeErrors,
-      denoiseNodeRunning
+      denoiseNodeRunning,
+      lutNodeMissing
     )
   );
   // Suppressed while a drag is in flight: the store's node position is still
@@ -371,7 +386,8 @@ export function NodeEditorPanel() {
         imageNodeSourceThumbs,
         denoiseNodeNeedsConsent,
         denoiseNodeErrors,
-        denoiseNodeRunning
+        denoiseNodeRunning,
+        lutNodeMissing
       )
     );
   }, [
@@ -388,6 +404,7 @@ export function NodeEditorPanel() {
     denoiseNodeNeedsConsent,
     denoiseNodeErrors,
     denoiseNodeRunning,
+    lutNodeMissing,
   ]);
 
   // Round-12 fix pack item 1 ("開くRAWによってはノードが何も表示されない？"): React

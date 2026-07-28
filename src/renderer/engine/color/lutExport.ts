@@ -58,6 +58,7 @@ import { BLEND_KIND, CUSTOM_KIND } from '../graph/ops';
 import { SPOTS_KIND } from '../graph/spotsNode';
 import { IMAGE_KIND } from '../graph/imageNode';
 import { EXTERNAL_KIND } from '../graph/externalNode';
+import { lutTableCache } from '../graph/lutSource';
 import type { WbModel } from './whiteBalance';
 import { srgbDecode, srgbEncode } from './srgb';
 import { SRGB_TO_WORK, WORK_TO_SRGB } from './workingSpace';
@@ -391,9 +392,24 @@ vec3 applyLut(sampler2D lut, vec3 srgb) {
  * at all, since a LUT captures the color TRANSFORM, not any one image's
  * content. `outputId` mirrors exportImage's rule (undefined = the doc's
  * first output); `name` becomes the .cube TITLE and the webgl comment.
+ *
+ * LUT import node (docs/brief-bank/lut-import-node.md): a chain containing
+ * one COMPOSES into this export — it is a per-pixel color transform with a
+ * real CPU mirror (unlike image/external/spots/masked-blend above), so
+ * reduceGraphForLut never needs to bypass it; `ctx.lutTables` (this
+ * module's own main-thread cache, lutSource.ts's lutTableCache — the SAME
+ * one CanvasView.tsx's cpuReferenceMean uses) lets buildPlan resolve its
+ * real table here too, and cpuEvalPlan bakes its effect into every lattice
+ * point exactly like any other color op. Only reachable when the
+ * referenced .cube has already loaded into that cache — in practice always
+ * true by export time, since the live preview would already be showing the
+ * SAME LUT applied (same "eventually consistent" tolerance the DCP
+ * lattice/image-node texture caches get elsewhere); an unloaded table
+ * degrades to the node's OWN identity fallback (buildPlan's LUT_KIND
+ * branch), not a skip/failure.
  */
 export function buildLutExport(doc: GraphDoc, wb: WbModel, outputId: string | undefined, name: string): LutExportResult {
-  const ctx: CompileContext = { wb, renderScale: 1, outputId };
+  const ctx: CompileContext = { wb, renderScale: 1, outputId, lutTables: lutTableCache() };
   const { doc: reducedDoc, skipped } = reduceGraphForLut(doc, ctx);
   const plan = buildPlan(reducedDoc, ctx);
   return {

@@ -37,6 +37,7 @@ import { IMAGE_KIND, imageBaseName } from '../engine/graph/imageNode';
 import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { denoiseModelSizeLabel } from '../../../shared/denoiseModel';
+import { defaultLutParams, LUT_KIND } from '../engine/graph/lutNode';
 import { anchorRadiusToOutput, outputRadiusToAnchor } from '../engine/graph/anchorSpace';
 import {
   defaultDevelopParams,
@@ -1514,6 +1515,90 @@ function DenoiseInspector({ node }: { node: GraphNode }) {
   );
 }
 
+/**
+ * LUT import node (docs/brief-bank/lut-import-node.md): filename + a
+ * "選択…" button (native .cube picker) + input-space selector + amount
+ * slider, plus a relink notice when the referenced file failed to load —
+ * reuses the Image node's file-reference + relink UI pattern (ImageInspector
+ * above). Japanese display text (this feature's UI convention), English
+ * code.
+ */
+function LutInspector({ node }: { node: GraphNode }) {
+  const setLutPath = useAppStore((s) => s.setLutPath);
+  const setLutInputSpace = useAppStore((s) => s.setLutInputSpace);
+  const setLutAmount = useAppStore((s) => s.setLutAmount);
+  const missing = useAppStore((s) => s.lutNodeMissing[node.id] === true);
+  const lut = node.lut ?? defaultLutParams();
+  const sessionRef = useRef<number | null>(null);
+  const choose = async () => {
+    const result = await window.silverbox.openLutDialog();
+    if (result.canceled) return;
+    setLutPath(node.id, result.path, null);
+  };
+  return (
+    <>
+      <div className="inspector-title">LUT: 所有する .cube フィルムシミュレーション／クリエイティブ LUT を適用。</div>
+      <Section title="参照ファイル">
+        <div className="param-row">
+          <span className="param-label">ファイル</span>
+          <span className="lut-node-filename" title={lut.path || '未選択'} data-testid="lut-node-filename">
+            {lut.path ? imageBaseName(lut.path) : '未選択'}
+          </span>
+        </div>
+        <button type="button" data-testid="lut-node-choose" onClick={() => void choose()}>
+          選択…
+        </button>
+        {missing && (
+          <div className="inspector-notice" data-testid="lut-node-missing-notice">
+            ファイルが見つかりません — 修復・再選択するまで元の色のまま（無効化）で表示します。
+          </div>
+        )}
+      </Section>
+      <Section title="入力色空間">
+        <div className="param-row">
+          <span className="param-label">Input space</span>
+          <select
+            data-testid="lut-node-input-space"
+            value={lut.inputSpace}
+            onChange={(ev) => setLutInputSpace(node.id, ev.target.value === 'rec709' ? 'rec709' : 'srgb')}
+          >
+            <option value="srgb">sRGB</option>
+            <option value="rec709">Rec.709</option>
+          </select>
+        </div>
+      </Section>
+      <Section title="適用量">
+        <div className="param-row" title="ダブルクリックでリセット" onDoubleClick={() => setLutAmount(node.id, 1, null)}>
+          <span className={`param-label${lut.amount !== 1 ? ' changed' : ''}`}>Amount</span>
+          <input
+            type="range"
+            data-testid="lut-node-amount"
+            min={0}
+            max={1}
+            step={0.01}
+            value={lut.amount}
+            onChange={(ev) => {
+              sessionRef.current ??= Date.now();
+              setLutAmount(node.id, Number(ev.target.value), `lut-amount:${node.id}:${sessionRef.current}`);
+            }}
+            onPointerUp={() => {
+              sessionRef.current = null;
+            }}
+          />
+          <input
+            type="number"
+            min={0}
+            max={1}
+            step={0.01}
+            value={lut.amount}
+            onChange={(ev) => setLutAmount(node.id, Number(ev.target.value), null)}
+          />
+        </div>
+      </Section>
+    </>
+  );
+}
+
 function NodeContent({ node }: { node: GraphNode | undefined }) {
   const wbModel = useAppStore((s) => s.wbModel);
   if (!node) {
@@ -1549,6 +1634,9 @@ function NodeContent({ node }: { node: GraphNode | undefined }) {
   }
   if (node.kind === DENOISE_KIND) {
     return <DenoiseInspector node={node} />;
+  }
+  if (node.kind === LUT_KIND) {
+    return <LutInspector node={node} />;
   }
   if (node.kind === 'input') {
     return (

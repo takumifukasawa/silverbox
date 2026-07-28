@@ -24,6 +24,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
+import type { CubeLut } from '../color/lutCube';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 
 /** Fire-and-forget commands: main → worker, no response expected. */
@@ -95,6 +96,21 @@ export type RenderWorkerCommand =
    * branch's fallback (an all-zero lattice) then applies.
    */
   | { type: 'dcpLattice'; lattice: readonly number[] | null }
+  /**
+   * LUT import node (docs/brief-bank/lut-import-node.md): a parsed .cube
+   * table (or `null` — load failed/malformed) for one referenced file,
+   * computed main-thread-side (lutSource.ts, where file IO/parsing can
+   * happen) and posted here keyed by the RAW (as-authored) `lut.path` —
+   * the SAME string a PlanStep 'lut3d'/1D 'passes' step carries
+   * (graphDoc.ts), mirroring 'imageNode's own path-keying. Stored in the
+   * worker's own `currentLutTables` map and threaded into every
+   * buildPlan() ctx as `lutTables` (mirrors `currentDcpLattice`'s
+   * "set on change, read on every render" shape); a 3D table ALSO
+   * triggers GraphRenderer.setLutTexture (mirrors 'imageNode' triggering
+   * setImageNodeTexture) — a 1D table needs no GPU texture at all (see
+   * lutNode.ts's buildLut1DWgsl).
+   */
+  | { type: 'lutTable'; path: string; table: CubeLut | null }
   /**
    * External-tool hook node (denoise v1, task #41): the completed (or
    * failed) result of one round trip through externalNodeRunner.ts's IPC

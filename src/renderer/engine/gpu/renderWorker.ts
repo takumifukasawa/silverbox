@@ -43,6 +43,7 @@ import { GraphRenderer } from './graphRenderer';
 import { buildPlan, type CompileContext, type GraphDoc, type RenderPlan } from '../graph/graphDoc';
 import { setCustomShaderArtifact, clearCustomShaderArtifacts } from '../graph/customShaderNode';
 import { createWbModel, type WbModel } from '../color/whiteBalance';
+import type { CubeLut } from '../color/lutCube';
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { RenderWorkerCommand, RenderWorkerRequest, RenderWorkerResponse } from './renderProtocol';
 import type { DenoiseRunResult, ExternalToolResult } from '../../../../shared/ipc';
@@ -61,6 +62,19 @@ let currentImageDims: { width: number; height: number } | null = null;
 let currentCameraModel: string | null = null;
 /** DCP profile mode (docs/brief-bank/dcp-profile.md): the baked lattice for whichever DCP file is currently configured, mirrored here via the 'dcpLattice' command — see renderProtocol.ts's doc comment. */
 let currentDcpLattice: readonly number[] | null = null;
+/**
+ * LUT import node (docs/brief-bank/lut-import-node.md): every 'lutTable'
+ * command received so far, keyed by raw path — threaded into every
+ * buildPlan() ctx as `lutTables` (mirrors `currentDcpLattice`'s role) AND
+ * doubles as the replay list a compare pane initializing LATER needs (a 3D
+ * entry is re-applied to a fresh GraphRenderer via setLutTexture — see
+ * 'initCompare' below, mirroring `imageNodeCache`'s replay role). Cleared on
+ * every 'image' command (main-image switch) — LUT paths are sidecar-
+ * relative too (imageNode.ts's resolveImagePath, reused by lutSource.ts),
+ * so a stale relative-path→wrong-file mapping must never survive into a
+ * different photo's doc, same reasoning as `imageNodeCache`.
+ */
+const currentLutTables = new Map<string, CubeLut | null>();
 /** Gen of the most recently applied 'image'/'render' command (main surface — see renderProtocol.ts). */
 let currentGen = 0;
 
@@ -217,6 +231,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
           dcpLattice: currentDcpLattice,
+          lutTables: currentLutTables,
           allowExternal: req.allowExternal,
         });
         const result = await renderer.renderToPixels(req.image, plan, req.colorSpace);
@@ -238,6 +253,7 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
           dcpLattice: currentDcpLattice,
+          lutTables: currentLutTables,
           inspectNodeId: req.inspectNodeId,
         });
         const result = await renderer.captureCutPointPixels(req.image, plan, req.encoded);
@@ -291,6 +307,10 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       imageNodeCache.clear();
       externalResultCache.clear();
       denoiseResultCache.clear();
+      // LUT import node cache invalidation on main-image switch — see
+      // `currentLutTables`'s own doc comment (sidecar-relative paths can
+      // resolve to a DIFFERENT file per photo).
+      currentLutTables.clear();
       // fire-and-forget, but a failure (e.g. a lost GPU device) must still
       // surface to the UI (task #45/worker-error-surfacing) instead of
       // vanishing silently — see renderProtocol.ts's 'error' response doc.
@@ -314,6 +334,31 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
     }
     case 'dcpLattice': {
       currentDcpLattice = msg.lattice;
+      return;
+    }
+    case 'lutTable': {
+      // Cached here (not just applied) so a compare pane created LATER can
+      // replay every LUT table loaded so far — mirrors `imageNodeCache`'s
+      // own replay role. buildPlan's own ctx.lutTables read (every 'render'/
+      // 'compareRender' above) picks up the new entry on the NEXT render,
+      // same "eventually consistent" tolerance every other async-resource
+      // command in this file gets.
+      currentLutTables.set(msg.path, msg.table);
+      const table = msg.table;
+      if (table && table.kind === '3d') {
+        void rendererReady
+          .then((renderer) => renderer.setLutTexture(msg.path, table))
+          .catch((err) => {
+            post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+          });
+        if (compareRendererReady) {
+          void compareRendererReady
+            .then((renderer) => renderer.setLutTexture(msg.path, table))
+            .catch((err) => {
+              post({ type: 'error', message: err instanceof Error ? err.message : String(err) });
+            });
+        }
+      }
       return;
     }
     case 'imageNode': {
@@ -356,6 +401,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
               dcpLattice: currentDcpLattice,
+              lutTables: currentLutTables,
               inspectNodeId: msg.inspectNodeId ?? undefined,
             },
             msg.showBefore
@@ -465,6 +511,12 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
           for (const [path, image] of imageNodeCache) renderer.setImageNodeTexture(path, image);
           for (const [key, entry] of externalResultCache) renderer.setExternalResult(key, entry.encoded, entry.result);
           for (const [key, result] of denoiseResultCache) renderer.setDenoiseResult(key, result);
+          // LUT import node: replay every 3D table loaded so far (1D tables
+          // need no GPU texture — see lutNode.ts) — mirrors imageNodeCache's
+          // replay above.
+          for (const [path, table] of currentLutTables) {
+            if (table && table.kind === '3d') renderer.setLutTexture(path, table);
+          }
           resolveCompareRenderer!(renderer);
         },
         (err) => {
@@ -500,6 +552,7 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
               dcpLattice: currentDcpLattice,
+              lutTables: currentLutTables,
             },
             msg.showBefore
           );

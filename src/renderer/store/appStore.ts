@@ -79,6 +79,8 @@ import { defaultExternalParams, EXTERNAL_KIND } from '../engine/graph/externalNo
 import { confirmAndRetry, pendingExternalRequest } from '../engine/graph/externalNodeRunner';
 import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { retryPendingDenoise } from '../engine/graph/denoiseNodeRunner';
+import { defaultLutParams, LUT_KIND } from '../engine/graph/lutNode';
+import { clearLutSourceCache } from '../engine/graph/lutSource';
 import { DENOISE_MODEL_SHA256 } from '../../../shared/denoiseModel';
 import { sha256Hex, type HistogramData, type ScopeSamples } from '../engine/gpu/graphRenderer';
 import { RenderWorkerClient, mirrorShaderArtifactClear, mirrorShaderArtifactSet, mirrorDcpLattice } from '../engine/gpu/renderClient';
@@ -1498,6 +1500,28 @@ interface AppState {
   /** Update the Develop node's profile source/DCP path (Inspector's minimal UI); `amount` keeps riding updateNodeParam like every other numeric slider. */
   setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp'): void;
   setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
+  // --- LUT import node (docs/brief-bank/lut-import-node.md) ------------------
+  /** Replace a LUT node's referenced-file path (Inspector's "Choose…" / the "+ LUT…" builder); `coalesceKey` null = its own undo entry, same convention as setImagePath. */
+  setLutPath(nodeId: string, path: string, coalesceKey: string | null): void;
+  /** Toggle a LUT node's input-space selector (sRGB / Rec.709 — see lutNode.ts's LutInputSpace doc comment). */
+  setLutInputSpace(nodeId: string, inputSpace: 'srgb' | 'rec709'): void;
+  /** Replace a LUT node's amount (Inspector's slider); `coalesceKey` null = its own undo entry, same convention as setImagePath. */
+  setLutAmount(nodeId: string, amount: number, coalesceKey: string | null): void;
+  /**
+   * nodeId → true once that LUT node's referenced-file load has actually
+   * FAILED (missing/unreadable/malformed .cube) — never true merely while a
+   * load is still in flight or before one has started (see lutSource.ts's
+   * syncLutSources). Drives the node-editor/Inspector relink notice, same
+   * role as imageNodeMissing; an absent/empty path is never "missing", just
+   * identity.
+   */
+  lutNodeMissing: Record<string, boolean>;
+  setLutNodeMissing(nodeId: string, missing: boolean): void;
+  /** Bumped whenever a LUT-node load settles (success or failure) — mirrors imageNodeRev's role in re-running CanvasView's render effect once the referenced file's table is actually ready. */
+  lutNodeRev: number;
+  bumpLutNodeRev(): void;
+  /** "+ LUT…" inspector control: opens the native .cube picker and, on a real pick, builds a fresh LUT node wired into the active output's chain (spliced in like external/denoise — NOT the disconnected-source treatment IMAGE_KIND gets, since a LUT is a chain transform, not a composite source) — one undo entry. No-op (no node created) if the dialog is canceled. */
+  addLutNodeFromDialog(): Promise<void>;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -2093,6 +2117,7 @@ function emptyPhotoFields(): Partial<AppState> {
     nodeThumbs: {},
     imageNodeMissing: {},
     imageNodeSourceThumbs: {},
+    lutNodeMissing: {},
     inspectNodeId: null,
     shaderErrors: {},
     sidecarNotice: null,
@@ -4424,6 +4449,10 @@ export const useAppStore = create<AppState>((set, get) => {
       // own per-path caches clear themselves inside the 'image' command they
       // are about to receive (see graphRenderer.ts's setImage doc comment).
       clearImageNodeSourceCache();
+      // Same reasoning for the LUT import node's own path-keyed cache
+      // (lutSource.ts) — sidecar-relative .cube paths mean nothing outside
+      // THIS doc's own sidecar directory either.
+      clearLutSourceCache();
       set({
         // Item F (decode-completion flash fix): the FIELD is cleared here as
         // always, but the blob: URL itself is deliberately NOT revoked at
@@ -4472,6 +4501,11 @@ export const useAppStore = create<AppState>((set, get) => {
         // doc comment); the fresh doc's own image nodes get resynced by
         // CanvasView's effect once it re-runs against the new `graph`.
         imageNodeSourceThumbs: {},
+        // Same reuse-of-node-ids reasoning as imageNodeMissing above — a
+        // stale "missing .cube" verdict must not survive into a different
+        // photo's doc (lutSource.ts's own cache is cleared in lockstep by
+        // clearLutSourceCache — see CanvasView.tsx's render effect).
+        lutNodeMissing: {},
         inspectNodeId: null,
         // Global undo (docs/brief-bank/global-undo.md): deliberately NOT
         // reset here — `undoStack` is the store's ONE global timeline, not
@@ -5007,6 +5041,16 @@ export const useAppStore = create<AppState>((set, get) => {
         // identity (bit-exact pass-through), so adding one never changes the
         // render until the user raises the strength slider.
         node = { id, kind, position: { ...out.position }, denoise: defaultDenoiseParams() };
+      } else if (kind === LUT_KIND) {
+        // Spliced into the chain like every other 1-in-1-out kind above (NOT
+        // the disconnected-source treatment IMAGE_KIND gets — a LUT is a
+        // color TRANSFORM, not a composite source). No path chosen yet ⇒
+        // identity (bit-exact pass-through, buildPlan's own "no file / no
+        // table loaded" fallback), so adding one never changes the render
+        // until a .cube is actually picked (Inspector's "Choose…", or the
+        // "+ LUT…" control's addLutNodeFromDialog, which skips this path
+        // entirely and sets `lut.path` directly from the dialog result).
+        node = { id, kind, position: { ...out.position }, lut: defaultLutParams() };
       } else {
         // fresh WB atomics start at the image's as-shot values (= identity)
         const params =
@@ -5106,6 +5150,8 @@ export const useAppStore = create<AppState>((set, get) => {
       // Round-11 fix pack item 4: same immediate prune for the source-file
       // thumbnail fallback, in case a removed node was kind 'image'.
       const { [nodeId]: _prunedThumb, ...imageNodeSourceThumbs } = s.imageNodeSourceThumbs;
+      // Same immediate prune for a removed LUT node's own missing-file badge.
+      const { [nodeId]: _prunedLut, ...lutNodeMissing } = s.lutNodeMissing;
       return {
         ...pushHistory(s, null, { label: `Remove ${node.kind} node` }),
         graph: scratch,
@@ -5114,6 +5160,7 @@ export const useAppStore = create<AppState>((set, get) => {
         nodeThumbs: pruneNodeThumb(s.nodeThumbs, nodeId),
         imageNodeMissing,
         imageNodeSourceThumbs,
+        lutNodeMissing,
         inspectNodeId: s.inspectNodeId === nodeId ? null : s.inspectNodeId,
       };
     });
@@ -5753,6 +5800,96 @@ export const useAppStore = create<AppState>((set, get) => {
       };
     });
     void get().refreshDcpProfile();
+  },
+
+  setLutPath(nodeId, path, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== LUT_KIND) return {};
+      const lut = { ...(node.lut ?? defaultLutParams()), path };
+      return {
+        ...pushHistory(s, coalesceKey, { label: 'Set LUT file' }),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, lut } : n)) },
+        graphDirty: true,
+        // A path edit invalidates whatever "missing" verdict the OLD path
+        // earned — lutSource.ts's next syncLutSources call (the render
+        // effect the graph change itself triggers) re-settles it.
+        lutNodeMissing: { ...s.lutNodeMissing, [nodeId]: false },
+      };
+    });
+  },
+
+  setLutInputSpace(nodeId, inputSpace) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== LUT_KIND) return {};
+      const lut = { ...(node.lut ?? defaultLutParams()), inputSpace };
+      return {
+        ...pushHistory(s, null, { label: 'Set LUT input space' }),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, lut } : n)) },
+        graphDirty: true,
+      };
+    });
+  },
+
+  setLutAmount(nodeId, amount, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== LUT_KIND) return {};
+      const lut = { ...(node.lut ?? defaultLutParams()), amount: Math.min(1, Math.max(0, amount)) };
+      return {
+        ...pushHistory(s, coalesceKey, { label: 'Adjust LUT amount' }),
+        graph: { ...s.graph, nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, lut } : n)) },
+        graphDirty: true,
+      };
+    });
+  },
+
+  lutNodeMissing: {},
+  setLutNodeMissing(nodeId, missing) {
+    set((s) => (s.lutNodeMissing[nodeId] === missing ? {} : { lutNodeMissing: { ...s.lutNodeMissing, [nodeId]: missing } }));
+  },
+
+  lutNodeRev: 0,
+  bumpLutNodeRev() {
+    set((s) => ({ lutNodeRev: s.lutNodeRev + 1 }));
+  },
+
+  async addLutNodeFromDialog() {
+    const result = await window.silverbox.openLutDialog();
+    if (result.canceled) return;
+    set((s) => {
+      const g = s.graph;
+      const outputs = g.nodes.filter((n) => n.kind === 'output');
+      const out = (s.activeOutputId && outputs.find((n) => n.id === s.activeOutputId)) || outputs[0];
+      if (!out) return {};
+      const inEdge = g.edges.find((e) => e.target === out.id);
+      if (!inEdge) return {};
+      const id = nextId(g, LUT_KIND);
+      const node: GraphNode = {
+        id,
+        kind: LUT_KIND,
+        position: { ...out.position },
+        lut: { path: result.path, inputSpace: 'srgb', amount: 1 },
+      };
+      const nodes = g.nodes
+        .map((n) => (n.id === out.id ? { ...n, position: { x: n.position.x + 180, y: n.position.y } } : n))
+        .concat(node);
+      let scratch: GraphDoc = { ...g, nodes, edges: g.edges.filter((e) => e !== inEdge) };
+      const addEdge = (source: string, target: string) => {
+        const edge = { id: nextId(scratch, 'e'), source, target };
+        scratch = { ...scratch, edges: [...scratch.edges, edge] };
+      };
+      addEdge(inEdge.source, id);
+      addEdge(id, out.id);
+      return {
+        ...pushHistory(s, null, { label: 'Add LUT node' }),
+        graph: scratch,
+        graphDirty: true,
+        selectedNodeId: id,
+        lutNodeMissing: { ...s.lutNodeMissing, [id]: false },
+      };
+    });
   },
 
   updateNodeParamsBatch(nodeId, entries, coalesceKey) {

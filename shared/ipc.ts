@@ -14,6 +14,9 @@ export const IPC = {
   // DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1): the
   // Develop panel's "DCP file…" picker (Inspector's minimal source-selector UI).
   openDcpDialog: 'dialog:openDcp',
+  // LUT import node (docs/brief-bank/lut-import-node.md): the "+ LUT…"
+  // inspector control's native .cube picker.
+  openLutDialog: 'dialog:openLut',
   listImages: 'fs:listImages',
   readFile: 'file:read',
   readSidecar: 'sidecar:read',
@@ -319,6 +322,8 @@ export interface SilverboxApi {
   openFolderDialog(): Promise<OpenImageDialogResult>;
   /** Show the native open dialog filtered to .dcp (DCP camera-profile mode, stage 1) — the Develop panel's profile source picker. */
   openDcpDialog(): Promise<OpenImageDialogResult>;
+  /** Show the native open dialog filtered to .cube (LUT import node, docs/brief-bank/lut-import-node.md) — the "+ LUT…" inspector control's picker. */
+  openLutDialog(): Promise<OpenImageDialogResult>;
   /**
    * List `dir`'s supported images (IMAGE_EXTENSIONS, no recursion), sorted by
    * filename — folder filmstrip's one piece of main-process surface. Throws

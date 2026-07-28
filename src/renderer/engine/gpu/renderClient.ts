@@ -14,6 +14,7 @@
 import type { PreparedImage } from '../decoder/decodeWorker';
 import type { GraphDoc } from '../graph/graphDoc';
 import type { CustomShaderArtifact } from '../graph/customShaderNode';
+import type { CubeLut } from '../color/lutCube';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import type { HistogramData, RendererStats, ScopeSamples } from './graphRenderer';
 import type {
@@ -244,6 +245,29 @@ export class RenderWorkerClient {
   setImageNodeSource(path: string, image: PreparedImage): void {
     const msg: RenderWorkerCommand = { type: 'imageNode', path, image };
     getWorker().postMessage(msg, [image.data.buffer]);
+  }
+
+  /**
+   * LUT import node (docs/brief-bank/lut-import-node.md): post one
+   * referenced .cube's parsed table (or `null` on load failure), keyed by
+   * its raw path — see renderProtocol.ts's 'lutTable' doc comment.
+   *
+   * Deliberately NOT transferred (unlike setImageNodeSource's decoded
+   * pixels): lutSource.ts keeps its OWN main-thread copy of this SAME table
+   * object (lutTableCache(), consumed by CanvasView.tsx's cpuReferenceMean —
+   * a main-thread buildPlan caller, since the worker's own copy lives in an
+   * isolated realm). Transferring `table.data.buffer` here would DETACH it
+   * from that main-thread copy too (same object, same underlying
+   * ArrayBuffer) — a real bug caught during implementation: the CPU
+   * reference silently went all-NaN (0-length Float32Array) the moment a
+   * LUT table's buffer got transferred out from under it. LUT tables are
+   * small (at most a few MB even at the largest supported size), so the
+   * structured-clone copy this costs is negligible — nothing like the
+   * per-frame decoded-image traffic setImage/setImageNodeSource transfer.
+   */
+  setLutTable(path: string, table: CubeLut | null): void {
+    const msg: RenderWorkerCommand = { type: 'lutTable', path, table };
+    getWorker().postMessage(msg);
   }
 
   render(args: {
