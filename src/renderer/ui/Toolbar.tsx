@@ -411,6 +411,7 @@ export function Toolbar() {
   const undo = useAppStore((s) => s.undo);
   const redo = useAppStore((s) => s.redo);
   const resetAllEdits = useAppStore((s) => s.resetAllEdits);
+  const autoTone = useAppStore((s) => s.autoTone);
   const removeOpNode = useAppStore((s) => s.removeOpNode);
   const cropMode = useAppStore((s) => s.cropMode);
   const toggleCropMode = useAppStore((s) => s.toggleCropMode);
@@ -495,6 +496,14 @@ export function Toolbar() {
         title="Reset all edits — back to a fresh open of this photo (one undo entry, ⇧⌘R)"
       >
         Reset
+      </button>
+      <button
+        onClick={autoTone}
+        disabled={imageStatus !== 'ready'}
+        data-testid="toolbar-auto-tone"
+        title="自動トーン — set the basic-tone sliders from this photo's own histogram (one undo entry; keep refining by hand afterward)"
+      >
+        自動トーン
       </button>
       <button
         onClick={toggleCropMode}

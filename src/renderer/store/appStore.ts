@@ -63,7 +63,8 @@ import {
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
 import { defaultDevelopParams, identityCurvePoints, profileSource, type CurvePoints, type DevelopParams } from '../engine/graph/developNode';
-import { PROFILE_LATTICE_N } from '../engine/color/profileFit';
+import { PROFILE_LATTICE_N, profileForModel } from '../engine/color/profileFit';
+import { neutralLumaSample, solveAutoTone } from '../engine/color/autoTone';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, type Mat3 as DcpMat3 } from '../engine/color/dcp';
 import { clampMaskShape, defaultMaskParams, MASK_KIND, type MaskShape } from '../engine/graph/maskNode';
 import { clampSpot, defaultSpotsParams, SPOTS_CAP, SPOTS_KIND, type Spot } from '../engine/graph/spotsNode';
@@ -830,6 +831,20 @@ interface AppState {
    * develop node.
    */
   resetDevelopNode(nodeId: string): void;
+  /**
+   * "自動トーン" (Auto tone, docs/brief-bank/auto-tone.md) — a one-click
+   * STARTING POINT for the basic-tone sliders, derived transparently from
+   * the OPEN photo's own luma histogram (percentile-anchored, not ML/black
+   * box — engine/color/autoTone.ts's solveAutoTone). Writes ONLY the 5
+   * basic-tone keys (ev/blacks/whites/highlights/shadows — never contrast,
+   * never temp/tint, never the tone curve) through updateNodeParamsBatch,
+   * the SAME mutator a slider drag uses: one undo entry (⌘Z reverts every
+   * slider at once) and fork-on-touch for a linked photo (basic-tone forks
+   * to 個別調整, exactly like a manual basic.* edit). No-op without a ready
+   * image or a Develop node. Single photo only (the brief's stated v1
+   * scope) — batch/apply-to-selection is future work.
+   */
+  autoTone(): void;
   /**
    * The library ∪ legacy-userData preset/template summaries (task #37;
    * dual-location since docs/brief-bank/linked-looks-stage-e.md — see
@@ -6498,6 +6513,33 @@ export const useAppStore = create<AppState>((set, get) => {
       },
       graphDirty: true,
     }));
+  },
+
+  autoTone() {
+    const s = get();
+    if (s.imageStatus !== 'ready' || !s.image) return;
+    const node = s.graph.nodes.find((n) => n.kind === DEVELOP_KIND);
+    if (!node) return;
+    const develop = node.develop ?? defaultDevelopParams();
+    const wbGains = s.wbModel.gains(develop.basic.temp, develop.basic.tint);
+    // Builtin only — the baked DCP lattice lives in the (separate) render
+    // worker thread, not synchronously readable here; auto-tone samples the
+    // pre-profile population in DCP mode instead (documented v1 limitation,
+    // see autoTone.ts's file header).
+    const profileLattice = profileSource(develop.profile) === 'builtin' ? profileForModel(s.image.capture?.cameraModel ?? null) : null;
+    const sample = neutralLumaSample(s.image, develop.profile, profileLattice, wbGains);
+    const patch = solveAutoTone(sample);
+    s.updateNodeParamsBatch(
+      node.id,
+      [
+        ['basic.ev', patch.ev],
+        ['basic.blacks', patch.blacks],
+        ['basic.whites', patch.whites],
+        ['basic.highlights', patch.highlights],
+        ['basic.shadows', patch.shadows],
+      ],
+      `auto-tone:${Date.now()}`
+    );
   },
 
   presets: [],
