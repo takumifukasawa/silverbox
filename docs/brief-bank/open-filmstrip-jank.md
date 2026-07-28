@@ -1,10 +1,30 @@
 # Fix: filmstrip unmounts during decode (open-time layout jank)
 
-Status: DISPATCHED 2026-07-21 (root cause confirmed, fix plan below). User hand-test:
+Status: FIXED+LANDED 2026-07-21 (commit bd75181) + DOUBLE-CHECKED 2026-07-28.
+Jank fixed via the 4-edit terminal-state model below; a preview-URL leak the
+timing shift exposed (verify-preview check 4) was root-caused to a
+pre-existing CanvasView inline-release race and fixed with a deterministic
+backstop useEffect keyed on the pendingSwitch/openingPreview STATE. Full
+gate: typecheck 0, unit 278, SUITE: PASS 74/74. Original hand-test:
 "openするとき、decodeしてる時、カタログビューが一瞬閉じた後にまた
-decode後に開く感じで、表示領域がガタガタして気持ちが悪い". Fix
-pending; dispatch AFTER the fork-bug agent lands (both touch
-appStore.ts openImageByPath area — avoid parallel-agent collision).
+decode後に開く感じで、表示領域がガタガタして気持ちが悪い".
+
+## Double-check verdict (2026-07-28, independent re-derivation)
+
+Both risk surfaces re-derived from source, both CLEAN:
+- **folderEntries retained through the decode**: the only production consumer
+  is Filmstrip.tsx:516 (showing the old folder during decode = the intended
+  smooth behavior); CanvasView.tsx:1353 is the `__debug.folderState()` verify
+  getter, not a render path. No consumer misuses the retained entries.
+- **CanvasView backstop over-release**: showOpeningPreview (2373) requires
+  `imageStatus==='loading' || (ready && pendingSwitch)`; the backstop (2410)
+  fires only on `!pendingSwitch && !openingPreview`. Case split: the
+  pendingSwitch true→false trigger only fires once the real frame presented
+  (imageStatus==='ready') → overlay already hidden → release safe; the
+  openingPreview→null trigger is either the ready commit (ready → safe) or a
+  supersede via clearOpeningPreview, which ALREADY revoked that url itself, so
+  the backstop only double-revokes (no-op) and drops a stale ref. "Revoke a
+  url the overlay is actively painting" is unreachable. Fix is sound.
 
 ## Root cause (confirmed)
 
