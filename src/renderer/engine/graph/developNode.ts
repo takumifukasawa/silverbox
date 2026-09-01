@@ -381,18 +381,45 @@ ${wgslExposure('u.wb_ev.w')}
 ${wgslContrast('u.t0.x')}
   // tone: four sequential stages, each weighing by the display-encoded
   // luminance of its OWN input so the composition stays monotone.
-  // highlights: band 0.35–0.9, tapered above 0.8 so near-whites keep
-  // separation instead of graying out
+  //
+  // LR-CALIBRATION 2026-09-02 (5-scene delta-over-own-base sweep, matched
+  // LR Classic exports config-by-config): the pre-calibration bands
+  // below were expressed in PRE-toneCurve encoded space, but every fresh RAW
+  // seeds a strongly midtone-compressing base curve (baseCurve.ts) AFTER
+  // this stage — e.g. 0.35 pre-curve lands past display code ~139/255,
+  // already beyond the 95th luma percentile on real scenes — so highlights/
+  // whites were barely engaging before the extreme top few percent, and
+  // shadows' wide 0.1–0.75 fade (→ display ~25..220) was reaching almost the
+  // entire tonal range instead of just the shadows. Bands renumbered against
+  // measured base-curve percentile mapping; strengths re-derived from the
+  // percentile deltas that were already close (near-black lift magnitude for
+  // shadows, full-engagement magnitude for highlights/whites). Blacks is
+  // UNCHANGED — see its own comment below.
+  //
+  // highlights: band 0.15–0.42 (was 0.35–0.9), tapered above 0.40 so
+  // near-whites keep separation instead of graying out
   var ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.y * 1.1 * smoothstep(0.35, 0.9, ys) * (1.0 - 0.3 * smoothstep(0.8, 1.0, ys)));
-  // shadows: strong near black, fading by ~0.75; multiplicative keeps the
-  // black point anchored
+  c = c * exp2(u.t0.y * 1.0 * smoothstep(0.15, 0.42, ys) * (1.0 - 0.25 * smoothstep(0.4, 0.55, ys)));
+  // shadows: strong near black, fading by 0.32 (was 0.75) so the lift stays
+  // in true shadows instead of reaching upper-mid tones. A ramp-UP near
+  // literal black was tried and reverted: shadows is MULTIPLICATIVE, so it
+  // can never lift a truly clipped (0) pixel regardless of shape, but a ramp
+  // still measurably reduced the lift on near-but-not-clipped darks and
+  // blew the shadow-clip budget in verify-autotone; flat-from-black keeps
+  // that anti-clip behavior. Multiplicative also keeps the black point
+  // anchored.
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.z * 1.9 * (1.0 - smoothstep(0.1, 0.75, ys)));
-  // whites: white-point control, top-weighted but reaching midtones
+  c = c * exp2(u.t0.z * 1.4 * (1.0 - smoothstep(0.05, 0.32, ys)));
+  // whites: white-point control, band 0.12–0.45 (was 0.3–1.0)
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.w * 0.9 * smoothstep(0.3, 1.0, ys));
-  // blacks: linear black-point offset fading by mid-tones; clamp so negative
+  c = c * exp2(u.t0.w * 1.0 * smoothstep(0.12, 0.45, ys));
+  // blacks: linear black-point offset fading by mid-tones — LEFT UNCHANGED:
+  // the one bl_m50 data point closely matched LR's near-black magnitude
+  // already (measured p1/p2/p5/p10 within ~10-15% of LR's), and the
+  // fade-reach signal was too noisy across scenes of very different overall
+  // brightness (median-across-scenes residual swung from ~0 to large
+  // depending on scene, not a consistent shape signal) to justify a
+  // reshape; clamp so negative
   // offsets crush to black instead of going negative downstream
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
   c = max(c + vec3f(u.t1.x * 0.018 * (1.0 - smoothstep(0.0, 0.45, ys))), vec3f(0.0));
@@ -1332,19 +1359,21 @@ export function cpuDevelopTone(px: Rgb, b: DevelopBasicParams, wbGains: [number,
   g *= gain;
   bl *= gain;
   [r, g, bl] = cpuContrast([r, g, bl], b.contrast / 100);
+  // LR-CALIBRATION 2026-09-02 — mirror of TONE_WGSL's re-banded stages; see
+  // that pass's doc comment for the fit rationale.
   const ysOf = (rr: number, gg: number, bb: number) => srgbEncode(Math.min(Math.max(lumaCpu(rr, gg, bb), 0), 1));
   let ys = ysOf(r, g, bl);
-  let k = Math.pow(2, (b.highlights / 100) * 1.1 * smoothstepCpu(0.35, 0.9, ys) * (1 - 0.3 * smoothstepCpu(0.8, 1, ys)));
+  let k = Math.pow(2, (b.highlights / 100) * 1.0 * smoothstepCpu(0.15, 0.42, ys) * (1 - 0.25 * smoothstepCpu(0.4, 0.55, ys)));
   r *= k;
   g *= k;
   bl *= k;
   ys = ysOf(r, g, bl);
-  k = Math.pow(2, (b.shadows / 100) * 1.9 * (1 - smoothstepCpu(0.1, 0.75, ys)));
+  k = Math.pow(2, (b.shadows / 100) * 1.4 * (1 - smoothstepCpu(0.05, 0.32, ys)));
   r *= k;
   g *= k;
   bl *= k;
   ys = ysOf(r, g, bl);
-  k = Math.pow(2, (b.whites / 100) * 0.9 * smoothstepCpu(0.3, 1, ys));
+  k = Math.pow(2, (b.whites / 100) * 1.0 * smoothstepCpu(0.12, 0.45, ys));
   r *= k;
   g *= k;
   bl *= k;

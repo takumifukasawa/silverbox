@@ -230,7 +230,18 @@ try {
   // a few more (measured ~0.057 total on this fixture) — a real, intended,
   // BOUNDED effect of the two sliders' own formulas (see autoTone.ts's
   // AUTO_TONE_BLACK_GAIN doc comment), not a runaway/unbounded blowout.
-  check('shadow clip does not blow out beyond the baseline', histAfter.shadowClip < histBefore.shadowClip + 0.08, {
+  // Widened again 0.08 → 0.10 for the basic-tone RESPONSE-CURVE calibration
+  // (2026-09-02, developNode.ts's TONE_WGSL/cpuDevelopTone): shadows'
+  // fade-out band narrowed sharply (was reaching ~0.75 pre-toneCurve, i.e.
+  // most of the tonal range once the seeded base curve is accounted for;
+  // now ~0.32, matching LR's actual shadows reach). That's correct — but it
+  // means shadows no longer pre-lifts a wide swath of low-mid tones the way
+  // it used to, so on THIS fixture more pixels sit at the lower brightness
+  // blacks' own (UNCHANGED) fade weight sees, and blacks' bounded negative
+  // nudge crushes a few more of them to literal 0 (measured ~0.090 total
+  // here, up from ~0.057) — still the same two bounded formulas, just
+  // exposed on more pixels now that shadows' reach is honest.
+  check('shadow clip does not blow out beyond the baseline', histAfter.shadowClip < histBefore.shadowClip + 0.1, {
     before: histBefore.shadowClip,
     after: histAfter.shadowClip,
   });
