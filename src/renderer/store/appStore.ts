@@ -835,9 +835,9 @@ interface AppState {
    * "自動トーン" (Auto tone, docs/brief-bank/auto-tone.md) — a one-click
    * STARTING POINT for the basic-tone sliders, derived transparently from
    * the OPEN photo's own luma histogram (percentile-anchored, not ML/black
-   * box — engine/color/autoTone.ts's solveAutoTone). Writes ONLY the 5
-   * basic-tone keys (ev/blacks/whites/highlights/shadows — never contrast,
-   * never temp/tint, never the tone curve) through updateNodeParamsBatch,
+   * box — engine/color/autoTone.ts's solveAutoTone). Writes ONLY the 6
+   * basic-tone keys (ev/contrast/blacks/whites/highlights/shadows — never
+   * temp/tint, never the tone curve) through updateNodeParamsBatch,
    * the SAME mutator a slider drag uses: one undo entry (⌘Z reverts every
    * slider at once) and fork-on-touch for a linked photo (basic-tone forks
    * to 個別調整, exactly like a manual basic.* edit). No-op without a ready
@@ -6533,6 +6533,7 @@ export const useAppStore = create<AppState>((set, get) => {
       node.id,
       [
         ['basic.ev', patch.ev],
+        ['basic.contrast', patch.contrast],
         ['basic.blacks', patch.blacks],
         ['basic.whites', patch.whites],
         ['basic.highlights', patch.highlights],

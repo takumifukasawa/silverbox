@@ -217,10 +217,20 @@ try {
   // pixels to literal 0/255 — bound the INCREASE over the pre-auto-tone
   // baseline (which may already be well above 0 on a scene with real deep
   // shadows/saturated colors — "any channel at 0/255", not "the whole pixel
-  // is black/white") by a couple of points, well above the ~0.5% target
-  // fraction (AUTO_TONE_BLACK_PERCENTILE/AUTO_TONE_WHITE_PERCENTILE) but far
-  // below what an actual blowout would produce.
-  check('shadow clip does not blow out beyond the baseline', histAfter.shadowClip < histBefore.shadowClip + 0.02, {
+  // is black/white") well above what a couple of the solve's small nudges
+  // can legitimately move it, but far below what an actual blowout would
+  // produce.
+  // SHADOW budget widened 0.02 → 0.08 for the v2 allocation-model
+  // recalibration (2026-09-01, LR-Auto fit): unlike v1 (which never touched
+  // contrast and kept blacks near 0 on a typical photo), v2 ALWAYS applies a
+  // small LR-matched contrast (+6) plus a modestly negative blacks — on
+  // THIS fixture (test.ARW) shadowClip already sits at ~12.7% before any
+  // edit (an unusually shadow/black-heavy stress photo), so contrast alone
+  // legitimately raises it a couple of points, and the bounded blacks nudge
+  // a few more (measured ~0.057 total on this fixture) — a real, intended,
+  // BOUNDED effect of the two sliders' own formulas (see autoTone.ts's
+  // AUTO_TONE_BLACK_GAIN doc comment), not a runaway/unbounded blowout.
+  check('shadow clip does not blow out beyond the baseline', histAfter.shadowClip < histBefore.shadowClip + 0.08, {
     before: histBefore.shadowClip,
     after: histAfter.shadowClip,
   });
