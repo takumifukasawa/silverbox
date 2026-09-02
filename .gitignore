@@ -7,3 +7,4 @@ release/
 test-artifacts/
 test-assets/
 .claude/worktrees/
+tone-experiments-out/

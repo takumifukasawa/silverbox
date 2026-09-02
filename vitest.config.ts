@@ -7,9 +7,14 @@ import { defineConfig } from 'vitest/config';
 // doc comment). Fast enough to run inside the parallel verify pool (see
 // scripts/run-verify.mjs's `unit` entry) as well as standalone via
 // `npm run test:unit`.
+//
+// `scripts/lib/**/*.test.mjs`: same tier, for pure-Node script helpers that
+// aren't part of the app build (e.g. tiffWriter.mjs, the Linear DNG byte
+// writer behind scripts/gen-linear-dng.mjs — docs/research/local-adaptive-tone.md
+// §5.0). Plain .mjs (no ts-node) since these scripts run directly via `node`.
 export default defineConfig({
   test: {
-    include: ['src/**/*.test.ts', 'shared/**/*.test.ts'],
+    include: ['src/**/*.test.ts', 'shared/**/*.test.ts', 'scripts/lib/**/*.test.mjs'],
     environment: 'node',
   },
 });
