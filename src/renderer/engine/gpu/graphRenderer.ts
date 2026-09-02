@@ -33,6 +33,15 @@ import { buildLutStripPixels, type CubeLut3D } from '../color/lutCube';
 import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import { DENOISE_MODEL_SHA256 } from '../../../../shared/denoiseModel';
+import {
+  betaForLevel,
+  discretizationLevels,
+  LOCALTONE_K_LEVELS,
+  LOCALTONE_KNEE_SOFTEN_FRAC,
+  LOCALTONE_LUMA_EPS,
+  LOCALTONE_RATIO_CLAMP_MAX,
+  pyramidLevelDims,
+} from '../graph/localToneNode';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
 type PlanLens = NonNullable<RenderPlan['lens']>;
@@ -235,6 +244,237 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let outWork = ${WGSL_SRGB_TO_WORK} * srgbDecode(sampled);
   let result = mix(c0.rgb, outWork, params.x);
   return vec4f(result, c0.a);
+}
+`;
+
+// --- Local-adaptive tone (docs/research/local-adaptive-tone.md, stage 1) ----
+//
+// Fast Local Laplacian Filter on log2(WORKING_LUMA luminance), luminance-only
+// with the RATIO color-restore method (localToneNode.ts's module doc
+// comment). Pyramid levels are single-channel r32float render targets sized
+// per level (halving by ceil, down to 1x1) — a chain of ordinary fullscreen
+// fragment passes at CUSTOM (non-frame) resolutions, NOT a compute/storage-
+// texture pipeline. DEVIATION from the research doc's §4.4 recommendation
+// ("compute-pass pyramid... storage textures"): every OTHER per-node pass in
+// this file already works as "one bind group, textureLoad-only, one output
+// texture, draw(3)" (wgslCommon.ts's doc comment) — a fragment pipeline's
+// TARGET FORMAT is fixed at pipeline-creation time, but its target's TEXTURE
+// SIZE is whatever the bound render-target view's texture actually is, so
+// reusing that exact mechanism at a per-pyramid-level size needs zero new
+// WebGPU capability. The only compute pipelines in this file today are the
+// histogram/scope REDUCTIONS (GPU→CPU readback helpers, a different job
+// entirely) — introducing a second, parallel rendering paradigm (compute +
+// storage-texture ping-pong) for one experimental node was judged higher
+// risk than reusing the established one, for the identical numerical result.
+//
+// r32float (not r16float/rgba16float) throughout: the doc's fp16-
+// cancellation warning is specifically about LINEAR-domain pyramids; log2
+// domain is well-conditioned (no catastrophic cancellation), but at
+// LOCALTONE_K_LEVELS=12 discretization levels a half-float's ~3-4
+// significant digits of PYRAMID-LEVEL STORAGE risks compounding into visible
+// banding on top of the discretization's own already-flagged banding risk
+// (research doc §4.4 item 3). Since this pyramid is a SINGLE channel
+// (luminance only), r32float costs no more than an rgba16float texture at
+// half the resolution — there is no real memory pressure reason to prefer
+// the narrower format here (see the honest-report perf/memory note for
+// where format DOES start to matter: full-resolution export of a large
+// image, an acknowledged stage-1 limitation — tiling/BGU-slicing is
+// explicitly out of stage-1 scope per the brief).
+//
+// Burt-Adelson [1,4,6,4,1]/16 kernel (research doc §1.2/§4.3), applied as a
+// single non-separable 5x5 pass (not two separable 1D passes — halves pass
+// count) — matches localToneNode.ts's reduceGray/expandGray CPU reference
+// exactly (same kernel, same clamp-to-edge, same 2x-center convention), so
+// the doc-mandated collapse(build(x))≈x property this WGSL pyramid relies on
+// is exactly what localToneNode.test.ts already proves for the CPU twin.
+const LOCALTONE_KERNEL_WGSL = /* wgsl */ `
+const LOCALTONE_K = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
+`;
+
+/** log2(max(WORKING_LUMA·rgb, eps)) of the step's rgba16float input, into a full-res r32float target. */
+const LOCALTONE_LOGLUMA_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let c = textureLoad(src, vec2i(pos.xy), 0).rgb;
+  let y = max(dot(c, ${WGSL_WORKING_LUMA}), ${LOCALTONE_LUMA_EPS});
+  return log2(y);
+}
+`;
+
+/** REDUCE: Burt-Adelson blur + decimate by 2, clamp-to-edge — see localToneNode.ts's reduceGray. `u` = (srcW, srcH) for clamping; output dims come from the bound render target. */
+const LOCALTONE_REDUCE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u: vec4f; // x=srcW, y=srcH
+${FULLSCREEN_VS}
+${LOCALTONE_KERNEL_WGSL}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let o = vec2i(pos.xy);
+  let sw = i32(u.x);
+  let sh = i32(u.y);
+  let center = o * 2;
+  var sum = 0.0;
+  for (var dy = -2; dy <= 2; dy++) {
+    let sy = clamp(center.y + dy, 0, sh - 1);
+    let ky = LOCALTONE_K[dy + 2];
+    for (var dx = -2; dx <= 2; dx++) {
+      let sx = clamp(center.x + dx, 0, sw - 1);
+      sum += LOCALTONE_K[dx + 2] * ky * textureLoad(src, vec2i(sx, sy), 0).r;
+    }
+  }
+  return sum;
+}
+`;
+
+/**
+ * Per-level remap curve — see localToneNode.ts's remapLog2 (kept
+ * numerically identical: same constants, same operation order). STAGE 1b:
+ * `beta` is now a SINGLE, symmetric-in-offset slope for the whole level
+ * (computed CPU-side per gammaJ by betaForLevel — see buildLocalTonePasses
+ * — since it depends only on gammaJ, not on any per-pixel value), not a
+ * per-pixel branch on sign(d) — see localToneNode.ts's module doc comment
+ * for why the sign-keyed split was dropped. `u` = (gamma, sigmaR, beta,
+ * unused).
+ */
+const LOCALTONE_REMAP_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> u: vec4f; // x=gamma, y=sigmaR, z=beta, w=unused
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let x = textureLoad(src, vec2i(pos.xy), 0).r;
+  let gamma = u.x;
+  let sigmaR = u.y;
+  let beta = u.z;
+  let d = x - gamma;
+  let ad = abs(d);
+  let sd = sign(d);
+  let knee = ${LOCALTONE_KNEE_SOFTEN_FRAC} * sigmaR;
+  let t = smoothstep(sigmaR - knee, sigmaR + knee, ad);
+  let idOut = d;
+  let tailOut = sd * (sigmaR + beta * (ad - sigmaR));
+  let f = mix(idOut, tailOut, t);
+  return gamma + f;
+}
+`;
+
+/** Top-pyramid-level accumulate — no expand needed (Laplacian top level = Gaussian top level, standard Burt-Adelson convention): accum' = accumPrev + tentWeight(gInput,gammaJ,step)*contrib. `u` = (gammaJ, step). */
+const LOCALTONE_ACCUMULATE_TOP_SHADER = /* wgsl */ `
+@group(0) @binding(0) var accumPrev: texture_2d<f32>;
+@group(0) @binding(1) var gInputLevel: texture_2d<f32>;
+@group(0) @binding(2) var contribTex: texture_2d<f32>;
+@group(0) @binding(3) var<uniform> u: vec4f; // x=gammaJ, y=step
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let o = vec2i(pos.xy);
+  let g = textureLoad(gInputLevel, o, 0).r;
+  let wgt = max(0.0, 1.0 - abs(g - u.x) / u.y);
+  let acc = textureLoad(accumPrev, o, 0).r;
+  let contrib = textureLoad(contribTex, o, 0).r;
+  return acc + wgt * contrib;
+}
+`;
+
+/** Fused expand+diff+weight+accumulate for a non-top level: contrib = gFine - expand(gCoarse) (this level's Laplacian, computed inline — Burt-Adelson EXPAND, matches localToneNode.ts's expandGray exactly), then accum' = accumPrev + tentWeight(gInput,gammaJ,step)*contrib. `u` = (gammaJ, step, coarseW, coarseH). Fusing expand+diff+accumulate into one pass (rather than three) is what keeps the total per-discretization-level pass count to ~2×levels instead of ~4×levels. */
+const LOCALTONE_ACCUMULATE_LAPLACIAN_SHADER = /* wgsl */ `
+@group(0) @binding(0) var accumPrev: texture_2d<f32>;
+@group(0) @binding(1) var gInputLevel: texture_2d<f32>;
+@group(0) @binding(2) var gFine: texture_2d<f32>;
+@group(0) @binding(3) var gCoarse: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> u: vec4f; // x=gammaJ, y=step, z=coarseW, w=coarseH
+${FULLSCREEN_VS}
+${LOCALTONE_KERNEL_WGSL}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let o = vec2i(pos.xy);
+  let cw = i32(u.z);
+  let ch = i32(u.w);
+  var sum = 0.0;
+  for (var m = -2; m <= 2; m++) {
+    let oxm = o.x - m;
+    if ((oxm & 1) != 0) { continue; }
+    let cx = clamp(oxm / 2, 0, cw - 1);
+    let km = LOCALTONE_K[m + 2];
+    for (var n = -2; n <= 2; n++) {
+      let oyn = o.y - n;
+      if ((oyn & 1) != 0) { continue; }
+      let cy = clamp(oyn / 2, 0, ch - 1);
+      sum += km * LOCALTONE_K[n + 2] * textureLoad(gCoarse, vec2i(cx, cy), 0).r;
+    }
+  }
+  let expanded = 4.0 * sum;
+  let contrib = textureLoad(gFine, o, 0).r - expanded;
+  let g = textureLoad(gInputLevel, o, 0).r;
+  let wgt = max(0.0, 1.0 - abs(g - u.x) / u.y);
+  let acc = textureLoad(accumPrev, o, 0).r;
+  return acc + wgt * contrib;
+}
+`;
+
+/** Collapse step: recon = accumLevel + expand(coarserRecon) (Burt-Adelson EXPAND, same inline form as the accumulate-laplacian shader above). `u` = (coarseW, coarseH). */
+const LOCALTONE_COLLAPSE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var accumLevel: texture_2d<f32>;
+@group(0) @binding(1) var coarserRecon: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u: vec4f; // x=coarseW, y=coarseH
+${FULLSCREEN_VS}
+${LOCALTONE_KERNEL_WGSL}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let o = vec2i(pos.xy);
+  let cw = i32(u.x);
+  let ch = i32(u.y);
+  var sum = 0.0;
+  for (var m = -2; m <= 2; m++) {
+    let oxm = o.x - m;
+    if ((oxm & 1) != 0) { continue; }
+    let cx = clamp(oxm / 2, 0, cw - 1);
+    let km = LOCALTONE_K[m + 2];
+    for (var n = -2; n <= 2; n++) {
+      let oyn = o.y - n;
+      if ((oyn & 1) != 0) { continue; }
+      let cy = clamp(oyn / 2, 0, ch - 1);
+      sum += km * LOCALTONE_K[n + 2] * textureLoad(coarserRecon, vec2i(cx, cy), 0).r;
+    }
+  }
+  let expanded = 4.0 * sum;
+  return textureLoad(accumLevel, o, 0).r + expanded;
+}
+`;
+
+/** Zero-fill — seeds the tent-weight accumulator's ping buffer before the K-discretization-level loop (research doc §1.3 step 4: the output pyramid is the convex-combination sum Σ_j w_j(g)·L[r_j(I)], no separate identity seeding needed — see localToneNode.ts's module doc comment). */
+const LOCALTONE_ZERO_SHADER = /* wgsl */ `
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  return 0.0;
+}
+`;
+
+/**
+ * Final composite: restore color by the RATIO method (localToneNode.ts's
+ * module doc comment / research doc §1.2 'lum') — scale the ORIGINAL rgb by
+ * 2^(processedLog - originalLog), then mix toward identity by `amount`. The
+ * ratio is clamped (LOCALTONE_RATIO_CLAMP_MAX) as a numerical-safety guard
+ * against runaway values near-black, not an LR-calibrated constant.
+ */
+const LOCALTONE_COMPOSITE_SHADER = /* wgsl */ `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var processedLog: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u: vec4f; // x=amount
+${FULLSCREEN_VS}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let o = vec2i(pos.xy);
+  let c0 = textureLoad(src, o, 0);
+  let origLuma = max(dot(c0.rgb, ${WGSL_WORKING_LUMA}), ${LOCALTONE_LUMA_EPS});
+  let origLog = log2(origLuma);
+  let newLog = textureLoad(processedLog, o, 0).r;
+  let ratio = clamp(exp2(newLog - origLog), 0.0, ${LOCALTONE_RATIO_CLAMP_MAX}.0);
+  let outRgb = c0.rgb * ratio;
+  return vec4f(mix(c0.rgb, outRgb, u.x), c0.a);
 }
 `;
 
@@ -811,6 +1051,30 @@ interface ExecStep {
   denoiseResultView?: GPUTextureView;
   /** LUT import node (3D case) with its strip texture ALREADY uploaded (setLutTexture landed before this render): sample it against `src` via LUT3D_SHADER — see resolveSteps' 'lut3d' branch. Absent = plain pass-through of `src` (texture not yet uploaded — a transient race, self-healing on the next render once setLutTexture lands; never a crash). */
   lutView?: GPUTextureView;
+  /**
+   * Local-adaptive tone step (docs/research/local-adaptive-tone.md, stage
+   * 1): the fully pre-recorded Fast-LLF pyramid pass list — built ONCE in
+   * resolveSteps() (the only place with `this.createTexture`/`createBuffer`
+   * access), then just REPLAYED via `addPass` every render() call, same
+   * "resolve builds it, recordSteps only replays it" split every other
+   * special ExecStep field (imageView/lutView/...) already uses. `passes`
+   * covers everything BETWEEN the log-luma extraction and the final
+   * composite (both of which need `at(step.src)`, only known at record
+   * time — see recordSteps' 'localTone' branch). Not pooled across
+   * setGraph() calls (stage-1 simplicity — see the honest-report perf
+   * note); destroySteps() frees `textures`/`buffers` alongside `phases`'
+   * uniform buffers.
+   */
+  localTone?: {
+    logLumaPipeline: GPURenderPipeline;
+    logLumaTarget: GPUTextureView;
+    passes: { pipeline: GPURenderPipeline; target: GPUTextureView; entries: GPUBindGroupEntry[] }[];
+    compositePipeline: GPURenderPipeline;
+    compositeUniform: GPUBuffer;
+    processedLogView: GPUTextureView;
+    textures: GPUTexture[];
+    buffers: GPUBuffer[];
+  };
 }
 
 
@@ -891,6 +1155,8 @@ export class GraphRenderer {
   private blendPipelineCache: GPURenderPipeline | null = null;
   /** Pipelines for plan passes, keyed by PassSpec.shaderId. */
   private passPipelines = new Map<string, GPURenderPipeline>();
+  /** Local-adaptive tone (docs/research/local-adaptive-tone.md) pass pipelines — a FIXED small set (8 shader kinds; see localTonePipeline), cached forever like passPipelines. Unlike passPipelines, target format varies (r32float for every pyramid pass, rgba16float for the final composite), so the cache key alone can't infer it — see localTonePipeline's signature. */
+  private localTonePipelines = new Map<string, GPURenderPipeline>();
   /** Custom-code pipelines keyed by source; null = failed to compile. */
   private setGraphGen = 0;
   /** Resolves when the most recent setGraph() has landed (readback waits on it). */
@@ -1032,6 +1298,206 @@ export class GraphRenderer {
       this.passPipelines.set(shaderId, pipeline);
     }
     return pipeline;
+  }
+
+  /**
+   * Local-adaptive tone pass pipeline — same shape as passPipeline() but
+   * with a caller-chosen target FORMAT (most passes are single-channel
+   * r32float pyramid levels; the final composite is rgba16float — see the
+   * LOCALTONE_*_SHADER constants). Cached by a fixed shaderId per pass
+   * KIND: there are only 8 distinct shaders total — every pyramid level and
+   * every discretization index reuses the SAME compiled pipeline, only the
+   * bound textures/uniforms differ per invocation (buildLocalTonePasses).
+   */
+  private localTonePipeline(shaderId: string, wgsl: string, format: GPUTextureFormat): GPURenderPipeline {
+    let pipeline = this.localTonePipelines.get(shaderId);
+    if (!pipeline) {
+      const module = this.device.createShaderModule({ code: wgsl });
+      void assertShaderCompiles(module, shaderId);
+      pipeline = this.device.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module, entryPoint: 'vs' },
+        fragment: { module, entryPoint: 'fs', targets: [{ format }] },
+      });
+      this.localTonePipelines.set(shaderId, pipeline);
+    }
+    return pipeline;
+  }
+
+  /**
+   * Build the full Fast Local Laplacian pyramid pass list for one
+   * 'localtone' plan step (docs/research/local-adaptive-tone.md, stage 1) —
+   * called once per resolveSteps() (i.e. once per setGraph(), NOT once per
+   * render() — every OTHER special ExecStep field, e.g. lutView, follows
+   * the same "resolve computes it, render() replays it" split). Every
+   * texture/buffer this allocates is returned in `textures`/`buffers` so
+   * destroySteps() can free them; nothing here is pooled across setGraph()
+   * calls (see the module-level LOCALTONE_* doc comment's honest perf note).
+   *
+   * Algorithm (research doc §1.3's Fast LLF, "process one discretization
+   * level at a time, accumulate into the output pyramid" memory-saving
+   * variant): precompute the INPUT image's own Gaussian pyramid of
+   * log2-luma (`gInput`, built once); for each of LOCALTONE_K_LEVELS
+   * discretization references gammaJ, remap the FULL-res log-luma with that
+   * one fixed reference, build ITS Gaussian pyramid (`gRemap`, scratch,
+   * reused/overwritten every iteration), then accumulate
+   * tentWeight(gInput[l], gammaJ, step) * Laplacian(gRemap)[l] into a
+   * persistent ping-ponged accumulator pyramid; finally collapse the
+   * accumulator back to a single full-res log-luma image. The tent weights
+   * partition unity exactly, so the accumulator needs no separate identity
+   * seeding (LOCALTONE_ZERO_SHADER's doc comment) — this is the paper's
+   * literal formulation (§1.3 step 4), not Aubry's demo-specific
+   * "add-a-delta-to-identity" shortcut (which only applies to that demo's
+   * zero-mean detail-only remap, not this node's full tone-tail remap).
+   */
+  private buildLocalTonePasses(
+    shadows: number,
+    highlights: number,
+    sigmaR: number,
+    amount: number,
+    frameWidth: number,
+    frameHeight: number
+  ): NonNullable<ExecStep['localTone']> {
+    const levels = pyramidLevelDims(frameWidth, frameHeight);
+    const n = levels.length;
+    const textures: GPUTexture[] = [];
+    const buffers: GPUBuffer[] = [];
+    const mk = (w: number, h: number): GPUTexture => {
+      const t = this.createTexture({
+        size: [Math.max(1, w), Math.max(1, h)],
+        format: 'r32float',
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+      });
+      textures.push(t);
+      return t;
+    };
+    const uni = (values: readonly number[]): GPUBuffer => {
+      const buf = this.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const arr = new Float32Array(4);
+      arr.set(values);
+      this.device.queue.writeBuffer(buf, 0, arr);
+      buffers.push(buf);
+      return buf;
+    };
+
+    const pLogLuma = this.localTonePipeline('localtone/logluma', LOCALTONE_LOGLUMA_SHADER, 'r32float');
+    const pReduce = this.localTonePipeline('localtone/reduce', LOCALTONE_REDUCE_SHADER, 'r32float');
+    const pRemap = this.localTonePipeline('localtone/remap', LOCALTONE_REMAP_SHADER, 'r32float');
+    const pAccumTop = this.localTonePipeline('localtone/accumTop', LOCALTONE_ACCUMULATE_TOP_SHADER, 'r32float');
+    const pAccumLap = this.localTonePipeline('localtone/accumLaplacian', LOCALTONE_ACCUMULATE_LAPLACIAN_SHADER, 'r32float');
+    const pCollapse = this.localTonePipeline('localtone/collapse', LOCALTONE_COLLAPSE_SHADER, 'r32float');
+    const pZero = this.localTonePipeline('localtone/zero', LOCALTONE_ZERO_SHADER, 'r32float');
+    const pComposite = this.localTonePipeline('localtone/composite', LOCALTONE_COMPOSITE_SHADER, 'rgba16float');
+
+    const logLuma = mk(levels[0]!.w, levels[0]!.h);
+
+    // Input Gaussian pyramid of log-luma (gInput[0] IS logLuma itself).
+    const gInput: GPUTexture[] = [logLuma];
+    for (let l = 0; l < n - 1; l++) gInput.push(mk(levels[l + 1]!.w, levels[l + 1]!.h));
+
+    const passes: { pipeline: GPURenderPipeline; target: GPUTextureView; entries: GPUBindGroupEntry[] }[] = [];
+
+    for (let l = 0; l < n - 1; l++) {
+      passes.push({
+        pipeline: pReduce,
+        target: gInput[l + 1]!.createView(),
+        entries: [
+          { binding: 0, resource: gInput[l]!.createView() },
+          { binding: 1, resource: { buffer: uni([levels[l]!.w, levels[l]!.h, 0, 0]) } },
+        ],
+      });
+    }
+
+    // Persistent ping-ponged accumulator pyramid, seeded to zero.
+    const accumA = levels.map((lv) => mk(lv.w, lv.h));
+    const accumB = levels.map((lv) => mk(lv.w, lv.h));
+    for (let l = 0; l < n; l++) {
+      passes.push({ pipeline: pZero, target: accumA[l]!.createView(), entries: [] });
+    }
+    let curAccum = accumA;
+    let nextAccum = accumB;
+
+    const gammas = discretizationLevels(LOCALTONE_K_LEVELS);
+    const step = gammas.length > 1 ? gammas[1]! - gammas[0]! : 1;
+
+    // Remap scratch pyramid (gRemap[0] IS the full-res remapped image), rebuilt every discretization iteration.
+    const remapFull = mk(levels[0]!.w, levels[0]!.h);
+    const gRemap: GPUTexture[] = [remapFull];
+    for (let l = 0; l < n - 1; l++) gRemap.push(mk(levels[l + 1]!.w, levels[l + 1]!.h));
+
+    for (const gammaJ of gammas) {
+      const beta = betaForLevel(gammaJ, shadows, highlights);
+      passes.push({
+        pipeline: pRemap,
+        target: gRemap[0]!.createView(),
+        entries: [
+          { binding: 0, resource: logLuma.createView() },
+          { binding: 1, resource: { buffer: uni([gammaJ, sigmaR, beta, 0]) } },
+        ],
+      });
+      for (let l = 0; l < n - 1; l++) {
+        passes.push({
+          pipeline: pReduce,
+          target: gRemap[l + 1]!.createView(),
+          entries: [
+            { binding: 0, resource: gRemap[l]!.createView() },
+            { binding: 1, resource: { buffer: uni([levels[l]!.w, levels[l]!.h, 0, 0]) } },
+          ],
+        });
+      }
+      for (let l = 0; l < n - 1; l++) {
+        passes.push({
+          pipeline: pAccumLap,
+          target: nextAccum[l]!.createView(),
+          entries: [
+            { binding: 0, resource: curAccum[l]!.createView() },
+            { binding: 1, resource: gInput[l]!.createView() },
+            { binding: 2, resource: gRemap[l]!.createView() },
+            { binding: 3, resource: gRemap[l + 1]!.createView() },
+            { binding: 4, resource: { buffer: uni([gammaJ, step, levels[l + 1]!.w, levels[l + 1]!.h]) } },
+          ],
+        });
+      }
+      passes.push({
+        pipeline: pAccumTop,
+        target: nextAccum[n - 1]!.createView(),
+        entries: [
+          { binding: 0, resource: curAccum[n - 1]!.createView() },
+          { binding: 1, resource: gInput[n - 1]!.createView() },
+          { binding: 2, resource: gRemap[n - 1]!.createView() },
+          { binding: 3, resource: { buffer: uni([gammaJ, step, 0, 0]) } },
+        ],
+      });
+      [curAccum, nextAccum] = [nextAccum, curAccum];
+    }
+
+    // Collapse: recon[top] = accum[top] directly (Burt-Adelson: L[top]=G[top], no pass needed).
+    const recon: GPUTexture[] = new Array(n) as GPUTexture[];
+    recon[n - 1] = curAccum[n - 1]!;
+    for (let l = n - 2; l >= 0; l--) {
+      const target = mk(levels[l]!.w, levels[l]!.h);
+      passes.push({
+        pipeline: pCollapse,
+        target: target.createView(),
+        entries: [
+          { binding: 0, resource: curAccum[l]!.createView() },
+          { binding: 1, resource: recon[l + 1]!.createView() },
+          { binding: 2, resource: { buffer: uni([levels[l + 1]!.w, levels[l + 1]!.h, 0, 0]) } },
+        ],
+      });
+      recon[l] = target;
+    }
+
+    return {
+      logLumaPipeline: pLogLuma,
+      logLumaTarget: logLuma.createView(),
+      passes,
+      compositePipeline: pComposite,
+      compositeUniform: uni([amount, 0, 0, 0]),
+      processedLogView: recon[0]!.createView(),
+      textures,
+      buffers,
+    };
   }
 
   /** Upload the linear preview as rgba16float (values are in [0,1] after decode). */
@@ -1910,6 +2376,19 @@ export class GraphRenderer {
           src: op.src,
         };
       }
+      if (op.type === 'localtone') {
+        // Local-adaptive tone (docs/research/local-adaptive-tone.md, stage
+        // 1): the entire Fast-LLF pyramid pass list is built HERE (the only
+        // place with texture/buffer-allocation access) — recordSteps just
+        // replays it. `phases: []` — this step never goes through the
+        // generic ping-pong phases loop (see buildLocalTonePasses' doc
+        // comment and recordSteps' 'localTone' branch below).
+        return {
+          phases: [],
+          src: op.src,
+          localTone: this.buildLocalTonePasses(op.shadows, op.highlights, op.sigmaR, op.amount, frameWidth, frameHeight),
+        };
+      }
       const hasMask = op.srcMask !== undefined;
       return {
         phases: [{ pipeline: hasMask ? this.blendMaskPipeline() : this.blendPipeline(), uniformBuffer: this.vec4Buffer(op.uniform) }],
@@ -1921,7 +2400,13 @@ export class GraphRenderer {
   }
 
   private destroySteps(steps: ExecStep[]): void {
-    for (const step of steps) for (const phase of step.phases) this.destroyBuffer(phase.uniformBuffer);
+    for (const step of steps) {
+      for (const phase of step.phases) this.destroyBuffer(phase.uniformBuffer);
+      if (step.localTone) {
+        for (const t of step.localTone.textures) this.destroyTexture(t);
+        for (const b of step.localTone.buffers) this.destroyBuffer(b);
+      }
+    }
   }
 
   private async applyGraph(plan: RenderPlan): Promise<void> {
@@ -2090,6 +2575,36 @@ export class GraphRenderer {
           { binding: 1, resource: step.lutView },
           { binding: 2, resource: { buffer: phase.uniformBuffer! } },
         ]);
+        return;
+      }
+      if (step.localTone) {
+        // Local-adaptive tone (docs/research/local-adaptive-tone.md, stage
+        // 1): replay the pre-recorded pyramid pass list (buildLocalTonePasses,
+        // resolveSteps' 'localtone' branch) — the log-luma extraction and
+        // the final composite are the only two passes that need `at(step.src)`
+        // (only resolvable here, not at resolve time), so they're recorded
+        // explicitly; everything between them is a fully self-contained
+        // {pipeline,target,entries} triple already.
+        const lt = step.localTone;
+        // Rough, JS-side "how long does recording this step's ~2*K_LEVELS
+        // draw calls take" figure (stage-1 flagged this as an unmeasured
+        // perf gap) — gated on the same shaderDiagnosticsEnabled/
+        // SILVERBOX_TEST flag as assertShaderCompiles above so it's a
+        // complete no-op in normal interactive use. This times ENCODER
+        // RECORDING only (CPU-side), not actual GPU execution time (no
+        // cheap synchronous way to get that here); see the implementer
+        // report for the measured figure and that caveat.
+        const ltStart = shaderDiagnosticsEnabled ? performance.now() : 0;
+        addPass(encoder, lt.logLumaTarget, lt.logLumaPipeline, [{ binding: 0, resource: at(step.src) }]);
+        for (const p of lt.passes) addPass(encoder, p.target, p.pipeline, p.entries);
+        addPass(encoder, views[i]!, lt.compositePipeline, [
+          { binding: 0, resource: at(step.src) },
+          { binding: 1, resource: lt.processedLogView },
+          { binding: 2, resource: { buffer: lt.compositeUniform } },
+        ]);
+        if (shaderDiagnosticsEnabled) {
+          console.log(`[localtone] recorded ${lt.passes.length + 2} passes in ${(performance.now() - ltStart).toFixed(2)}ms (JS-side encoding only)`);
+        }
         return;
       }
       if (step.srcB !== undefined) {

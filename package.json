@@ -119,6 +119,7 @@
     "verify:repairsheet": "node scripts/verify-repairsheet.mjs",
     "verify:develop-thumbnails": "node scripts/verify-develop-thumbnails.mjs",
     "verify:autotone": "node scripts/verify-autotone.mjs",
+    "verify:localtone": "node scripts/verify-localtone.mjs",
     "fit:basecurve": "node scripts/fit-base-curve.mjs",
     "fit:profile": "node scripts/fit-profile.mjs",
     "verify": "node scripts/run-verify.mjs",

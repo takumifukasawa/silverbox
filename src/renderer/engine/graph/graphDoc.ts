@@ -33,6 +33,13 @@ import {
   type LutParams,
 } from './lutNode';
 import { applyCubeLutCpu, type CubeLut } from '../color/lutCube';
+import {
+  defaultLocalToneParams,
+  isIdentityLocalTone,
+  LOCALTONE_KIND,
+  sanitizeLocalToneParams,
+  type LocalToneParams,
+} from './localToneNode';
 import { maskShapeAnchorToOutput, maskShapeOutputToAnchor, spotAnchorToOutput, spotOutputToAnchor } from './anchorSpace';
 import type { ExportColorSpace, ExportMetadataPolicy, PhotoFlag } from '../../../../shared/ipc';
 // Type-only — presetFamilies.ts imports runtime symbols (DEVELOP_KIND etc.)
@@ -54,7 +61,8 @@ export type GraphNodeKind =
   | typeof IMAGE_KIND
   | typeof EXTERNAL_KIND
   | typeof DENOISE_KIND
-  | typeof LUT_KIND;
+  | typeof LUT_KIND
+  | typeof LOCALTONE_KIND;
 
 export interface GraphNode {
   id: string;
@@ -82,6 +90,13 @@ export interface GraphNode {
   denoise?: DenoiseParams;
   /** LUT import node (docs/brief-bank/lut-import-node.md): referenced .cube file + input-space selector + amount; only for kind 'lut'. */
   lut?: LutParams;
+  /**
+   * Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1
+   * implementer brief): Fast Local Laplacian shadows/highlights params,
+   * EXPERIMENTAL and opt-in — only for kind 'localtone'. Spatial class, no
+   * CPU mirror (see localToneNode.ts's module doc comment).
+   */
+  localtone?: LocalToneParams;
   /**
    * Bypass toggle (node bypass feature, Resolve's Ctrl+D): absent/false =
    * active (default). Legal on every 1-in/1-out chain kind (ops, custom,
@@ -200,6 +215,7 @@ export type AddableKind =
   | typeof EXTERNAL_KIND
   | typeof DENOISE_KIND
   | typeof LUT_KIND
+  | typeof LOCALTONE_KIND
   | 'output';
 
 /** Output node's display name, defaulting the unset/blank case to 'main' (spec §6). */
@@ -231,6 +247,7 @@ export function nodeLabel(node: GraphNode, fileName: string | null): string {
     const path = node.lut?.path ?? '';
     return path ? `lut — ${imageBaseName(path)}` : 'lut';
   }
+  if (node.kind === LOCALTONE_KIND) return 'local tone';
   if (isOpKind(node.kind)) return OPS[node.kind].label.toLowerCase();
   return node.kind;
 }
@@ -369,6 +386,7 @@ export function defaultParams(
     | typeof EXTERNAL_KIND
     | typeof DENOISE_KIND
     | typeof LUT_KIND
+    | typeof LOCALTONE_KIND
     | 'output'
   >
 ): Record<string, number> {
@@ -753,6 +771,7 @@ const KNOWN_NODE_KEYS = new Set([
   'external',
   'denoise',
   'lut',
+  'localtone',
   'disabled',
   'name',
   'export',
@@ -840,6 +859,7 @@ export function serializeGraphDoc(
           ...(n.external ? { external: n.external } : {}),
           ...(n.denoise ? { denoise: n.denoise } : {}),
           ...(n.lut ? { lut: n.lut } : {}),
+          ...(n.localtone ? { localtone: n.localtone } : {}),
           ...(n.disabled ? { disabled: true } : {}),
           ...(n.name !== undefined ? { name: n.name } : {}),
           ...(n.export ? { export: n.export } : {}),
@@ -945,6 +965,7 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
       n.kind !== EXTERNAL_KIND &&
       n.kind !== DENOISE_KIND &&
       n.kind !== LUT_KIND &&
+      n.kind !== LOCALTONE_KIND &&
       !isOpKind(n.kind)
     ) {
       throw new Error(`unknown node kind ${String(n.kind)}`);
@@ -1003,6 +1024,13 @@ export function parseGraphDoc(text: string, srcDims?: { width: number; height: n
     // accepted too.
     if (n.kind === LUT_KIND) {
       n.lut = sanitizeLutParams(n.lut, n.id);
+    }
+    // Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage
+    // 1 implementer brief): additive node kind to schemaVersion 4 (no
+    // version bump), same "extend the recognized-kind list, sanitize when
+    // present" pattern LUT_KIND/DENOISE_KIND/etc. already followed.
+    if (n.kind === LOCALTONE_KIND) {
+      n.localtone = sanitizeLocalToneParams(n.localtone, n.id);
     }
     if (n.kind === 'output') {
       n.name = typeof n.name === 'string' && n.name.trim() !== '' ? n.name : undefined;
@@ -1257,6 +1285,25 @@ export type PlanStep =
        * engine invariant (docs/brief-bank/lut-import-node.md item 4).
        */
       cpu: (px: Rgb) => Rgb;
+    }
+  | {
+      nodeId: string;
+      type: 'localtone';
+      src: number;
+      /** 0..100 — see localToneNode.ts's LocalToneParams.shadows. */
+      shadows: number;
+      /** -100..0 — see localToneNode.ts's LocalToneParams.highlights. */
+      highlights: number;
+      /** Stops (log2) — see localToneNode.ts's LocalToneParams.sigmaR. */
+      sigmaR: number;
+      /** 0..1 mix vs identity — same role as blend's uniform.x / lut3d's amount. */
+      amount: number;
+      /**
+       * NO CPU mirror (spatial class, same as 'image'/'external'/'denoise'
+       * above) — a Fast Local Laplacian pyramid coefficient depends on the
+       * WHOLE image, not a per-pixel neighborhood a JS reference could
+       * mirror. See localToneNode.ts's module doc comment.
+       */
     };
 
 /** Wrap an op's `applyOp` WGSL into a complete pass shader (vec4 uniform). */
@@ -1671,6 +1718,28 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
           });
           index = steps.length - 1;
         }
+      } else if (node.kind === LOCALTONE_KIND) {
+        // Local-adaptive tone node (docs/research/local-adaptive-tone.md,
+        // stage 1): identity at amount 0 OR shadows=highlights=0
+        // (isIdentityLocalTone) — same bit-exact pass-through invariant
+        // every other node kind upholds. Spatial class (Fast Local
+        // Laplacian pyramid) — no CPU mirror, see PlanStep's 'localtone'
+        // doc comment.
+        const params = node.localtone ?? defaultLocalToneParams();
+        if (isIdentityLocalTone(params)) {
+          index = src;
+        } else {
+          steps.push({
+            nodeId: id,
+            type: 'localtone',
+            src,
+            shadows: params.shadows,
+            highlights: params.highlights,
+            sigmaR: params.sigmaR,
+            amount: params.amount,
+          });
+          index = steps.length - 1;
+        }
       } else if (node.kind === 'whitebalance') {
         // the atomic WB shares the per-image Kelvin/Tint model — the uniform
         // carries the computed relative gains, and as-shot values skip
@@ -1774,6 +1843,11 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
       // Real CPU mirror (unlike 'image'/'external'/'denoise' above) — see
       // PlanStep's 'lut3d' doc comment.
       outputs.push(step.cpu(at(step.src)));
+    } else if (step.type === 'localtone') {
+      // No CPU mirror — a Fast Local Laplacian pyramid coefficient depends
+      // on the WHOLE image (spatial class, same as 'image'/'external'/
+      // 'denoise' above) — see PlanStep's 'localtone' doc comment.
+      throw new Error(`step ${step.nodeId} has no CPU reference`);
     } else {
       const a = at(step.srcA);
       const b = at(step.srcB);
@@ -1804,6 +1878,7 @@ function stepHasCpuMirror(s: PlanStep): boolean {
   if (s.type === 'external') return false; // no CPU mirror — see PlanStep's doc comment
   if (s.type === 'denoise') return false; // no CPU mirror — see PlanStep's doc comment
   if (s.type === 'lut3d') return true; // real CPU mirror — see PlanStep's 'lut3d' doc comment
+  if (s.type === 'localtone') return false; // no CPU mirror — see PlanStep's doc comment
   return true; // blend (always has a CPU-evaluable inline mix)
 }
 
@@ -1856,7 +1931,7 @@ export function stripNoCpuMirrorSteps(plan: RenderPlan): RenderPlan {
   plan.steps.forEach((step, i) => {
     if (!stepHasCpuMirror(step)) {
       resolvedAncestor[i] =
-        step.type === 'passes' || step.type === 'external' || step.type === 'denoise'
+        step.type === 'passes' || step.type === 'external' || step.type === 'denoise' || step.type === 'localtone'
           ? resolveOld(step.src)
           : -1; // 'image' — zero-input source, no upstream to bypass to
       return;

@@ -9,6 +9,7 @@ import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { LUT_KIND } from '../engine/graph/lutNode';
+import { LOCALTONE_KIND } from '../engine/graph/localToneNode';
 import { PresetsMenu } from './PresetsMenu';
 import { SharedLookMenu } from './SharedLookMenu';
 
@@ -40,6 +41,7 @@ function AddNodeMenu() {
     EXTERNAL_KIND,
     DENOISE_KIND,
     LUT_KIND,
+    LOCALTONE_KIND,
     'output',
     ...(Object.keys(OPS) as AddableKind[]),
   ];

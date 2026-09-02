@@ -24,6 +24,7 @@ import { IMAGE_KIND } from '../engine/graph/imageNode';
 import { EXTERNAL_KIND } from '../engine/graph/externalNode';
 import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { LUT_KIND } from '../engine/graph/lutNode';
+import { LOCALTONE_KIND } from '../engine/graph/localToneNode';
 import { computeAutoLayout, type LayoutEdgeInput, type LayoutNodeInput } from './nodeAutoLayout';
 
 /** A node's own data, as `buildNodes` below packs it — thumbUrl/inspecting are per-node-preview pack additions, `missing` is the image node feature's own, `badge`/`badgeTitle` is the external-tool hook node's (needs-confirm/pending/error), `disabled` is the node bypass feature's, `linkLabel` is a linked Develop node's own (docs/brief-bank/linked-looks-stage-b.md semantic 8). */
@@ -278,6 +279,7 @@ function buildNodes(
         n.kind === EXTERNAL_KIND ||
         n.kind === DENOISE_KIND ||
         n.kind === LUT_KIND ||
+        n.kind === LOCALTONE_KIND ||
         (n.kind === 'output' && outputCount > 1),
     };
   }) as Node[];

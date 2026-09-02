@@ -81,6 +81,7 @@ import { confirmAndRetry, pendingExternalRequest } from '../engine/graph/externa
 import { defaultDenoiseParams, DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { retryPendingDenoise } from '../engine/graph/denoiseNodeRunner';
 import { defaultLutParams, LUT_KIND } from '../engine/graph/lutNode';
+import { defaultLocalToneParams, LOCALTONE_KIND, type LocalToneParams } from '../engine/graph/localToneNode';
 import { clearLutSourceCache } from '../engine/graph/lutSource';
 import { DENOISE_MODEL_SHA256 } from '../../../shared/denoiseModel';
 import { sha256Hex, type HistogramData, type ScopeSamples } from '../engine/gpu/graphRenderer';
@@ -1537,6 +1538,9 @@ interface AppState {
   bumpLutNodeRev(): void;
   /** "+ LUT…" inspector control: opens the native .cube picker and, on a real pick, builds a fresh LUT node wired into the active output's chain (spliced in like external/denoise — NOT the disconnected-source treatment IMAGE_KIND gets, since a LUT is a chain transform, not a composite source) — one undo entry. No-op (no node created) if the dialog is canceled. */
   addLutNodeFromDialog(): Promise<void>;
+  // --- Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1) --
+  /** Merge a partial params patch into a localtone node's params (Inspector's sliders); `coalesceKey` null = its own undo entry, same convention as setDenoiseStrength. Unspecified fields keep their current value — each slider passes only its own field. */
+  setLocalToneParams(nodeId: string, patch: Partial<LocalToneParams>, coalesceKey: string | null): void;
   /** Validate `src` for a custom node; on success apply it (one undo step). */
   applyShaderSource(nodeId: string, src: string): Promise<void>;
   /** Replace one tone-curve channel; `session` coalesces a drag into 1 undo. */
@@ -5066,6 +5070,13 @@ export const useAppStore = create<AppState>((set, get) => {
         // "+ LUT…" control's addLutNodeFromDialog, which skips this path
         // entirely and sets `lut.path` directly from the dialog result).
         node = { id, kind, position: { ...out.position }, lut: defaultLutParams() };
+      } else if (kind === LOCALTONE_KIND) {
+        // Local-adaptive tone node (docs/research/local-adaptive-tone.md,
+        // stage 1): spliced into the chain like every other 1-in-1-out kind
+        // above. Default params (shadows=highlights=0) are identity
+        // (isIdentityLocalTone), so adding one never changes the render
+        // until the user raises a slider.
+        node = { id, kind, position: { ...out.position }, localtone: defaultLocalToneParams() };
       } else {
         // fresh WB atomics start at the image's as-shot values (= identity)
         const params =
@@ -5903,6 +5914,23 @@ export const useAppStore = create<AppState>((set, get) => {
         graphDirty: true,
         selectedNodeId: id,
         lutNodeMissing: { ...s.lutNodeMissing, [id]: false },
+      };
+    });
+  },
+
+  // --- Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1) --
+  setLocalToneParams(nodeId, patch, coalesceKey) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== LOCALTONE_KIND) return {};
+      const current = node.localtone ?? defaultLocalToneParams();
+      return {
+        ...pushHistory(s, coalesceKey, { label: 'Adjust local tone' }),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? { ...n, localtone: { ...current, ...patch } } : n)),
+        },
+        graphDirty: true,
       };
     });
   },

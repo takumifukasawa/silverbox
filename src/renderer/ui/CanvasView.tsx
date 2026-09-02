@@ -66,6 +66,7 @@ import { DENOISE_KIND } from '../engine/graph/denoiseNode';
 import { handleExternalRunRequest } from '../engine/graph/externalNodeRunner';
 import { handleDenoiseRunRequest } from '../engine/graph/denoiseNodeRunner';
 import { LUT_KIND } from '../engine/graph/lutNode';
+import { defaultLocalToneParams, LOCALTONE_KIND } from '../engine/graph/localToneNode';
 import { lutSourceDecodeCount, lutTableCache, syncLutSources } from '../engine/graph/lutSource';
 import { SpotOverlay } from './SpotOverlay';
 import { SpotDrawOverlay } from './SpotDrawOverlay';
@@ -361,6 +362,10 @@ declare global {
       setLutInputSpace(nodeId: string, inputSpace: 'srgb' | 'rec709'): void;
       /** Verify-only load-cache check: how many times lutSource.ts has actually attempted a parse (cache misses only) — see its own doc comment. */
       lutSourceDecodeCount(): number;
+      /** Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'localtone'. */
+      localToneNodeState(nodeId?: string): { shadows: number; highlights: number; clarity: number; sigmaR: number; amount: number } | null;
+      /** Verify-only: merge a partial params patch into a localtone node — one undo entry (bypasses the Inspector's sliders). */
+      setLocalToneParams(nodeId: string, patch: Partial<{ shadows: number; highlights: number; clarity: number; sigmaR: number; amount: number }>): void;
       /** External-tool hook node (task #41): `nodeId` defaults to the currently selected node. Null when that node isn't kind 'external'. */
       externalNodeState(
         nodeId?: string
@@ -1913,6 +1918,18 @@ export function CanvasView() {
       /** Verify-only load-cache check: bumped once per REAL parse attempt (cache miss) — see lutSource.ts. */
       lutSourceDecodeCount() {
         return lutSourceDecodeCount();
+      },
+      /** Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1): full params for `nodeId` (defaults to the current selection); null when it isn't a localtone node. */
+      localToneNodeState(nodeId) {
+        const s = useAppStore.getState();
+        const id = nodeId ?? s.selectedNodeId;
+        const node = s.graph.nodes.find((n) => n.id === id);
+        if (node?.kind !== LOCALTONE_KIND) return null;
+        return node.localtone ?? defaultLocalToneParams();
+      },
+      /** Verify-only: merge a partial params patch into a localtone node without driving the Inspector's sliders. */
+      setLocalToneParams(nodeId, patch) {
+        useAppStore.getState().setLocalToneParams(nodeId, patch, null);
       },
       /** External-tool hook node (task #41): command/encoded + needs-confirm/error/running badge state for `nodeId` (defaults to the current selection); null when it isn't an external node. */
       externalNodeState(nodeId) {
