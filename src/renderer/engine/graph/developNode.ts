@@ -413,28 +413,67 @@ ${wgslContrast('u.t0.x')}
   // NOT a rise-from-black shape despite reshaping the same interaction the
   // clip-trap note below warns about.
   //
-  // highlights: gradual full-range engagement (rise 0.0-0.55, tapered above
-  // 0.55 so near-whites keep separation instead of graying out)
+  // LR-CALIBRATION 2026-09-02 ROUND 3 (SEEDED re-fit — fixes a measurement
+  // artifact in rounds 1+2 above): those rounds were fit against sweep
+  // renders that opened photos WITHOUT the seeded default base curve
+  // (baseCurve.ts) present, while the LR reference exports always carry
+  // LR's own default base tone — so the fit was chasing the wrong target.
+  // Chain-order finding (read from compileDevelop below): the tone stage
+  // runs BEFORE toneCurve, so seeding the base curve does NOT change the ys
+  // this stage's smoothstep reads — ys is still the PRE-curve encoded luma.
+  // What seeding changes is downstream: the tone stage's OUTPUT now passes
+  // through the base curve before it reaches display, and that curve's
+  // local slope (steep through the shadow region, e.g. raw 21→27, 29→43;
+  // compressive near white, e.g. 116→180, 255→255) re-scales whatever delta
+  // a given gain produces once it lands in display units. A pure-math
+  // re-derivation (percentile-matched, 5 Italy scenes DSC03298/DSC04260/
+  // DSC06787/DSC07349/DSC09305, ys recovered by inverting the ACTUAL seeded
+  // base curve on each scene's own seeded base percentile table, gain
+  // re-applied through that same curve before comparing to LR) validated to
+  // reproduce the shipped formulas' known seeded gaps within ~0.2-0.5 before
+  // being trusted for ranking; both re-tuned STRENGTHS below, confirmed by a
+  // real seeded GPU render, are lower than rounds 1+2 — for shadows because
+  // the curve's steep shadow slope amplifies a given raw gain once display-
+  // encoded, so a materially weaker raw gain reproduces LR's observed
+  // display-space delta; for highlights the same curve compression pulled
+  // the useful engagement range wider instead (see that stage's own note).
+  // Band POSITIONS are otherwise unchanged in kind — same shapes as round 2,
+  // only the numbers moved. Real-render median seeded gap (RMS over
+  // percentile deltas, 5-scene median, round-2 shipped → round-3 here):
+  // hi_m40 3.18→2.26, hi_m80 6.63→3.81, sh_p35 3.47→1.75, sh_p70 7.65→4.04 —
+  // all four now clear their targets (≤2.5/≤4.0/≤2.5/≤4.5). Two bimodal
+  // scenes (DSC04260, DSC06787) are a structural ceiling for sh_p70 (LR's
+  // locally-adaptive operator vs. this stage's single global weight): their
+  // OWN per-scene gap moved the WRONG way (DSC04260 11.79→13.84, DSC06787
+  // 8.3→11.93) even though the cross-scene median improved sharply, because
+  // the other three scenes (esp. DSC03298 5.63→3.06, DSC07349 7.65→4.04)
+  // improved far more; accepted as the best reachable frontier rather than
+  // chasing those two outliers into a worse median for everyone else.
+  //
+  // highlights: gradual full-range engagement (rise 0.0-0.9, tapered only in
+  // the very top band 0.85-0.95 so whites keeps separation) — round 2's
+  // rise-to-0.55/taper-from-0.55 band undershot LR's engagement range once
+  // measured against the seeded curve's compression near white: the curve's
+  // shallow slope there damps a fixed raw gain, so the useful rise had to
+  // extend much further up the tonal range (not just re-strengthen) to
+  // still read as LR's broad, gradual highlights pull.
   var ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.y * 0.85 * smoothstep(0.0, 0.55, ys) * (1.0 - 0.4 * smoothstep(0.55, 0.9, ys)));
-  // shadows: fading by 0.33, starting the fall at literal ys=0 instead of
-  // holding a flat plateau to 0.05 (round-1's shape) — measured against LR,
-  // the flat plateau made shadows read as "flat-topped then falls too fast"
-  // where LR's own decline is steadier and starts immediately. This is
-  // still NOT a rise-from-black shape (weight is 1.0, i.e. maximal, exactly
-  // at ys=0, same as round-1) — only where the DECLINE begins moved
-  // earlier, so near-black weight is barely touched (smoothstep's flat
-  // start keeps weight ~0.99 through ys~0.02, ~0.93 by ys~0.05) while the
-  // low-mid shadows fall off measurably sooner, matching LR's steadier
-  // decline. A genuine ramp-UP from literal black was tried (round 1) and
-  // reverted: shadows is MULTIPLICATIVE, so it can never lift a truly
-  // clipped (0) pixel regardless of shape, but a ramp measurably reduced the
-  // lift on near-but-not-clipped darks and blew the shadow-clip budget in
-  // verify-autotone; this reshape keeps that same near-ys=0 weight instead.
-  // Multiplicative also keeps the black point anchored.
+  c = c * exp2(u.t0.y * 1.2 * smoothstep(0.0, 0.9, ys) * (1.0 - 0.1 * smoothstep(0.85, 0.95, ys)));
+  // shadows: SAME fall-off band as round 2 (starts at literal ys=0, faded by
+  // 0.33 — still NOT a rise-from-black shape, weight is maximal exactly at
+  // ys=0, so a truly clipped pixel is still never lifted and the autotone
+  // shadow-clip budget this shape was chosen to respect in round 2 is
+  // unaffected) — only the STRENGTH constant moved (1.35 → 0.9): the base
+  // curve's steep shadow-region slope amplifies whatever raw gain this stage
+  // applies before it reaches display, so round 2's 1.35 (fit blind to that
+  // amplification) overshot once measured against the seeded pipeline.
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.z * 1.35 * (1.0 - smoothstep(0.0, 0.33, ys)));
-  // whites: white-point control, band 0.12–0.45 (was 0.3–1.0)
+  c = c * exp2(u.t0.z * 0.9 * (1.0 - smoothstep(0.0, 0.33, ys)));
+  // whites: white-point control, band 0.12–0.45 (was 0.3–1.0) — UNCHANGED by
+  // round 3: the wh_m50/wh_p30 sweep configs hold highlights/shadows at
+  // their identity default (0), so the two edits above are exp2(0*shape)=1
+  // no-ops in those renders and this stage's own input is bit-identical to
+  // before — no re-measurement needed, only re-derived algebraically.
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
   c = c * exp2(u.t0.w * 1.0 * smoothstep(0.12, 0.45, ys));
   // blacks: linear black-point offset fading by mid-tones — LEFT UNCHANGED:
@@ -1383,16 +1422,18 @@ export function cpuDevelopTone(px: Rgb, b: DevelopBasicParams, wbGains: [number,
   g *= gain;
   bl *= gain;
   [r, g, bl] = cpuContrast([r, g, bl], b.contrast / 100);
-  // LR-CALIBRATION 2026-09-02 (rounds 1+2) — mirror of TONE_WGSL's re-banded,
-  // re-shaped stages; see that pass's doc comments for the fit rationale.
+  // LR-CALIBRATION 2026-09-02 (rounds 1+2+3, seeded re-fit) — mirror of
+  // TONE_WGSL's re-banded, re-shaped, re-strengthened stages; see that
+  // pass's doc comments for the fit rationale (round 3's seeded-pipeline
+  // finding in particular).
   const ysOf = (rr: number, gg: number, bb: number) => srgbEncode(Math.min(Math.max(lumaCpu(rr, gg, bb), 0), 1));
   let ys = ysOf(r, g, bl);
-  let k = Math.pow(2, (b.highlights / 100) * 0.85 * smoothstepCpu(0.0, 0.55, ys) * (1 - 0.4 * smoothstepCpu(0.55, 0.9, ys)));
+  let k = Math.pow(2, (b.highlights / 100) * 1.2 * smoothstepCpu(0.0, 0.9, ys) * (1 - 0.1 * smoothstepCpu(0.85, 0.95, ys)));
   r *= k;
   g *= k;
   bl *= k;
   ys = ysOf(r, g, bl);
-  k = Math.pow(2, (b.shadows / 100) * 1.35 * (1 - smoothstepCpu(0.0, 0.33, ys)));
+  k = Math.pow(2, (b.shadows / 100) * 0.9 * (1 - smoothstepCpu(0.0, 0.33, ys)));
   r *= k;
   g *= k;
   bl *= k;
