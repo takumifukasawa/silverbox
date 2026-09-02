@@ -396,20 +396,44 @@ ${wgslContrast('u.t0.x')}
   // shadows, full-engagement magnitude for highlights/whites). Blacks is
   // UNCHANGED — see its own comment below.
   //
-  // highlights: band 0.15–0.42 (was 0.35–0.9), tapered above 0.40 so
-  // near-whites keep separation instead of graying out
+  // LR-CALIBRATION 2026-09-02 ROUND 2 (RESPONSE-CURVE SHAPE fit, continuing
+  // the above band recalibration once its own constants hit a local
+  // optimum): the round-1 bands got the ENGAGEMENT RANGE right but not the
+  // engagement SHAPE — measured against LR's percentile-delta curves (5
+  // scenes, display-code delta over each app's own default at matched
+  // percentile rank), highlights engages much earlier and more gradually
+  // than a hard 0.15-start threshold (LR is already pulling down by
+  // display-percentile 30-50, well before this stage's old 0.15 floor), and
+  // shadows' fall-off starting at 0.05 (a flat plateau below that) reads as
+  // "flat-topped then falls too fast" against LR's steadier decline. Both
+  // reshaped below: highlights' rise now starts at literal ys=0 (gradual
+  // full-range ramp, tapered near the very top so whites keep separation);
+  // shadows' fall now also starts at literal ys=0 instead of holding flat
+  // through a 0.05 plateau — see that stage's own comment for why this is
+  // NOT a rise-from-black shape despite reshaping the same interaction the
+  // clip-trap note below warns about.
+  //
+  // highlights: gradual full-range engagement (rise 0.0-0.55, tapered above
+  // 0.55 so near-whites keep separation instead of graying out)
   var ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.y * 1.0 * smoothstep(0.15, 0.42, ys) * (1.0 - 0.25 * smoothstep(0.4, 0.55, ys)));
-  // shadows: strong near black, fading by 0.32 (was 0.75) so the lift stays
-  // in true shadows instead of reaching upper-mid tones. A ramp-UP near
-  // literal black was tried and reverted: shadows is MULTIPLICATIVE, so it
-  // can never lift a truly clipped (0) pixel regardless of shape, but a ramp
-  // still measurably reduced the lift on near-but-not-clipped darks and
-  // blew the shadow-clip budget in verify-autotone; flat-from-black keeps
-  // that anti-clip behavior. Multiplicative also keeps the black point
-  // anchored.
+  c = c * exp2(u.t0.y * 0.85 * smoothstep(0.0, 0.55, ys) * (1.0 - 0.4 * smoothstep(0.55, 0.9, ys)));
+  // shadows: fading by 0.33, starting the fall at literal ys=0 instead of
+  // holding a flat plateau to 0.05 (round-1's shape) — measured against LR,
+  // the flat plateau made shadows read as "flat-topped then falls too fast"
+  // where LR's own decline is steadier and starts immediately. This is
+  // still NOT a rise-from-black shape (weight is 1.0, i.e. maximal, exactly
+  // at ys=0, same as round-1) — only where the DECLINE begins moved
+  // earlier, so near-black weight is barely touched (smoothstep's flat
+  // start keeps weight ~0.99 through ys~0.02, ~0.93 by ys~0.05) while the
+  // low-mid shadows fall off measurably sooner, matching LR's steadier
+  // decline. A genuine ramp-UP from literal black was tried (round 1) and
+  // reverted: shadows is MULTIPLICATIVE, so it can never lift a truly
+  // clipped (0) pixel regardless of shape, but a ramp measurably reduced the
+  // lift on near-but-not-clipped darks and blew the shadow-clip budget in
+  // verify-autotone; this reshape keeps that same near-ys=0 weight instead.
+  // Multiplicative also keeps the black point anchored.
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
-  c = c * exp2(u.t0.z * 1.4 * (1.0 - smoothstep(0.05, 0.32, ys)));
+  c = c * exp2(u.t0.z * 1.35 * (1.0 - smoothstep(0.0, 0.33, ys)));
   // whites: white-point control, band 0.12–0.45 (was 0.3–1.0)
   ys = srgbEncode1(clamp(luma(c), 0.0, 1.0));
   c = c * exp2(u.t0.w * 1.0 * smoothstep(0.12, 0.45, ys));
@@ -1359,16 +1383,16 @@ export function cpuDevelopTone(px: Rgb, b: DevelopBasicParams, wbGains: [number,
   g *= gain;
   bl *= gain;
   [r, g, bl] = cpuContrast([r, g, bl], b.contrast / 100);
-  // LR-CALIBRATION 2026-09-02 — mirror of TONE_WGSL's re-banded stages; see
-  // that pass's doc comment for the fit rationale.
+  // LR-CALIBRATION 2026-09-02 (rounds 1+2) — mirror of TONE_WGSL's re-banded,
+  // re-shaped stages; see that pass's doc comments for the fit rationale.
   const ysOf = (rr: number, gg: number, bb: number) => srgbEncode(Math.min(Math.max(lumaCpu(rr, gg, bb), 0), 1));
   let ys = ysOf(r, g, bl);
-  let k = Math.pow(2, (b.highlights / 100) * 1.0 * smoothstepCpu(0.15, 0.42, ys) * (1 - 0.25 * smoothstepCpu(0.4, 0.55, ys)));
+  let k = Math.pow(2, (b.highlights / 100) * 0.85 * smoothstepCpu(0.0, 0.55, ys) * (1 - 0.4 * smoothstepCpu(0.55, 0.9, ys)));
   r *= k;
   g *= k;
   bl *= k;
   ys = ysOf(r, g, bl);
-  k = Math.pow(2, (b.shadows / 100) * 1.4 * (1 - smoothstepCpu(0.05, 0.32, ys)));
+  k = Math.pow(2, (b.shadows / 100) * 1.35 * (1 - smoothstepCpu(0.0, 0.33, ys)));
   r *= k;
   g *= k;
   bl *= k;
