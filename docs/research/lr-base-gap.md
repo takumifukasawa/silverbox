@@ -1168,3 +1168,232 @@ construction; not re-run, per the brief (no fix ⇒ nothing to verify against).
    root cause resolved at the decoder level, or (b) a decision to treat
    DSC07349 as a documented, un-fixed-this-round outlier and refit
    brightness on the other 4 scenes only.
+
+## Stage base-7: decode-level diagnosis of DSC07349's divergence —
+## mechanism identified (black-level handling), confirmed NOT fixable via
+## any libraw-wasm configuration lever; STOPPED per brief, no fix landed
+
+Trigger: base-6 localized the bug to "somewhere in libraw-wasm's own
+demosaic/black-level/color-conversion path" but left it unverified,
+naming per-file black/white-level handling and highlight-clip handling as
+the two leading unverified suspects. This pass instruments both directly.
+No repo/engine changes were made (`git status` clean throughout); all
+scripts, JSON and the mask derivation live in this session's own
+scratchpad (`base7-diag/`), outside the repo, matching precedent. HEAD
+stayed at `f168a7f` (branch `wip/localtone-stage1`) throughout.
+
+### 1. Per-scene libraw internals dump — every exposed field is IDENTICAL
+### across the three same-WB-preset scenes; two fields the brief wanted
+### (`cblack[4]`, `linear_max`) are not exposed by this libraw-wasm build
+
+Dumped `metadata(true).color_data` for all 5 scenes via libraw-wasm
+directly (Node + Playwright harness, same server+browser pattern as
+`scripts/spike-cst.mjs`, using the exact `OPEN_SETTINGS` from
+`librawDecoder.ts`):
+
+| scene | dims (w×h) | cam_mul | black | maximum | data_maximum | fmaximum | fnorm | raw_bps | ISO |
+|---|---|---|---|---|---|---|---|---|---|
+| DSC03298 | 4688×7028 | [1972,1024,1861,1024] | 512 | 16383 | 0 | 0 | 0 | 14 | 320 |
+| DSC04260 | 4688×7028 | [2291,1024,1573,1024] | 512 | 16383 | 0 | 0 | 0 | 14 | 500 |
+| DSC06787 | 4688×7028 | [2402,1024,1681,1024] | 512 | 16383 | 0 | 0 | 0 | 14 | 200 |
+| DSC07349 | 7028×4688 | [2402,1024,1681,1024] | 512 | 16383 | 0 | 0 | 0 | 14 | 200 |
+| DSC09305 | 4688×7028 | [2402,1024,1681,1024] | 512 | 16383 | 0 | 0 | 0 | 14 | 1000 |
+
+`pre_mul`, `cam_xyz`, and `rgb_cam` are also bit-identical across all 5
+scenes (camera-model constants, as expected since `useCameraMatrix` is
+left at its library default). `data_maximum`/`fmaximum`/`fnorm` read `0`
+for every scene through this API — this build's `metadata()` snapshot is
+taken before/without the full `dcraw_process()` highlight-scan step that
+would populate them, so they carry no signal either way.
+
+Cross-checked against the ARW files directly (exiftool, bypassing libraw
+entirely): `BlackLevel` = `512 512 512 512` and `WhiteLevel` = `15360
+15360 15360` on **all 5 scenes, DSC07349 included** — the Sony-embedded
+per-channel black/white tags are themselves scene-independent constants
+for this camera body, not per-shot values. **This directly refutes the
+"per-file black/white-level metadata" suspect as literally nothing to
+read**: there is no per-shot metadata divergence anywhere in the exposed
+surface (libraw's own `color_data` or the raw EXIF tags) that
+differentiates DSC07349 from its two bit-identical-`cam_mul` siblings
+(DSC06787/DSC09305).
+
+**Tooling limitation worth flagging explicitly**: the brief asked for
+`cblack[4]` (libraw's internal per-channel black, typically derived from
+optical-black border/margin pixels rather than the metadata tag) and
+`linear_max`. Neither is exposed by this project's pinned `libraw-wasm@1.6.0`
+build — confirmed by grepping the compiled `.d.ts` (no such fields in
+`ColorData`) and `strings`-scanning `dist/libraw.wasm` directly for the
+literal field names: `data_maximum`/`fmaximum`/`fnorm` are present in the
+binary (matching the typed surface), `cblack`/`linear_max` are **absent**
+(only `userCblack`, an *input* setting, appears). So the one piece of data
+most likely to directly prove or disprove a per-channel black-level
+divergence cannot be read out of this build at all — the sensitivity test
+in §3 below is the closest available substitute.
+
+### 2. Clip census — REFUTES the highlight-clipping hypothesis outright
+
+Fraction of demosaiced 16-bit pixels at/near saturation (≥99% of 65535)
+per channel, same decode:
+
+| scene | R clip | G clip | B clip | any-channel clip |
+|---|---|---|---|---|
+| DSC03298 | 0.0007% | 0.0009% | 0.0010% | 0.0013% |
+| DSC04260 | 0.0123% | 0.0061% | 0.0032% | 0.0126% |
+| DSC06787 | 0.3027% | 0.3212% | 0.7080% | **0.7083%** |
+| DSC07349 | 0.0116% | 0.0051% | 0.0030% | **0.0116%** |
+| DSC09305 | 0.2701% | 0.2668% | 0.2565% | **0.2802%** |
+
+DSC07349 — the divergent scene — has the **lowest** any-channel clip
+fraction of the three same-WB-preset scenes, an order of magnitude below
+both "clean" siblings (61× below DSC06787, 24× below DSC09305). If
+clipped-pixel desaturation feeding into the neutral-mask/sky statistics
+were the mechanism, the clean scenes (far more clipped) should show the
+larger divergence, not the broken one. **Candidate refuted directly by
+measurement**, no lever test needed — consistent with base-6's own §1/§4
+finding that the neutral mask sits in the dark sea/horizon band, nowhere
+near the bright sun/sky where clipping actually occurs in this frame.
+
+### 3. Configuration-lever sweep — mechanism found (black-level handling),
+### but no scene-independent lever closes it without regressing a clean scene
+
+Method: decode DSC07349 with `OPEN_SETTINGS` plus one changed
+setting at a time, resample the 16-bit Rec.2020-linear output onto the
+same 231,033-px Lab C\*<6 near-neutral mask used by base-6 (rebuilt here
+from LR's own base JPEG, `lr-sweep-20260901/base/DSC07349.jpg` —
+reproduces base-6's stated 8.26% mask fraction and its §5 LR-target
+ratios (0.982/1.013) exactly, confirming the mask is faithfully
+reconstructed), convert Rec.2020-linear → sRGB-linear via the same 3×3
+matrix used in `scripts/spike-cst.mjs`, and report R/G, B/G against the
+LR target. (Absolute numbers here differ slightly from base-6's own
+Stage-A figures — 1.18/0.86 vs base-6's 1.395/0.736 — because this
+harness resamples via nearest-neighbor onto the mask grid without
+`librawDecoder.ts`'s camera-crop/cropbox pass; the harness is internally
+consistent for an A/B lever comparison, which is what it's used for.)
+
+| lever | R/G | B/G |
+|---|---|---|
+| **LR target** | **0.9820** | **1.0130** |
+| baseline (= `OPEN_SETTINGS`) | 1.1838 | 0.8597 |
+| `highlight=1` (blend) | 1.2431 | 0.8206 |
+| `highlight=9` (reconstruct) | 1.2412 | 0.8194 |
+| `adjustMaximumThr=0` | 1.1838 | 0.8597 |
+| `adjustMaximumThr=1` | 1.1838 | 0.8597 |
+| `useCameraMatrix=1` | 1.1838 | 0.8597 |
+| `useCameraMatrix=3` | 1.1838 | 0.8597 |
+| `userBlack=512` (explicit, == metadata) | 1.1838 | 0.8597 |
+| `userBlack=462` (−50) | 1.3002 | 0.9389 |
+| `userBlack=562` (+50) | 1.0751 | 0.7749 |
+| `userCblack` R+100 | 0.0833 | 0.1788 |
+| `userCblack` B+100 | 0.2565 | 0.0826 |
+| `fourColorRgb=true` | 1.1839 | 0.8597 |
+| `medPasses=3` | 1.1839 | 0.8598 |
+| `userQual=3` (AHD) | 1.1838 | 0.8597 |
+| `userQual=0` (linear) | 1.1840 | 0.8595 |
+| `noAutoScale=true` (negative control) | 0.2537 | 0.3120 |
+
+**Six levers are inert**: `highlight` mode moves the ratio the *wrong*
+direction (further from target); `adjustMaximumThr`, `useCameraMatrix`,
+`fourColorRgb`, `medPasses`, and `userQual` (demosaic algorithm choice)
+produce **zero measurable change** — bit-identical to baseline to 4
+decimal places. These six are cleanly ruled out as the mechanism.
+
+**`userBlack`/`userCblack` are the one lever family with real leverage** —
+which is itself informative: it confirms base-6's black-level-handling
+hypothesis is mechanically live (the ratio IS sensitive to how the black
+point is subtracted, exactly where a per-shot black-level drift would
+show up). But two things kill it as an actionable fix:
+
+1. **Wrong shape.** The needed correction is two-axis and
+   *oppositely signed* — R/G must come DOWN (1.18→0.98) while B/G must go
+   UP (0.86→1.01). A uniform scalar (`userBlack`) moves both R/G AND B/G
+   in the SAME direction (both fall as black increases: R/G 1.18→1.08→0.71→0.32,
+   B/G 0.86→0.77→0.48→0.22 at +50/+200/+400) — it can be tuned to hit
+   R/G≈0.98 around +85..+90, but at that same point B/G has moved to
+   roughly 0.70, i.e. **further from its 1.013 target than baseline**, not
+   closer. No scalar value closes both axes simultaneously. A
+   hand-picked asymmetric `userCblack` (R+100/B−100) was tried as the
+   directionally-motivated alternative and overshoots catastrophically
+   (R/G 0.06, B/G 0.31) — the lever is far too coarse/nonlinear near
+   this scene's low raw signal level to hand-tune usefully.
+
+2. **Disturbs an already-correct scene.** The SAME `userBlack=562` (+50)
+   delta was applied to DSC06787 and DSC09305 (near-neutral masks rebuilt
+   the same way from their own LR base JPEGs) to test the brief's
+   explicit acceptance bar ("must NOT disturb the clean scenes"):
+
+   | scene | lever | R/G | B/G | LR target |
+   |---|---|---|---|---|
+   | DSC06787 | baseline | 1.0157 | 1.0107 | 1.0168 / 1.0193 |
+   | DSC06787 | `userBlack=562` (+50) | **0.9594** | **0.9842** | 1.0168 / 1.0193 |
+   | DSC06787 | `userBlack=712` (+200) | 0.8361 | 0.9323 | 1.0168 / 1.0193 |
+   | DSC09305 | baseline | 1.0748 | 0.9320 | 1.0448 / 0.9689 |
+   | DSC09305 | `userBlack=562` (+50) | 0.9765 | **0.8768** | 1.0448 / 0.9689 |
+
+   DSC06787's baseline is already within ~1-2% of its own LR target on
+   both axes (i.e. genuinely clean, matching base-6's framing) — the same
+   +50 delta that partially helps DSC07349's R/G axis pushes DSC06787's
+   R/G from +0.1% error to **−5.6%** and its B/G from −0.8% to **−3.4%**,
+   a real, measurable regression on a scene that needs no fix. DSC09305
+   shows a mixed result (R/G improves, B/G worsens further, from −0.9%
+   error to −9.5%). **No single fixed, scene-independent `open()` setting
+   closes DSC07349's gap without regressing at least one axis of an
+   already-clean scene** — the brief's stop condition is met.
+
+### Conclusion
+
+The mechanism is now positively identified — black-level handling, not
+highlight/clip handling (§2 refutes that cleanly) and not any per-file
+metadata divergence (§1: every readable field, including exiftool's own
+raw tag dump, is bit-identical across the three same-WB-preset scenes).
+§3 shows the ratio IS mechanically sensitive to how the black point is
+subtracted, but the correction DSC07349 needs is inherently **per-shot
+and per-channel** (a shape no uniform, scene-independent `open()` setting
+can express), and the one field that could confirm or quantify that
+per-channel drift directly — `cblack[4]` — is not exposed anywhere in
+this project's pinned libraw-wasm build (§1's binary-string check).
+Sharper than base-6's "somewhere in libraw internals, unverified": this
+pass verifies the mechanism, verifies it is not a metadata or
+highlight-handling issue, and verifies no exposed configuration lever can
+express the required per-shot/per-channel shape — closing off the
+"maybe a lever exists we haven't tried" uncertainty base-6 left open.
+
+Per the brief's own acceptance clause: **no fix was attempted or landed**.
+The only ways forward from here are out of this pass's scope: (a) patch
+or fork libraw-wasm to expose `cblack[4]` (and ideally `linear_max`) so a
+real per-shot correction could at least be *diagnosed* precisely instead
+of inferred from ratio sensitivity, which is a build-toolchain change to
+a third-party wasm dependency, not a `librawDecoder.ts` configuration
+change; or (b) treat DSC07349 as a documented, structurally-out-of-reach
+outlier (as base-6 already recommended for the base-5 brightness refit)
+and exclude it from any multi-scene calibration work rather than chase a
+fix that this pass's evidence says does not exist at the configuration
+level.
+
+### Gates
+
+No repo files were changed this pass (`git status` clean at `f168a7f`
+throughout) — typecheck/vitest/verify chain unaffected by construction,
+not re-run per the brief (no fix ⇒ nothing to verify against).
+
+### Honest residuals / next steps for whoever picks this up
+
+1. The `userBlack=562`/`+712` sweep's monotonic, same-direction R/G AND
+   B/G decline as black increases (§3) has a plausible mechanical
+   explanation worth recording: `OPEN_SETTINGS` subtracts black BEFORE
+   the per-channel `cam_mul` WB gain is applied, and DSC07349's `cam_mul`
+   is strongly unequal (R needs 2.35× G's gain, B needs 1.64×) — so an
+   error in the shared black point gets amplified unevenly across
+   channels post-WB. This is offered as an explanation for the *shape* of
+   the sensitivity, not a new lead; it doesn't change the conclusion that
+   no scalar lever closes both axes.
+2. §1's `cblack[4]`/`linear_max` gap is a genuine tooling limitation, not
+   a scope decision — if a future pass has appetite for patching/forking
+   libraw-wasm (or shelling out to a locally-installed `dcraw`/`libraw`
+   CLI with `-D`/verbose flags as a one-off diagnostic, entirely outside
+   the shipped app) to read the actual per-channel black libraw computed
+   for DSC07349 vs its siblings, that would either confirm this pass's
+   inferred mechanism precisely or redirect it.
+3. This diagnostic made no engine changes; the base-5/base-6 status quo
+   (DSC07349 remains a documented, unfixed color-divergence outlier) is
+   unchanged. Nothing here reopens or narrows any other open item in this
+   document.
