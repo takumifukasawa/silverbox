@@ -107,6 +107,22 @@ export type RenderWorkerCommand =
    */
   | { type: 'dcpLattice'; lattice: readonly number[] | null }
   /**
+   * "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-
+   * gap.md): the BAKED lattice for the local Adobe Standard DCP + ACR Look
+   * table + PV2012 curve — mirrors 'dcpLattice's own shape exactly (same
+   * main-thread-computes/worker-just-stores split, same all-zero fallback).
+   */
+  | { type: 'acrLookLattice'; lattice: readonly number[] | null }
+  /**
+   * WB color-matrix correction (stage base-2, fix ①, docs/research/lr-base-
+   * gap.md): a flat row-major 3×3 (dcp/wbCorrection.ts's `flattenMat3`), or
+   * `null` (no local Adobe Standard DCP for this camera, or nothing to
+   * correct) — computed main-thread-side (file IO) and threaded into every
+   * buildPlan() ctx as `wbColorMatrixCorrection`, mirroring `dcpLattice`'s
+   * "set on change, read on every render" shape.
+   */
+  | { type: 'wbColorMatrixCorrection'; matrix: readonly number[] | null }
+  /**
    * LUT import node (docs/brief-bank/lut-import-node.md): a parsed .cube
    * table (or `null` — load failed/malformed) for one referenced file,
    * computed main-thread-side (lutSource.ts, where file IO/parsing can

@@ -56,6 +56,18 @@ export function mirrorDcpLattice(lattice: readonly number[] | null): void {
   getWorker().postMessage(msg);
 }
 
+/** "Adobe Color (local)" mode (stage base-2, fix ②) — mirrors `mirrorDcpLattice`'s shape exactly; see appStore.ts's `refreshAcrLook`. */
+export function mirrorAcrLookLattice(lattice: readonly number[] | null): void {
+  const msg: RenderWorkerCommand = { type: 'acrLookLattice', lattice };
+  getWorker().postMessage(msg);
+}
+
+/** WB color-matrix correction (stage base-2, fix ①) — mirrors `mirrorDcpLattice`'s shape exactly; see appStore.ts's `refreshWbColorMatrixCorrection`. */
+export function mirrorWbColorMatrixCorrection(matrix: readonly number[] | null): void {
+  const msg: RenderWorkerCommand = { type: 'wbColorMatrixCorrection', matrix };
+  getWorker().postMessage(msg);
+}
+
 let nextReqId = 0;
 const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
 /** The one live client, so the shared worker's onmessage router can reach it for out-of-band messages (initError). */

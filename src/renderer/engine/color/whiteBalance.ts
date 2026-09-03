@@ -90,7 +90,7 @@ function cmfZ(l: number): number {
 /** Second radiation constant c2 = hc/k in nm·K. */
 const C2 = 1.4388e7;
 
-interface Uv {
+export interface Uv {
   u: number;
   v: number;
 }
@@ -110,7 +110,7 @@ export function planckUv(T: number): Uv {
   return xyzToUv([X, Y, Z]);
 }
 
-function xyzToUv([X, Y, Z]: [number, number, number]): Uv {
+export function xyzToUv([X, Y, Z]: [number, number, number]): Uv {
   const d = X + 15 * Y + 3 * Z;
   return { u: (4 * X) / d, v: (6 * Y) / d };
 }
@@ -149,10 +149,17 @@ export function mccamyCct(x: number, y: number): number {
 
 // --- 3x3 matrix helpers --------------------------------------------------------
 
-type Mat3 = number[][];
-type Vec3 = [number, number, number];
+export type Mat3 = number[][];
+export type Vec3 = [number, number, number];
 
-function mulMat3Vec3(m: Mat3, v: Vec3): Vec3 {
+/**
+ * Exported (stage base-2, fix ①): `dcp/wbCorrection.ts` reuses this exact
+ * matrix-vector multiply, plus `invertMat3`/`xyzToUv`/`estimateFromUv` below,
+ * to run the SAME camera-neutral → CCT/tint inverse model this file already
+ * implements, just fed the mired-interpolated ColorMatrix instead of the
+ * single `camXyz` — one implementation, not a second hand-copy.
+ */
+export function mulMat3Vec3(m: Mat3, v: Vec3): Vec3 {
   return [
     m[0]![0]! * v[0] + m[0]![1]! * v[1] + m[0]![2]! * v[2],
     m[1]![0]! * v[0] + m[1]![1]! * v[1] + m[1]![2]! * v[2],
@@ -174,7 +181,7 @@ function mulMat3Mat3(a: readonly (readonly number[])[], b: readonly (readonly nu
   return out;
 }
 
-function invertMat3(m: Mat3): Mat3 | null {
+export function invertMat3(m: Mat3): Mat3 | null {
   const [a, b, c] = m[0] as [number, number, number];
   const [d, e, f] = m[1] as [number, number, number];
   const [g, h, i] = m[2] as [number, number, number];
@@ -238,7 +245,7 @@ function tempTintToMul(temp: number, tint: number, camXyz: Mat3): Vec3 {
  * along the green normal, rounded to slider granularity (the doc stores
  * these rounded values and pass-skip compares against them exactly).
  */
-function estimateFromUv(uv: Uv): WbTempTint {
+export function estimateFromUv(uv: Uv): WbTempTint {
   const miredMin = 1e6 / WB_TEMP_RANGE.max;
   const miredMax = 1e6 / WB_TEMP_RANGE.min;
   const d2 = (mired: number): number => {

@@ -62,6 +62,10 @@ let currentImageDims: { width: number; height: number } | null = null;
 let currentCameraModel: string | null = null;
 /** DCP profile mode (docs/brief-bank/dcp-profile.md): the baked lattice for whichever DCP file is currently configured, mirrored here via the 'dcpLattice' command — see renderProtocol.ts's doc comment. */
 let currentDcpLattice: readonly number[] | null = null;
+/** "Adobe Color (local)" mode (stage base-2, fix ②): the baked lattice, mirrored here via the 'acrLookLattice' command — see renderProtocol.ts's doc comment. */
+let currentAcrLookLattice: readonly number[] | null = null;
+/** WB color-matrix correction (stage base-2, fix ①): mirrored here via the 'wbColorMatrixCorrection' command — see renderProtocol.ts's doc comment. */
+let currentWbColorMatrixCorrection: readonly number[] | null = null;
 /**
  * LUT import node (docs/brief-bank/lut-import-node.md): every 'lutTable'
  * command received so far, keyed by raw path — threaded into every
@@ -231,6 +235,8 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
           dcpLattice: currentDcpLattice,
+          acrLookLattice: currentAcrLookLattice,
+          wbColorMatrixCorrection: currentWbColorMatrixCorrection,
           lutTables: currentLutTables,
           allowExternal: req.allowExternal,
         });
@@ -253,6 +259,8 @@ async function handleRequest(req: RenderWorkerRequest): Promise<void> {
           srcHeight: req.image.height,
           cameraModel: req.image.capture?.cameraModel ?? null,
           dcpLattice: currentDcpLattice,
+          acrLookLattice: currentAcrLookLattice,
+          wbColorMatrixCorrection: currentWbColorMatrixCorrection,
           lutTables: currentLutTables,
           inspectNodeId: req.inspectNodeId,
         });
@@ -337,6 +345,14 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
       currentDcpLattice = msg.lattice;
       return;
     }
+    case 'acrLookLattice': {
+      currentAcrLookLattice = msg.lattice;
+      return;
+    }
+    case 'wbColorMatrixCorrection': {
+      currentWbColorMatrixCorrection = msg.matrix;
+      return;
+    }
     case 'lutTable': {
       // Cached here (not just applied) so a compare pane created LATER can
       // replay every LUT table loaded so far — mirrors `imageNodeCache`'s
@@ -402,6 +418,8 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
               dcpLattice: currentDcpLattice,
+              acrLookLattice: currentAcrLookLattice,
+              wbColorMatrixCorrection: currentWbColorMatrixCorrection,
               lutTables: currentLutTables,
               inspectNodeId: msg.inspectNodeId ?? undefined,
             },
@@ -553,6 +571,8 @@ self.onmessage = (ev: MessageEvent<RenderWorkerCommand | RenderWorkerRequest>) =
               srcHeight: currentImageDims?.height,
               cameraModel: currentCameraModel,
               dcpLattice: currentDcpLattice,
+              acrLookLattice: currentAcrLookLattice,
+              wbColorMatrixCorrection: currentWbColorMatrixCorrection,
               lutTables: currentLutTables,
             },
             msg.showBefore

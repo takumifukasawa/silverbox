@@ -7,6 +7,7 @@
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
 import { compileDevelop, defaultDevelopParams, profileSource, type DevelopParams, type PassSpec } from './developNode';
 import { profileForModel, PROFILE_LATTICE_N } from '../color/profileFit';
+import { bakeWbCorrectedLattice } from '../color/wbCorrectedProfile';
 import {
   createDefaultCustomShaderParams,
   getCustomShaderArtifact,
@@ -1184,10 +1185,11 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
     if (!sanitized) throw new Error(`develop toneCurve.${ch} is invalid`);
     base.toneCurve[ch] = sanitized;
   }
-  // profile.source is a closed enum ('builtin' | 'dcp') — an unrecognized
-  // string sanitizes quietly to 'builtin' rather than rejecting the doc
-  // (sidecar-spec.md rule 7), same posture as `rating`/`flag`.
-  if (base.profile.source !== 'dcp') base.profile.source = 'builtin';
+  // profile.source is a closed enum ('builtin' | 'dcp' | 'acrlook' — the
+  // latter added stage base-2, fix ②) — an unrecognized string sanitizes
+  // quietly to 'builtin' rather than rejecting the doc (sidecar-spec.md rule
+  // 7), same posture as `rating`/`flag`.
+  if (base.profile.source !== 'dcp' && base.profile.source !== 'acrlook') base.profile.source = 'builtin';
   return base;
 }
 
@@ -1390,6 +1392,27 @@ export interface CompileContext {
    */
   dcpLattice?: readonly number[] | null;
   /**
+   * "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-
+   * gap.md): the BAKED lattice for the local Adobe Standard DCP + ACR Look
+   * table + PV2012 curve (dcp/localAdobeProfile.ts's `bakeAcrLookLattice`) —
+   * resolved OUTSIDE buildPlan (file IO + base85/zlib decode) and threaded in
+   * here, the exact same shape `dcpLattice` uses. Falls back to the all-zero
+   * (identity) lattice when absent/not-yet-loaded, same safety contract.
+   */
+  acrLookLattice?: readonly number[] | null;
+  /**
+   * WB color-matrix correction (stage base-2, fix ①, docs/research/lr-base-
+   * gap.md): a flat row-major 3×3 (dcp/wbCorrection.ts's `flattenMat3`) that
+   * corrects the decoder's single-ColorMatrix conversion by reprojecting
+   * through the shot-CCT-mired-interpolated ColorMatrix1/2 of the photo's
+   * local Adobe Standard DCP — see wbCorrection.ts's doc comment for the
+   * full derivation and its documented exclusivity with 'dcp'/'acrlook'
+   * profile modes (only consulted in the 'builtin' arm below). `null`/absent
+   * = no correction available (no local DCP, or nothing to correct) — the
+   * pre-fix-① behavior exactly.
+   */
+  wbColorMatrixCorrection?: readonly number[] | null;
+  /**
    * LUT import node (docs/brief-bank/lut-import-node.md): parsed .cube
    * tables, keyed by the SAME raw (as-authored) `lut.path` string a 'lut'
    * node carries — resolved OUTSIDE buildPlan (file IO + parsing, see
@@ -1578,13 +1601,26 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
       } else if (node.kind === DEVELOP_KIND) {
         const params = node.develop ?? defaultDevelopParams();
         const wbGains = wb.gains(params.basic.temp, params.basic.tint);
-        // DCP mode (docs/brief-bank/dcp-profile.md): the baked DCP lattice
-        // shares the EXACT residual-lattice shape/trilinear code the builtin
-        // fitted profile uses (see compileDevelop/PROFILE_WGSL) — only WHICH
-        // array feeds it differs. `ctx.dcpLattice` absent/null (not loaded
-        // yet, load failed, or no dcpPath configured) falls back to an
-        // all-zero lattice: identity, never a crash or a stale render.
-        const lattice = profileSource(params.profile) === 'dcp' ? (ctx?.dcpLattice ?? ZERO_DCP_LATTICE) : profileForModel(ctx?.cameraModel);
+        // Profile source (docs/brief-bank/dcp-profile.md; 'acrlook' added
+        // stage base-2, fix ②): every source shares the EXACT residual-
+        // lattice shape/trilinear code the builtin fitted profile uses (see
+        // compileDevelop/PROFILE_WGSL) — only WHICH array feeds it differs.
+        // 'dcp'/'acrlook' fall back to an all-zero lattice when their bake
+        // hasn't landed yet (loading, failed, or — 'acrlook' — the local
+        // files are absent): identity, never a crash or a stale render.
+        // 'builtin' additionally composes fix ①'s WB color-matrix correction
+        // when one is available (see wbCorrection.ts's doc comment for why
+        // this composition is EXCLUSIVE to 'builtin' — 'dcp'/'acrlook'
+        // already do a full correct reconstruction of their own).
+        const source = profileSource(params.profile);
+        const lattice =
+          source === 'dcp'
+            ? (ctx?.dcpLattice ?? ZERO_DCP_LATTICE)
+            : source === 'acrlook'
+              ? (ctx?.acrLookLattice ?? ZERO_DCP_LATTICE)
+              : ctx?.wbColorMatrixCorrection
+                ? bakeWbCorrectedLattice(ctx?.cameraModel, profileForModel(ctx?.cameraModel), ctx.wbColorMatrixCorrection)
+                : profileForModel(ctx?.cameraModel);
         const compiled = compileDevelop(params, wbGains, renderScale, lattice);
         if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through

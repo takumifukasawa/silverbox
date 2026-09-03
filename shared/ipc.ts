@@ -547,6 +547,18 @@ export interface SilverboxApi {
    * migration's verify-suite lever): when set, it WINS over the
    * `quickProjectDir` setting as the quick-project directory, used EXACTLY
    * as given (no subdir) — null in normal use, where the setting applies.
+   * `acrLookAutoDefault` (SILVERBOX_TEST_ACR_DEFAULT, stage base-2,
+   * docs/research/lr-base-gap.md) re-enables AUTO-DISCOVERY of the local
+   * Adobe Camera Raw files (per-camera "Adobe Standard" DCP + the shared
+   * "Adobe Color.xmp" Look, used by both fix ①'s WB color-matrix correction
+   * and fix ②'s "Adobe Color (local)" default-mode seeding) INSIDE the
+   * suite — off for every other script. UNLIKE `lensProfileAutoDefault`/
+   * `baseCurveDefault`, this does NOT ride `forceDefaults`: those two seed
+   * from static, machine-independent tables, but this discovery reads REAL
+   * files on the local machine, and `forceDefaults` is exactly what
+   * verify:golden/develop's own headless CLI renders set — riding it would
+   * make those scripts' 'builtin'-mode goldens silently machine-dependent
+   * on any box that happens to have Adobe Camera Raw installed.
    */
   testFlags: {
     isTest: boolean;
@@ -554,6 +566,7 @@ export interface SilverboxApi {
     baseCurveDefault: boolean;
     forceDefaults: boolean;
     projectDirOverride: string | null;
+    acrLookAutoDefault: boolean;
   };
   /**
    * Subscribe to main's ONE-TIME `--render`/`--check` job push (headless CLI

@@ -271,7 +271,16 @@ function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: Profi
   const setDevelopProfileDcpPath = useAppStore((s) => s.setDevelopProfileDcpPath);
   const dcpProfileStatus = useAppStore((s) => s.dcpProfileStatus);
   const dcpProfileError = useAppStore((s) => s.dcpProfileError);
-  const source = profile.source === 'dcp' ? 'dcp' : 'builtin';
+  // "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-
+  // gap.md): runtime-discovered only (no manual file picker — the brief's
+  // own posture) — `acrLookAvailable` is re-probed on every image open (see
+  // appStore.ts's `refreshAcrLook`) and drives whether the option even
+  // appears, so there is never a dead selectable option pointing at files
+  // that aren't on this machine.
+  const acrLookAvailable = useAppStore((s) => s.acrLookAvailable);
+  const acrLookStatus = useAppStore((s) => s.acrLookStatus);
+  const acrLookError = useAppStore((s) => s.acrLookError);
+  const source = profile.source === 'dcp' ? 'dcp' : profile.source === 'acrlook' ? 'acrlook' : 'builtin';
   const chooseFile = async () => {
     const result = await window.silverbox.openDcpDialog();
     if (result.canceled) return;
@@ -285,10 +294,19 @@ function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: Profi
         <select
           data-testid="profile-source-select"
           value={source}
-          onChange={(ev) => setDevelopProfileSource(nodeId, ev.target.value === 'dcp' ? 'dcp' : 'builtin')}
+          onChange={(ev) => {
+            const v = ev.target.value;
+            setDevelopProfileSource(nodeId, v === 'dcp' ? 'dcp' : v === 'acrlook' ? 'acrlook' : 'builtin');
+          }}
         >
           <option value="builtin">Built-in</option>
           <option value="dcp">DCP file…</option>
+          {/* Hidden entirely (not just disabled) when the local files aren't
+              present, per the brief — never a dead option; if the CURRENT
+              doc already names 'acrlook' (e.g. a sidecar from another
+              machine) it's kept selectable so the user isn't silently
+              bounced to a different mode without an explanation. */}
+          {(acrLookAvailable || source === 'acrlook') && <option value="acrlook">Adobe Color (local)</option>}
         </select>
       </div>
       {source === 'dcp' && (
@@ -303,6 +321,16 @@ function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: Profi
           {dcpProfileStatus === 'error' && (
             <span className="dcp-profile-error" data-testid="dcp-profile-status" title={dcpProfileError ?? undefined}>
               {dcpProfileError ?? 'Failed to load'}
+            </span>
+          )}
+        </div>
+      )}
+      {source === 'acrlook' && (
+        <div className="dcp-profile-file-row">
+          {acrLookStatus === 'loading' && <span data-testid="acrlook-profile-status">Loading…</span>}
+          {acrLookStatus === 'error' && (
+            <span className="dcp-profile-error" data-testid="acrlook-profile-status" title={acrLookError ?? undefined}>
+              {acrLookError ?? 'Failed to load'}
             </span>
           )}
         </div>

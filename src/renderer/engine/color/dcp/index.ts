@@ -18,5 +18,15 @@ export {
   applyToneCurve,
   renderDcpPixel,
   bakeDcpLattice,
+  lerpMat3Flat,
 } from './pipeline';
+export { decodeAcrLookTable, decodeBase85, ACR_BASE85_ALPHABET, type AcrLookTable } from './bigTable';
+export {
+  adobeStandardDcpPath,
+  normalizeMakeForAdobePath,
+  ADOBE_COLOR_LOOK_XMP_PATH,
+  parseAcrLookXmp,
+  bakeAcrLookLattice,
+  type ParsedAcrLookXmp,
+} from './localAdobeProfile';
 export * from './matrices';

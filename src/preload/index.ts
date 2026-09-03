@@ -66,6 +66,7 @@ const api: SilverboxApi = {
     baseCurveDefault: process.env.SILVERBOX_TEST_BASE_CURVE_DEFAULT === '1',
     forceDefaults: process.env.SILVERBOX_CLI_RENDER === '1',
     projectDirOverride: process.env.SILVERBOX_TEST_PROJECT ?? null,
+    acrLookAutoDefault: process.env.SILVERBOX_TEST_ACR_DEFAULT === '1',
   },
   onCliRun: (callback) => {
     const listener = (_ev: IpcRendererEvent, job: CliJob) => callback(job);

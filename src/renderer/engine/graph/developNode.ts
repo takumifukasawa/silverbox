@@ -177,15 +177,31 @@ export interface EffectsParams {
  * locally-installed DCP; never bundled/redistributed (the brief's legal
  * line).
  */
+/**
+ * `source: 'acrlook'` (stage base-2, fix ②, docs/research/lr-base-gap.md):
+ * the "Adobe Color (local)" mode — Adobe Standard DCP (auto-discovered for
+ * the photo's camera model, same directory convention as `dcpPath` but never
+ * user-chosen) + the local ACR "Adobe Color" Look table + its
+ * ToneCurvePV2012, all baked into the SAME residual-lattice shape 'dcp'
+ * already uses (dcp/localAdobeProfile.ts's `bakeAcrLookLattice`). Mutually
+ * exclusive with 'dcp'/'builtin' by construction (one `source` field) — the
+ * exclusivity is load-bearing (see wbCorrection.ts's doc comment): the
+ * builtin lattice was fit to APPROXIMATE Adobe Color and must never stack
+ * with the real thing. `dcpPath` is unused in this mode (no manual file
+ * picker — runtime-discovered only; UI hides the option entirely when the
+ * local files aren't present).
+ */
 export interface ProfileParams {
   amount: number;
-  source?: 'builtin' | 'dcp';
+  source?: 'builtin' | 'dcp' | 'acrlook';
   dcpPath?: string;
 }
 
 /** `source` defaults to 'builtin' when absent (older/hand-authored docs). */
-export function profileSource(p: ProfileParams): 'builtin' | 'dcp' {
-  return p.source === 'dcp' ? 'dcp' : 'builtin';
+export function profileSource(p: ProfileParams): 'builtin' | 'dcp' | 'acrlook' {
+  if (p.source === 'dcp') return 'dcp';
+  if (p.source === 'acrlook') return 'acrlook';
+  return 'builtin';
 }
 
 export interface DevelopParams {

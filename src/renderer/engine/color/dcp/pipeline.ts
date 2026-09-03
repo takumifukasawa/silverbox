@@ -57,7 +57,15 @@ function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
 }
 
-function lerpMat3Flat(a: Mat3Flat, b: Mat3Flat, t: number): Mat3 {
+/**
+ * Exported (stage base-2, fix ① — dual-illuminant WB color-matrix
+ * interpolation): whiteBalance.ts's `wbCorrection.ts` reuses this SAME
+ * mired-linear matrix blend for ColorMatrix1/2 — the identical formula this
+ * module already applies to ForwardMatrix, just fed a different matrix pair,
+ * so both consumers stay numerically identical by construction (one
+ * implementation, not two hand-copies).
+ */
+export function lerpMat3Flat(a: Mat3Flat, b: Mat3Flat, t: number): Mat3 {
   const out = new Array(9) as number[];
   for (let i = 0; i < 9; i++) out[i] = lerp(a[i]!, b[i]!, t);
   return reshapeMat3(out as unknown as Mat3Flat);
@@ -344,7 +352,30 @@ export function applyToneCurve(curve: ToneCurve, rgb: Vec3): Vec3 {
  * computed once by the caller rather than per pixel, since it never varies
  * within one bake.
  */
-export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, cameraFromWorking: Mat3, asShotTempK: number): Vec3 {
+export function renderDcpPixel(
+  dcp: ParsedDcp,
+  workingRgb: Vec3,
+  cameraFromWorking: Mat3,
+  asShotTempK: number,
+  /**
+   * Stage base-2, fix ② ("local Adobe Color look"): an ADDITIONAL look-table
+   * stage + tone-curve override, applied AFTER the DCP's own HueSatMap/
+   * LookTable, in the SAME linear-ProPhoto HSV space (DNG spec's
+   * `encoding_Linear` description for a big-table look — see
+   * docs/research/lr-base-gap.md's round-2 addendum and localAdobeProfile.ts's
+   * own doc comment for the full stage-order reasoning). This is exactly how
+   * ACR composes an XMP "Look" preset on top of a camera profile: the
+   * profile's own characterization (HueSatMap/LookTable, executed above,
+   * unchanged) THEN the Look's own table THEN the Look's ToneCurvePV2012 —
+   * not a replacement of the profile's stages, an ADDITIONAL one layered on.
+   * `toneCurve`, when given, REPLACES `dcp.toneCurve` (not stacked) — Adobe
+   * Standard carries no ProfileToneCurve of its own (confirmed, see the
+   * research doc's DCP round-1 finding), so there is nothing to stack with in
+   * practice; the override shape is still the principled one if that ever
+   * changes for a different base profile.
+   */
+  extra?: { lookTable?: HueSatTable | null; lookTableEncoding?: 'linear' | 'sRGB'; toneCurve?: ToneCurve | null }
+): Vec3 {
   const fraction = illuminantFraction(dcp, asShotTempK);
   const camToXyz = cameraToXyzD50Matrix(dcp, fraction);
   const cameraRgb = cameraNativeFromWorking(workingRgb, cameraFromWorking);
@@ -368,9 +399,17 @@ export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, cameraFromWorki
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
   }
+  if (extra?.lookTable) {
+    const vCoord = valueLookupCoord(v, extra.lookTableEncoding ?? 'linear');
+    const [dh, sScale, vScale] = lookupTable(extra.lookTable, h, s, vCoord);
+    h = ((h + dh) % 360 + 360) % 360;
+    s = Math.min(Math.max(s * sScale, 0), 1);
+    v = v * vScale;
+  }
 
   let rgbAdjusted = hsvToRgb([h, s, v]);
-  if (dcp.toneCurve) rgbAdjusted = applyToneCurve(dcp.toneCurve, rgbAdjusted);
+  const toneCurve = extra?.toneCurve ?? dcp.toneCurve;
+  if (toneCurve) rgbAdjusted = applyToneCurve(toneCurve, rgbAdjusted);
 
   const xyzD50Out = mulMat3Vec3(PROPHOTO_TO_XYZ_D50, rgbAdjusted);
   const xyzD65Out = mulMat3Vec3(BRADFORD_D50_TO_D65, xyzD50Out);
@@ -394,7 +433,14 @@ export function renderDcpPixel(dcp: ParsedDcp, workingRgb: Vec3, cameraFromWorki
  * `cameraFromWorking` — see `renderDcpPixel`'s doc comment — is built ONCE by
  * the caller (`cameraFromWorkingMatrix`) and reused across all n³ nodes.
  */
-export function bakeDcpLattice(dcp: ParsedDcp, cameraFromWorking: Mat3, asShotTempK: number, n: number): number[] {
+export function bakeDcpLattice(
+  dcp: ParsedDcp,
+  cameraFromWorking: Mat3,
+  asShotTempK: number,
+  n: number,
+  /** Stage base-2, fix ②: forwarded verbatim to `renderDcpPixel` — see its own doc comment. Reused by localAdobeProfile.ts's `bakeAcrLookLattice` so the "Adobe Color (local)" mode needs no lattice-baking code of its own. */
+  extra?: { lookTable?: HueSatTable | null; lookTableEncoding?: 'linear' | 'sRGB'; toneCurve?: ToneCurve | null }
+): number[] {
   const out = new Array<number>(n * n * n * 3);
   for (let ix = 0; ix < n; ix++) {
     const r = ix / (n - 1);
@@ -402,7 +448,7 @@ export function bakeDcpLattice(dcp: ParsedDcp, cameraFromWorking: Mat3, asShotTe
       const g = iy / (n - 1);
       for (let iz = 0; iz < n; iz++) {
         const b = iz / (n - 1);
-        const rendered = renderDcpPixel(dcp, [r, g, b], cameraFromWorking, asShotTempK);
+        const rendered = renderDcpPixel(dcp, [r, g, b], cameraFromWorking, asShotTempK, extra);
         const base = ((ix * n + iy) * n + iz) * 3;
         out[base] = rendered[0] - r;
         out[base + 1] = rendered[1] - g;

@@ -62,3 +62,45 @@ export const DEFAULT_BASE_CURVE: CurvePoints = A7C2_BASE_CURVE;
 export function baseCurveForModel(model: string | null | undefined): CurvePoints {
   return (model && BASE_CURVE_BY_MODEL[model]) || DEFAULT_BASE_CURVE;
 }
+
+/**
+ * Base curve for "Adobe Color (local)" mode (stage base-2, fix ②,
+ * docs/research/lr-base-gap.md). MEASURED NECESSITY (not assumed): the
+ * brief's own double-application-trap analysis originally assumed Adobe
+ * Standard's Look table (ValScale entries) + its `ToneCurvePV2012` supplied
+ * enough tone to make the seeded base curve redundant (⇒ flatten it, same as
+ * a tone-carrying DCP). A real 5-scene render-and-compare (acrlook mode,
+ * amount 100, toneCurve FLATTENED to identity, EV 0.5) refuted that: pooled
+ * mean Δluma (LR−sb) was **+0.97 stops** — WORSE than the pre-stage-base-2
+ * shipped default's +0.09 (A7C2_BASE_CURVE under the OLD builtin lattice) —
+ * because `ToneCurvePV2012`'s own XMP points ((0,0) (22,16) (40,35) (127,127)
+ * (224,230) (240,246) (255,255)) are a MILD S-curve close to identity, not
+ * LR's real default brightening (which Adobe's PV2012 engine applies as an
+ * internal, undocumented, per-scene-adaptive base tone map — see the
+ * research doc's round-3 finding — not something any DNG/XMP field exposes).
+ * So flattening was WRONG for this mode; a base curve is still needed.
+ *
+ * Refit method: percentile-match (CTRL_Q quantiles, equal per-scene weight —
+ * the same method fit-base-curve.mjs's round-3 uses, simplified: no subject-
+ * area weighting) between silverbox's acrlook-mode render (amount 100,
+ * EV 0.5, identity toneCurve) and each of the 5 lr-base-gap.md scenes' LR
+ * base JPEG, in the SAME 0..255 sRGB-ENCODED point space toneCurve.ts's
+ * PCHIP evaluator uses. Re-measured with this curve seeded: pooled mean
+ * Δluma **−0.03 stops** (essentially flat, vs the flattened attempt's
+ * +0.97 and the OLD default's +0.09) — see the stage base-2 report for the
+ * full per-scene table. A COARSER fit than A7C2_BASE_CURVE's single-scene
+ * origin (5 scenes, no subject weighting) — a future round following
+ * fit-base-curve.mjs's full method (subject-area weighting, more scenes) is
+ * the natural next refinement, same posture A7C2_BASE_CURVE's own doc
+ * comment already carries for its successor.
+ */
+export const ACRLOOK_BASE_CURVE: CurvePoints = [
+  [0, 0],
+  [7, 8],
+  [16, 21],
+  [26, 38],
+  [46, 78],
+  [71, 111],
+  [109, 165],
+  [255, 255],
+];
