@@ -91,10 +91,10 @@ export interface GraphNode {
   /** LUT import node (docs/brief-bank/lut-import-node.md): referenced .cube file + input-space selector + amount; only for kind 'lut'. */
   lut?: LutParams;
   /**
-   * Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1
-   * implementer brief): Fast Local Laplacian shadows/highlights params,
-   * EXPERIMENTAL and opt-in — only for kind 'localtone'. Spatial class, no
-   * CPU mirror (see localToneNode.ts's module doc comment).
+   * Local-adaptive tone node (docs/research/local-adaptive-tone.md; STAGE
+   * 1d — global-reference + small-radius base/detail split): shadows/
+   * highlights params, EXPERIMENTAL and opt-in — only for kind 'localtone'.
+   * Spatial class, no CPU mirror (see localToneNode.ts's module doc comment).
    */
   localtone?: LocalToneParams;
   /**
@@ -1294,15 +1294,15 @@ export type PlanStep =
       shadows: number;
       /** -100..0 — see localToneNode.ts's LocalToneParams.highlights. */
       highlights: number;
-      /** Stops (log2) — see localToneNode.ts's LocalToneParams.sigmaR. */
+      /** Pixels (base-blur sigma, STAGE 1d) — see localToneNode.ts's LocalToneParams.sigmaR. */
       sigmaR: number;
       /** 0..1 mix vs identity — same role as blend's uniform.x / lut3d's amount. */
       amount: number;
       /**
        * NO CPU mirror (spatial class, same as 'image'/'external'/'denoise'
-       * above) — a Fast Local Laplacian pyramid coefficient depends on the
-       * WHOLE image, not a per-pixel neighborhood a JS reference could
-       * mirror. See localToneNode.ts's module doc comment.
+       * above) — the global scene reference (`ref`) depends on the WHOLE
+       * image, not a per-pixel neighborhood a JS reference could mirror
+       * inside cpuEvalPlan. See localToneNode.ts's module doc comment.
        */
     };
 
@@ -1844,9 +1844,9 @@ export function cpuEvalPlan(plan: RenderPlan, px: Rgb, x: number, y: number, wid
       // PlanStep's 'lut3d' doc comment.
       outputs.push(step.cpu(at(step.src)));
     } else if (step.type === 'localtone') {
-      // No CPU mirror — a Fast Local Laplacian pyramid coefficient depends
-      // on the WHOLE image (spatial class, same as 'image'/'external'/
-      // 'denoise' above) — see PlanStep's 'localtone' doc comment.
+      // No CPU mirror — the global scene reference depends on the WHOLE
+      // image (spatial class, same as 'image'/'external'/'denoise' above) —
+      // see PlanStep's 'localtone' doc comment.
       throw new Error(`step ${step.nodeId} has no CPU reference`);
     } else {
       const a = at(step.srcA);

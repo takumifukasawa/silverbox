@@ -1601,11 +1601,12 @@ function LutInspector({ node }: { node: GraphNode }) {
 }
 
 /**
- * Local-adaptive tone node (docs/research/local-adaptive-tone.md, stage 1
- * implementer brief): EXPERIMENTAL, opt-in Fast Local Laplacian shadows/
- * highlights. Minimal panel per the brief — four sliders, same
- * range+number+double-click-reset pattern as DenoiseInspector above.
- * `clarity` is reserved for a later stage (band-limited micro-contrast) and
+ * Local-adaptive tone node (docs/research/local-adaptive-tone.md, STAGE 1d —
+ * global-reference + small-radius base/detail split, see localToneNode.ts's
+ * module doc comment): EXPERIMENTAL, opt-in shadows/highlights. Minimal
+ * panel per the brief — four sliders, same range+number+double-click-reset
+ * pattern as DenoiseInspector above. `clarity` is reserved for a later stage
+ * (band-limited micro-contrast on the now-explicit detail channel) and
  * intentionally has NO control here — it is carried through the sidecar but
  * inert (no shader reads it) in stage 1, so a slider for it would just be
  * misleading.
@@ -1656,19 +1657,19 @@ function LocalToneInspector({ node }: { node: GraphNode }) {
   return (
     <>
       <div className="inspector-title">
-        Local Tone (experimental): Fast Local Laplacian shadows/highlights — locality-aware, halo-resistant.
+        Local Tone (experimental): scene-relative shadows/highlights — locality-aware, halo-resistant.
       </div>
       <Section title="Shadows / Highlights">
         {row('shadows', 'Shadows', 0, 100, 1, 0)}
         {row('highlights', 'Highlights', -100, 0, 1, 0)}
         <div className="inspector-hint">
-          Shadows lifts pixels reading LOCALLY dark relative to their surround; Highlights crushes pixels reading
-          locally bright — both are relative to a per-scale coarse reference, not the pixel's absolute value (see
-          docs/research/local-adaptive-tone.md's E1 measurements).
+          Shadows lifts pixels reading LOCALLY dark relative to the whole scene; Highlights crushes pixels reading
+          locally bright — both are relative to the image's own global reference, not the pixel's absolute value
+          (see docs/research/local-adaptive-tone.md's E1 measurements).
         </div>
       </Section>
       <Section title="Advanced">
-        {row('sigmaR', 'Detail/tone threshold (stops)', 0.5, 10, 0.1, LOCALTONE_SIGMA_R_DEFAULT)}
+        {row('sigmaR', 'Local radius (px)', 1, 8, 0.1, LOCALTONE_SIGMA_R_DEFAULT)}
         {row('amount', 'Amount', 0, 1, 0.01, 1)}
         <div className="inspector-hint">
           shadows=highlights=0 or amount=0 is a bit-exact pass-through — this node only affects the render once a
