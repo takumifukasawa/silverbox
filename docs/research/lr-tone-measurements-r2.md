@@ -106,3 +106,29 @@ A 2-factor (spread, log-mean) model trained purely on round-2 data predicts `ful
 2. E4's single/few-pixel spike artifact at c3.5/c4/c4.5 (and present but less isolated in round-1's own c5) — any future σr work off these files must smooth before max-search, not take the raw per-pixel max.
 3. E6 dr0→dr2 small non-monotonic dip (532→228 encoded units, above noise floor, unexplained).
 4. E6's mean-series and dr6+ points are not as cleanly orthogonal as the design intended — the 0.95 highlight-clip ceiling in the source-generation script makes corner mean and spread co-vary once dark/light values push toward that ceiling.
+
+---
+
+## Round-3 addendum (2026-09-03): the sub-σr response curve — the dead zone does not exist
+
+18 additive probes (`gen-tone-experiments-r3.mjs`): a 64px patch offset from a fixed surround by 0.5–5 stops (shadows probe: surround 50%, patch darker; highlights probe: surround 2%, patch brighter). Patch-center delta-over-base, stops:
+
+| \|offset\| | sh_p100 (surround 50%) | sh_p50 | hi_m100 (surround 2%) |
+|---|---|---|---|
+| 0.5 | +0.002 | +0.001 | −0.016 |
+| 1 | +0.016 | +0.008 | −0.529 |
+| 1.5 | +0.141 | +0.070 | −0.767 |
+| 2 | +0.298 | +0.149 | −1.093 |
+| 2.5 | +0.473 | +0.236 | −1.371 |
+| 3 | +0.620 | +0.310 | −1.621 |
+| 3.5 | +0.804 | +0.402 | −1.890 |
+| 4 | +0.831 | +0.415 | −1.978 |
+| 5 | +1.054 | +0.527 | −3.893 |
+
+Findings:
+1. **No dead zone.** The response onsets smoothly around ~0.5–1.5 stops of offset and grows quasi-linearly (≈0.30 stops/stop for Shadows+100 through 3.5 stops; ≈0.55 for Highlights−100 through 4). σr ≈ 4 stops (round-2) governs the OVERSHOOT/halo knee only, not tone-response onset — the fe-tail-only remap formulation (identity inside σr) is wrong.
+2. **Slider strength is linear**: sh_p50 = sh_p100 / 2 at every offset (max deviation < 0.002 stops).
+3. **The curve retro-predicts round-1's E1 table**: bg=50% (offset 1.47) → 0.13 vs measured +0.131; bg=90% (2.32) → ~0.41 vs +0.495; bg=0.5% (patch +5.2 above surround) → +0.02 vs +0.022. E1 is explained by a pure signed-offset response — no global layer required for it (E6 remains a separate, smaller effect).
+4. Cross-terms: hi_m100 also darkens a patch only 0.5 stops below a bright surround (−0.218) — absolute-level dependence coexists with the offset response; the hi_m100 point at offset 5 (−3.89) matches E1's bg0.5 crush (−4.01) at its 5.17-stop offset.
+
+Analysis: patch-center medians via tifffile, gamma-1.8 linearized; results in the harvest directory's analysis-r2/r3-results.json.
