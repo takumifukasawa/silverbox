@@ -549,3 +549,25 @@ inside a joint (EV 0.35 + curve) refit. Sanity arithmetic that closes: the
 EV=0 vs EV=0.5 pooled gap difference is 0.545 stops vs the 0.500 applied —
 the 0.045 excess is the nonlinear base curve acting on the shifted input,
 the same nonlinearity that forced the localtone 1e-r refit.
+
+## Data appendix (values from the round-2/3 agent analyses, previously only in session reports)
+
+**Adobe D65-interpolation weights** (mired fraction toward ColorMatrix2/D65
+at each scene's LR-resolved As-Shot temperature; silverbox uses 1.0 always):
+DSC03298 4100K → **0.541**; DSC06787/DSC09305 5137K → **0.792**;
+DSC07349 5250K → **0.813**. (The near-identical 0.792 vs 0.813 is what
+rules matrix interpolation OUT as DSC07349's differentiator.)
+
+**Adobe Color LookTable sample entries** (decoded 36×16×16 table, entries
+are (HueShift°, SatScale, ValScale); v=8 slice, s=15 max-sat column):
+h=0 red (3.331, 0.9938, 0.5427); h=3 orange (8.626, 0.9967, 0.6590);
+h=6 yellow (−0.339, 0.9982, 0.7567); h=21 sky (0.183, 0.9984, 0.9758);
+h=33 magenta (1.765, 0.9511, 0.5954). ValScale along V for red@s15:
+v=0 → 1.000, v=8 → 0.543, v=15 → 0.296. Global ranges: HueShift −180…170°,
+SatScale 0…1.060, ValScale 0.296…1.083. (Sample facts recorded for
+calibration reasoning; the full table itself is Adobe's and stays out of
+the repo — these few coordinates are measurement observations.)
+
+**Per-DNG BaselineExposure readings** (plugin v2.1.1 exports, exiftool):
+DSC03298 ISO 320 → 0.35; DSC04260 ISO 500 → 0.35; DSC06787 ISO 200 → 0.35;
+DSC07349 ISO 200 → 0.35; DSC09305 ISO 1000 → 0.35.
