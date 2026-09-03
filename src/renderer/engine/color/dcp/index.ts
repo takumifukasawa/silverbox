@@ -19,6 +19,7 @@ export {
   renderDcpPixel,
   bakeDcpLattice,
   lerpMat3Flat,
+  HUESAT_STABILITY_V_FLOOR,
 } from './pipeline';
 export { decodeAcrLookTable, decodeBase85, ACR_BASE85_ALPHABET, type AcrLookTable } from './bigTable';
 export {

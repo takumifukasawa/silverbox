@@ -111,7 +111,27 @@ const {
   approxCameraFromWorkingMatrix,
   cameraFromWorkingMatrix,
   mulMat3Mat3,
+  bakeDcpLattice,
+  HUESAT_STABILITY_V_FLOOR,
 } = dcp;
+
+// Separate bundle: profileFit.ts's `profileResidual` (stage base-4's runtime
+// look-up side — see the "2c" section below), same esbuild-from-TS-source
+// idiom as the dcp/ bundle above, own temp dir so the two bundles' fixed
+// output filename ('dcp.bundle.mjs', see bundleToTempModule) never collide.
+const profileFitBundleWorkDir = mkdtempSync(join(tmpdir(), 'silverbox-profilefit-bundle-'));
+let profileFitModule;
+try {
+  profileFitModule = await bundleToTempModule('src/renderer/engine/color/profileFit.ts', profileFitBundleWorkDir);
+  check('bundled engine/color/profileFit.ts via esbuild and imported it under plain Node', true, null);
+} catch (err) {
+  check('bundled engine/color/profileFit.ts via esbuild and imported it', false, String(err.stack ?? err));
+  console.error(`\n${failures} check(s) failed`);
+  process.exit(1);
+} finally {
+  rmSync(profileFitBundleWorkDir, { recursive: true, force: true });
+}
+const { profileResidual, PROFILE_LATTICE_N } = profileFitModule;
 
 const IDENTITY_MAT3 = [
   [1, 0, 0],
@@ -326,6 +346,21 @@ function evalCurveRef(points, x) {
   }
   return last[1];
 }
+// Stage base-4 low-V stability damping (dcp/pipeline.ts's own
+// HUESAT_STABILITY_V_FLOOR/dampHueSatCorrection) — independently
+// re-transcribed here (own smoothstep, own blend-to-identity), NOT imported.
+// The 0.05 floor value itself must be kept in sync by hand with production's
+// own HUESAT_STABILITY_V_FLOOR constant (checked directly against the
+// bundled export below, see the "damping" checks in section 2 below).
+const REF_HUESAT_STABILITY_V_FLOOR = 0.08;
+function smoothstep01Ref(edge0, edge1, x) {
+  const t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+function dampHueSatCorrectionRef([dh, sScale, vScale], v) {
+  const damp = smoothstep01Ref(0, REF_HUESAT_STABILITY_V_FLOOR, v);
+  return [dh * damp, 1 + (sScale - 1) * damp, 1 + (vScale - 1) * damp];
+}
 function referenceRenderDcpPixel(d, workingRgb, cameraFromWorking, asShotTempK) {
   const cct1 = 2856; // StdA — the fixture's own CalibrationIlluminant1
   const cct2 = 6504; // D65 — CalibrationIlluminant2
@@ -359,14 +394,14 @@ function referenceRenderDcpPixel(d, workingRgb, cameraFromWorking, asShotTempK) 
       table = { dims: a.dims, data };
     }
     const vCoord = valueLookupCoordRef(v, d.hueSatMapEncoding);
-    const [dh, sScale, vScale] = lookupTableRef(table, h, s, vCoord);
+    const [dh, sScale, vScale] = dampHueSatCorrectionRef(lookupTableRef(table, h, s, vCoord), v);
     h = ((h + dh) % 360 + 360) % 360;
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
   }
   if (d.lookTable) {
     const vCoord = valueLookupCoordRef(v, d.lookTableEncoding);
-    const [dh, sScale, vScale] = lookupTableRef(d.lookTable, h, s, vCoord);
+    const [dh, sScale, vScale] = dampHueSatCorrectionRef(lookupTableRef(d.lookTable, h, s, vCoord), v);
     h = ((h + dh) % 360 + 360) % 360;
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
@@ -397,6 +432,132 @@ check('the DCP pipeline actually moves the pixel (not an accidental identity)', 
   actual,
   input: TEST_WORKING_RGB,
 });
+check(
+  "this script's own REF_HUESAT_STABILITY_V_FLOOR stays in sync with production's HUESAT_STABILITY_V_FLOOR",
+  HUESAT_STABILITY_V_FLOOR === REF_HUESAT_STABILITY_V_FLOOR,
+  { production: HUESAT_STABILITY_V_FLOOR, reference: REF_HUESAT_STABILITY_V_FLOOR }
+);
+// Damping golden math: an independent low-V pixel (deep shadow, off-axis hue/
+// sat so the table lookup is non-trivial) must match the reference within
+// the same 1e-6 tolerance as the main golden-math check above, AND must
+// measurably differ from what an UNDAMPED render would produce (proving the
+// damping is actually wired into production's renderDcpPixel, not dead code).
+const SHADOW_TEST_RGB = [0.01, 0.006, 0.004];
+const shadowGolden = referenceRenderDcpPixel(parsed, SHADOW_TEST_RGB, IDENTITY_MAT3, HALFWAY_TEMP_K);
+const shadowActual = renderDcpPixel(parsed, SHADOW_TEST_RGB, IDENTITY_MAT3, HALFWAY_TEMP_K);
+const shadowDiffVsRef = Math.max(...shadowGolden.map((v, i) => Math.abs(v - shadowActual[i])));
+check('renderDcpPixel at a deep-shadow pixel matches the (damping-aware) independent reference within 1e-6', shadowDiffVsRef < 1e-6, {
+  shadowGolden,
+  shadowActual,
+  shadowDiffVsRef,
+});
+
+
+// === 2c. stage base-4: ENCODED-domain lattice bake + trilinear look-up =====
+// docs/research/lr-base-gap.md "Stage base-3" addendum: bakeDcpLattice's node
+// positions and profileResidual's runtime look-up coordinate both moved from
+// the LINEAR domain to an sRGB-ENCODED domain (shadow-densified grid) — this
+// section independently re-derives BOTH halves (own reference math, not
+// copied from pipeline.ts/profileFit.ts) so a regression in either the bake
+// or the look-up side would be caught here, in lockstep with that change.
+console.log('\nverify-dcp (stage base-4: encoded-domain bake + trilinear vs an independent reference):');
+
+/**
+ * Independent re-transcription of profileFit.ts's `profileResidual(...,
+ * 'encoded')` trilinear algorithm (clamp -> sRGB-encode -> scale by (N-1) ->
+ * floor/frac -> 8-corner weighted blend) — written fresh from the documented
+ * shape, not copied, so agreement with the production function is a genuine
+ * cross-check.
+ */
+function trilinearResidualEncodedRef(lat, N, r, g, b) {
+  const enc = [srgbEncodeRef(r), srgbEncodeRef(g), srgbEncodeRef(b)];
+  const i0 = [0, 0, 0];
+  const frac = [0, 0, 0];
+  for (let k = 0; k < 3; k++) {
+    const c = Math.min(1, Math.max(0, enc[k])) * (N - 1);
+    i0[k] = Math.min(N - 2, Math.floor(c));
+    frac[k] = c - i0[k];
+  }
+  let ro = 0,
+    go = 0,
+    bo = 0;
+  for (let dx = 0; dx < 2; dx++)
+    for (let dy = 0; dy < 2; dy++)
+      for (let dz = 0; dz < 2; dz++) {
+        const w = (dx ? frac[0] : 1 - frac[0]) * (dy ? frac[1] : 1 - frac[1]) * (dz ? frac[2] : 1 - frac[2]);
+        const base = (((i0[0] + dx) * N + (i0[1] + dy)) * N + (i0[2] + dz)) * 3;
+        ro += w * lat[base];
+        go += w * lat[base + 1];
+        bo += w * lat[base + 2];
+      }
+  return [ro, go, bo];
+}
+
+const N_ENC = 5; // small, hand-checkable lattice — independent of the production PROFILE_LATTICE_N (17)
+const encLattice = bakeDcpLattice(parsed, IDENTITY_MAT3, HALFWAY_TEMP_K, N_ENC);
+
+// 2c-i: bake side — node (1,1,1) must sit at the DECODED encoded-grid
+// position (e = 1/(N-1), r = srgbDecode(e)), not the old plain-linear
+// ix/(N-1). Re-derive that node's own residual via referenceRenderDcpPixel
+// (already independent, defined above) and compare to the actual bake.
+const nodeE = 1 / (N_ENC - 1);
+const nodeR = srgbDecodeRef(nodeE);
+const nodeRenderedRef = referenceRenderDcpPixel(parsed, [nodeR, nodeR, nodeR], IDENTITY_MAT3, HALFWAY_TEMP_K);
+const nodeResidualRef = nodeRenderedRef.map((v) => v - nodeR);
+const nodeBase = ((1 * N_ENC + 1) * N_ENC + 1) * 3;
+const nodeResidualActual = [encLattice[nodeBase], encLattice[nodeBase + 1], encLattice[nodeBase + 2]];
+const nodeDiff = Math.max(...nodeResidualRef.map((v, i) => Math.abs(v - nodeResidualActual[i])));
+check('bakeDcpLattice node (1,1,1) sits at the DECODED encoded-grid position (matches an independent reference within 1e-6)', nodeDiff < 1e-6, {
+  nodeR,
+  nodeResidualRef,
+  nodeResidualActual,
+  nodeDiff,
+});
+// Endpoints stay anchored (encode/decode(0)=0, (1)=1) — node 0 must still be
+// the trivial all-zero-input residual exactly, hand-checkable without any
+// reference re-derivation.
+const node0Residual = [encLattice[0], encLattice[1], encLattice[2]];
+const node0Ref = referenceRenderDcpPixel(parsed, [0, 0, 0], IDENTITY_MAT3, HALFWAY_TEMP_K).map((v) => v - 0);
+check('bakeDcpLattice node 0 is still anchored at working r/g/b=0 exactly (encode/decode(0)=0)', Math.max(...node0Ref.map((v, i) => Math.abs(v - node0Residual[i]))) < 1e-6, {
+  node0Residual,
+  node0Ref,
+});
+
+// 2c-ii: look-up side — production `profileResidual(lat, r, g, b, 'encoded')`
+// at a deep-shadow pixel matches the independent trilinear+encode reference.
+// profileResidual hardcodes N=PROFILE_LATTICE_N internally (it doesn't infer
+// N from the array), so this needs a full-size (17) bake, unlike 2c-i's
+// small hand-checkable N_ENC lattice which is only ever indexed directly.
+const encLatticeFull = bakeDcpLattice(parsed, IDENTITY_MAT3, HALFWAY_TEMP_K, PROFILE_LATTICE_N);
+const SHADOW_PIXEL = [0.004, 0.006, 0.003]; // deep-shadow triplet, the regime stage base-4 targets
+const actualShadowResidual = profileResidual(encLatticeFull, SHADOW_PIXEL[0], SHADOW_PIXEL[1], SHADOW_PIXEL[2], 'encoded');
+const refShadowResidual = trilinearResidualEncodedRef(encLatticeFull, PROFILE_LATTICE_N, SHADOW_PIXEL[0], SHADOW_PIXEL[1], SHADOW_PIXEL[2]);
+const shadowDiff = Math.max(...refShadowResidual.map((v, i) => Math.abs(v - actualShadowResidual[i])));
+check('profileResidual(..., "encoded") matches an independent trilinear+sRGB-encode reference at a deep-shadow pixel', shadowDiff < 1e-9, {
+  actualShadowResidual,
+  refShadowResidual,
+  shadowDiff,
+});
+// The 'linear' domain (still the builtin lattice's own default/path) must
+// NOT pick up the encode step — same production function, opposite default.
+const actualShadowResidualLinear = profileResidual(encLatticeFull, SHADOW_PIXEL[0], SHADOW_PIXEL[1], SHADOW_PIXEL[2]);
+check(
+  "profileResidual defaults to the 'linear' domain (no encode) — genuinely different from the 'encoded' result above",
+  Math.max(...actualShadowResidualLinear.map((v, i) => Math.abs(v - actualShadowResidual[i]))) > 1e-6,
+  { actualShadowResidualLinear, actualShadowResidual }
+);
+
+// 2c-iii: the whole point of stage base-4 — the encoded domain moves a
+// deep-shadow pixel's blend weight toward node 1 MUCH more than the old
+// linear domain would have (node 0's own index is 0, so the raw scaled
+// coordinate below IS the node-1 blend weight whenever it's < 1).
+const linearWeight1 = Math.min(1, Math.max(0, SHADOW_PIXEL[0])) * (PROFILE_LATTICE_N - 1);
+const encodedWeight1 = Math.min(1, Math.max(0, srgbEncodeRef(SHADOW_PIXEL[0]))) * (PROFILE_LATTICE_N - 1);
+check(
+  "the encoded domain moves a deep-shadow pixel's blend weight toward node 1 much further than the old linear domain (stage base-4's whole point)",
+  encodedWeight1 > linearWeight1 * 3,
+  { linearWeight1, encodedWeight1 }
+);
 
 // === 2b. camera-native reconstruction (Stage 2 exactness) ===================
 console.log('\nverify-dcp (Stage 2: exact rgb_cam-based camera-native reconstruction):');

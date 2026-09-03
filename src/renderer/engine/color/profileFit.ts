@@ -1,3 +1,5 @@
+import { srgbEncode } from './srgb';
+
 /**
  * Fitted per-camera PROFILE residual — the Adobe-Color color character match
  * (docs/brief-bank/profile-fit.md; COLOR.md "Default rendering").
@@ -1655,11 +1657,31 @@ const N = PROFILE_LATTICE_N;
 /**
  * Trilinear residual at working-linear (r,g,b). Clamps the look-up coord to
  * [0,1] (out-of-gamut inputs read ~identity, never an edge-clamped shift). The
- * EXACT algorithm the WGSL pass mirrors (developNode.ts PROFILE_WGSL) — keep
- * them in lockstep.
+ * EXACT algorithm the WGSL pass mirrors (developNode.ts PROFILE_WGSL /
+ * PROFILE_WGSL_ENCODED) — keep them in lockstep.
+ *
+ * `domain` (stage base-4, docs/research/lr-base-gap.md "Stage base-3"
+ * addendum) selects the grid LOOK-UP coordinate space:
+ *  - `'linear'` (default) indexes at the raw linear (r,g,b) — the BUILTIN
+ *    fitted lattice's own domain (A7C2_PROFILE was fit directly in linear —
+ *    this default keeps every existing caller byte-identical, unchanged by
+ *    this parameter's addition).
+ *  - `'encoded'` sRGB-encodes (r,g,b) FIRST, then indexes — used ONLY for the
+ *    dcp/acrlook lattices (dcp/pipeline.ts's `bakeDcpLattice`, which now
+ *    bakes its nodes at DECODED positions in this same encoded domain — see
+ *    that function's doc comment for why: it densifies grid resolution near
+ *    black, where the uniform linear grid left deep-shadow pixels pinned to
+ *    the trivial zero-correction black corner). The STORED residual is
+ *    always a LINEAR delta either way — only the look-up coordinate changes.
  */
-export function profileResidual(lat: readonly number[], r: number, g: number, b: number): [number, number, number] {
-  const p = [r, g, b];
+export function profileResidual(
+  lat: readonly number[],
+  r: number,
+  g: number,
+  b: number,
+  domain: 'linear' | 'encoded' = 'linear'
+): [number, number, number] {
+  const p = domain === 'encoded' ? [srgbEncode(r), srgbEncode(g), srgbEncode(b)] : [r, g, b];
   const i0 = [0, 0, 0];
   const f = [0, 0, 0];
   for (let k = 0; k < 3; k++) {
@@ -1682,13 +1704,14 @@ export function profileResidual(lat: readonly number[], r: number, g: number, b:
   return [ro, go, bo];
 }
 
-/** Apply the profile at `amount` (0..100): p + (amount/100)*residual(p). */
+/** Apply the profile at `amount` (0..100): p + (amount/100)*residual(p). `domain` forwarded verbatim to `profileResidual` (default `'linear'` — see its own doc comment). */
 export function applyProfileCpu(
   lat: readonly number[],
   px: readonly [number, number, number],
-  amount: number
+  amount: number,
+  domain: 'linear' | 'encoded' = 'linear'
 ): [number, number, number] {
-  const res = profileResidual(lat, px[0], px[1], px[2]);
+  const res = profileResidual(lat, px[0], px[1], px[2], domain);
   const a = amount / 100;
   return [px[0] + a * res[0], px[1] + a * res[1], px[2] + a * res[2]];
 }

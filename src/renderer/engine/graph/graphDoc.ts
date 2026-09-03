@@ -5,7 +5,7 @@
  * in git. Node positions live here for that reason.
  */
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
-import { compileDevelop, defaultDevelopParams, profileSource, type DevelopParams, type PassSpec } from './developNode';
+import { compileDevelop, defaultDevelopParams, profileDomain, profileSource, type DevelopParams, type PassSpec } from './developNode';
 import { profileForModel, PROFILE_LATTICE_N } from '../color/profileFit';
 import { bakeWbCorrectedLattice } from '../color/wbCorrectedProfile';
 import {
@@ -1604,10 +1604,13 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
         // Profile source (docs/brief-bank/dcp-profile.md; 'acrlook' added
         // stage base-2, fix ②): every source shares the EXACT residual-
         // lattice shape/trilinear code the builtin fitted profile uses (see
-        // compileDevelop/PROFILE_WGSL) — only WHICH array feeds it differs.
+        // compileDevelop/PROFILE_WGSL) — only WHICH array feeds it, and
+        // (stage base-4) which DOMAIN it's looked up in, differs.
         // 'dcp'/'acrlook' fall back to an all-zero lattice when their bake
         // hasn't landed yet (loading, failed, or — 'acrlook' — the local
-        // files are absent): identity, never a crash or a stale render.
+        // files are absent): identity, never a crash or a stale render (the
+        // domain choice is moot on an all-zero lattice — every node is 0
+        // regardless of where it's indexed).
         // 'builtin' additionally composes fix ①'s WB color-matrix correction
         // when one is available (see wbCorrection.ts's doc comment for why
         // this composition is EXCLUSIVE to 'builtin' — 'dcp'/'acrlook'
@@ -1621,7 +1624,7 @@ export function buildPlan(doc: GraphDoc, ctx?: CompileContext): RenderPlan {
               : ctx?.wbColorMatrixCorrection
                 ? bakeWbCorrectedLattice(ctx?.cameraModel, profileForModel(ctx?.cameraModel), ctx.wbColorMatrixCorrection)
                 : profileForModel(ctx?.cameraModel);
-        const compiled = compileDevelop(params, wbGains, renderScale, lattice);
+        const compiled = compileDevelop(params, wbGains, renderScale, lattice, profileDomain(source));
         if (compiled.passes.length === 0) {
           index = src; // untouched Develop = bit-exact pass-through
         } else {

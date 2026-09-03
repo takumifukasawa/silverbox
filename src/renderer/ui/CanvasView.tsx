@@ -267,12 +267,16 @@ declare global {
       updateSettings(partial: Partial<Settings>): Promise<void>;
       canvasView(): ViewportState & { dpr: number };
       wbState(): { asShot: { temp: number; tint: number }; mccamyCct: number };
+      /** Raw camXyz/rgbCam matrices behind the current photo's WbModel (docs/research/lr-base-gap.md's DCP work reads these off refreshDcpProfile/refreshAcrLook already; additive, test-surface only, for reproducing the SAME continuous renderDcpPixel evaluation those use). null when the decoder didn't expose either. */
+      wbMatricesState(): { camXyz: number[][]; rgbCam: number[][] | null } | null;
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       /** DCP camera-profile mode (docs/brief-bank/dcp-double-tone-fix.md) — drives the SAME store actions the inspector's source select / file picker do. */
       setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp'): void;
       setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
       /** DCP bake status + rev (`dcpProfileRev` ticks once each bake lands) — verify waits on this before asserting the tone-curve flatten. */
       dcpProfileState(): { status: string; error: string | null; rev: number };
+      /** "Adobe Color (local)" bake status + rev (`acrLookRev` ticks once each refreshAcrLook settles — same shape as dcpProfileState, mirrors its own separate status machine) — additive, test-surface only (stage base-4 diagnostic harness, docs/research/lr-base-gap.md). */
+      acrLookProfileState(): { status: string; error: string | null; rev: number; available: boolean };
       histogramState(): import('../engine/gpu/graphRenderer').HistogramData | null;
       historyState(): { past: number; future: number };
       /** Global undo (docs/brief-bank/global-undo.md): the full stack, kind/label/target only — deliberately no GraphDoc payloads (keep this small enough to serialize over page.evaluate). `target` is null only for a batch entry (`sync`, which carries `targets` instead) — every other kind, including `arrange`, carries a single photo-path `target` like `photo-edit`/`rating`/`flag`; `targets` is null for every non-batch kind. */
@@ -1699,6 +1703,10 @@ export function CanvasView() {
       canvasView() {
         return { ...viewRef.current, dpr: devicePixelRatio };
       },
+      wbMatricesState() {
+        const { wbModel: model } = useAppStore.getState();
+        return model.camXyz ? { camXyz: model.camXyz, rgbCam: model.rgbCam } : null;
+      },
       wbState() {
         const { wbModel: model } = useAppStore.getState();
         return { asShot: model.asShot, mccamyCct: model.mccamyCct };
@@ -1715,6 +1723,10 @@ export function CanvasView() {
       dcpProfileState() {
         const s = useAppStore.getState();
         return { status: s.dcpProfileStatus, error: s.dcpProfileError, rev: s.dcpProfileRev };
+      },
+      acrLookProfileState() {
+        const s = useAppStore.getState();
+        return { status: s.acrLookStatus, error: s.acrLookError, rev: s.acrLookRev, available: s.acrLookAvailable };
       },
       histogramState() {
         return useAppStore.getState().histogram;

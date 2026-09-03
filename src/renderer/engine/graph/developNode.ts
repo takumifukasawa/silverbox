@@ -204,6 +204,26 @@ export function profileSource(p: ProfileParams): 'builtin' | 'dcp' | 'acrlook' {
   return 'builtin';
 }
 
+/**
+ * Stage base-4 (docs/research/lr-base-gap.md, "Stage base-3" addendum): the
+ * profile-lattice LOOK-UP domain for a given `source` — a pure function of
+ * `source` alone, since it's exactly "which lattice is this" in disguise:
+ * 'builtin' always rides the fitted A7C2_PROFILE lattice (fit directly in
+ * linear — `profileResidual`'s `'linear'` default keeps it byte-identical),
+ * while 'dcp'/'acrlook' always ride a `bakeDcpLattice`-produced lattice,
+ * which now bakes its nodes in the ENCODED domain (see that function's doc
+ * comment). Not threaded as a separate flag through CompileContext/
+ * renderProtocol/renderWorker: `source` already crosses every one of those
+ * boundaries embedded in the GraphDoc (it's what SELECTS `dcpLattice` vs
+ * `acrLookLattice` vs the builtin fit in graphDoc.ts's buildPlan already),
+ * so a second, independently-threaded flag would just be a second place for
+ * the same fact to drift out of sync — this derives it at the one call site
+ * that already knows `source` (buildPlan) instead.
+ */
+export function profileDomain(source: 'builtin' | 'dcp' | 'acrlook'): 'linear' | 'encoded' {
+  return source === 'builtin' ? 'linear' : 'encoded';
+}
+
 export interface DevelopParams {
   profile: ProfileParams;
   basic: DevelopBasicParams;
@@ -359,6 +379,48 @@ struct ProfileLat {
   body: /* wgsl */ `
   {
     let pc = clamp(c, vec3f(0.0), vec3f(1.0)) * ${PROFILE_N - 1}.0;
+    let i0 = min(vec3i(pc), vec3i(${PROFILE_N - 2}));
+    let f = pc - vec3f(i0);
+    var res = vec3f(0.0);
+    for (var dx = 0; dx < 2; dx = dx + 1) {
+      let wx = select(1.0 - f.x, f.x, dx == 1);
+      for (var dy = 0; dy < 2; dy = dy + 1) {
+        let wy = select(1.0 - f.y, f.y, dy == 1);
+        for (var dz = 0; dz < 2; dz = dz + 1) {
+          let wz = select(1.0 - f.z, f.z, dz == 1);
+          let idx = ((i0.x + dx) * ${PROFILE_N} + (i0.y + dy)) * ${PROFILE_N} + (i0.z + dz);
+          res = res + wx * wy * wz * u.data[idx].xyz;
+        }
+      }
+    }
+    c = c + res;
+  }
+`,
+});
+
+// DCP/acrlook variant of PROFILE_WGSL (stage base-4, docs/research/lr-base-
+// gap.md "Stage base-3" addendum): IDENTICAL trilinear math, except the
+// look-up coordinate is sRGB-ENCODED before indexing — the lattice bound here
+// was baked by dcp/pipeline.ts's `bakeDcpLattice` at DECODED node positions
+// in this same encoded domain (see that function's doc comment for why: it
+// densifies grid resolution near black, where the uniform linear grid left
+// deep-shadow pixels pinned to the trivial zero-correction black corner).
+// Exact mirror of profileFit.ts's `profileResidual(..., 'encoded')` — keep
+// them in lockstep. Deliberately a SEPARATE constant (own shaderId, see
+// compileDevelop) rather than a runtime branch inside PROFILE_WGSL, so the
+// builtin path's own WGSL text/pipeline stay completely untouched — the
+// engine invariant this stage must not disturb.
+const PROFILE_WGSL_ENCODED = nodePassWgsl({
+  uniformDecl: /* wgsl */ `
+struct ProfileLat {
+  data: array<vec4f, ${PROFILE_N * PROFILE_N * PROFILE_N}>,
+}
+@group(0) @binding(1) var<storage, read> u: ProfileLat;
+`,
+  helpers: WGSL_SRGB_ENCODE,
+  body: /* wgsl */ `
+  {
+    let pc = srgbEncode(clamp(c, vec3f(0.0), vec3f(1.0))) * ${PROFILE_N - 1}.0;
     let i0 = min(vec3i(pc), vec3i(${PROFILE_N - 2}));
     let f = pc - vec3f(i0);
     var res = vec3f(0.0);
@@ -1274,7 +1336,9 @@ export function compileDevelop(
   wbGains: [number, number, number],
   renderScale: number,
   /** Per-camera profile residual (buildPlan resolves it via profileForModel); defaults to the fallback so callers without a model still render correctly. */
-  profileLattice: readonly number[] = DEFAULT_PROFILE
+  profileLattice: readonly number[] = DEFAULT_PROFILE,
+  /** Profile-lattice look-up domain (stage base-4) — `profileDomain(profileSource(params.profile))`, defaulting to `'linear'` so every caller that predates this parameter (tests, the CLI mirror path, etc.) keeps the builtin-lattice behavior byte-identical. */
+  profileLatticeDomain: 'linear' | 'encoded' = 'linear'
 ): CompiledDevelop {
   const b = params.basic;
   const profileActive = !isIdentityProfile(params.profile);
@@ -1313,7 +1377,13 @@ export function compileDevelop(
   if (profile) {
     // FIRST in the chain (before the base curve / any user slider) — the
     // fitted camera-color transform, a read-only storage-buffer trilinear.
-    passes.push({ shaderId: 'develop/profile', wgsl: PROFILE_WGSL, uniforms: profile.buffer as ArrayBuffer, storage: true });
+    // Domain picks WHICH shader (own shaderId each, see PROFILE_WGSL_ENCODED's
+    // doc comment) — the builtin ('linear') path is untouched.
+    passes.push(
+      profileLatticeDomain === 'encoded'
+        ? { shaderId: 'develop/profileEncoded', wgsl: PROFILE_WGSL_ENCODED, uniforms: profile.buffer as ArrayBuffer, storage: true }
+        : { shaderId: 'develop/profile', wgsl: PROFILE_WGSL, uniforms: profile.buffer as ArrayBuffer, storage: true }
+    );
   }
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
   if (lut) {
@@ -1364,8 +1434,8 @@ export function compileDevelop(
       ? null // spatial kernels have no per-pixel CPU mirror
       : (px: Rgb, x: number, y: number, width: number, height: number): Rgb => {
           let out = px;
-          // FIRST — exact mirror of PROFILE_WGSL (trilinear + amount blend).
-          if (profileActive) out = applyProfileCpu(profileLattice, out, params.profile.amount);
+          // FIRST — exact mirror of PROFILE_WGSL/PROFILE_WGSL_ENCODED (trilinear + amount blend).
+          if (profileActive) out = applyProfileCpu(profileLattice, out, params.profile.amount, profileLatticeDomain);
           if (toneActive) out = cpuDevelopTone(out, b, wbGains);
           if (lut) out = cpuToneCurve(out, lut);
           if (hslBands) out = cpuHsl(out, hslBands);

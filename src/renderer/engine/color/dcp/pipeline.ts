@@ -340,6 +340,73 @@ export function applyToneCurve(curve: ToneCurve, rgb: Vec3): Vec3 {
   return [ch(rgb[0]), ch(rgb[1]), ch(rgb[2])];
 }
 
+// --- Low-V HueSatMap/LookTable stability damping ----------------------------
+
+/**
+ * Stage base-4 (docs/research/lr-base-gap.md "Stage base-3" addendum, RE-
+ * DERIVED here, not resurrected verbatim from base-3's reverted attempt):
+ * damp every ProfileHueSatMap/LookTable/Look-table hue/sat/val CORRECTION
+ * toward IDENTITY as V→0. Plain HSV saturation/hue is well known to be
+ * numerically unstable at very low V (tiny absolute R/G/B differences swing
+ * hue/sat wildly), and base-3's own ablation measured this DCP's actual
+ * table data as genuinely unstable there too — not just a measurement
+ * artifact: at v≈0.005 (this DCP's own near-neutral shadow population), the
+ * table read s≈0.40 (not near-zero) and h≈235°, and applying its own
+ * HueSatMap correction moved the pixel SHARPLY away from the target
+ * (ablation: R/G 0.71→0.41, B/G 1.65→2.13 on DSC03298's near-neutral mean).
+ * Base-3 implemented and measured this exact idea (as an isolated pixel
+ * evaluation, where it worked) but reverted it after finding it was INERT in
+ * the shipped render — root cause turned out to be a SEPARATE bug: the
+ * baked lattice's uniform LINEAR grid meant real shadow pixels almost never
+ * reached a node actually evaluated near v=0 (99%+ of the blend weight sat
+ * on node 0, the trivial identity corner) — see `bakeDcpLattice`'s own doc
+ * comment for that fix. With representation now fixed, this damping reaches
+ * the pixels it was always meant to protect.
+ *
+ * TUNING (5-scene x 3-mode neutral-ratio measurement, scratchpad/base4-diag/
+ * measure-neutral.mjs — see the stage base-4 report for the full table):
+ * with the encoded-domain representation fix ALONE (no damping), DSC03298's
+ * dcp/acrlook neutral R/G, B/G were still ~35-50% off LR (representation was
+ * fixed, but that just meant real pixels now reach the ACTUAL unstable
+ * HueSatMap value, not a diluted blend toward identity — the damping still
+ * had real work to do). 0.05 (a first, conservative floor — comfortably
+ * above the shadow population's own v~0.001-0.01 but not much more) already
+ * closed most of the gap (dcp R/G -39%→+0.1%, B/G +5.7%→+3.6%; acrlook R/G
+ * -50.8%→-4.5%, B/G +18.4%→+12.6% — acrlook's B/G alone still just outside
+ * the ~10% band). 0.08 widened the ramp a little further and closed the
+ * rest for dcp (R/G +2.5%, B/G +2.5%) while pulling acrlook's R/G to -1.5%
+ * and B/G to +10.8% (right at the ~10% line); 0.10 barely moved either
+ * further (diminishing returns — acrlook B/G +10.3%, dcp actually 0.7pp
+ * WORSE on R/G) while carrying more risk of over-damping genuine midtone
+ * corrections outside this 5-scene set. SHIPPED at 0.08 — the better
+ * balance across BOTH modes, not single-mindedly chasing acrlook's own
+ * worst axis. Confirmed NOT to regress DSC04260/06787/09305 (already-clean
+ * scenes stayed clean, several cells improved slightly) at every floor
+ * tested; DSC07349 (a separate, pre-existing, OUT-OF-SCOPE regression per
+ * round-2 — see the addendum) stayed in the same ~15-20% broken ballpark
+ * throughout, never chased.
+ */
+export const HUESAT_STABILITY_V_FLOOR = 0.08;
+
+/** Smoothstep (CIE-style Hermite ease, 0 at/below edge0, 1 at/above edge1). */
+function smoothstep01(edge0: number, edge1: number, x: number): number {
+  const t = Math.min(Math.max((x - edge0) / (edge1 - edge0), 0), 1);
+  return t * t * (3 - 2 * t);
+}
+
+/**
+ * Damp a table lookup's [dh, sScale, vScale] triplet toward identity (0, 1,
+ * 1) as `v` (the CURRENT V this specific stage is about to look up at, not
+ * the pixel's original V — each stage gets its own protection since a
+ * heavily-damped early stage can leave `v` just as small for the next one)
+ * approaches 0, fully engaging (undamped) by `HUESAT_STABILITY_V_FLOOR`.
+ */
+function dampHueSatCorrection(delta: readonly [number, number, number], v: number): [number, number, number] {
+  const damp = smoothstep01(0, HUESAT_STABILITY_V_FLOOR, v);
+  const [dh, sScale, vScale] = delta;
+  return [dh * damp, 1 + (sScale - 1) * damp, 1 + (vScale - 1) * damp];
+}
+
 // --- Full pipeline -----------------------------------------------------------
 
 /**
@@ -387,21 +454,21 @@ export function renderDcpPixel(
   if (dcp.hueSatMap1) {
     const table = blendTables(dcp.hueSatMap1, dcp.hueSatMap2, fraction);
     const vCoord = valueLookupCoord(v, dcp.hueSatMapEncoding);
-    const [dh, sScale, vScale] = lookupTable(table, h, s, vCoord);
+    const [dh, sScale, vScale] = dampHueSatCorrection(lookupTable(table, h, s, vCoord), v);
     h = ((h + dh) % 360 + 360) % 360;
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
   }
   if (dcp.lookTable) {
     const vCoord = valueLookupCoord(v, dcp.lookTableEncoding);
-    const [dh, sScale, vScale] = lookupTable(dcp.lookTable, h, s, vCoord);
+    const [dh, sScale, vScale] = dampHueSatCorrection(lookupTable(dcp.lookTable, h, s, vCoord), v);
     h = ((h + dh) % 360 + 360) % 360;
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
   }
   if (extra?.lookTable) {
     const vCoord = valueLookupCoord(v, extra.lookTableEncoding ?? 'linear');
-    const [dh, sScale, vScale] = lookupTable(extra.lookTable, h, s, vCoord);
+    const [dh, sScale, vScale] = dampHueSatCorrection(lookupTable(extra.lookTable, h, s, vCoord), v);
     h = ((h + dh) % 360 + 360) % 360;
     s = Math.min(Math.max(s * sScale, 0), 1);
     v = v * vScale;
@@ -423,15 +490,40 @@ export function renderDcpPixel(
  * — the EXACT same shape profileFit.ts's fitted lattice uses (grid node
  * (ix,iy,iz) ↔ input [ix,iy,iz]/(N-1); flat layout `((ix*N+iy)*N+iz)*3+c`),
  * so it can be sampled through the IDENTICAL trilinear WGSL/CPU pair
- * (developNode.ts's PROFILE_WGSL / profileFit.ts's `profileResidual`) —
- * chosen deliberately (see the render report's "GPU LUT strategy" note) so
- * DCP mode needs no new shader code and inherits that pair's already-proven
- * GPU/CPU parity for free. `n` is normally `PROFILE_LATTICE_N`
- * (profileFit.ts) — passed in rather than imported to keep this module
- * independent of profileFit.ts's own concerns.
+ * (developNode.ts's PROFILE_WGSL_ENCODED / profileFit.ts's `profileResidual`,
+ * `domain: 'encoded'`) — chosen deliberately (see the render report's "GPU
+ * LUT strategy" note) so DCP mode needs no new shader code and inherits that
+ * pair's already-proven GPU/CPU parity for free. `n` is normally
+ * `PROFILE_LATTICE_N` (profileFit.ts) — passed in rather than imported to
+ * keep this module independent of profileFit.ts's own concerns.
  *
  * `cameraFromWorking` — see `renderDcpPixel`'s doc comment — is built ONCE by
  * the caller (`cameraFromWorkingMatrix`) and reused across all n³ nodes.
+ *
+ * STAGE BASE-4 (docs/research/lr-base-gap.md, "Stage base-3" addendum): grid
+ * node `ix/(n-1)` is now an sRGB-ENCODED coordinate, decoded to LINEAR
+ * (`srgbDecode`) before it is handed to `renderDcpPixel` — a shadow-densified
+ * domain, not a shadow-densified GRID SIZE. Before this change, node
+ * positions were plain LINEAR working-space values (spacing 1/16≈0.0625), so
+ * a deep-shadow pixel (e.g. median profile-space V≈0.004 on DSC03298, the
+ * Venice-bridge scene that exposed this) sat only ~6% of the way from node 0
+ * toward node 1 — the trilinear blend was ~94% node 0's (the trivial,
+ * zero-correction black corner), making `renderDcpPixel`'s real shadow
+ * behavior unrepresentable regardless of any fix inside it (this was proven,
+ * not assumed — see the addendum's ablation). Encoding first moves that same
+ * pixel to ~81% of the way from node 0 to node 1 (sRGB-encode(0.004)≈0.051,
+ * ×16 ≈ node 0.81 of 17) — comfortably inside the first cell's own
+ * interpolation range instead of pinned to its zero corner. The two lattice
+ * ENDPOINTS are unchanged (encode(0)=0, encode(1)=1 — node 0 and node N-1
+ * still sit at working r/g/b 0 and 1 exactly), so this only redistributes the
+ * 15 interior nodes; it is not a bigger grid, `PROFILE_LATTICE_N` is
+ * unchanged. The STORED residual stays a LINEAR delta (`rendered - [r,g,b]`,
+ * added to a linear pixel as-is by the caller) — only the grid's own
+ * COORDINATE space (where a given node's r/g/b sits) moved; the runtime
+ * lookup coordinate is encoded to match (see PROFILE_WGSL_ENCODED /
+ * `profileResidual`'s `domain` parameter). The BUILTIN fitted lattice
+ * (A7C2_PROFILE) is untouched by this — it was fit directly in the LINEAR
+ * domain and is never baked through this function.
  */
 export function bakeDcpLattice(
   dcp: ParsedDcp,
@@ -443,11 +535,13 @@ export function bakeDcpLattice(
 ): number[] {
   const out = new Array<number>(n * n * n * 3);
   for (let ix = 0; ix < n; ix++) {
-    const r = ix / (n - 1);
+    // ENCODED grid coordinate, decoded to the LINEAR value renderDcpPixel
+    // actually evaluates at (stage base-4 — see this function's doc comment).
+    const r = srgbDecode(ix / (n - 1));
     for (let iy = 0; iy < n; iy++) {
-      const g = iy / (n - 1);
+      const g = srgbDecode(iy / (n - 1));
       for (let iz = 0; iz < n; iz++) {
-        const b = iz / (n - 1);
+        const b = srgbDecode(iz / (n - 1));
         const rendered = renderDcpPixel(dcp, [r, g, b], cameraFromWorking, asShotTempK, extra);
         const base = ((ix * n + iy) * n + iz) * 3;
         out[base] = rendered[0] - r;
