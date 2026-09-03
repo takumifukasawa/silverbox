@@ -540,3 +540,12 @@ reuse the scene-statistics machinery localtone already has, but that is a
 design decision, not a measurement, and needs its own probe (e.g. one
 scene rendered at synthetically varied exposure offsets through LR).
 DNGs + log at ~/../lr-calib/lr-dng-20260903/ (outside repo).
+
+**Clarification (consistency audit):** the "−0.15 EV static candidate" above
+is NOT a standalone fix — applying it alone would WORSEN the pooled gap to
+~+0.24 stops, because A7C2_BASE_CURVE was fit assuming EV 0.5 and has
+absorbed the offset. It is a convention-alignment item meaningful only
+inside a joint (EV 0.35 + curve) refit. Sanity arithmetic that closes: the
+EV=0 vs EV=0.5 pooled gap difference is 0.545 stops vs the 0.500 applied —
+the 0.045 excess is the nonlinear base curve acting on the shifted input,
+the same nonlinearity that forced the localtone 1e-r refit.
