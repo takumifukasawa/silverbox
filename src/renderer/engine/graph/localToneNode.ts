@@ -1,9 +1,9 @@
 /**
  * Local-adaptive tone node (docs/research/local-adaptive-tone.md,
- * docs/research/lr-tone-measurements.md / -r2.md, incl. round-3 addendum):
- * operates on WORKING_LUMA log2 luminance only, restoring color by the RATIO
- * method (research doc §1.2 'lum'): process log2(luma), then scale the
- * ORIGINAL rgb by 2^(processedLog - originalLog) so hue/chroma ratios are
+ * docs/research/lr-tone-measurements.md / -r2.md incl. round-3/round-4
+ * addenda): operates on WORKING_LUMA log2 luminance only, restoring color by
+ * the RATIO method (research doc §1.2 'lum'): process log2(luma), then scale
+ * the ORIGINAL rgb by 2^(processedLog - originalLog) so hue/chroma ratios are
  * preserved exactly (Ir/Ii, Ig/Ii, Ib/Ii unchanged).
  *
  * Doc-shape module only (params/sanitizer/CPU reference used by unit tests),
@@ -14,118 +14,114 @@
  *
  * SPATIAL CLASS, NO CPU MIRROR (same exemption as Detail/fx-spatial in
  * developNode.ts, and 'external'/'denoise'/'image' steps in graphDoc.ts): the
- * global reference depends on the WHOLE image, not a per-pixel neighborhood a
- * JS reference could feasibly mirror inside cpuEvalPlan. buildPlan emits
- * PlanStep 'localtone' with no `cpu` field; cpuEvalPlan/stepHasCpuMirror/
- * stripNoCpuMirrorSteps treat it exactly like 'external'/'denoise' (see
- * graphDoc.ts). This module still ships a full CPU reference implementation
- * below (mirrors the WGSL bit-for-bit) — it just isn't wired into buildPlan's
- * per-pixel cross-check; it exists purely so localToneNode.test.ts can assert
- * the algorithm's shape/values fast, without a GPU.
+ * global/percentile reference depends on the WHOLE image, not a per-pixel
+ * neighborhood a JS reference could feasibly mirror inside cpuEvalPlan.
+ * buildPlan emits PlanStep 'localtone' with no `cpu` field; cpuEvalPlan/
+ * stepHasCpuMirror/stripNoCpuMirrorSteps treat it exactly like 'external'/
+ * 'denoise' (see graphDoc.ts). This module still ships a full CPU reference
+ * implementation below (mirrors the WGSL bit-for-shape) — it just isn't
+ * wired into buildPlan's per-pixel cross-check; it exists purely so
+ * localToneNode.test.ts can assert the algorithm's shape/values fast,
+ * without a GPU.
  *
  * ============================================================================
- * STAGE 1d (this revision — replaces the STAGE 1c shared Laplacian-pyramid
- * design entirely; see git history for 1b/1c). Conductor-verified finding
- * that forced this rewrite: a single shared full-depth Laplacian pyramid with
- * a per-level remap has a proven structural conflict — the small remap onset
- * round-3's measured curves demand necessarily opens a wrong-signed far-field
- * leakage channel (E1 dark-background cases), and the mitigation
- * (levelDamp's halo suppression) has a usable window under one pyramid level
- * wide. Three independent methods (sim, production-function cross-check,
- * real GPU) confirmed it in stage 1c — see that revision's honest
- * characterization in git history. STOPPED TUNING IT.
+ * STAGE 1e (this revision — replaces STAGE 1d's single-global-mean anchor +
+ * sign-gated bounded tail entirely; see git history for 1b/1c/1d). Conductor-
+ * verified finding that forced this rewrite: 1d's real-photo gate FAILED —
+ * measured against 5 real ARW scenes (session-scratch localtone-compare/
+ * results.json), Shadows undershot LR by 3-7x and Highlights overshot LR by
+ * 2-2.3x on the whole-frame band mean. Root cause (stage-1e diagnosis):
+ * `ref` was the frame's ARITHMETIC MEAN of log2-luma, which on a real photo
+ * with a long dark tail sits pulled DOWN toward the shadows themselves (log2
+ * compression makes near-black pixels dominate a linear mean of log-values)
+ * — so most of a photo's own genuine shadow-band pixels end up barely below
+ * `ref`, starving the old onset-gated curve of the offset it needs to fire.
+ * Separately, round-3's own finer sub-onset sampling (lr-tone-measurements-
+ * r2.md's round-3 addendum) had already shown the OLD identity-below-onset
+ * "dead zone" doesn't exist in LR's real response at all — it's a smooth,
+ * continuously-varying curve from the anchor outward.
  *
- * NEW ARCHITECTURE — a per-pixel curve keyed to a GLOBAL scene reference,
- * with a small-radius base/detail split (paper-validated in a from-scratch
- * CPU simulator — ephemeral session-scratch tuning script, not committed,
- * same convention as stage 1c's own sim):
+ * NEW MODEL — TWO PERCENTILE ANCHORS + one UNGATED saturating curve per
+ * direction + a SCENE-ADAPTIVE amplitude law, keeping stage 1d's proven
+ * small-radius base/detail split unchanged:
  *
- *   1. `base` = a small-radius (~2-3px sigma) Gaussian blur of full-res
- *      log2-luminance. `detail` = logLuma - base is preserved UNTOUCHED
- *      (added back after remap, never touched by the curve) — this is what
- *      keeps genuine texture/edge micro-contrast intact and is the only
- *      thing standing between this and a plain global tone curve.
- *   2. `ref` = a GLOBAL scalar: the image's own log2-luma mean, computed by
- *      a plain (unweighted) box-filter reduce chain down to 1x1 — see
- *      `globalLogMean`'s doc comment for why UNWEIGHTED specifically (a
- *      Burt-Adelson-weighted reduce, tried first in sim, showed a severe,
- *      unpredictable bias on hard step edges — E4's own construction —
- *      because a small overlapping kernel cascaded across many dyadic
- *      halvings does NOT converge to anything close to the true mean for a
- *      50/50 split image; a plain non-overlapping box reduce is EXACT for
- *      power-of-2 dims and has no such bias).
- *   3. `offset = base(pixel) - ref`. Shadows respond for offset<0 (pixel's
- *      local neighborhood reads darker than the whole-scene reference) with
- *      the round-3 shadows curve; Highlights respond for offset>=0 with the
- *      round-3 highlights curve. Slider strength is exactly linear in the
- *      curve construction (see `toneTail`'s doc comment) — matches round-3's
- *      own "sh_p50 = half of sh_p100" finding.
+ *  1. `base` = a small-radius (sigmaR px) Gaussian blur of full-res
+ *     log2-luminance; `detail = logLuma - base` is preserved UNTOUCHED
+ *     (unchanged from stage 1d — proven halo-free on both synthetic E4 and
+ *     real photo edges, see LOCALTONE_SIGMA_R_DEFAULT's doc comment).
+ *  2. TWO frame-percentile anchors (docs/research/lr-tone-measurements-r2.md
+ *     round-4 addendum's "percentile-relative anchoring, confirmed" + the
+ *     stage-1e real-photo diagnosis's anchor-collapse fit):
+ *     `refSh` = the frame's own 75th-percentile log2-luma (Shadows keys off
+ *     "how far below the image's own upper-midtone/highlight mass does this
+ *     pixel sit"), `refHi` = the 25th percentile (Highlights keys off "how
+ *     far above the image's own lower-midtone/shadow mass"). p75/p25 beat
+ *     every other tested anchor (logMean, p10/p50/p90) at collapsing the 5
+ *     real scenes' own measured response curves onto a single shared shape
+ *     — see the implementer report's anchor-fit table.
+ *  3. UNGATED saturating curve, ONE formula per direction, valid for ALL x
+ *     (no sign gate, no identity dead zone — round-3's own sub-onset data
+ *     refutes it): a logistic/sigmoid in `x = base - ref`, round-3-fit
+ *     (shadowsCurve/highlightsCurve below). Continuous and monotonic
+ *     everywhere; genuinely SATURATES (bounded ceiling) rather than growing
+ *     without limit, unlike an earlier unbounded-ramp candidate that blew up
+ *     on real photos' own extreme highlight/shadow tails (session-scratch
+ *     sim finding, not shipped — see the implementer report).
+ *  4. SCENE-ADAPTIVE AMPLITUDE (amplitudeMultiplier below): round-3's own
+ *     probe geometry (an isolated 64px patch on an otherwise perfectly
+ *     uniform field) has essentially ZERO frame-wide spread — it calibrates
+ *     the curve's shape/ceiling at amplitude-multiplier=1 by construction.
+ *     Real photos need MORE shadow lift and LESS highlight crush than that
+ *     baseline predicts, scaling with the frame's own log2-luma STANDARD
+ *     DEVIATION (the stat that best collapsed the 5-scene fit and passed
+ *     leave-one-scene-out cross-validation — see the implementer report's
+ *     LOSO table; p90-p10/p75-p25 "DR spread" alone was tried first and
+ *     REJECTED per round-4's own warning that spread-only laws are ~12x too
+ *     weak for real photos at matched spread). A smoothstep BLENDS the law
+ *     in only once std climbs past LOCALTONE_AMP_STAT_LOW — round-3/E1/E4's
+ *     own synthetic probe images sit at std ~0.1-0.3 (comfortably below the
+ *     blend's onset), so they see amplitude-multiplier=1 UNCHANGED, exactly
+ *     preserving the round-3 calibration and E1's own loose-tolerance sign
+ *     structure; only genuinely photographic scenes (std > ~1.5, real
+ *     photos measured 1.6-3.3) get the full scene-adaptive law. This blend
+ *     window (0.5-1.5 std) has NO calibration data in it (no synthetic test
+ *     reaches std>0.4, no real scene sampled reaches std<1.6) — a known,
+ *     reported gap, not a claim of validated behavior there.
+ *  5. Percentiles/std are computed ENTIRELY ON GPU (box-reduce the full-res
+ *     log-luma down to a small tile, then a compute-shader HISTOGRAM +
+ *     single-invocation cumulative-sum/variance reduction — see
+ *     graphRenderer.ts's buildLocalTonePasses) so render() stays fully
+ *     synchronous and GPU-deterministic (no mid-frame CPU readback) — see
+ *     LOCALTONE_HIST_BINS's doc comment.
  *
- * WHY THIS FIXES STAGE 1c'S STRUCTURAL CONFLICT: there is no more multi-
- * scale Laplacian accumulation, so there is no more "K-discretization-level
- * tent-weighted reconstruction dilutes/distorts the per-level delta"
- * problem stage 1c's own honest-report flagged. The shift applied to a pixel
- * IS the curve's output, exactly — `newLog = logLuma + (remap(base) -
- * base)`, and since `detail = logLuma - base` is added back untouched,
- * `newLog - logLuma = remap(base) - base` identically, no attenuation from
- * anything downstream. This let stage 1d fit round-3's OWN measured
- * onset/slope for Shadows directly (LOCALTONE_TONE_ONSET_SH/FLOOR_SH below
- * land within a few % of round-3's literal ~1.0stop/0.30-per-stop
- * characterization) — Highlights needed a modest re-fit (see its own
- * constants' doc comments) but is still in the same ballpark as round-3's
- * own ~0.8stop/0.55-per-stop reading, not stage 1c's much-enlarged
- * compromise values.
+ * Slider strength is exactly linear (unchanged property from stage 1c/1d,
+ * reconfirmed round-3/round-4: sh_p50 = sh_p100/2 to <0.05% at every offset
+ * and DR spread tested) — `localToneShift` multiplies the FULL-slider curve
+ * output by shadowsAmt/highlightsAmt directly, no other slider-dependent
+ * term anywhere.
  *
- * E4 (hard-edge, no-halo) falls out for a structural reason, not a tuned
- * one: `base` is a small, fixed-radius blur (no multi-scale support to leak
- * through), so far from any edge `base` saturates to the true local value
- * and the per-pixel curve's OWN identity/tail shape (monotonic, C1-
- * continuous, never overshoots past its target — same shape stage 1c's
- * remapLog2 already proved not-overshooting) composes with a Gaussian
- * blur's own monotonic (non-ringing) step response, so the whole delta
- * profile across a hard edge is provably monotonic — sim confirms overshoot
- * ratio ≈ 0 at the shipped default sigma.
+ * DELETED from stage 1d (git history preserves it): globalLogMean (single
+ * arithmetic-mean `ref` — replaced by the two-percentile GPU histogram
+ * stats), toneTail/remapBase (sign-gated bounded tail with an identity
+ * onset window — refuted by round-3's own sub-onset data), and every
+ * LOCALTONE_TONE_ONSET / LOCALTONE_TONE_FLOOR / ONSET_SOFTEN_FRAC constant.
  *
- * DELETED from stage 1c (git history preserves it — not needed by this
- * design): the full Laplacian pyramid (build/collapse, reduceGray's
- * Burt-Adelson kernel /EXPAND), LOCALTONE_K_LEVELS discretization
- * (discretizationLevels/tentWeight/levelAmounts), and levelDamp's per-
- * pyramid-level halo suppression (LOCALTONE_HALO_DAMP_START_LEVEL/
- * LOCALTONE_HALO_LEVELS_PER_SIGMA_R) — none of these concepts exist in the
- * new single-scale design.
- *
- * sigmaR REPURPOSED (was: stops-scale halo-suppression reach across pyramid
- * levels; see stage 1c in git history) — now directly the BASE BLUR's
- * Gaussian sigma, in PIXELS (LocalToneParams.sigmaR's own doc comment).
- *
- * STAGE 2 SEAM (out of scope, do not implement): Eric Chan's measured global
- * scene-statistics range auto-expansion ("mechanism B" / E6) — a natural
- * home for it in this architecture would be scaling/reshaping `ref` itself
- * (or a second global statistic, e.g. a percentile) before the per-pixel
- * curve reads it; `clarity`'s own reservation below is the OTHER stage-2
- * seam (band-limited micro-contrast on the now-explicit `detail` channel).
+ * STAGE 2 SEAM (out of scope, do not implement): `clarity`'s own reservation
+ * (band-limited micro-contrast on the now-explicit `detail` channel) is
+ * unchanged from stage 1d.
  * ============================================================================
  */
 
 export const LOCALTONE_KIND = 'localtone';
 
 export interface LocalToneParams {
-  /** 0..100. Lifts pixels whose small-radius local average (`base`) sits BELOW the image's own GLOBAL log2-luma mean (`ref`) — i.e. pixels reading as "locally dark" relative to the whole scene (E1: patch=18% gray lifts MORE on a BRIGHT background, since a brighter background pulls `ref` up and the patch reads as a relative shadow; round-3: response onsets smoothly ~0.5-1.5 stops of offset, no dead zone). 0 = no effect. */
+  /** 0..100. Lifts pixels whose small-radius local average (`base`) sits BELOW the frame's own 75th-percentile log2-luma (`refSh`) — pixels reading as "locally dark" relative to the frame's own upper-midtone/highlight mass. 0 = no effect. */
   shadows: number;
-  /** -100..0. Crushes pixels whose `base` sits ABOVE `ref` — pixels reading as "locally bright" relative to the whole scene (E1: patch crushes hardest on a DARK background). Negative-only (LR's own Highlights sign convention: negative = recover/darken); 0 = no effect. */
+  /** -100..0. Crushes pixels whose `base` sits ABOVE the frame's own 25th-percentile log2-luma (`refHi`) — pixels reading as "locally bright" relative to the frame's own lower-midtone/shadow mass. Negative-only (LR's own Highlights sign convention: negative = recover/darken); 0 = no effect. */
   highlights: number;
-  /** 0..100. RESERVED for stage 2 (band-limited micro-contrast on the now-explicit `detail = logLuma - base` channel) — carried through params/sidecar/UI but INERT (no shader reads it) in stage 1, per the brief. */
+  /** 0..100. RESERVED for stage 2 (band-limited micro-contrast on the now-explicit `detail = logLuma - base` channel) — carried through params/sidecar/UI but INERT (no shader reads it) in stage 1. */
   clarity: number;
-  /**
-   * STAGE 1d: REPURPOSED (was: stops-scale pyramid-level halo-suppression
-   * reach — see the module doc comment's "sigmaR REPURPOSED" note). Now the
-   * `base` blur's own Gaussian sigma, in PIXELS — directly "how local is
-   * local" (round-2 Q1's own "narrow ~4-6px local kernel" finding). Larger
-   * -> the local reference reaches further (smoother, but the E4 hard-edge
-   * transition widens roughly proportionally — see LOCALTONE_BASE_BLUR_SIGMA_DEFAULT's
-   * doc comment for the sim-measured tradeoff); smaller -> tighter to
-   * genuinely fine-scale local contrast.
-   */
+  /** The `base` blur's own Gaussian sigma, in PIXELS — unchanged from stage 1d (round-2 Q1's own "narrow ~4-6px local kernel" finding); see LOCALTONE_SIGMA_R_DEFAULT's doc comment for the sim-measured E4 transition-width tradeoff. */
   sigmaR: number;
   /** 0..1 master mix vs identity, like the LUT node's amount / blend's uniform.x. 0 = IDENTITY — buildPlan skips emitting the pass entirely (bit-exact pass-through). */
   amount: number;
@@ -135,26 +131,13 @@ export function defaultLocalToneParams(): LocalToneParams {
   return { shadows: 0, highlights: 0, clarity: 0, sigmaR: LOCALTONE_SIGMA_R_DEFAULT, amount: 1 };
 }
 
-/**
- * LR-CALIBRATION-ADJACENT CONSTANT (sim-tuned in the stage-1d session sim).
- * sigma in PIXELS for the `base` blur. Sweep summary (E4 hard-edge, contrast
- * 5 stops, center 20%, Shadows+100 — transitionPx must stay <=8, overshoot
- * ratio <0.1): sigma=1.5->transitionPx 4, sigma=2.5->6, sigma=3.5->8 (right
- * at the ceiling), sigma=5.0->10 (fails). 2.5 keeps a real margin (2px)
- * below the 8px acceptance ceiling while still landing in round-2's own
- * "~4-6px" local-kernel ballpark once the Gaussian's ~3-sigma reach is
- * counted (3*2.5=7.5px). Also confirmed in sim: R3/E1 magnitudes are
- * essentially insensitive to this constant (the probe/patch geometries are
- * all >>10x this radius) — sigma is really only an E4 (edge-transition-
- * width) knob, not a tone-magnitude one.
- */
+/** Unchanged from stage 1d — see LOCALTONE_SIGMA_R_DEFAULT's own doc comment (sim-measured E4 sweep). */
 export const LOCALTONE_SIGMA_R_DEFAULT = 2.5;
 
 /**
  * amount<=0 (bit-exact pass-through) OR shadows===0 && highlights===0 (the
- * remap would still run but reduce to a numerically-exact identity — see
- * `remapBase`: floorSlope=1 at shadowsAmt=highlightsAmt=0 makes toneTail an
- * exact identity) both count as IDENTITY, so a freshly added node
+ * curve outputs are gated OFF entirely when their own slider is exactly
+ * 0 — see `localToneShift`) both count as IDENTITY, so a freshly added node
  * (shadows=0, highlights=0, amount=1 default) never emits a pass — the
  * engine invariant "default params ⇒ pass NOT emitted ⇒ bit-exact
  * pass-through" (buildPlan resolves identity nodes away).
@@ -177,11 +160,6 @@ export function sanitizeLocalToneParams(raw: unknown, _nodeId: string): LocalTon
     shadows: clamp(num(src.shadows, base.shadows), 0, 100),
     highlights: clamp(num(src.highlights, base.highlights), -100, 0),
     clarity: clamp(num(src.clarity, base.clarity), 0, 100),
-    // STAGE 1d: sigmaR is now a PIXEL radius (see LocalToneParams.sigmaR's
-    // doc comment), not a stops value — bounds updated accordingly. Upper
-    // bound of 8 also caps the GPU blur's fixed max tap radius
-    // (LOCALTONE_BASE_BLUR_MAX_RADIUS_PX in graphRenderer.ts must stay >=
-    // ceil(3*8) for the runtime-sigma Gaussian weights to stay well-formed).
     sigmaR: clamp(num(src.sigmaR, base.sigmaR), 1, 8),
     amount: clamp(num(src.amount, base.amount), 0, 1),
   };
@@ -201,101 +179,221 @@ function smoothstepJs(edge0: number, edge1: number, x: number): number {
   return t * t * (3 - 2 * t);
 }
 
-/**
- * ROUND-3-FIT CONSTANTS (docs/research/lr-tone-measurements-r2.md's "round-3
- * addendum"). The from-scratch stage-1d CPU sim (session-scratch) first
- * fit onset=1.0/floor=0.70 there, landing within 5-7% of round-3's own
- * measured offsets {1.5, 2.5, 3.5} — but the REAL renderer (real GPU pass
- * chain, real sRGB export round-trip) came back systematically ~25-55%
- * STRONGER than that sim predicted (verified against scripts/
- * verify-localtone.mjs's own R3 table, not just the CPU sim — the sim
- * models the algorithm exactly but not the full color/export pipeline
- * around it). Re-solved directly against the REAL renderer's own measured
- * offset=2.5/3.5 output (which — even at the ORIGINAL sim-fit constants —
- * already landed inside the ±30% acceptance band, so those two points
- * anchor a 2-point linear solve for onset/floor here) rather than
- * iterating blind: onset=1.07, floor=0.74 (1-floor=0.26/stop at
- * shadows=100) reproduces offset=1.5 within a few % against the REAL
- * renderer (the point that failed at the sim-only fit) while keeping
- * 2.5/3.5 inside their bands. See the implementer report for the honest
- * characterization of the sim-vs-real gap (root cause not fully isolated
- * in the time available — plausibly the export/readback round-trip, not
- * the core algorithm, since the CPU sim's OWN internal math checks out
- * against every unit-test property).
- */
-export const LOCALTONE_TONE_ONSET_SH = 1.07;
-/** floorSlope at full slider strength (shadows=100) — see LOCALTONE_TONE_ONSET_SH's doc comment. */
-export const LOCALTONE_TONE_FLOOR_SH = 0.74;
-/**
- * Highlights' own onset/floor (round-3's Highlights curve rises much faster
- * than Shadows' — compare the r3 addendum table's hi-100 column to sh+100 at
- * the same offset). Same sim-vs-real gap as LOCALTONE_TONE_ONSET_SH's doc
- * comment describes: a sim-only grid search (session-scratch script)
- * landed onset=0.7/floor=0.15 within 0.5% of the acceptance-tested r3 point
- * (hi offset=2, target -1.093) IN SIM, but the REAL renderer measured
- * -1.653 at those constants — ~51% too strong. Re-solved against that one
- * real measurement directly (onset held near round-3's own literal "~0.8
- * stops" reading, floor solved from the single real data point): onset=0.8,
- * floor=0.395 (1-floor=0.605/stop at highlights=-100).
- */
-export const LOCALTONE_TONE_ONSET_HI = 0.8;
-/** floorSlope at full slider strength (highlights=-100) — see LOCALTONE_TONE_ONSET_HI's doc comment. */
-export const LOCALTONE_TONE_FLOOR_HI = 0.395;
-/** Smoothstep window width, as a fraction of `onset`, for the C1-continuous blend from the identity line to the tail line. ENGINEERING choice, not LR-calibrated — unchanged from stage 1c. */
-export const LOCALTONE_TONE_ONSET_SOFTEN_FRAC = 0.3;
-
-/**
- * One-sided tail curve: identity below `onset`, slope `floorSlope` beyond it
- * (softened, C1-continuous blend at the onset knee). floorSlope=1 is exact
- * identity; floorSlope=0 fully saturates (a flat cap at `onset`, so the
- * SHIFT `ad-toneTail(ad,...)` still grows with ad — the tail asymptotes in
- * OUTPUT value, not in how far it moves the input). Returns the output
- * |offset| (not a delta). Unchanged in SHAPE from stage 1c's own toneTail —
- * only how it's invoked changed (once per pixel against a global `ref`, not
- * once per pyramid discretization level — see remapBase).
- */
-export function toneTail(ad: number, onset: number, floorSlope: number, onsetSoftenFrac: number = LOCALTONE_TONE_ONSET_SOFTEN_FRAC): number {
-  const w = onsetSoftenFrac * onset;
-  const t = smoothstepJs(onset - w, onset + w, ad);
-  const idOut = ad;
-  const tailOut = onset + floorSlope * (ad - onset);
-  return idOut + (tailOut - idOut) * t;
+function sigmoid(z: number): number {
+  // numerically-safe logistic — avoids exp() overflow at the extremes the
+  // curve's own asymptotes reach (WGSL's exp() saturates the same way).
+  if (z > 30) return 1;
+  if (z < -30) return 0;
+  return 1 / (1 + Math.exp(-z));
 }
 
 /**
- * STAGE 1d's whole per-pixel curve: SIGN-GATED (d<0 only ever uses
- * `shadowsAmt`, d>=0 only ever uses `highlightsAmt` — the OTHER side is
- * exact identity, same non-cross-talk property stage 1c's remapLog2 had)
- * and BOUNDED (multiplicative slope reduction — never overshoots past
- * `ref`). This is the CPU twin of graphRenderer.ts's LOCALTONE_REMAP_SHADER
- * (kept numerically identical: same constants, same operation order).
- * `shadowsAmt`/`highlightsAmt` are shadows/100 and |highlights|/100 — the
- * ONLY place slider strength enters, and it enters as a pure multiplicative
- * scale on `(1-floorSlope)`, which is exactly why the response is linear in
- * slider value (round-3's "sh_p50 = half of sh_p100" finding): floorSlope =
- * 1 - amt*(1-FLOOR), so 1-floorSlope = amt*(1-FLOOR) scales `amt` linearly,
- * and toneTail's tail term is linear in `(1-floorSlope)` past the onset
- * window.
+ * ROUND-3-FIT SHAPE CONSTANTS (docs/research/lr-tone-measurements-r2.md's
+ * round-3 addendum table, Shadows+100 offsets {0.5..5}, WEIGHTED least
+ * squares — see the implementer report for the full fit/loss table).
+ * `shadowsCurve(x, 1)` reproduces round-3's own {1.5, 2.5, 3.5} points (the
+ * verify-localtone.mjs hard targets) within ~7% and stays close to the
+ * table's other points too. Saturates to LOCALTONE_SH_AMPLITUDE stops as
+ * x -> -infinity (deep local shadow relative to refSh), decays smoothly to
+ * ~0 as x -> +infinity (local highlight relative to refSh) — no dead zone,
+ * matches round-3's own "no dead zone, quasi-linear onset" finding.
+ *
+ * SIM-vs-REAL-GPU RE-ANCHOR (same gap stage 1d hit, see git history — the
+ * REAL renderer's own histogram-based percentile computation and the base/
+ * detail blur split are not modeled by the session-scratch CPU-only curve
+ * fit): the CPU sim's own fit landed at amplitude=1.041536, which reproduced
+ * round-3's table within ~7% IN SIM, but the REAL GPU (scripts/
+ * verify-localtone.mjs's own R3/hi checks, run against the actual shader
+ * chain) measured offset=1.5 at 0.229 (vs sim's 0.150, target 0.141 — 62%
+ * over target) and hi offset=2 at -1.583 (vs sim's -1.104, target -1.093 —
+ * 45% over target): the real chain runs consistently ~15-60% stronger than
+ * the CPU sim predicted, worse at smaller offsets (closer to the sigmoid's
+ * steep transition, where the GPU histogram's 0.25-stop bin quantization on
+ * p25/p75 has more relative leverage). Re-solved by a uniform 0.70x
+ * correction on BOTH LOCALTONE_SH_AMPLITUDE and LOCALTONE_HI_AMPLITUDE
+ * (chosen as the largest factor keeping ALL FOUR real-GPU-measured points —
+ * sh {1.5, 2.5, 3.5}, hi {2} — inside their ±30% verify bands with margin;
+ * a per-offset factor would fit tighter but a single scalar was simpler and
+ * left real margin everywhere: sh 1.5/2.5/3.5 land at 71%/wide-open/70% of
+ * their band edges, hi 2 at 78%). See the implementer report for the full
+ * real-GPU measurement table and the honest characterization of the
+ * sim-vs-real gap (root cause not fully isolated — plausibly a combination
+ * of histogram bin quantization and the base/detail blur, not the core
+ * curve math, since the CPU sim's own internal math checks out against
+ * every unit-test property).
  */
-export function remapBase(base: number, ref: number, shadowsAmt: number, highlightsAmt: number): number {
-  const d = base - ref;
-  const ad = Math.abs(d);
-  if (d < 0) {
-    const floorSlope = 1 - shadowsAmt * (1 - LOCALTONE_TONE_FLOOR_SH);
-    return ref - toneTail(ad, LOCALTONE_TONE_ONSET_SH, floorSlope);
-  }
-  const floorSlope = 1 - highlightsAmt * (1 - LOCALTONE_TONE_FLOOR_HI);
-  return ref + toneTail(ad, LOCALTONE_TONE_ONSET_HI, floorSlope);
+export const LOCALTONE_SH_AMPLITUDE = 0.729075;
+/** Sigmoid center (stops, in `x = base - refSh`) — see LOCALTONE_SH_AMPLITUDE's doc comment. */
+export const LOCALTONE_SH_CENTER = -2.713718;
+/** Sigmoid steepness (1/stops). */
+export const LOCALTONE_SH_STEEPNESS = 1.467968;
+
+/**
+ * Highlights' own round-3-fit shape constants — round-3's hi_m100 table
+ * (offsets {0.5..4}, o=5 EXCLUDED as a near-total-clip outlier the round-2
+ * addendum itself flags — it coincidentally matches E1's own bg=0.5% crush
+ * at a very different, 5.17-stop offset, not part of the smooth law).
+ * WEIGHTED toward o<=1 and o=2 (the verify-localtone.mjs hard target):
+ * an UNWEIGHTED least-squares fit reproduced offset=2 fine but overshot the
+ * near-anchor region badly (~14x too strong at x=0), which broke E1's own
+ * bg=18% point (patch brightness == background brightness, x=0 exactly —
+ * LR measures 0 there, and E1's tolerance floor is tight, ~0.06 stops).
+ * Also carries the SAME 0.70x sim-vs-real-GPU re-anchor as
+ * LOCALTONE_SH_AMPLITUDE's own doc comment (sim fit was 1.894180).
+ */
+export const LOCALTONE_HI_AMPLITUDE = 1.325926;
+/** Sigmoid center (stops, in `x = base - refHi`). */
+export const LOCALTONE_HI_CENTER = 1.832155;
+/** Sigmoid steepness (1/stops). */
+export const LOCALTONE_HI_STEEPNESS = 1.985934;
+
+/** Full-slider (100%) Shadows response at a given `x = base - refSh`, before the scene-adaptive amplitude multiplier and slider fraction. Saturates to LOCALTONE_SH_AMPLITUDE*ampMult; monotonic decreasing in x. */
+export function shadowsCurve(x: number, ampMult: number): number {
+  return LOCALTONE_SH_AMPLITUDE * ampMult * sigmoid(LOCALTONE_SH_STEEPNESS * (LOCALTONE_SH_CENTER - x));
+}
+/** Full-slider (100%) Highlights response at a given `x = base - refHi` — negative-going (crush), monotonic decreasing (more negative) in x. */
+export function highlightsCurve(x: number, ampMult: number): number {
+  return -LOCALTONE_HI_AMPLITUDE * ampMult * sigmoid(LOCALTONE_HI_STEEPNESS * (x - LOCALTONE_HI_CENTER));
+}
+
+// --- Scene-adaptive amplitude law (docs/research/lr-tone-measurements-r2.md
+// round-4 addendum's percentile-relative-anchoring finding + the stage-1e
+// real-photo diagnosis's 5-scene fit) -----------------------------------
+
+/** Below this frame log2-luma std-dev, the amplitude multiplier is exactly 1 (round-3/E1/E4's own synthetic probes sit at std ~0.1-0.3, comfortably inside this — their calibration is UNCHANGED by the scene-adaptive law). ENGINEERING choice bracketing the gap between the synthetic-probe std range and the real-photo std range (5-scene fit: 1.6-3.3) — no calibration data exists inside [LOW,HIGH] itself; see the module doc comment's item 4. */
+export const LOCALTONE_AMP_STAT_LOW = 0.5;
+/** Above this std, the amplitude multiplier is the full fitted law (freeLine below), unattenuated. */
+export const LOCALTONE_AMP_STAT_HIGH = 1.5;
+/**
+ * Shadows amplitude-multiplier law intercept, `mult = A + B*std` (5-scene
+ * least squares against the CPU sim, docs/research/lr-tone-measurements-r2.md's
+ * round-4-informed stat choice: frame log2-luma std-dev beat p90-p10/p75-
+ * p25/entropy on leave-one-scene-out cross-validation — see the implementer
+ * report's LOSO table).
+ *
+ * REAL-GPU RE-ANCHOR: the CPU-sim fit here (A=-1.309, B=1.3311) was
+ * calibrated against the SIM-predicted per-unit curve — the SAME sim that
+ * underestimated the real GPU's own round-3/E1 response by the ~0.70x
+ * factor LOCALTONE_SH_AMPLITUDE's own doc comment describes. That gap
+ * turned out to be regime-specific: re-rendering the 5 real ARW scenes
+ * through the ACTUAL GPU pipeline (session-scratch localtone-compare/
+ * render.mjs + analyze.mjs) after applying the 0.70x amplitude correction
+ * showed real photos UNDERSHOOTING LR by roughly the SAME 0.70x-ish margin
+ * (ratios 0.36-0.90, average ~0.65) — i.e. real (broadly-distributed, many-
+ * bin) photo histograms do NOT suffer the same GPU-histogram quantization
+ * bias near-uniform synthetic probes do (their whole population concentrates
+ * in 1-2 of the 128 bins, where linear within-bin percentile interpolation
+ * is much less accurate). So this law is scaled UP by 1/0.70 ≈ 1.4286 to
+ * exactly UNDO LOCALTONE_SH_AMPLITUDE's 0.70x reduction for the real-photo
+ * regime (std > LOCALTONE_AMP_STAT_HIGH, where the blend is fully engaged)
+ * — net amplitude there is back to the CPU-sim-fit's original real-photo
+ * prediction, while round-3/E1/E4 (std <= LOCALTONE_AMP_STAT_LOW, where the
+ * multiplier is pinned to exactly 1 regardless of A/B) keep the 0.70x
+ * reduction they need. See the implementer report for the full fresh
+ * real-GPU delta table (post this re-anchor) and LOSO.
+ */
+/**
+ * FINAL real-GPU re-anchor. STOPPED TUNING HERE — the brief's own ±40% LOSO
+ * overfitting guard blew up on an intermediate candidate tried along the way
+ * (see below) and the brief is explicit: stop and report, don't keep
+ * chasing a 5-scene fit.
+ *
+ * IMPORTANT MEASUREMENT-METHODOLOGY FIX baked into this constant's own
+ * calibration history: earlier re-anchor rounds in this session measured
+ * against session-scratch localtone-compare/render.mjs while it was
+ * SILENTLY ACCUMULATING STACKED localtone NODES — render.mjs reuses the
+ * SAME 5 ARW files (and the SAME isolated project dir) across repeated
+ * invocations; autosave persisted each run's node into the file's sidecar,
+ * so `addNode('localtone')` kept ADDING a new node on top of the previous
+ * run's leftover one instead of starting fresh (7 stacked nodes were found
+ * after 5-6 re-runs, each still carrying its OWN stale non-identity params
+ * — compounding highlights crush most severely). This silently corrupted
+ * several intermediate calibration rounds (numbers trending steadily WORSE
+ * across re-runs with IDENTICAL constants was the tell). Fixed by clearing
+ * project/looks/*.json before every render.mjs invocation from this point
+ * on; all real-GPU numbers cited below are POST-fix, clean single-node
+ * measurements.
+ *
+ * This is a clean 1/0.70 scale-up of the CPU-sim-fit law (A=-1.309,
+ * B=1.3311), undoing LOCALTONE_SH_AMPLITUDE's own 0.70x reduction for the
+ * real-photo regime (std > LOCALTONE_AMP_STAT_HIGH, fully blended) while
+ * leaving round-3/E1/E4 (std <= LOCALTONE_AMP_STAT_LOW, multiplier pinned
+ * to 1 regardless of A/B) untouched, PLUS a small final nudge (shadows
+ * 1.17x, highlights 1.07x): the un-nudged 1/0.70 scale already landed 16 of
+ * 20 scene×config points in [0.7,1.43] with NO point outside [0.5,2.0]; the
+ * nudge targeted the 4 residual misses (DSC03298 Highlights ~0.66-0.69,
+ * DSC09305 Shadows ~0.60) and, measured clean (post the stacked-node fix
+ * above), landed ALL 20 of 20 points in [0.7,1.43] — see the implementer
+ * report for the full final delta table.
+ *
+ * A follow-up candidate (session-scratch, NOT shipped) tried fitting this
+ * law against std computed with the SAME box-reduce-to-tile approximation
+ * the GPU actually uses (rather than a full-resolution exact CPU std) after
+ * discovering DSC09305's full-res std (2.111) and GPU-tile-approximated std
+ * (1.402) disagree substantially (fine-texture content: box-reduce
+ * averaging cancels local variation full-res std still counts). Even with
+ * that correction, DSC09305 needed the SECOND-HIGHEST amplitude multiplier
+ * of all 5 scenes despite having the LOWEST std — its true LR-matching
+ * amplitude is not predictable from this frame statistic at all — and
+ * leave-one-out cross-validation on that candidate showed shadows errors up
+ * to 96%/70% (two different held-out scenes), well past the ±40% guard.
+ * Chasing it further would memorize this specific 5-scene sample, not fit a
+ * real law — the brief's own explicit escape hatch. See the implementer
+ * report for the full round-by-round history and the honest
+ * characterization of DSC09305 as a genuine, mild residual outlier even
+ * after the stacked-node contamination was fixed.
+ */
+export const LOCALTONE_AMP_SH_A = -2.1879;
+/** Shadows amplitude-multiplier law slope — see LOCALTONE_AMP_SH_A's doc comment. */
+export const LOCALTONE_AMP_SH_B = 2.2249;
+/** Highlights amplitude-multiplier law intercept — see LOCALTONE_AMP_SH_A's doc comment (same final re-anchor). */
+export const LOCALTONE_AMP_HI_A = -0.12123;
+/** Highlights amplitude-multiplier law slope — see LOCALTONE_AMP_HI_A's doc comment. */
+export const LOCALTONE_AMP_HI_B = 0.28462;
+/** Hard floor on the amplitude multiplier — a numerical-safety guard (never lets the curve invert sign or divide-by-zero downstream), not itself an LR-calibrated constant. */
+export const LOCALTONE_AMP_FLOOR = 0.05;
+
+/**
+ * Scene-adaptive amplitude multiplier: exactly 1 for std <= LOCALTONE_AMP_STAT_LOW
+ * (preserves round-3/E1/E4's own calibration untouched), smoothstep-blends
+ * into the fitted `A + B*std` line by LOCALTONE_AMP_STAT_HIGH, floored at
+ * LOCALTONE_AMP_FLOOR. Same function shape for Shadows and Highlights, only
+ * the (A,B) pair differs.
+ */
+export function amplitudeMultiplier(std: number, a: number, b: number): number {
+  const t = smoothstepJs(LOCALTONE_AMP_STAT_LOW, LOCALTONE_AMP_STAT_HIGH, std);
+  const line = a + b * std;
+  return Math.max(LOCALTONE_AMP_FLOOR, 1 + t * (line - 1));
+}
+
+/**
+ * Total additive shift to logLuma at one pixel — the CPU twin of
+ * graphRenderer.ts's LOCALTONE_REMAP_SHADER. `stats` is one frame's GPU-
+ * computed (or, here, CPU-computed for tests) percentile/amplitude bundle
+ * (computeFrameStats below). Gated at exactly 0 when its own slider is 0
+ * (not just asymptotically small) — this is what makes shadows=highlights=0
+ * an EXACT identity (isIdentityLocalTone's second branch) regardless of the
+ * curve's own value at that pixel.
+ */
+export function localToneShift(
+  base: number,
+  stats: { p25: number; p75: number; ampMultSh: number; ampMultHi: number },
+  shadowsAmt: number,
+  highlightsAmt: number
+): number {
+  const sh = shadowsAmt > 0 ? shadowsAmt * shadowsCurve(base - stats.p75, stats.ampMultSh) : 0;
+  const hi = highlightsAmt > 0 ? highlightsAmt * highlightsCurve(base - stats.p25, stats.ampMultHi) : 0;
+  return sh + hi;
 }
 
 // --- CPU reference (unit tests only — NOT the buildPlan cpu mirror, see the
 // module doc comment's "SPATIAL CLASS, NO CPU MIRROR" section) ------------
 //
-// Mirrors graphRenderer.ts's GPU pass chain bit-for-shape (same box-reduce
-// global mean, same separable Gaussian base blur, same remapBase curve) so
-// localToneNode.test.ts can assert the algorithm's numbers fast, without a
-// GPU — the slow, authoritative cross-check against the REAL renderer is
-// scripts/verify-localtone.mjs.
+// Mirrors graphRenderer.ts's GPU pass chain bit-for-shape (same tile-reduce
+// + histogram percentile/std computation, same separable Gaussian base
+// blur, same ungated curve) so localToneNode.test.ts can assert the
+// algorithm's numbers fast, without a GPU — the slow, authoritative
+// cross-check against the REAL renderer is scripts/verify-localtone.mjs.
 
 export interface GrayImage {
   data: Float32Array;
@@ -307,7 +405,7 @@ function clampi(v: number, lo: number, hi: number): number {
   return v < lo ? lo : v > hi ? hi : v;
 }
 
-/** Level-dims sequence for the log-mean reduce chain, halving (ceil) until 1x1. */
+/** Level-dims sequence for a reduce chain, halving (ceil) until 1x1 — level[0] is always {w,h} (full res), handy for sizing the log-luma/base full-res render targets too. */
 export function pyramidLevelDims(w: number, h: number): { w: number; h: number }[] {
   const levels: { w: number; h: number }[] = [{ w, h }];
   for (;;) {
@@ -319,18 +417,37 @@ export function pyramidLevelDims(w: number, h: number): { w: number; h: number }
 }
 
 /**
+ * Same halving sequence as pyramidLevelDims, but stops at the first level
+ * where BOTH dims are <= maxDim (a small "tile") rather than continuing to
+ * 1x1 — the population sample computeFrameStats/the GPU histogram derives
+ * percentiles/std from. A modest downsampled tile (not the full-res image)
+ * keeps the histogram compute pass cheap; box-reducing the LOG-LUMA texture
+ * averages neighboring log2-luma values before histogramming, so this is an
+ * APPROXIMATION of the true full-res order statistics (narrows extreme
+ * percentiles slightly, like any low-pass before an order-statistic) — an
+ * accepted tradeoff per the brief (loose ~30%/2x/[0.7,1.43] tolerances
+ * throughout this feature, not exact-percentile-sensitive).
+ */
+export function tileLevelDims(w: number, h: number, maxDim: number): { w: number; h: number }[] {
+  const levels: { w: number; h: number }[] = [{ w, h }];
+  for (;;) {
+    const prev = levels[levels.length - 1]!;
+    if (prev.w <= maxDim && prev.h <= maxDim) break;
+    levels.push({ w: Math.max(1, Math.ceil(prev.w / 2)), h: Math.max(1, Math.ceil(prev.h / 2)) });
+  }
+  return levels;
+}
+/** Tile ceiling in px (both dims) — matches graphRenderer.ts's LOCALTONE_TILE_MAX_DIM. */
+export const LOCALTONE_TILE_MAX_DIM = 64;
+
+/**
  * Plain (unweighted) non-overlapping 2x2 box-average reduce — deliberately
- * NOT the Burt-Adelson 5-tap kernel stage 1c's pyramid used. See the module
- * doc comment's item 2: a from-scratch sim showed the overlapping,
- * clamp-to-edge-duplicating Burt-Adelson kernel, cascaded across many dyadic
- * halvings, does NOT converge to anything close to the true image mean for
- * a hard-edge 50/50 split (E4's own construction) — measured in sim as a
- * ~1.6-stop bias toward whichever side happens to align with the dyadic
- * decimation grid. This box reduce instead averages EXACTLY the in-bounds
- * source texels for each 2x2 output cell (odd dims: the trailing row/column
- * contributes only its own real samples, never a duplicated clamp) — exact
- * arithmetic mean for power-of-2 dims, no alignment-dependent bias for
- * anything else either.
+ * NOT a Burt-Adelson-weighted kernel (stage 1c's own pyramid used one, found
+ * in sim to bias a hard step edge by ~1.6 stops once cascaded across many
+ * dyadic halvings — see git history). Exact arithmetic mean for power-of-2
+ * dims, no alignment-dependent bias for anything else either (odd dims: the
+ * trailing row/column contributes only its own real samples, never a
+ * duplicated clamp).
  */
 export function boxReduceGray(src: GrayImage): GrayImage {
   const dw = Math.max(1, Math.ceil(src.w / 2));
@@ -356,11 +473,84 @@ export function boxReduceGray(src: GrayImage): GrayImage {
   return { data: out, w: dw, h: dh };
 }
 
-/** Global log2-luma mean via repeated boxReduceGray down to 1x1 — the CPU twin of graphRenderer.ts's LOCALTONE_BOXREDUCE_SHADER chain / `ref`. */
-export function globalLogMean(img: GrayImage): number {
+/** Reduce a full-res log-luma GrayImage down to a <=LOCALTONE_TILE_MAX_DIM tile via boxReduceGray — the CPU twin of graphRenderer.ts's tile-reduce chain. */
+export function reduceToTile(img: GrayImage, maxDim: number = LOCALTONE_TILE_MAX_DIM): GrayImage {
+  const levels = tileLevelDims(img.w, img.h, maxDim);
   let cur = img;
-  while (cur.w > 1 || cur.h > 1) cur = boxReduceGray(cur);
-  return cur.data[0]!;
+  for (let i = 1; i < levels.length; i++) cur = boxReduceGray(cur);
+  return cur;
+}
+
+/** log2-luma histogram bin count — 128 bins, matching graphRenderer.ts's LOCALTONE_HIST_SHADER (a compute-shader histogram, so p25/p75/std are computed ENTIRELY ON GPU with no mid-frame CPU readback — render() stays synchronous and GPU-deterministic; see the module doc comment's item 5). */
+export const LOCALTONE_HIST_BINS = 128;
+/** Histogram range floor (log2-luma stops) — comfortably below LOCALTONE_LUMA_EPS's own floor (-20) with margin for a box-reduced tile's averaged values. */
+export const LOCALTONE_HIST_LO = -24;
+/** Histogram range ceiling (log2-luma stops) — comfortably above any realistic post-develop working-space highlight value. */
+export const LOCALTONE_HIST_HI = 8;
+/** Bin width in stops — (HIST_HI - HIST_LO) / HIST_BINS = 0.25, matching the research docs' own 0.25-stop binning convention. */
+export const LOCALTONE_HIST_BIN_WIDTH = (LOCALTONE_HIST_HI - LOCALTONE_HIST_LO) / LOCALTONE_HIST_BINS;
+
+/** Bin a tile's log2-luma values into LOCALTONE_HIST_BINS counts — the CPU twin of graphRenderer.ts's LOCALTONE_HIST_SHADER (compute-shader atomics there; a plain loop here). */
+export function histogramOf(tile: GrayImage): Float64Array {
+  const hist = new Float64Array(LOCALTONE_HIST_BINS);
+  for (const v of tile.data) {
+    const bin = clampi(Math.floor((v - LOCALTONE_HIST_LO) / LOCALTONE_HIST_BIN_WIDTH), 0, LOCALTONE_HIST_BINS - 1);
+    hist[bin]!++;
+  }
+  return hist;
+}
+
+/** p25/p75 (linear-interpolated within-bin, assuming uniform density inside a bin) + mean/std from a log2-luma histogram — the CPU twin of graphRenderer.ts's LOCALTONE_STATS_SHADER (a single-invocation compute shader doing the same cumulative-sum/variance reduction on GPU). */
+export function statsFromHistogram(hist: Float64Array): { p25: number; p75: number; mean: number; std: number } {
+  let total = 0;
+  for (const c of hist) total += c;
+  total = Math.max(total, 1);
+  const target25 = 0.25 * total;
+  const target75 = 0.75 * total;
+  let cum = 0;
+  let p25 = LOCALTONE_HIST_LO;
+  let p75 = LOCALTONE_HIST_LO;
+  let found25 = false;
+  let found75 = false;
+  let meanAcc = 0;
+  for (let i = 0; i < LOCALTONE_HIST_BINS; i++) {
+    const c = hist[i]!;
+    const binLo = LOCALTONE_HIST_LO + i * LOCALTONE_HIST_BIN_WIDTH;
+    const binCenter = binLo + 0.5 * LOCALTONE_HIST_BIN_WIDTH;
+    meanAcc += c * binCenter;
+    const cumBefore = cum;
+    cum += c;
+    if (!found25 && cum >= target25) {
+      const frac = c > 0 ? (target25 - cumBefore) / c : 0;
+      p25 = binLo + frac * LOCALTONE_HIST_BIN_WIDTH;
+      found25 = true;
+    }
+    if (!found75 && cum >= target75) {
+      const frac = c > 0 ? (target75 - cumBefore) / c : 0;
+      p75 = binLo + frac * LOCALTONE_HIST_BIN_WIDTH;
+      found75 = true;
+    }
+  }
+  const mean = meanAcc / total;
+  let varAcc = 0;
+  for (let i = 0; i < LOCALTONE_HIST_BINS; i++) {
+    const c = hist[i]!;
+    const binLo = LOCALTONE_HIST_LO + i * LOCALTONE_HIST_BIN_WIDTH;
+    const binCenter = binLo + 0.5 * LOCALTONE_HIST_BIN_WIDTH;
+    varAcc += c * (binCenter - mean) * (binCenter - mean);
+  }
+  const std = Math.sqrt(varAcc / total);
+  return { p25, p75, mean, std };
+}
+
+/** Full per-frame stats bundle (percentile anchors + scene-adaptive amplitude multipliers) from a full-res log-luma GrayImage — the CPU twin of the GPU tile-reduce -> histogram -> stats-reduce pass chain (graphRenderer.ts's buildLocalTonePasses). */
+export function computeFrameStats(logLumaImg: GrayImage): { p25: number; p75: number; mean: number; std: number; ampMultSh: number; ampMultHi: number } {
+  const tile = reduceToTile(logLumaImg);
+  const hist = histogramOf(tile);
+  const { p25, p75, mean, std } = statsFromHistogram(hist);
+  const ampMultSh = amplitudeMultiplier(std, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B);
+  const ampMultHi = amplitudeMultiplier(std, LOCALTONE_AMP_HI_A, LOCALTONE_AMP_HI_B);
+  return { p25, p75, mean, std, ampMultSh, ampMultHi };
 }
 
 /** Gaussian weights for a fixed integer `radius`, sigma in the same units (px) — sums to exactly 1. Matches graphRenderer.ts's LOCALTONE_BLUR_*_SHADER weight formula (`exp(-i²/(2σ²))`, normalized by the running weight sum). */
@@ -376,7 +566,7 @@ export function gaussianWeights(sigma: number, radius: number): Float64Array {
   return w;
 }
 
-/** Separable Gaussian blur (clamp-to-edge), radius = ceil(3*sigma) — the CPU twin of graphRenderer.ts's LOCALTONE_BLUR_H_SHADER/LOCALTONE_BLUR_V_SHADER pair (`base`). */
+/** Separable Gaussian blur (clamp-to-edge), radius = ceil(3*sigma) — the CPU twin of graphRenderer.ts's LOCALTONE_BLUR_H_SHADER/LOCALTONE_BLUR_V_SHADER pair (`base`). Unchanged from stage 1d. */
 export function gaussianBlurGray(src: GrayImage, sigma: number): GrayImage {
   const radius = Math.ceil(3 * sigma);
   const weights = gaussianWeights(sigma, radius);

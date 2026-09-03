@@ -34,14 +34,26 @@ import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import { DENOISE_MODEL_SHA256 } from '../../../../shared/denoiseModel';
 import {
+  LOCALTONE_AMP_FLOOR,
+  LOCALTONE_AMP_HI_A,
+  LOCALTONE_AMP_HI_B,
+  LOCALTONE_AMP_SH_A,
+  LOCALTONE_AMP_SH_B,
+  LOCALTONE_AMP_STAT_HIGH,
+  LOCALTONE_AMP_STAT_LOW,
+  LOCALTONE_HI_AMPLITUDE,
+  LOCALTONE_HI_CENTER,
+  LOCALTONE_HI_STEEPNESS,
+  LOCALTONE_HIST_BINS,
+  LOCALTONE_HIST_BIN_WIDTH,
+  LOCALTONE_HIST_LO,
   LOCALTONE_LUMA_EPS,
   LOCALTONE_RATIO_CLAMP_MAX,
-  LOCALTONE_TONE_FLOOR_HI,
-  LOCALTONE_TONE_FLOOR_SH,
-  LOCALTONE_TONE_ONSET_HI,
-  LOCALTONE_TONE_ONSET_SH,
-  LOCALTONE_TONE_ONSET_SOFTEN_FRAC,
-  pyramidLevelDims,
+  LOCALTONE_SH_AMPLITUDE,
+  LOCALTONE_SH_CENTER,
+  LOCALTONE_SH_STEEPNESS,
+  LOCALTONE_TILE_MAX_DIM,
+  tileLevelDims,
 } from '../graph/localToneNode';
 
 type PlanGeometry = NonNullable<RenderPlan['geometry']>;
@@ -248,21 +260,40 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) vec4f {
 }
 `;
 
-// --- Local-adaptive tone (docs/research/local-adaptive-tone.md, STAGE 1d) ---
+// --- Local-adaptive tone (docs/research/local-adaptive-tone.md, STAGE 1e) ---
 //
-// STAGE 1d replaces stage 1c's shared full-depth Laplacian pyramid entirely
-// (see localToneNode.ts's module doc comment for WHY — a proven structural
-// conflict between round-3's small remap onset and E1's far-field leakage,
-// confirmed three independent ways). The new design is a per-pixel curve
-// keyed to a GLOBAL scene reference, with a small-radius base/detail split:
-// `base` = a small Gaussian blur of full-res log2-luma; `ref` = the whole
-// image's own log2-luma mean (a plain box-reduce chain down to 1x1); the
-// curve reads `base - ref` and shifts `base` alone, with `detail = logLuma -
-// base` added back UNTOUCHED. This needs only a HANDFUL of full-frame passes
-// (log-luma extract, ~log2(maxDim) box-reduce steps for `ref`, 2 separable
-// blur passes for `base`, one fused remap pass, one composite pass) instead
-// of stage 1c's K_LEVELS×~2×pyramidDepth pass count (~570 for a typical
-// image) — see buildLocalTonePasses' own doc comment for the exact count.
+// STAGE 1e replaces stage 1d's single-global-mean `ref` + sign-gated bounded
+// tail entirely (see localToneNode.ts's module doc comment for WHY — 1d
+// failed the real-photo gate, undershooting Shadows 3-7x and overshooting
+// Highlights 2-2.3x on real ARW scenes). The curve now keys off TWO frame
+// PERCENTILE anchors (p75 for Shadows, p25 for Highlights) instead of one
+// arithmetic mean, uses an UNGATED saturating sigmoid (no identity dead
+// zone — round-3's own sub-onset data refutes it), and scales by a
+// SCENE-ADAPTIVE amplitude law (the frame's own log2-luma std-dev). The
+// small-radius base/detail split is UNCHANGED from stage 1d: `base` = a
+// small Gaussian blur of full-res log2-luma; `detail = logLuma - base` is
+// added back untouched.
+//
+// Percentiles/std are computed ENTIRELY ON GPU, no mid-frame CPU readback
+// (render() is synchronous — see graphRenderer.ts's own class doc comment —
+// and a WebGPU buffer readback is unavoidably async, so a CPU round-trip
+// mid-frame is architecturally not an option here): box-reduce logLuma down
+// to a small (<=LOCALTONE_TILE_MAX_DIM) tile, a compute-shader HISTOGRAM
+// pass bins that tile's log2-luma values (atomics, same idiom as
+// HISTOGRAM_SHADER elsewhere in this file), then a single-invocation
+// compute-shader STATS pass does the cumulative-sum/variance reduction over
+// the (tiny, 128-bin) histogram and writes p25/p75/ampMultSh/ampMultHi into
+// a 4-float storage buffer the remap pass reads directly. Fully
+// deterministic (two renders byte-identical): atomic adds are order-
+// independent for a sum, and every downstream step is a plain, repeatable
+// GPU computation over that final count.
+//
+// Pass count: log-luma extract (outside `passes`) + (tileLevels-1) box-
+// reduce steps (far fewer than stage 1d's full-1x1 chain — a 64px tile
+// stops ~5-6 halvings earlier) + 1 histogram compute + 1 stats compute + 2
+// separable blur passes for `base` + 1 fused remap pass + composite
+// (outside `passes`) — see buildLocalTonePasses' own doc comment for the
+// exact count on a typical preview size.
 //
 // r32float (not r16float/rgba16float) throughout, same rationale as stage
 // 1c: log2 domain is well-conditioned, single channel, and r32float costs no
@@ -282,7 +313,7 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
 `;
 
 /**
- * BOX REDUCE for the global log-mean (`ref`) chain — plain, UNWEIGHTED 2x2
+ * BOX REDUCE for the percentile/std TILE chain — plain, UNWEIGHTED 2x2
  * average of only the in-bounds source texels (odd dims: no clamp-duplicate
  * padding, matches localToneNode.ts's boxReduceGray exactly). Deliberately
  * NOT the Burt-Adelson overlapping kernel stage 1c's pyramid used for its
@@ -290,7 +321,10 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
  * from-scratch sim found that kernel introduces a severe, alignment-
  * dependent bias on hard step edges once cascaded across many dyadic
  * halvings (exactly E4's own construction). `u` = (srcW, srcH); output dims
- * come from the bound render target.
+ * come from the bound render target. STAGE 1e: the chain now stops at a
+ * small (<=LOCALTONE_TILE_MAX_DIM) TILE (see buildLocalTonePasses), not 1x1
+ * — the tile is then histogrammed (LOCALTONE_HIST_SHADER) for percentiles
+ * instead of being read as a single global mean.
  */
 const LOCALTONE_BOXREDUCE_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
@@ -375,45 +409,132 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
 `;
 
 /**
- * Fused remap: reads full-res `logLuma` and `base`, plus the 1x1 `ref`
- * texture (the box-reduce chain's final level, sampled directly — no CPU
- * readback needed anywhere in this pipeline), computes the STAGE 1d curve
- * (see localToneNode.ts's remapBase — kept numerically identical: same
- * constants, same operation order) and writes `logLuma + (newBase - base)`
- * directly — i.e. `detail = logLuma - base` is added back inline rather than
- * as a separate pass, since `newLog = newBase + detail = logLuma + (newBase
- * - base)` algebraically. `u` = (shadowsAmt, highlightsAmt, unused, unused).
+ * HISTOGRAM of the small percentile/std TILE's log2-luma values (see
+ * LOCALTONE_BOXREDUCE_SHADER's doc comment) — LOCALTONE_HIST_BINS atomic
+ * counters, same atomics idiom as HISTOGRAM_SHADER elsewhere in this file.
+ * `u` = (tileW, tileH). The buffer this writes into is CLEARED (encoder.
+ * clearBuffer) immediately before this pass every replay — see
+ * buildLocalTonePasses' 'compute' pass-kind doc comment — since it's the
+ * SAME GPUBuffer reused across every render() call (built once at resolve
+ * time), and atomics only ever ADD.
+ */
+const LOCALTONE_HIST_SHADER = /* wgsl */ `
+@group(0) @binding(0) var tileTex: texture_2d<f32>;
+@group(0) @binding(1) var<storage, read_write> hist: array<atomic<u32>, ${LOCALTONE_HIST_BINS}>;
+@group(0) @binding(2) var<uniform> u: vec4f; // x=tileW, y=tileH
+@compute @workgroup_size(8, 8)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  let tw = i32(u.x);
+  let th = i32(u.y);
+  if (i32(gid.x) >= tw || i32(gid.y) >= th) { return; }
+  let v = textureLoad(tileTex, vec2i(gid.xy), 0).r;
+  let bin = clamp(i32(floor((v - (${LOCALTONE_HIST_LO})) / ${LOCALTONE_HIST_BIN_WIDTH})), 0, ${LOCALTONE_HIST_BINS - 1});
+  atomicAdd(&hist[bin], 1u);
+}
+`;
+
+/**
+ * STATS reduce: a SINGLE invocation (workgroup_size(1), dispatched 1x1) does
+ * the entire p25/p75/mean/std cumulative-sum/variance reduction over the
+ * (tiny, LOCALTONE_HIST_BINS-entry) histogram, then applies the
+ * scene-adaptive amplitude law (localToneNode.ts's amplitudeMultiplier —
+ * kept numerically identical: same constants, same operation order),
+ * writing the 4-float result `(p25, p75, ampMultSh, ampMultHi)` the remap
+ * pass reads directly. 128 sequential iterations is trivial GPU cost for a
+ * single invocation; no workgroup-shared-memory reduction needed at this
+ * tiny scale.
+ */
+const LOCALTONE_STATS_SHADER = /* wgsl */ `
+@group(0) @binding(0) var<storage, read> hist: array<u32, ${LOCALTONE_HIST_BINS}>;
+@group(0) @binding(1) var<storage, read_write> outStats: vec4f;
+@compute @workgroup_size(1)
+fn cs(@builtin(global_invocation_id) gid: vec3u) {
+  var total: f32 = 0.0;
+  for (var i = 0; i < ${LOCALTONE_HIST_BINS}; i++) { total += f32(hist[i]); }
+  total = max(total, 1.0);
+  let target25 = 0.25 * total;
+  let target75 = 0.75 * total;
+  var cum: f32 = 0.0;
+  var p25: f32 = ${LOCALTONE_HIST_LO};
+  var p75: f32 = ${LOCALTONE_HIST_LO};
+  var found25 = false;
+  var found75 = false;
+  var meanAcc: f32 = 0.0;
+  for (var i = 0; i < ${LOCALTONE_HIST_BINS}; i++) {
+    let c = f32(hist[i]);
+    let binLo = ${LOCALTONE_HIST_LO} + f32(i) * ${LOCALTONE_HIST_BIN_WIDTH};
+    let binCenter = binLo + 0.5 * ${LOCALTONE_HIST_BIN_WIDTH};
+    meanAcc += c * binCenter;
+    let cumBefore = cum;
+    cum += c;
+    if (!found25 && cum >= target25) {
+      let frac = select(0.0, (target25 - cumBefore) / c, c > 0.0);
+      p25 = binLo + frac * ${LOCALTONE_HIST_BIN_WIDTH};
+      found25 = true;
+    }
+    if (!found75 && cum >= target75) {
+      let frac = select(0.0, (target75 - cumBefore) / c, c > 0.0);
+      p75 = binLo + frac * ${LOCALTONE_HIST_BIN_WIDTH};
+      found75 = true;
+    }
+  }
+  let mean = meanAcc / total;
+  var varAcc: f32 = 0.0;
+  for (var i = 0; i < ${LOCALTONE_HIST_BINS}; i++) {
+    let c = f32(hist[i]);
+    let binLo = ${LOCALTONE_HIST_LO} + f32(i) * ${LOCALTONE_HIST_BIN_WIDTH};
+    let binCenter = binLo + 0.5 * ${LOCALTONE_HIST_BIN_WIDTH};
+    varAcc += c * (binCenter - mean) * (binCenter - mean);
+  }
+  let stdDev = sqrt(varAcc / total);
+  let tBlend = smoothstep(${LOCALTONE_AMP_STAT_LOW}, ${LOCALTONE_AMP_STAT_HIGH}, stdDev);
+  let lineSh = ${LOCALTONE_AMP_SH_A} + ${LOCALTONE_AMP_SH_B} * stdDev;
+  let lineHi = ${LOCALTONE_AMP_HI_A} + ${LOCALTONE_AMP_HI_B} * stdDev;
+  let ampMultSh = max(${LOCALTONE_AMP_FLOOR}, 1.0 + tBlend * (lineSh - 1.0));
+  let ampMultHi = max(${LOCALTONE_AMP_FLOOR}, 1.0 + tBlend * (lineHi - 1.0));
+  outStats = vec4f(p25, p75, ampMultSh, ampMultHi);
+}
+`;
+
+/**
+ * Fused remap: reads full-res `logLuma` and `base`, plus the 4-float stats
+ * storage buffer (p25, p75, ampMultSh, ampMultHi — LOCALTONE_STATS_SHADER's
+ * output, no CPU readback anywhere in this pipeline), computes the STAGE 1e
+ * UNGATED curve (see localToneNode.ts's shadowsCurve/highlightsCurve/
+ * localToneShift — kept numerically identical: same constants, same
+ * operation order) and writes `logLuma + shift` directly — i.e. `detail =
+ * logLuma - base` is added back inline rather than as a separate pass, since
+ * `newLog = base + shift + detail = logLuma + shift` algebraically. `u` =
+ * (shadowsAmt, highlightsAmt, unused, unused).
  */
 const LOCALTONE_REMAP_SHADER = /* wgsl */ `
 @group(0) @binding(0) var logLumaTex: texture_2d<f32>;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
-@group(0) @binding(2) var refTex: texture_2d<f32>;
+@group(0) @binding(2) var<storage, read> stats: vec4f; // x=p25, y=p75, z=ampMultSh, w=ampMultHi
 @group(0) @binding(3) var<uniform> u: vec4f; // x=shadowsAmt, y=highlightsAmt
 ${FULLSCREEN_VS}
-fn toneTail(ad: f32, onset: f32, floorSlope: f32) -> f32 {
-  let w = ${LOCALTONE_TONE_ONSET_SOFTEN_FRAC} * onset;
-  let t = smoothstep(onset - w, onset + w, ad);
-  let idOut = ad;
-  let tailOut = onset + floorSlope * (ad - onset);
-  return idOut + (tailOut - idOut) * t;
+fn sigmoidLt(z: f32) -> f32 {
+  return 1.0 / (1.0 + exp(-z));
 }
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
   let o = vec2i(pos.xy);
   let x = textureLoad(logLumaTex, o, 0).r;
   let base = textureLoad(baseTex, o, 0).r;
-  let refVal = textureLoad(refTex, vec2i(0, 0), 0).r;
-  let d = base - refVal;
-  let ad = abs(d);
-  var newBase: f32;
-  if (d < 0.0) {
-    let floorSlope = 1.0 - u.x * (1.0 - ${LOCALTONE_TONE_FLOOR_SH});
-    newBase = refVal - toneTail(ad, ${LOCALTONE_TONE_ONSET_SH}, floorSlope);
-  } else {
-    let floorSlope = 1.0 - u.y * (1.0 - ${LOCALTONE_TONE_FLOOR_HI});
-    newBase = refVal + toneTail(ad, ${LOCALTONE_TONE_ONSET_HI}, floorSlope);
+  let p25 = stats.x;
+  let p75 = stats.y;
+  let ampMultSh = stats.z;
+  let ampMultHi = stats.w;
+  var shift = 0.0;
+  if (u.x > 0.0) {
+    let xSh = base - p75;
+    shift += u.x * ${LOCALTONE_SH_AMPLITUDE} * ampMultSh * sigmoidLt(${LOCALTONE_SH_STEEPNESS} * (${LOCALTONE_SH_CENTER} - xSh));
   }
-  return x + (newBase - base);
+  if (u.y > 0.0) {
+    let xHi = base - p25;
+    shift += -(u.y * ${LOCALTONE_HI_AMPLITUDE} * ampMultHi * sigmoidLt(${LOCALTONE_HI_STEEPNESS} * (xHi - ${LOCALTONE_HI_CENTER})));
+  }
+  return x + shift;
 }
 `;
 
@@ -997,6 +1118,18 @@ interface ExecPhase {
   uniformBuffer: GPUBuffer | null;
 }
 
+/**
+ * One pre-recorded local-tone pass, replayed every render() call — either a
+ * plain fullscreen render pass (box-reduce/blur, same shape every other
+ * built-in pass in this file uses) or a compute pass (the histogram/stats
+ * reduction, STAGE 1e — see LOCALTONE_HIST_SHADER/LOCALTONE_STATS_SHADER).
+ * `clearBuffer` (compute only): zeroed via encoder.clearBuffer() immediately
+ * before dispatch — see addComputePass's own doc comment.
+ */
+type LocalTonePass =
+  | { kind: 'render'; pipeline: GPURenderPipeline; target: GPUTextureView; entries: GPUBindGroupEntry[] }
+  | { kind: 'compute'; pipeline: GPUComputePipeline; entries: GPUBindGroupEntry[]; dispatchX: number; dispatchY: number; clearBuffer?: GPUBuffer };
+
 interface ExecStep {
   /** Sequential fullscreen passes; the last one writes the step's output. */
   phases: ExecPhase[];
@@ -1018,13 +1151,14 @@ interface ExecStep {
   lutView?: GPUTextureView;
   /**
    * Local-adaptive tone step (docs/research/local-adaptive-tone.md, STAGE
-   * 1d — global-reference + small-radius base/detail split, see
+   * 1e — two percentile anchors + ungated saturating curve + scene-adaptive
+   * amplitude, small-radius base/detail split unchanged from stage 1d, see
    * localToneNode.ts's module doc comment): the fully pre-recorded pass
    * list — built ONCE in resolveSteps() (the only place with
    * `this.createTexture`/`createBuffer` access), then just REPLAYED via
-   * `addPass` every render() call, same "resolve builds it, recordSteps
-   * only replays it" split every other special ExecStep field
-   * (imageView/lutView/...) already uses. `passes` covers everything
+   * `addPass`/`addComputePass` every render() call, same "resolve builds
+   * it, recordSteps only replays it" split every other special ExecStep
+   * field (imageView/lutView/...) already uses. `passes` covers everything
    * BETWEEN the log-luma extraction and the final composite (both of which
    * need `at(step.src)`, only known at record time — see recordSteps'
    * 'localTone' branch). Not pooled across setGraph() calls (stage-1
@@ -1034,7 +1168,7 @@ interface ExecStep {
   localTone?: {
     logLumaPipeline: GPURenderPipeline;
     logLumaTarget: GPUTextureView;
-    passes: { pipeline: GPURenderPipeline; target: GPUTextureView; entries: GPUBindGroupEntry[] }[];
+    passes: LocalTonePass[];
     compositePipeline: GPURenderPipeline;
     compositeUniform: GPUBuffer;
     processedLogView: GPUTextureView;
@@ -1123,6 +1257,8 @@ export class GraphRenderer {
   private passPipelines = new Map<string, GPURenderPipeline>();
   /** Local-adaptive tone (docs/research/local-adaptive-tone.md) pass pipelines — a FIXED small set (6 shader kinds, STAGE 1d; see localTonePipeline), cached forever like passPipelines. Unlike passPipelines, target format varies (r32float for every pyramid/reduce/blur pass, rgba16float for the final composite), so the cache key alone can't infer it — see localTonePipeline's signature. */
   private localTonePipelines = new Map<string, GPURenderPipeline>();
+  /** STAGE 1e histogram/stats compute pipelines — separate cache from localTonePipelines (different GPUComputePipeline type). */
+  private localToneComputePipelines = new Map<string, GPUComputePipeline>();
   /** Custom-code pipelines keyed by source; null = failed to compile. */
   private setGraphGen = 0;
   /** Resolves when the most recent setGraph() has landed (readback waits on it). */
@@ -1267,13 +1403,15 @@ export class GraphRenderer {
   }
 
   /**
-   * Local-adaptive tone pass pipeline — same shape as passPipeline() but
-   * with a caller-chosen target FORMAT (every pyramid-chain/blur pass is
-   * single-channel r32float; the final composite is rgba16float — see the
-   * LOCALTONE_*_SHADER constants). Cached by a fixed shaderId per pass KIND:
-   * there are only 6 distinct shaders total (STAGE 1d) — every box-reduce
-   * chain level reuses the SAME compiled pipeline, only the bound
-   * textures/uniforms differ per invocation (buildLocalTonePasses).
+   * Local-adaptive tone RENDER pass pipeline — same shape as passPipeline()
+   * but with a caller-chosen target FORMAT (every box-reduce/blur/remap
+   * pass is single-channel r32float; the final composite is rgba16float —
+   * see the LOCALTONE_*_SHADER constants). Cached by a fixed shaderId per
+   * pass KIND: every box-reduce chain level reuses the SAME compiled
+   * pipeline, only the bound textures/uniforms differ per invocation
+   * (buildLocalTonePasses). See localToneComputePipeline for the STAGE 1e
+   * histogram/stats COMPUTE pipelines (a separate cache — different
+   * `GPUComputePipeline` type).
    */
   private localTonePipeline(shaderId: string, wgsl: string, format: GPUTextureFormat): GPURenderPipeline {
     let pipeline = this.localTonePipelines.get(shaderId);
@@ -1290,8 +1428,20 @@ export class GraphRenderer {
     return pipeline;
   }
 
+  /** Local-adaptive tone COMPUTE pass pipeline (STAGE 1e's GPU histogram/stats reduction) — same caching shape as localTonePipeline. */
+  private localToneComputePipeline(shaderId: string, wgsl: string): GPUComputePipeline {
+    let pipeline = this.localToneComputePipelines.get(shaderId);
+    if (!pipeline) {
+      const module = this.device.createShaderModule({ code: wgsl });
+      void assertShaderCompiles(module, shaderId);
+      pipeline = this.device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'cs' } });
+      this.localToneComputePipelines.set(shaderId, pipeline);
+    }
+    return pipeline;
+  }
+
   /**
-   * Build the full STAGE 1d pass list for one 'localtone' plan step
+   * Build the full STAGE 1e pass list for one 'localtone' plan step
    * (docs/research/local-adaptive-tone.md; see localToneNode.ts's module
    * doc comment for the algorithm) — called once per resolveSteps() (i.e.
    * once per setGraph(), NOT once per render() — every OTHER special
@@ -1301,12 +1451,15 @@ export class GraphRenderer {
    * nothing here is pooled across setGraph() calls (stage-1 simplicity,
    * unchanged from stage 1c).
    *
-   * Pass count: 1 (log-luma extract, recorded outside `passes` — see
-   * recordSteps' 'localTone' branch) + (n-1) box-reduce steps for `ref`
-   * (n = pyramidLevelDims(frameW,frameH).length, ~11-13 for a typical
-   * preview/export size) + 2 (base blur H/V) + 1 (fused remap) + 1
-   * (composite, also outside `passes`) = n+4 total, roughly 15-17 passes
-   * for a typical image — vs stage 1c's ~2×K_LEVELS×pyramidDepth ≈ 570.
+   * Pass count: 1 (log-luma extract, recorded outside `passes`) + (nTile-1)
+   * box-reduce steps down to a <=LOCALTONE_TILE_MAX_DIM tile (nTile =
+   * tileLevelDims(frameW,frameH,64).length — FEWER than stage 1d's full
+   * chain to 1x1, since the tile stops several halvings early) + 1
+   * histogram compute + 1 stats compute + 2 (base blur H/V) + 1 (fused
+   * remap) + 1 (composite, also outside `passes`) — roughly 12-14 passes
+   * for a typical preview/export size (was 15-17 in stage 1d; see the
+   * implementer report for the measured count) — vs stage 1c's
+   * ~2×K_LEVELS×pyramidDepth ≈ 570.
    */
   private buildLocalTonePasses(
     shadows: number,
@@ -1316,8 +1469,8 @@ export class GraphRenderer {
     frameWidth: number,
     frameHeight: number
   ): NonNullable<ExecStep['localTone']> {
-    const levels = pyramidLevelDims(frameWidth, frameHeight);
-    const n = levels.length;
+    const tileLevels = tileLevelDims(frameWidth, frameHeight, LOCALTONE_TILE_MAX_DIM);
+    const nTile = tileLevels.length;
     const textures: GPUTexture[] = [];
     const buffers: GPUBuffer[] = [];
     const mk = (w: number, h: number): GPUTexture => {
@@ -1337,6 +1490,11 @@ export class GraphRenderer {
       buffers.push(buf);
       return buf;
     };
+    const storageBuf = (sizeBytes: number, usage: GPUBufferUsageFlags): GPUBuffer => {
+      const buf = this.createBuffer({ size: sizeBytes, usage });
+      buffers.push(buf);
+      return buf;
+    };
 
     const pLogLuma = this.localTonePipeline('localtone/logluma', LOCALTONE_LOGLUMA_SHADER, 'r32float');
     const pBoxReduce = this.localTonePipeline('localtone/boxreduce', LOCALTONE_BOXREDUCE_SHADER, 'r32float');
@@ -1344,33 +1502,66 @@ export class GraphRenderer {
     const pBlurV = this.localTonePipeline('localtone/blurV', LOCALTONE_BLUR_V_SHADER, 'r32float');
     const pRemap = this.localTonePipeline('localtone/remap', LOCALTONE_REMAP_SHADER, 'r32float');
     const pComposite = this.localTonePipeline('localtone/composite', LOCALTONE_COMPOSITE_SHADER, 'rgba16float');
+    const pHist = this.localToneComputePipeline('localtone/hist', LOCALTONE_HIST_SHADER);
+    const pStats = this.localToneComputePipeline('localtone/stats', LOCALTONE_STATS_SHADER);
 
-    const logLuma = mk(levels[0]!.w, levels[0]!.h);
-    const passes: { pipeline: GPURenderPipeline; target: GPUTextureView; entries: GPUBindGroupEntry[] }[] = [];
+    const logLuma = mk(frameWidth, frameHeight);
+    const passes: LocalTonePass[] = [];
 
-    // --- `ref`: plain box-reduce chain down to 1x1 (localToneNode.ts's
-    // globalLogMean) — the FINAL level's r32float texture IS `ref`, sampled
-    // directly by the remap shader (textureLoad at (0,0)), no CPU readback
-    // anywhere in this pipeline.
+    // --- percentile/std TILE: plain box-reduce chain down to a small tile
+    // (<=LOCALTONE_TILE_MAX_DIM), NOT 1x1 (stage 1d's `ref` chain went all
+    // the way down) — the tile is then histogrammed for p25/p75/std,
+    // replacing stage 1d's single arithmetic-mean `ref`.
     const reduceLevels: GPUTexture[] = [logLuma];
-    for (let l = 0; l < n - 1; l++) reduceLevels.push(mk(levels[l + 1]!.w, levels[l + 1]!.h));
-    for (let l = 0; l < n - 1; l++) {
+    for (let l = 0; l < nTile - 1; l++) reduceLevels.push(mk(tileLevels[l + 1]!.w, tileLevels[l + 1]!.h));
+    for (let l = 0; l < nTile - 1; l++) {
       passes.push({
+        kind: 'render',
         pipeline: pBoxReduce,
         target: reduceLevels[l + 1]!.createView(),
         entries: [
           { binding: 0, resource: reduceLevels[l]!.createView() },
-          { binding: 1, resource: { buffer: uni([levels[l]!.w, levels[l]!.h, 0, 0]) } },
+          { binding: 1, resource: { buffer: uni([tileLevels[l]!.w, tileLevels[l]!.h, 0, 0]) } },
         ],
       });
     }
-    const refView = reduceLevels[n - 1]!.createView();
+    const tile = reduceLevels[nTile - 1]!;
+    const tileDims = tileLevels[nTile - 1]!;
+
+    // --- histogram + stats reduce (STAGE 1e, GPU-only percentile/std —
+    // see LOCALTONE_HIST_SHADER/LOCALTONE_STATS_SHADER's own doc comments).
+    const histBuf = storageBuf(LOCALTONE_HIST_BINS * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST);
+    const statsBuf = storageBuf(16, GPUBufferUsage.STORAGE);
+    passes.push({
+      kind: 'compute',
+      pipeline: pHist,
+      entries: [
+        { binding: 0, resource: tile.createView() },
+        { binding: 1, resource: { buffer: histBuf } },
+        { binding: 2, resource: { buffer: uni([tileDims.w, tileDims.h, 0, 0]) } },
+      ],
+      dispatchX: Math.ceil(tileDims.w / 8),
+      dispatchY: Math.ceil(tileDims.h / 8),
+      clearBuffer: histBuf,
+    });
+    passes.push({
+      kind: 'compute',
+      pipeline: pStats,
+      entries: [
+        { binding: 0, resource: { buffer: histBuf } },
+        { binding: 1, resource: { buffer: statsBuf } },
+      ],
+      dispatchX: 1,
+      dispatchY: 1,
+    });
 
     // --- `base`: separable Gaussian blur of full-res log-luma, sigma =
-    // sigmaR (px) — localToneNode.ts's gaussianBlurGray.
-    const baseH = mk(levels[0]!.w, levels[0]!.h);
-    const base = mk(levels[0]!.w, levels[0]!.h);
+    // sigmaR (px) — localToneNode.ts's gaussianBlurGray. Unchanged from
+    // stage 1d.
+    const baseH = mk(frameWidth, frameHeight);
+    const base = mk(frameWidth, frameHeight);
     passes.push({
+      kind: 'render',
       pipeline: pBlurH,
       target: baseH.createView(),
       entries: [
@@ -1379,6 +1570,7 @@ export class GraphRenderer {
       ],
     });
     passes.push({
+      kind: 'render',
       pipeline: pBlurV,
       target: base.createView(),
       entries: [
@@ -1387,17 +1579,18 @@ export class GraphRenderer {
       ],
     });
 
-    // --- fused remap: newLog = logLuma + (remapBase(base,ref,...) - base).
-    const processedLog = mk(levels[0]!.w, levels[0]!.h);
+    // --- fused remap: newLog = logLuma + shift(base, stats, shadowsAmt, highlightsAmt).
+    const processedLog = mk(frameWidth, frameHeight);
     const shadowsAmt = shadows / 100;
     const highlightsAmt = Math.abs(highlights) / 100;
     passes.push({
+      kind: 'render',
       pipeline: pRemap,
       target: processedLog.createView(),
       entries: [
         { binding: 0, resource: logLuma.createView() },
         { binding: 1, resource: base.createView() },
-        { binding: 2, resource: refView },
+        { binding: 2, resource: { buffer: statsBuf } },
         { binding: 3, resource: { buffer: uni([shadowsAmt, highlightsAmt, 0, 0]) } },
       ],
     });
@@ -2427,12 +2620,38 @@ export class GraphRenderer {
   }
 
   /**
+   * Compute-pass replay helper — same "resolve builds the pipeline/entries,
+   * every render() call just replays" shape as addPass, for the local-tone
+   * histogram/stats compute passes (buildLocalTonePasses). `clearBuffer`
+   * (histogram pass only): the histogram's atomic counters accumulate into
+   * the SAME GPUBuffer every replay (built once at resolve time, unlike a
+   * one-shot stats()/scopeSamples() buffer) — clearBuffer() zeroes it
+   * immediately before this dispatch so counts never leak across frames.
+   */
+  private addComputePass(
+    encoder: GPUCommandEncoder,
+    pipeline: GPUComputePipeline,
+    entries: GPUBindGroupEntry[],
+    dispatchX: number,
+    dispatchY: number,
+    clearBuffer?: GPUBuffer
+  ): void {
+    if (clearBuffer) encoder.clearBuffer(clearBuffer);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+    pass.dispatchWorkgroups(dispatchX, dispatchY);
+    pass.end();
+  }
+
+  /**
    * Record every step's passes; shared by all consumers. Each step ends in
    * its own texture (so outputs can fan out); multi-phase steps ping-pong
    * through the scratch texture so the LAST phase lands on the step texture.
    */
   private static recordSteps(
     addPass: GraphRenderer['addPass'],
+    addComputePass: GraphRenderer['addComputePass'],
     steps: ExecStep[],
     outputIndex: number,
     sourceView: GPUTextureView,
@@ -2493,18 +2712,17 @@ export class GraphRenderer {
       }
       if (step.localTone) {
         // Local-adaptive tone (docs/research/local-adaptive-tone.md, STAGE
-        // 1d): replay the pre-recorded pass list (buildLocalTonePasses,
+        // 1e): replay the pre-recorded pass list (buildLocalTonePasses,
         // resolveSteps' 'localtone' branch) — the log-luma extraction and
         // the final composite are the only two passes that need `at(step.src)`
         // (only resolvable here, not at resolve time), so they're recorded
         // explicitly; everything between them is a fully self-contained
-        // {pipeline,target,entries} triple already.
+        // LocalTonePass already (either a render pass, or — STAGE 1e's new
+        // GPU histogram/stats reduction — a compute pass).
         const lt = step.localTone;
         // Rough, JS-side "how long does recording this step's ~n+4 draw
         // calls take" figure (stage-1 flagged this as an unmeasured perf
-        // gap; STAGE 1d's pass count is far smaller than stage 1c's, but
-        // the diagnostic itself is unchanged) — gated on the same
-        // shaderDiagnosticsEnabled/
+        // gap) — gated on the same shaderDiagnosticsEnabled/
         // SILVERBOX_TEST flag as assertShaderCompiles above so it's a
         // complete no-op in normal interactive use. This times ENCODER
         // RECORDING only (CPU-side), not actual GPU execution time (no
@@ -2512,7 +2730,10 @@ export class GraphRenderer {
         // report for the measured figure and that caveat.
         const ltStart = shaderDiagnosticsEnabled ? performance.now() : 0;
         addPass(encoder, lt.logLumaTarget, lt.logLumaPipeline, [{ binding: 0, resource: at(step.src) }]);
-        for (const p of lt.passes) addPass(encoder, p.target, p.pipeline, p.entries);
+        for (const p of lt.passes) {
+          if (p.kind === 'render') addPass(encoder, p.target, p.pipeline, p.entries);
+          else addComputePass(encoder, p.pipeline, p.entries, p.dispatchX, p.dispatchY, p.clearBuffer);
+        }
         addPass(encoder, views[i]!, lt.compositePipeline, [
           { binding: 0, resource: at(step.src) },
           { binding: 1, resource: lt.processedLogView },
@@ -2579,6 +2800,7 @@ export class GraphRenderer {
     );
     return GraphRenderer.recordSteps(
       this.addPass.bind(this),
+      this.addComputePass.bind(this),
       this.steps,
       this.outputIndex,
       sourceView,
@@ -2703,6 +2925,7 @@ export class GraphRenderer {
         : null;
       const linear = GraphRenderer.recordSteps(
         this.addPass.bind(this),
+        this.addComputePass.bind(this),
         steps,
         plan.output,
         baseView,
@@ -2818,6 +3041,7 @@ export class GraphRenderer {
         : null;
       const linear = GraphRenderer.recordSteps(
         this.addPass.bind(this),
+        this.addComputePass.bind(this),
         steps,
         plan.output,
         baseView,
