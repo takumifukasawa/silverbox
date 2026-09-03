@@ -931,3 +931,240 @@ reveal itself.
    swings of the same content, the DC-normalization hypothesis is
    effectively closed too and the remaining gap must be attributed
    elsewhere (most likely: fit quality, per finding 1 above).
+
+## Stage base-6: DSC07349 (sunset) color divergence — diagnosed, root cause
+## upstream of every in-scope surface; STOPPED per brief, no fix landed
+
+Trigger: DSC07349 is the last unexplained per-scene color gap (round-2's own
+close: "leading suspect is profileFit.ts's 3-scene lattice... the Adobe-look
+route below supersedes that lattice anyway" — never actually re-tested after
+the acrlook/DCP route landed). This pass re-diagnosed from scratch per the
+conductor's brief, following base-3/4's ablate.mjs / measure-neutral.mjs
+idioms, working scenes reused from those passes (`test-assets/italy/`,
+`~/Desktop/FFF/lr-calib/lr-sweep-20260901/base/`). No repo/engine changes
+were made; scripts, JSON, and JPEG previews are in this session's own
+scratchpad (`base6-diag/`), outside the repo, matching precedent. HEAD stayed
+at `6204e3c` (tree clean) throughout — verified with `git status`/`git
+rev-parse HEAD` after every step.
+
+### 1. Where is the neutral (Lab C\*<6) mask? — NOT the visible sky at all
+
+Rendered the mask as a red overlay on LR's own base JPEG
+(`base6-diag/mask-overlay.mjs`, `base6-diag/DSC07349-mask-overlay-small.jpg`):
+230,824/2,795,520 px (8.26%, matching the brief's known fact), **centroid
+normalized y=0.791, bbox y∈[763,1364] of 1365 — every masked pixel sits in
+the BOTTOM 44% of the frame** (row-band histogram: 0% in the top half, rising
+from 9.1% at the 50–60% band to 21.5% at 90–100%). Mean L\* of masked pixels:
+**28.06** (dark). Visually the mask traces two things: the dark sea surface
+(the whole width, near the bottom), and a narrow arc running through the
+sky's blue→orange twilight transition band near the horizon — genuinely
+near-neutral in Lab terms (two complementary hues meeting), not a gray card.
+**The mask has ZERO overlap with the deep saturated blue sky in the upper
+frame** — the actual visible symptom the user reported ("LR's rich blue
+sunset sky renders purple-gray/desaturated"). This is real and important:
+the neutral-ratio metric this scene has been tracked by since round-2 is
+measuring the wrong region for the user-visible complaint. It does **not**,
+however, mean the neutral number is pure noise (see §4) — the underlying
+color error turns out to be the same mechanism in both places.
+
+### 2. Stage ablation (base3-diag/ablate.mjs idiom, fresh bundle — base-4's
+### `HUESAT_STABILITY_V_FLOOR` damping included)
+
+Rebuilt `base6-diag/bundle.mjs` from current `HEAD` (not resurrected from an
+old session) via esbuild, then ran a bypass (identity-graph) render of
+DSC07349, averaged the near-neutral mask over that raw decode+WB pixel, and
+pushed the averaged camera-native value through the actual bundled
+`renderDcpPixel` stage-by-stage (`base6-diag/ablate.mjs`):
+
+| stage | R/G (display sRGB primaries) | B/G |
+|---|---|---|
+| **LR target** | **0.982** | **1.013** |
+| [A] decode+WB only, no DCP | 1.395 | 0.736 |
+| [B] +ForwardMatrix only | 1.252 | 0.841 |
+| [C] +HueSatMap | 1.361 | 0.784 |
+| [D] +LookTable (="dcp" mode) | 1.327 | 0.804 |
+| [E] +ACR Look table+PV2012 (="acrlook" mode) | 1.399 | 0.781 |
+
+**The divergence is already ~40%/~27% off target at Stage A — before any DCP
+code runs at all.** ForwardMatrix (B) is the only stage that moves the
+result meaningfully toward target (R/G 1.395→1.252); HueSatMap (C) moves it
+back AWAY; LookTable (D) and the ACR Look table (E) barely move it net. No
+stage gets within even 25% of target on either axis. This reproduces (and
+sharpens) `pipeline.ts`'s own doc comment: base-4's V-floor damping "stayed
+in the same ~15-20% broken ballpark throughout, never chased" for this
+scene — confirmed here to be structurally correct, since the error precedes
+the table stages entirely.
+
+**Illuminant-interpolation-input sensitivity (candidate a), quantified and
+killed:** re-ran stage D at the shot's own estimated 5126 K vs LR's
+independently-resolved 5250 K (both from the brief's "known facts"):
+R/G 1.3270→1.3248, B/G 0.80393→0.80395 — **a ~0.2% effect**, three orders of
+magnitude too small to explain a 30-40% ratio error. `illuminantFraction`
+itself is nearly identical at the two temperatures for this DCP's
+calibration-illuminant pair (0.813 vs ~0.81), matching the brief's own
+0.792-vs-0.813 sibling-scene note. **Candidate (a) is refuted.**
+
+### 3. The visible deliverable: sky-region hue/sat/luma vs LR, per mode
+
+Rendered real builtin/dcp/acrlook exports via the interactive app
+(`base6-diag/render-and-measure.mjs`, same Playwright idiom as
+base4-diag/measure-neutral.mjs) and measured the upper-35%-of-frame,
+LR-hue-in-blue-sector (180–300°), C\*>8 region — the actual sky, disjoint
+from the neutral mask:
+
+| mode | ΔHue (deg) | chroma ratio (ours/LR) | ΔL\* |
+|---|---|---|---|
+| builtin | +3.4 | **0.587** | +3.9 |
+| dcp | −2.2 | **0.449** | +4.6 |
+| acrlook | −0.3 | **0.547** | +2.3 |
+
+**Hue is essentially correct in every mode (≤3.4° off) — this is NOT a hue
+rotation.** The user-visible "desaturated/purple-gray" symptom is a real,
+large **chroma deficit (45–59% of LR's saturation)** plus a **small but
+consistent brightness lift (+2.3 to +4.6 L\*)** — a genuine "washed out"
+look, matching the report exactly.
+
+Stage-ablated the SAME sky region through `renderDcpPixel`
+(`base6-diag/ablate-sky.mjs`) to test candidate (c) directly:
+
+| stage | Lab hue | Lab chroma |
+|---|---|---|
+| **LR target** | **268.2°** | **24.79** |
+| [A] decode+WB only | 271.7° | 9.96 (40% of target) |
+| [B] +ForwardMatrix | 269.7° | 6.03 (24% of target) |
+| [C] +HueSatMap | 268.9° | 7.05 |
+| [D] +LookTable (dcp) | 269.2° | 7.07 |
+| [E] +ACR Look (acrlook) | 269.6° | 7.62 |
+
+Hue is within ~3.5° of target at **every** stage, including [A] with zero
+DCP code involved. The desaturation is **already 60% closed the wrong way at
+Stage A** (before any table), and **[B]'s ForwardMatrix stage makes it
+WORSE**, not better (chroma 9.96→6.03); the HueSatMap/LookTable/ACR-look
+stages (C–E) each nudge chroma back UP slightly (6.03→7.62), the opposite
+direction a "table over-desaturates saturated sunset hues" bug would
+predict. **Candidate (c), hue-dependent table application, is refuted** —
+the tables are mildly *helping*, not hurting.
+
+Decomposing stage-A's working-space RGB directly: ours = [R 0.0153,
+G 0.0187, B **0.0314**] vs LR's own sRGB average mapped into the same
+working primaries = [R 0.0145, G 0.0307, B **0.0825**]. **R matches LR
+almost exactly (+5%); G is 61% of target; B is only 38% of target** — the
+sky is under-blued specifically, not uniformly scaled. This is the same
+direction/shape as the neutral-mask finding below (R relatively too high, B
+relatively too low vs G), consistent with ONE shared root-cause mechanism
+rather than two independent bugs.
+
+### 4. L\*-binned breakdown of the neutral mask — kills the near-black
+### hue-instability explanation, confirms a real, broad color cast
+
+Binned the SAME neutral mask by LR's own L\* (`base6-diag/lbin-analysis.mjs`)
+to test whether the divergence concentrates in the very darkest pixels (the
+DSC03298-style near-black HSV instability base-3/4 diagnosed and fixed) or
+spans the whole tonal range (a genuine, broad color-cast bug):
+
+| L\* bin | % of mask | our R/G err (builtin/dcp/acrlook) | our B/G err | our hue (all 3 modes) | LR's own hue |
+|---|---|---|---|---|---|
+| [15,20) | 1.9% | +34/+29/+38% | −20/−17/−21% | 62–64° | 251° |
+| [20,25) | 16.2% | +27/+23/+27% | −18/−15/−19% | 62–66° | 257° |
+| [25,30) | 23.1% | +22/+18/+18% | −17/−14/−17% | 63–70° | 271° |
+| [30,40) | 20.2% | +18/+16/+14% | −16/−13/−13% | 65–69° | 67° |
+| [40,60) | 12.6% | +20/+19/+19% | −16/−14/−14% | 69–71° | 180° |
+| [60,100) | 6.4% | +14/+14/+11% | −17/−14/−14% | 71–76° | 30° |
+
+(the darkest bin, L\*<10, 19.5% of the mask, behaves qualitatively
+differently — see below.)
+
+Across **every bin from L\*15 to L\*100 — 80% of the mask, spanning deep
+shadow through highlight** — our render lands on a **remarkably stable
+~62–76° (orange) hue in all three modes**, while LR's own hue at the same
+coordinates is scattered/noisy (67° to 271°, as expected for genuinely
+near-neutral, low-signal content). A near-black HSV-instability artifact
+would produce NOISY divergence concentrated at the darkest few percent and
+shrinking fast with L\*; instead this shows a **stable, one-directional
+warm cast present at every tonal level tested, whose absolute chroma GROWS
+with L\* (from ~7-9 in the darkest usable bins to ~15-19 by L\*60-100)** —
+the signature of a fixed *relative* (percentage) R/B gain-ratio error, not a
+numerical near-black artifact. **Candidate (d) mask-methodology-artifact is
+only PARTIALLY right**: the neutral mask is a poor proxy for the visible sky
+(§1, confirmed), but is not measuring pure noise — it is catching a real,
+broad, one-directional color cast that also degrades the actual sky (§3).
+The darkest bin (L\*<10) is the one place base-3/4's near-black-instability
+story does still apply somewhat: LR's own hue reading is erratic there
+(R/G=0.325, an implausibly large blue cast even for "neutral" content) while
+our renders are comparatively closer to gray — but that bin is only 19.5% of
+the mask and is not where the dominant, stable divergence lives.
+
+### 5. Root-cause localization: upstream of every in-scope surface
+
+Stage A (bypass render: no develop node, no `dcp/pipeline.ts`, no
+`wbCorrection.ts`, no `whiteBalance.ts` gain — since `gains()` is exact
+identity at as-shot by construction, confirmed by reading the source) already
+reproduces the dominant share of BOTH the neutral-mask warm cast and the
+sky's chroma deficit. Checked `librawDecoder.ts` (the only remaining stage
+before Stage A's pixel exists): `OPEN_SETTINGS` is a fixed, scene-independent
+config (`useCameraWb: true, outputColor: 8 (Rec.2020), noAutoBright: true`,
+no highlight-recovery override) — nothing here is per-scene-tunable from any
+in-scope file. `camMul = [2402, 1024, 1681, 1024]` (R needs 2.35× the gain
+of B, consistent with a genuinely blue-shifted twilight illuminant) is
+libraw's own deterministic function of the WB_RGGBLevels tag, which the
+brief's known facts already establish is bit-identical to DSC06787/DSC09305
+(both clean) — so the WB gain APPLIED during demosaic must be numerically
+identical machinery across all three files; the divergence cannot be a
+difference in which gain gets computed, only in something scene-specific
+happening deeper in the demosaic/black-level/color-conversion path libraw
+runs internally (e.g., real per-shot black-level drift on a long twilight
+exposure — plausible, unverified, and not inspectable without instrumenting
+libraw-wasm itself).
+
+Checked `wbCorrection.ts`'s dormant fix① (dual-illuminant ColorMatrix
+interpolation): structurally inapplicable here regardless (its own doc
+comment restricts it to `builtin`-source only; `dcp`/`acrlook` already do a
+full illuminant-interpolated ForwardMatrix reconstruction) — and moot
+anyway, since §2 already quantified the illuminant-interpolation-fraction
+sensitivity at ~0.2%, an order of magnitude too small to be fix①'s target
+mechanism for THIS scene (fix① exists to correct exactly a wrong
+illuminant-interpolation *fraction*, which round-2 and this pass both show
+is essentially correct for 07349's ~0.81 fraction vs siblings' ~0.79).
+
+**Conclusion: none of the three in-scope files (`dcp/pipeline.ts`,
+`wbCorrection.ts`, `whiteBalance.ts`) contain the bug.** The dominant,
+reproducible, scene-specific divergence is already fully present in the raw
+decoder's output (`librawDecoder.ts` / libraw-wasm's own demosaic +
+`useCameraWb` + `outputColor` conversion) before any of this task's in-scope
+code executes. Per the brief's own acceptance clause ("If the root cause is
+out of reach... STOP with the evidence — that is a valid outcome"): **no fix
+was attempted**. Editing `librawDecoder.ts` or libraw-wasm's own internals is
+explicitly outside this pass's scope, would be a much higher-blast-radius
+change (shared by every RAW file, not just this profile path), and the
+evidence above only localizes the defect to that boundary — it does not yet
+identify the specific mechanism inside libraw's demosaic (black-level drift
+on a long twilight exposure is the best-supported remaining hypothesis, not
+a confirmed one).
+
+### Gates
+
+No repo files were changed this pass (`git status` clean at `6204e3c`
+throughout) — the existing verify/typecheck/vitest gates are unaffected by
+construction; not re-run, per the brief (no fix ⇒ nothing to verify against).
+
+### Honest residuals / next steps for whoever picks this up
+
+1. The best-supported remaining hypothesis is a libraw-internal, per-shot
+   effect (black-level or demosaic drift specific to a long, dark twilight
+   exposure) that a same-tag WB gain cannot reveal on a normally-exposed
+   scene — untested, would need libraw-wasm-level instrumentation (e.g.
+   dumping `cd.black`/`cd.maximum` per shot, or a synthetic near-black
+   flat-field RAW) to confirm.
+2. §1's finding stands on its own regardless of the color root cause: the
+   round-2-era neutral-mask metric for THIS scene is a poor proxy for the
+   thing the user actually complained about (it never samples the visible
+   sky at all). Any future work on this scene should track the sky-region
+   metric from §3 (or re-derive a brighter, more representative neutral
+   patch if one exists in-frame) alongside — or instead of — the legacy
+   whole-mask R/G,B/G ratio.
+3. This diagnostic made no engine changes, so the base-5 luma-curve/
+   color-outlier correlation the brief flagged as blocked on this fix
+   remains blocked — the brightness refit still needs either (a) this
+   root cause resolved at the decoder level, or (b) a decision to treat
+   DSC07349 as a documented, un-fixed-this-round outlier and refit
+   brightness on the other 4 scenes only.
