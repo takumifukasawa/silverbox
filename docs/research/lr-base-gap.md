@@ -483,3 +483,41 @@ amplitude stat) is not invariant. Net effect on the stage-1e merge gate:
 (0.55) to 3-of-4 configs out/edge (sh 0.38/0.38, hi−80 0.66). Stage-1e's
 amplitude constants were fit against EV=0 renders and need a refit against
 shipped-default renders before any merge decision.
+
+## Round-2 attribution (same day, evening): WB verdict + Adobe Color decoded
+
+**WB-gain derivation is CORRECT** — silverbox's cam_mul-derived as-shot
+(temp/tint) tracks LR's own resolved As-Shot within 49–124K / 4–7 tint on
+the probed scenes, and the three Daylight-preset scenes (06787/07349/09305)
+carry bit-identical WB_RGGBLevels → identical silverbox WB, yet only 07349
+diverges. The real, confirmed structural bug is the COLOR MATRIX: libraw's
+cam_xyz is exactly Adobe's ColorMatrix2 (D65) to float32 precision, used
+unconditionally, while Adobe mired-interpolates ColorMatrix1 (StdA,
+tungsten) ↔ ColorMatrix2 by shot CCT. At DSC03298's 4100K Adobe weights
+D65 only 0.541 — silverbox's forced 1.0 is a large matrix error and the
+best-supported cause of that scene's cast (the user's "bridge
+brightness/saturation" observation). DSC07349's divergence is NOT
+explained by WB or matrix interpolation (fraction ≈ its clean siblings);
+leading suspect is profileFit.ts's 3-scene lattice (which was trained ON
+this scene) mishandling saturated sunset hues — the Adobe-look route below
+supersedes that lattice anyway.
+
+**Adobe Color's LookTable is now fully decodable** (proof: MD5 fingerprint
+match + bit-exact re-encode): ACR XMP `crs:Table_<md5>` = DNG SDK
+dng_big_table encoding — Z85-variant base85 (custom 85-char alphabet,
+little-endian digit order), zlib, then a documented DNG stream
+(hueDiv×satDiv×valDiv × 3×float32 HueShift/SatScale/ValScale; Adobe Color
+= 36×16×16, encoding Linear). Full look = Adobe Standard DCP (on disk,
+per camera) + this table + crs:ToneCurvePV2012. Legal line: reimplement
+the decoder from these facts (no DNG SDK code), read the USER'S LOCAL ACR
+files at runtime, never commit Adobe table data (tests self-verify via the
+embedded MD5). No OSS tool decodes these today (exiftool/darktable/
+RawTherapee/dcamprof checked).
+
+**Remediation plan (stage base-2, pending GO):** (1) dual-illuminant
+color-matrix interpolation in whiteBalance.ts, matrices runtime-read from
+the local Adobe Standard DCP with graceful fallback to libraw's single
+matrix; (2) "local Adobe look" profile mode: dng_big_table decoder +
+LookTable stage on the existing DCP pipeline + the PV2012 look tone curve,
+sourced from the user's ACR install; (3) per-ISO BaselineExposure probe
+via LR-plugin DNG export (still the open tone-axis item).
