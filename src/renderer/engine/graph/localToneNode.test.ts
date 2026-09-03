@@ -140,7 +140,7 @@ describe('amplitudeMultiplier (scene-adaptive law)', () => {
     }
   });
 
-  it('is the exact fitted line at/above LOCALTONE_AMP_STAT_HIGH (real photos measured 1.6-3.3 std)', () => {
+  it('is the exact fitted line at/above LOCALTONE_AMP_STAT_HIGH (real photos measured 1.45-3.19 std under the shipped EV=0.5 default — STAGE 1e-r)', () => {
     const std = LOCALTONE_AMP_STAT_HIGH + 1;
     const expectedSh = Math.max(LOCALTONE_AMP_FLOOR, LOCALTONE_AMP_SH_A + LOCALTONE_AMP_SH_B * std);
     expect(amplitudeMultiplier(std, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B)).toBeCloseTo(expectedSh, 6);
@@ -159,11 +159,11 @@ describe('amplitudeMultiplier (scene-adaptive law)', () => {
     expect(amplitudeMultiplier(100, LOCALTONE_AMP_HI_A, -1)).toBeGreaterThanOrEqual(LOCALTONE_AMP_FLOOR);
   });
 
-  it('real-photo std range (1.6-3.3): Shadows multiplier grows with std, Highlights shrinks (both LR-measured directions, see the implementer report)', () => {
-    const shLow = amplitudeMultiplier(1.6, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B);
-    const shHigh = amplitudeMultiplier(3.3, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B);
+  it('real-photo std range (1.45-3.19 under EV=0.5 — STAGE 1e-r): Shadows multiplier grows with std, Highlights shrinks (both LR-measured directions, see localToneNode.ts LOCALTONE_AMP_SH_A doc comment)', () => {
+    const shLow = amplitudeMultiplier(1.45, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B);
+    const shHigh = amplitudeMultiplier(3.19, LOCALTONE_AMP_SH_A, LOCALTONE_AMP_SH_B);
     expect(shHigh).toBeGreaterThan(shLow);
-    const hiLow = amplitudeMultiplier(1.6, LOCALTONE_AMP_HI_A, LOCALTONE_AMP_HI_B);
+    const hiLow = amplitudeMultiplier(1.45, LOCALTONE_AMP_HI_A, LOCALTONE_AMP_HI_B);
     expect(hiLow).toBeLessThan(1); // highlights always reduced vs the round-3 baseline in the measured range
   });
 });

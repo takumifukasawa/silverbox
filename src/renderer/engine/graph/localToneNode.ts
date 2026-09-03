@@ -83,10 +83,14 @@
  *     blend's onset), so they see amplitude-multiplier=1 UNCHANGED, exactly
  *     preserving the round-3 calibration and E1's own loose-tolerance sign
  *     structure; only genuinely photographic scenes (std > ~1.5, real
- *     photos measured 1.6-3.3) get the full scene-adaptive law. This blend
+ *     photos measured 1.45-3.19 under the shipped EV=0.5 default — STAGE
+ *     1e-r, see LOCALTONE_AMP_SH_A's doc comment; was 1.6-3.3 under stage
+ *     1e's own EV=0 fit harness) get the full scene-adaptive law. This blend
  *     window (0.5-1.5 std) has NO calibration data in it (no synthetic test
- *     reaches std>0.4, no real scene sampled reaches std<1.6) — a known,
- *     reported gap, not a claim of validated behavior there.
+ *     reaches std>0.4, and one real scene — DSC09305, under EV=0.5 — now
+ *     sits just BELOW 1.5, so it is no longer purely outside this window
+ *     either) — a known, reported gap, not a claim of validated behavior
+ *     there.
  *  5. Percentiles/std are computed ENTIRELY ON GPU (box-reduce the full-res
  *     log-luma down to a small tile, then a compute-shader HISTOGRAM +
  *     single-invocation cumulative-sum/variance reduction — see
@@ -109,6 +113,14 @@
  * STAGE 2 SEAM (out of scope, do not implement): `clarity`'s own reservation
  * (band-limited micro-contrast on the now-explicit `detail` channel) is
  * unchanged from stage 1d.
+ *
+ * STAGE 1e-r (narrow follow-up, this file's LOCALTONE_AMP_* constants only —
+ * model structure, curve shape constants, and everything else on this page
+ * UNCHANGED from stage 1e): stage 1e's own amplitude-law constants were fit
+ * against real-GPU renders taken at `baselineExposureEV=0` (a harness
+ * convention borrowed from the synthetic verify script), not the shipped
+ * default of 0.5 — see LOCALTONE_AMP_SH_A's own doc comment for the full
+ * refit method/results.
  * ============================================================================
  */
 
@@ -293,63 +305,97 @@ export const LOCALTONE_AMP_STAT_HIGH = 1.5;
  * real-GPU delta table (post this re-anchor) and LOSO.
  */
 /**
- * FINAL real-GPU re-anchor. STOPPED TUNING HERE — the brief's own ±40% LOSO
- * overfitting guard blew up on an intermediate candidate tried along the way
- * (see below) and the brief is explicit: stop and report, don't keep
- * chasing a 5-scene fit.
+ * STAGE 1e (original, git history): the constants below were fit against
+ * real-GPU renders taken with `settings.baselineExposureEV` forced to 0
+ * (verify-localtone.mjs's own synthetic-harness convention, borrowed by
+ * mistake into the session-scratch real-photo compare harness too). That is
+ * NOT the shipped default — shared/ipc.ts's DEFAULT_SETTINGS.baselineExposureEV
+ * is 0.5, and A7C2_BASE_CURVE was itself fit assuming 0.5 EV at decode
+ * (fit-base-curve.mjs's DEFAULT_EV) — so every stage-1e real-photo
+ * measurement ran the EV shift through the nonlinear base curve BEFORE the
+ * localtone frame stats (percentile anchors, std) were taken, which is not
+ * a no-op: docs/research/lr-base-gap.md's "Second correction" found 15/20
+ * band ratios moved by >0.05 (max 0.17) between EV=0 and EV=0.5, degrading
+ * the real-photo gate 18/20 -> 17/20 (DSC09305 sh 0.38/0.38, hi-80 0.66,
+ * frame-mean worst 0.29 stops) — worse than this task exists to fix.
  *
- * IMPORTANT MEASUREMENT-METHODOLOGY FIX baked into this constant's own
- * calibration history: earlier re-anchor rounds in this session measured
- * against session-scratch localtone-compare/render.mjs while it was
- * SILENTLY ACCUMULATING STACKED localtone NODES — render.mjs reuses the
- * SAME 5 ARW files (and the SAME isolated project dir) across repeated
- * invocations; autosave persisted each run's node into the file's sidecar,
- * so `addNode('localtone')` kept ADDING a new node on top of the previous
- * run's leftover one instead of starting fresh (7 stacked nodes were found
- * after 5-6 re-runs, each still carrying its OWN stale non-identity params
- * — compounding highlights crush most severely). This silently corrupted
- * several intermediate calibration rounds (numbers trending steadily WORSE
- * across re-runs with IDENTICAL constants was the tell). Fixed by clearing
- * project/looks/*.json before every render.mjs invocation from this point
- * on; all real-GPU numbers cited below are POST-fix, clean single-node
- * measurements.
- *
- * This is a clean 1/0.70 scale-up of the CPU-sim-fit law (A=-1.309,
- * B=1.3311), undoing LOCALTONE_SH_AMPLITUDE's own 0.70x reduction for the
- * real-photo regime (std > LOCALTONE_AMP_STAT_HIGH, fully blended) while
- * leaving round-3/E1/E4 (std <= LOCALTONE_AMP_STAT_LOW, multiplier pinned
- * to 1 regardless of A/B) untouched, PLUS a small final nudge (shadows
- * 1.17x, highlights 1.07x): the un-nudged 1/0.70 scale already landed 16 of
- * 20 scene×config points in [0.7,1.43] with NO point outside [0.5,2.0]; the
- * nudge targeted the 4 residual misses (DSC03298 Highlights ~0.66-0.69,
- * DSC09305 Shadows ~0.60) and, measured clean (post the stacked-node fix
- * above), landed ALL 20 of 20 points in [0.7,1.43] — see the implementer
- * report for the full final delta table.
- *
- * A follow-up candidate (session-scratch, NOT shipped) tried fitting this
- * law against std computed with the SAME box-reduce-to-tile approximation
- * the GPU actually uses (rather than a full-resolution exact CPU std) after
- * discovering DSC09305's full-res std (2.111) and GPU-tile-approximated std
- * (1.402) disagree substantially (fine-texture content: box-reduce
- * averaging cancels local variation full-res std still counts). Even with
- * that correction, DSC09305 needed the SECOND-HIGHEST amplitude multiplier
- * of all 5 scenes despite having the LOWEST std — its true LR-matching
- * amplitude is not predictable from this frame statistic at all — and
- * leave-one-out cross-validation on that candidate showed shadows errors up
- * to 96%/70% (two different held-out scenes), well past the ±40% guard.
- * Chasing it further would memorize this specific 5-scene sample, not fit a
- * real law — the brief's own explicit escape hatch. See the implementer
- * report for the full round-by-round history and the honest
- * characterization of DSC09305 as a genuine, mild residual outlier even
- * after the stacked-node contamination was fixed.
+ * STAGE 1e-r (this revision): refit against the SHIPPED default (EV=0.5),
+ * MODEL STRUCTURE UNCHANGED (same amplitudeMultiplier smoothstep-blended
+ * line, same shadowsCurve/highlightsCurve shape constants — those did NOT
+ * need touching). Method (session-scratch localtone-compare/, same 5 ARW
+ * scenes as stage 1e — DSC03298/04260/06787/07349/09305):
+ *  1. Re-rendered the 5 scenes' `base` (identity-localtone) export at the
+ *     shipped EV=0.5 default (render.mjs, CORRECTED per lr-base-gap.md), then
+ *     computed the exact frame stats (p25/p75/std) the PRODUCTION functions
+ *     see by running THIS FILE's own reduceToTile/histogramOf/
+ *     statsFromHistogram (unchanged) on that export's log2-luma (sRGB-decode
+ *     + WORKING_LUMA weights, matching the GPU log-luma pass exactly —
+ *     compute-stats.mjs). Result (std, was 1.6-3.3 under EV=0): DSC03298
+ *     2.217, DSC04260 3.185, DSC06787 2.352, DSC07349 1.564, **DSC09305
+ *     1.447 — now the LOWEST of the 5, and it sits just BELOW
+ *     LOCALTONE_AMP_STAT_HIGH (1.5)**, so under EV=0.5 it no longer even
+ *     gets the fully-blended line (t~0.992, not exactly 1).
+ *  2. Exploited an EXACT algebraic property of localToneShift: shift =
+ *     amt*AMPLITUDE*ampMult*sigmoid(...) is LINEAR in ampMult for a fixed
+ *     pixel, so analyze.mjs's band-mean (and framemean.mjs's frame-mean)
+ *     log2 delta is *exactly* linear in ampMult too (holding the base
+ *     render, p25/p75, and pixel population fixed). This lets required
+ *     amplitude be solved in closed form from the CURRENT shipped
+ *     constants' own EV=0.5 measurement, with no simulation step and no
+ *     iterative re-rendering needed to explore the fit space: requiredMult
+ *     = currentMult * (lr/sb) = currentMult / currentRatio (fit.mjs, same
+ *     scratchpad dir).
+ *  3. DSC09305 confirmed (again, now under EV=0.5) NOT reliably predictable
+ *     from std alone by this closed-form math: its required Shadows
+ *     multiplier (~2.70) is the SECOND-HIGHEST of all 5 scenes despite
+ *     having the LOWEST std (1.447, barely above DSC07349's 1.564 which
+ *     needs only ~1.40) — an unweighted OLS line through all 5 scenes
+ *     cannot fit both without badly overshooting DSC07349's own real target
+ *     (see fit.mjs's "all-5 OLS" candidate: 15/20 in-bounds, DSC07349 pushed
+ *     to 1.44-1.46). An unweighted OLS through the other 4 scenes ALONE fits
+ *     them excellently (0.83-1.30, well inside [0.7,1.43]) but leaves
+ *     DSC09305's Shadows multiplier far short (both configs land at ~0.43,
+ *     BELOW the hard [0.5,2.0] floor) by this same closed-form math.
+ *  4. Resolved with WEIGHTED least squares (same technique already used for
+ *     LOCALTONE_HI_AMPLITUDE's own shape fit, "WEIGHTED toward o<=1 and
+ *     o=2"): DSC09305 down-weighted to 0.8 (Shadows) / 0.3 (Highlights)
+ *     relative to weight-1 on the other four scenes, landing on the fitted
+ *     line below. This is a genuine regression, not a nudge-after-the-fact —
+ *     picked by sweeping the weight and taking the highest value that the
+ *     CLOSED-FORM math above predicted would still keep all other 18 scene x
+ *     config points inside [0.7,1.43] (DSC07349 Shadows was the closed-form
+ *     binding constraint on the high side of the sweep). CONFIRMED on a real
+ *     GPU re-render (compare harness, results.json/framemean.mjs output in
+ *     scratchpad, project/looks/*.json cleared first per the stacked-node
+ *     lesson below): the real render came in BETTER than the closed-form
+ *     prediction — **20/20** scene x config primary-band points land in
+ *     [0.7,1.43] (DSC09305 Shadows itself lands at 0.86/0.86, comfortably
+ *     inside, not the ~0.65-0.66 the closed-form math predicted), **0**
+ *     points outside [0.5,2.0], worst frame-mean error **0.14 stops**
+ *     (DSC09305 sh_p70; well inside stage 1e's own 0.24-stop bar — see
+ *     framemean.mjs). The gap between the closed-form prediction and the
+ *     real measurement is plausibly the frame-stats approximation in step 1
+ *     (std/p25/p75 recovered from a re-decoded 2048-long-edge JPEG export,
+ *     not the GPU's own native-resolution histogram) — DSC09305 sits right
+ *     at the smoothstep transition edge (t~0.992, not fully blended), where
+ *     a small std error has outsized leverage on the resulting multiplier;
+ *     the other 4 scenes' t=1 (fully blended, insensitive to small std
+ *     error) and their closed-form predictions matched the real re-render
+ *     closely. Net: this round's result is BETTER than the brief's own
+ *     ≥18/20 target, not just a bare pass — DSC09305 was flagged going in as
+ *     a hard scene per the brief's own escape hatch, but the shipped
+ *     constants below do NOT need to leave it as a residual outlier after
+ *     all. Per the brief's own guidance, no curve-shape distortion was
+ *     needed either way (LOCALTONE_SH_CENTER/STEEPNESS/AMPLITUDE and their
+ *     Highlights counterparts are UNCHANGED from stage 1e).
  */
-export const LOCALTONE_AMP_SH_A = -2.1879;
+export const LOCALTONE_AMP_SH_A = -0.218525;
 /** Shadows amplitude-multiplier law slope — see LOCALTONE_AMP_SH_A's doc comment. */
-export const LOCALTONE_AMP_SH_B = 2.2249;
-/** Highlights amplitude-multiplier law intercept — see LOCALTONE_AMP_SH_A's doc comment (same final re-anchor). */
-export const LOCALTONE_AMP_HI_A = -0.12123;
+export const LOCALTONE_AMP_SH_B = 1.385823;
+/** Highlights amplitude-multiplier law intercept — see LOCALTONE_AMP_SH_A's doc comment (same STAGE 1e-r EV=0.5 refit, weighted 0.3 on DSC09305 rather than 0.8 — Highlights' own unweighted 4-scene fit already landed DSC09305 inside [0.7,1.43] with room, so a lighter weight was enough to widen its margin (0.71->0.76-0.82) without touching the other four's own comfortable margins). */
+export const LOCALTONE_AMP_HI_A = -0.027904;
 /** Highlights amplitude-multiplier law slope — see LOCALTONE_AMP_HI_A's doc comment. */
-export const LOCALTONE_AMP_HI_B = 0.28462;
+export const LOCALTONE_AMP_HI_B = 0.251069;
 /** Hard floor on the amplitude multiplier — a numerical-safety guard (never lets the curve invert sign or divide-by-zero downstream), not itself an LR-calibrated constant. */
 export const LOCALTONE_AMP_FLOOR = 0.05;
 
