@@ -441,3 +441,37 @@ as DNG through LR (the plugin can batch this) or Adobe DNG Converter and
 read the `BaselineExposure` tag directly — if it tracks the per-scene gap,
 the "adaptive" luma component collapses into a static curve + a per-ISO
 metadata term that silverbox can honor exactly.
+
+## CORRECTION (round-1 DCP experiment, same day — supersedes the headline number)
+
+The pooled "+0.66 stops LR-brighter" headline above is **~85% a measurement-
+harness artifact**: the render script behind this report's silverbox exports
+forced `baselineExposureEV = 0` (borrowed from verify-localtone.mjs's
+convention), while the SHIPPED default is 0.5 and `A7C2_BASE_CURVE` was fit
+assuming that 0.5 EV is applied at decode (see scripts/fit-base-curve.mjs's
+DEFAULT_EV). Re-measured with the shipped default:
+
+| config | pooled mean Δluma (LR−sb) | mean hue err | chroma ratio |
+|---|---|---|---|
+| harness as in this report (EV=0) | +0.633 | 16.2° | 0.885 |
+| shipped default (EV=0.5) | **+0.088** | 18.4° | 0.975 |
+| + Adobe Standard DCP applied | −0.119 | 16.3° | 1.080 |
+
+What SURVIVES the correction: the scene-adaptive tone residual (best static
+curve still leaves **0.506 stops RMS**, ≈ the 0.49 reported above) and the
+ISO correlation (r=0.755, 0.886 excluding the 2 WB-confounded scenes) — the
+per-ISO BaselineExposure hypothesis stands. Also unchanged: the WB
+divergence on DSC03298/DSC07349 (upstream of profiles, in WB-gain
+derivation) and the profile-table color gap.
+
+DCP round-1 findings: the local "Sony ILCE-7CM2 Adobe Standard.dcp" is
+TONE-LESS (ForwardMatrix1/2 + HueSatMap 90×30×1 + LookTable 36×8×16, no
+ProfileToneCurve, baselineExposureOffset 0) — so DCP application cannot
+close the tone axis at all, and on color it is a wash because LR's actual
+default is **Adobe Color** = Adobe Standard + a ~106KB `crs:LookTable`
+blob in an XMP Look preset (custom Base85-family encoding, ordinals 33–125,
+not standard ASCII85; undocumented; not yet decoded). The localtone
+delta-over-own-base measurements elsewhere are EV-shift-invariant (a global
+EV is an additive log2 constant: std, percentile offsets and per-band
+deltas are unchanged), so the stage-1e calibration is unaffected by this
+correction; only absolute-look comparisons were contaminated.
