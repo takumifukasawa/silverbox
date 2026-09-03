@@ -470,8 +470,16 @@ ProfileToneCurve, baselineExposureOffset 0) — so DCP application cannot
 close the tone axis at all, and on color it is a wash because LR's actual
 default is **Adobe Color** = Adobe Standard + a ~106KB `crs:LookTable`
 blob in an XMP Look preset (custom Base85-family encoding, ordinals 33–125,
-not standard ASCII85; undocumented; not yet decoded). The localtone
-delta-over-own-base measurements elsewhere are EV-shift-invariant (a global
-EV is an additive log2 constant: std, percentile offsets and per-band
-deltas are unchanged), so the stage-1e calibration is unaffected by this
-correction; only absolute-look comparisons were contaminated.
+not standard ASCII85; undocumented; not yet decoded).
+
+**Second correction (same day, empirical):** the paragraph originally here
+claimed the localtone delta-over-own-base calibration was EV-shift-invariant.
+Re-rendering the 20 localtone band measurements at the shipped EV=0.5
+FALSIFIED that: 15/20 band ratios moved >0.05 (max 0.17), because the EV
+shift passes through the NONLINEAR A7C2 base curve before the localtone
+stats are taken — the post-curve histogram (percentile anchors, std
+amplitude stat) is not invariant. Net effect on the stage-1e merge gate:
+18/20 → 17/20 in [0.7,1.43]; DSC09305 degrades from a shadows-only outlier
+(0.55) to 3-of-4 configs out/edge (sh 0.38/0.38, hi−80 0.66). Stage-1e's
+amplitude constants were fit against EV=0 renders and need a refit against
+shipped-default renders before any merge decision.
