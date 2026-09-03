@@ -1,38 +1,41 @@
 /**
  * Local-adaptive tone node verify (docs/research/local-adaptive-tone.md,
- * lr-tone-measurements.md / -r2.md, LOCAL-ADAPTIVE TONE STAGE 1 implementer
- * brief): proves the new `localtone` Fast Local Laplacian node reproduces
- * LR's measured LOCALITY signatures in-engine, not just "the render changed".
+ * lr-tone-measurements.md / -r2.md (round-3 addendum), LOCAL-ADAPTIVE TONE
+ * STAGE 1c implementer brief): proves the `localtone` Fast Local Laplacian
+ * node reproduces LR's measured LOCALITY signatures in-engine, not just
+ * "the render changed".
  *
  * STANDALONE — deliberately NOT registered in package.json's `verify`/
- * `verify:serial` chain (per the brief: "register nothing in the suite
- * yet"). A `verify:localtone` npm script IS registered so it can be run by
- * name; run by hand with `npm run verify:localtone`.
+ * `verify:serial` chain. A `verify:localtone` npm script IS registered so
+ * it can be run by name; run by hand with `npm run verify:localtone`.
  *
  *  1. E1 replication (lr-tone-measurements.md's headline table): a fixed
  *     18%-gray 64px patch on 6 uniform backgrounds (0.5/2/8/18/50/90%).
  *     Shadows=+100 then Highlights=-100, center-patch delta-over-base
  *     (stops). REQUIRED: the patch delta VARIES with background (locality)
- *     with the same SIGN structure LR measured — Shadows: brighter surround
- *     -> more lift; Highlights: darker surround -> stronger crush, brighter
- *     surround -> ~0. Magnitude tolerance is loose (within ~2x LR's table
- *     values, floor-padded so near-zero LR values don't demand an
- *     impossible ratio) — the full LR-vs-silverbox table is printed.
- *  2. E4 no-halo (lr-tone-measurements-r2.md's σr=4.0 calibration, on a hard
- *     step edge, contrast=5 stops, center=20%, Shadows=+100): the delta
+ *     with the same SIGN structure LR measured, and magnitude within ~2x
+ *     LR's table values (floor-padded so near-zero LR values don't demand
+ *     an impossible ratio) — the full LR-vs-silverbox table is printed.
+ *  2. R3 curve replication (lr-tone-measurements-r2.md's round-3 addendum,
+ *     the STAGE 1c decisive new data): 4 of round-3's own probe geometries
+ *     — 64px patch offset from a fixed surround, Shadows+100 at offsets
+ *     {1.5, 2.5, 3.5} stops (surround 50%) and Highlights-100 at offset
+ *     {2} stops (surround 2%) — center-patch delta within ~30% of the
+ *     measured LR value at each point.
+ *  3. E4 no-halo (lr-tone-measurements-r2.md's σr=4.0 calibration, on a hard
+ *     step edge, contrast=5 stops, center=20%, Shadows+100): the delta
  *     profile across the edge is two flat plateaus, transition confined to
  *     <=8px, overshoot ratio < 0.1.
- *  3. Identity invariants: amount=0 -> bit-exact pass-through (export bytes
+ *  4. Identity invariants: amount=0 -> bit-exact pass-through (export bytes
  *     identical); shadows=highlights=0 -> delta < 1/255 everywhere sampled;
  *     GPU determinism (two renders of the same state -> identical export
  *     bytes).
- *  4. Sidecar round-trip: schemaVersion stays 4 (additive node kind, same
+ *  5. Sidecar round-trip: schemaVersion stays 4 (additive node kind, same
  *     pattern as lut/denoise); path/params survive a save+reopen.
  *
- * NOT reproduced by stage 1 (expected, out of scope — noted in the printed
+ * NOT reproduced by stage 1c (expected, out of scope — noted in the printed
  * summary): the E6 global scene-statistics range-expansion layer (Eric
- * Chan's "mechanism B"), and exact LR magnitudes (only sign/locality is a
- * hard requirement here).
+ * Chan's "mechanism B").
  */
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -88,6 +91,43 @@ const e1Files = E1_BACKGROUNDS_PCT.map((bgPct) => {
     generator: (x, y) => (x >= e1p0 && x < e1p1 && y >= e1p0 && y < e1p1 ? E1_PATCH_VALUE : bg),
   });
   return { bgPct, bg, path };
+});
+
+// --- R3 probes: 64px patch offset from a fixed surround by signed log2
+// stops (lr-tone-measurements-r2.md's round-3 addendum construction,
+// gen-tone-experiments-r3.mjs — inlined here the same way E1/E4 are).
+// Shadows probe: surround=50%, patch DARKER by `offset` stops. Highlights
+// probe: surround=2%, patch BRIGHTER by `offset` stops. ---
+const R3_SIZE = 1024;
+const R3_PATCH = 64;
+const r3p0 = (R3_SIZE - R3_PATCH) / 2;
+const r3p1 = r3p0 + R3_PATCH;
+const R3_SH_SURROUND = 0.5;
+const R3_SH_OFFSETS = [1.5, 2.5, 3.5];
+const R3_HI_SURROUND = 0.02;
+const R3_HI_OFFSETS = [2];
+// LR-measured targets, stops (lr-tone-measurements-r2.md's round-3 addendum table).
+const R3_SH_TARGET = { 1.5: 0.141, 2.5: 0.473, 3.5: 0.804 };
+const R3_HI_TARGET = { 2: -1.093 };
+const r3ShFiles = R3_SH_OFFSETS.map((offset) => {
+  const patch = R3_SH_SURROUND / 2 ** offset;
+  const path = join(workDir, `r3_sh_o${offset}.dng`);
+  writeLinearDng(path, {
+    width: R3_SIZE,
+    height: R3_SIZE,
+    generator: (x, y) => (x >= r3p0 && x < r3p1 && y >= r3p0 && y < r3p1 ? patch : R3_SH_SURROUND),
+  });
+  return { offset, path };
+});
+const r3HiFiles = R3_HI_OFFSETS.map((offset) => {
+  const patch = R3_HI_SURROUND * 2 ** offset;
+  const path = join(workDir, `r3_hi_o${offset}.dng`);
+  writeLinearDng(path, {
+    width: R3_SIZE,
+    height: R3_SIZE,
+    generator: (x, y) => (x >= r3p0 && x < r3p1 && y >= r3p0 && y < r3p1 ? patch : R3_HI_SURROUND),
+  });
+  return { offset, path };
 });
 
 // --- E4: hard step edge, contrast=5 stops, center=20% (gen-tone-experiments.mjs's e4_c5_hard_l20 construction, inlined) ---
@@ -312,41 +352,16 @@ try {
   check('E1 (locality): Highlights-100 patch delta VARIES with background (spread > 0.01 stops)', spreadHighlights > 0.01, deltasHighlights);
 
   // Sign structure: Shadows delta at bg=90% must be >= bg=0.5% (brighter surround -> more/equal lift, never less).
-  // STAGE 1b UPDATE (honest-report finding — see localToneNode.ts's module
-  // doc comment and betaForLevel's doc comment for the full writeup): stage
-  // 1's sign-of-offset beta split was redesigned to key beta to the
-  // discretization level gammaJ instead (symmetric per level) — the
-  // conductor's own hypothesis, confirmed via CPU sim NOT to reproduce LR's
-  // E1 sign structure, and an inverted mapping (shipped) that measurably
-  // improves both this and E4's overshoot but still doesn't clear the bar.
-  // The DOMINANT remaining blocker, characterized via CPU sim and confirmed
-  // on this real render: LOCALTONE_SIGMA_R_DEFAULT=4.0 stops (an E4-only
-  // calibration) creates a DEAD ZONE — remapLog2 leaves |d|<~2.6 stops
-  // fully untouched — that excludes E1's own bg=50%/90% offsets from the
-  // 18% patch (1.47/2.32 stops) entirely, so NO beta-keying scheme can
-  // produce a lift there without also shrinking sigmaR (which the brief
-  // treats as a fixed, separately-calibrated constant). The checks below
-  // test what this stage actually delivers: monotonic ORDERING (required,
-  // passes) and at least one background showing a clearly-signed,
-  // correctly-directed effect (required, still fails — see the final
-  // report).
+  // STAGE 1c: round-3's own no-dead-zone finding means bg=50%/90% (offsets
+  // 1.47/2.32 stops from the 18% patch) should now show a real, positive
+  // lift, not the sigmaR dead-zone's exact zero stage 1b left behind.
   const sh05 = e1Results.find((r) => r.bgPct === 0.5).deltaShadows;
   const sh90 = e1Results.find((r) => r.bgPct === 90).deltaShadows;
   check('E1 (sign, Shadows): bg=90% lift >= bg=0.5% lift (brighter surround -> more/equal shadow lift, per LR)', sh90 >= sh05, { sh05, sh90 });
-  // KNOWN, CHARACTERIZED LIMITATION (see the comment above): bg=50%/90%
-  // land in the sigmaR dead zone (offsets 1.47/2.32 stops, under the
-  // ~2.6-stop knee start) so their delta is exactly 0, not positive; bg<18%
-  // still shows a real, un-fudged wrong-signed leakage from the
-  // patch/background edge through the shared pyramid (see betaForLevel's
-  // doc comment). Left as a real failing check rather than silently
-  // dropped — see the final report for the full characterization.
   const shPositiveSomewhere = e1Results.some((r) => r.deltaShadows > 0.002);
-  check('E1 (sign, Shadows): at least one background shows a clearly positive (correctly-directed) lift — KNOWN LIMITATION, see comment above', shPositiveSomewhere, deltasShadows);
+  check('E1 (sign, Shadows): at least one background shows a clearly positive (correctly-directed) lift', shPositiveSomewhere, deltasShadows);
 
   // Sign structure: Highlights delta at bg=0.5% must be clearly negative (strong crush) and much more negative than at bg=90% (~0, per LR).
-  // This direction holds up cleanly even with the beta floor (see the
-  // honest-report table) — Highlights' own tail is untouched by Shadows'
-  // cross-talk in this specific E1 patch/background geometry.
   const hi05 = e1Results.find((r) => r.bgPct === 0.5).deltaHighlights;
   const hi90 = e1Results.find((r) => r.bgPct === 90).deltaHighlights;
   check('E1 (sign, Highlights): bg=0.5% crush is clearly negative', hi05 < -0.002, hi05);
@@ -363,7 +378,46 @@ try {
   }
 
   // ===========================================================================
-  console.log('verify-localtone (2. E4 no-halo — hard edge, contrast=5 stops, Shadows+100: two flat plateaus, transition <=8px, overshoot ratio < 0.1):');
+  console.log('verify-localtone (2. R3 curve replication — round-3\'s own probe geometry, Shadows+100 at offsets {1.5,2.5,3.5} and Highlights-100 at offset {2}, within ~30% of LR):');
+  const r3Results = [];
+  const r3MagnitudeOk = (silverbox, lr) => Math.abs(silverbox - lr) <= 0.3 * Math.abs(lr);
+  for (const { offset, path } of r3ShFiles) {
+    await openImageAndWait(path);
+    const node = await addNode('localtone');
+    const nodeId = node.id;
+    const state0 = await localToneState(nodeId);
+    check(`R3 sh offset=${offset}: freshly added localtone node is at identity before measuring`, state0?.shadows === 0 && state0?.highlights === 0, state0);
+    const base = await cropLinearMean(psx, psy, PATCH_SAMPLE, PATCH_SAMPLE);
+    await setLocalTone(nodeId, { shadows: 100, highlights: 0 });
+    await settle();
+    const after = await cropLinearMean(psx, psy, PATCH_SAMPLE, PATCH_SAMPLE);
+    const delta = log2(after / base);
+    r3Results.push({ probe: 'sh', offset, delta, target: R3_SH_TARGET[offset] });
+  }
+  for (const { offset, path } of r3HiFiles) {
+    await openImageAndWait(path);
+    const node = await addNode('localtone');
+    const nodeId = node.id;
+    const state0 = await localToneState(nodeId);
+    check(`R3 hi offset=${offset}: freshly added localtone node is at identity before measuring`, state0?.shadows === 0 && state0?.highlights === 0, state0);
+    const base = await cropLinearMean(psx, psy, PATCH_SAMPLE, PATCH_SAMPLE);
+    await setLocalTone(nodeId, { shadows: 0, highlights: -100 });
+    await settle();
+    const after = await cropLinearMean(psx, psy, PATCH_SAMPLE, PATCH_SAMPLE);
+    const delta = log2(after / base);
+    r3Results.push({ probe: 'hi', offset, delta, target: R3_HI_TARGET[offset] });
+  }
+  console.log('  probe | offset | silverbox | LR target | relErr');
+  for (const r of r3Results) {
+    const relErr = Math.abs(r.delta - r.target) / Math.abs(r.target);
+    console.log(`  ${r.probe.padStart(5)} | ${String(r.offset).padStart(6)} | ${r.delta.toFixed(4).padStart(9)} | ${r.target.toFixed(4).padStart(9)} | ${(relErr * 100).toFixed(0).padStart(4)}%`);
+  }
+  for (const r of r3Results) {
+    check(`R3 ${r.probe} offset=${r.offset}: within ~30% of LR's measured ${r.target} stops`, r3MagnitudeOk(r.delta, r.target), r);
+  }
+
+  // ===========================================================================
+  console.log('verify-localtone (3. E4 no-halo — hard edge, contrast=5 stops, Shadows+100: two flat plateaus, transition <=8px, overshoot ratio < 0.1):');
   // Reopening e4Path (even though it's the SAME file setup already opened
   // once) still resets to a fresh default doc — no sidecar was ever SAVED
   // for it (setup's node lived only in memory), so this is functionally a
@@ -413,19 +467,10 @@ try {
     const side = o < 0 ? darkPlateau : lightPlateau;
     if (Math.abs(v - side) > 0.1 * plateauSpread) transitionPx = Math.max(transitionPx, Math.abs(o) + 1);
   }
-  // KNOWN, CHARACTERIZED LIMITATION (STAGE 1b update — same root cause as
-  // the overshoot check below): the level-keyed symmetric remap (this
-  // stage) measurably NARROWS this vs stage 1's sign-keyed design (21px ->
-  // 14px at LOCALTONE_LEVEL_TRANSITION_STOPS=24, measured) but still
-  // doesn't clear <=8px — the width tracks how many pyramid levels/gammaJ
-  // iterations meaningfully overlap the edge's own local Laplacian energy,
-  // which a global per-level beta (however it's keyed) can't shrink below a
-  // few levels' worth of spatial support without reintroducing K-level
-  // discretization aliasing. lr-tone-measurements-r2.md Q1's own finding —
-  // real LR combines a narrow (~4-6px) LOCAL edge kernel with a SEPARATE,
-  // distance-independent global term — suggests the actual fix is
-  // architectural (a dedicated small-radius kernel), not a beta-keying or
-  // sigmaR tweak; flagged as a stage-2 follow-up in the final report.
+  // STAGE 1c: levelDamp (localToneNode.ts) fades local-tone response by
+  // pyramid LEVEL INDEX (independent of gammaJ/log2-offset), so only the
+  // finest few levels — governed by sigmaR via LOCALTONE_HALO_LEVELS_PER_SIGMA_R
+  // — carry real response; this is what keeps the far-field plateaus flat.
   check(`E4: transition confined to <=8px of the edge (measured ${transitionPx}px)`, transitionPx <= 8, { transitionPx, deltaProfile: Object.fromEntries(deltaProfile) });
 
   // Overshoot: the max deviation beyond either plateau within the near-edge window, as a ratio of the plateau spread.
@@ -435,26 +480,8 @@ try {
     if (v < Math.min(darkPlateau, lightPlateau)) overshoot = Math.max(overshoot, Math.min(darkPlateau, lightPlateau) - v);
     if (v > Math.max(darkPlateau, lightPlateau)) overshoot = Math.max(overshoot, v - Math.max(darkPlateau, lightPlateau));
   }
-  // KNOWN, CHARACTERIZED LIMITATION (STAGE 1b update — see
-  // localToneNode.ts's betaForLevel/LOCALTONE_LEVEL_TRANSITION_STOPS doc
-  // comments for the full writeup): stage 1's sign-of-offset beta split
-  // was replaced with a level-keyed, offset-SYMMETRIC remap (betaForLevel)
-  // — a from-scratch CPU pyramid simulation confirmed this measurably
-  // REDUCES the overshoot ratio vs stage 1's design (0.49 (stage 1) ->
-  // 0.32 (LOCALTONE_LEVEL_TRANSITION_STOPS=16) -> 0.26 (=24), all measured
-  // on this exact real render) — a genuine, non-blind improvement — but it
-  // does NOT clear the brief's <0.1 bar at any tested transition width, nor
-  // does reducing LOCALTONE_BETA_FLOOR further (same CPU-sim finding as
-  // stage 1: overshoot and plateau spread shrink together, so their RATIO
-  // barely moves). The remaining gap needs a structurally different fix (a
-  // spatially-local edge-transition kernel, per lr-tone-measurements-r2.md
-  // Q1's own finding that real LR combines exactly that with a SEPARATE
-  // global term — the E6 layer this stage explicitly excludes), not a
-  // parameter tweak. Left as a REAL, un-fudged failing check so the gap is
-  // visible rather than hidden — see the final report for the full
-  // characterization and stage-2 recommendation.
   const overshootRatio = overshoot / plateauSpread;
-  check(`E4: overshoot ratio < 0.1 on the hard edge (measured ${overshootRatio.toFixed(3)}) — KNOWN LIMITATION, see comment above`, overshootRatio < 0.1, { overshoot, plateauSpread, overshootRatio });
+  check(`E4: overshoot ratio < 0.1 on the hard edge (measured ${overshootRatio.toFixed(3)})`, overshootRatio < 0.1, { overshoot, plateauSpread, overshootRatio });
 
   // ===========================================================================
   console.log('verify-localtone (4. sidecar round-trip — schemaVersion stays 4, params survive save+reopen):');
@@ -495,9 +522,8 @@ try {
 
 rmSync(workDir, { recursive: true, force: true });
 
-console.log('\nNOT reproduced by stage 1 (expected, out of scope per the brief):');
+console.log('\nNOT reproduced by stage 1c (expected, out of scope per the brief):');
 console.log('  - E6 global scene-statistics range-expansion layer (Eric Chan\'s "mechanism B") — no code path for it exists yet.');
-console.log('  - Exact LR magnitudes — only sign/locality is a hard requirement in stage 1; magnitude tolerance above is loose (~2x).');
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`);

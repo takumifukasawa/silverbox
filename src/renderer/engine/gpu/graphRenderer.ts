@@ -34,12 +34,15 @@ import { WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from '../graph/wgslCommon';
 import type { DenoiseRunResult, ExportColorSpace, ExternalToolResult } from '../../../../shared/ipc';
 import { DENOISE_MODEL_SHA256 } from '../../../../shared/denoiseModel';
 import {
-  betaForLevel,
   discretizationLevels,
+  levelAmounts,
+  levelDamp,
   LOCALTONE_K_LEVELS,
-  LOCALTONE_KNEE_SOFTEN_FRAC,
   LOCALTONE_LUMA_EPS,
   LOCALTONE_RATIO_CLAMP_MAX,
+  LOCALTONE_TONE_FLOOR,
+  LOCALTONE_TONE_ONSET,
+  LOCALTONE_TONE_ONSET_SOFTEN_FRAC,
   pyramidLevelDims,
 } from '../graph/localToneNode';
 
@@ -329,43 +332,99 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
 `;
 
 /**
- * Per-level remap curve — see localToneNode.ts's remapLog2 (kept
- * numerically identical: same constants, same operation order). STAGE 1b:
- * `beta` is now a SINGLE, symmetric-in-offset slope for the whole level
- * (computed CPU-side per gammaJ by betaForLevel — see buildLocalTonePasses
- * — since it depends only on gammaJ, not on any per-pixel value), not a
- * per-pixel branch on sign(d) — see localToneNode.ts's module doc comment
- * for why the sign-keyed split was dropped. `u` = (gamma, sigmaR, beta,
- * unused).
+ * Per-level remap curve — see localToneNode.ts's remapLog2/toneTail (kept
+ * numerically identical: same constants, same operation order). STAGE 1c:
+ * SIGN-GATED (d<0 only ever uses sAmt/shadows, d>=0 only ever uses
+ * hAmt/highlights — the OTHER side is exact identity) and BOUNDED
+ * (multiplicative slope reduction, asymptotes to a flat cap at `onset`
+ * stops from gamma, never overshoots past gamma itself) — see
+ * localToneNode.ts's module doc comment for the full rationale. `u` =
+ * (gamma, sAmt, hAmt, unused); sAmt/hAmt (both 0..1) are computed CPU-side
+ * per gammaJ by levelAmounts (buildLocalTonePasses).
  */
 const LOCALTONE_REMAP_SHADER = /* wgsl */ `
 @group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var<uniform> u: vec4f; // x=gamma, y=sigmaR, z=beta, w=unused
+@group(0) @binding(1) var<uniform> u: vec4f; // x=gamma, y=sAmt, z=hAmt, w=unused
 ${FULLSCREEN_VS}
+fn toneTail(ad: f32, onset: f32, floorSlope: f32) -> f32 {
+  let w = ${LOCALTONE_TONE_ONSET_SOFTEN_FRAC} * onset;
+  let t = smoothstep(onset - w, onset + w, ad);
+  let idOut = ad;
+  let tailOut = onset + floorSlope * (ad - onset);
+  return idOut + (tailOut - idOut) * t;
+}
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
   let x = textureLoad(src, vec2i(pos.xy), 0).r;
   let gamma = u.x;
-  let sigmaR = u.y;
-  let beta = u.z;
+  let sAmt = u.y;
+  let hAmt = u.z;
   let d = x - gamma;
   let ad = abs(d);
-  let sd = sign(d);
-  let knee = ${LOCALTONE_KNEE_SOFTEN_FRAC} * sigmaR;
-  let t = smoothstep(sigmaR - knee, sigmaR + knee, ad);
-  let idOut = d;
-  let tailOut = sd * (sigmaR + beta * (ad - sigmaR));
-  let f = mix(idOut, tailOut, t);
-  return gamma + f;
+  if (d < 0.0) {
+    let floorSlope = 1.0 - sAmt * (1.0 - ${LOCALTONE_TONE_FLOOR});
+    return gamma - toneTail(ad, ${LOCALTONE_TONE_ONSET}, floorSlope);
+  }
+  let floorSlope = 1.0 - hAmt * (1.0 - ${LOCALTONE_TONE_FLOOR});
+  return gamma + toneTail(ad, ${LOCALTONE_TONE_ONSET}, floorSlope);
 }
 `;
 
-/** Top-pyramid-level accumulate — no expand needed (Laplacian top level = Gaussian top level, standard Burt-Adelson convention): accum' = accumPrev + tentWeight(gInput,gammaJ,step)*contrib. `u` = (gammaJ, step). */
+/**
+ * Identity Laplacian-diff pass: contrib = gFine - expand(gCoarse), the SAME
+ * formula the accumulate-laplacian shader below computes for a REMAPPED
+ * pyramid, but run ONCE on the INPUT's own (unremapped) Gaussian pyramid —
+ * precomputed before the K-discretization-level loop so levelDamp (STAGE
+ * 1c) can blend each level's remapped contribution back toward this
+ * UNTOUCHED value instead of toward zero, preserving the tent weights'
+ * partition-of-unity reconstruction exactly at full damping (see
+ * localToneNode.ts's levelDamp doc comment). `u` = (coarseW, coarseH).
+ */
+const LOCALTONE_LAPLACIAN_DIFF_SHADER = /* wgsl */ `
+@group(0) @binding(0) var gFine: texture_2d<f32>;
+@group(0) @binding(1) var gCoarse: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> u: vec4f; // x=coarseW, y=coarseH
+${FULLSCREEN_VS}
+${LOCALTONE_KERNEL_WGSL}
+@fragment
+fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
+  let o = vec2i(pos.xy);
+  let cw = i32(u.x);
+  let ch = i32(u.y);
+  var sum = 0.0;
+  for (var m = -2; m <= 2; m++) {
+    let oxm = o.x - m;
+    if ((oxm & 1) != 0) { continue; }
+    let cx = clamp(oxm / 2, 0, cw - 1);
+    let km = LOCALTONE_K[m + 2];
+    for (var n = -2; n <= 2; n++) {
+      let oyn = o.y - n;
+      if ((oyn & 1) != 0) { continue; }
+      let cy = clamp(oyn / 2, 0, ch - 1);
+      sum += km * LOCALTONE_K[n + 2] * textureLoad(gCoarse, vec2i(cx, cy), 0).r;
+    }
+  }
+  let expanded = 4.0 * sum;
+  return textureLoad(gFine, o, 0).r - expanded;
+}
+`;
+
+/**
+ * Top-pyramid-level accumulate — no expand needed (Laplacian top level =
+ * Gaussian top level, standard Burt-Adelson convention): accum' = accumPrev
+ * + tentWeight(gInput,gammaJ,step)*blended, where `blended` mixes the
+ * REMAPPED top level toward the INPUT's own (== gInputLevel, since L[top] =
+ * G[top] for BOTH the remapped and unremapped pyramids — no separate
+ * identity texture needed here, unlike the non-top shader below) by
+ * levelDamp's damp factor (STAGE 1c halo suppression — see
+ * localToneNode.ts's levelDamp doc comment). `u` = (gammaJ, step, damp,
+ * unused).
+ */
 const LOCALTONE_ACCUMULATE_TOP_SHADER = /* wgsl */ `
 @group(0) @binding(0) var accumPrev: texture_2d<f32>;
 @group(0) @binding(1) var gInputLevel: texture_2d<f32>;
 @group(0) @binding(2) var contribTex: texture_2d<f32>;
-@group(0) @binding(3) var<uniform> u: vec4f; // x=gammaJ, y=step
+@group(0) @binding(3) var<uniform> u: vec4f; // x=gammaJ, y=step, z=damp
 ${FULLSCREEN_VS}
 @fragment
 fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
@@ -374,17 +433,32 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
   let wgt = max(0.0, 1.0 - abs(g - u.x) / u.y);
   let acc = textureLoad(accumPrev, o, 0).r;
   let contrib = textureLoad(contribTex, o, 0).r;
-  return acc + wgt * contrib;
+  let blended = mix(g, contrib, u.z); // g IS this level's identity contrib (L[top]=G[top])
+  return acc + wgt * blended;
 }
 `;
 
-/** Fused expand+diff+weight+accumulate for a non-top level: contrib = gFine - expand(gCoarse) (this level's Laplacian, computed inline — Burt-Adelson EXPAND, matches localToneNode.ts's expandGray exactly), then accum' = accumPrev + tentWeight(gInput,gammaJ,step)*contrib. `u` = (gammaJ, step, coarseW, coarseH). Fusing expand+diff+accumulate into one pass (rather than three) is what keeps the total per-discretization-level pass count to ~2×levels instead of ~4×levels. */
+/**
+ * Fused expand+diff+weight+accumulate for a non-top level: contrib = gFine
+ * - expand(gCoarse) (this level's Laplacian, computed inline — Burt-Adelson
+ * EXPAND, matches localToneNode.ts's expandGray exactly), blended toward
+ * `identityContrib` (the INPUT's own precomputed Laplacian at this level —
+ * LOCALTONE_LAPLACIAN_DIFF_SHADER, run once before the discretization
+ * loop) by levelDamp's damp factor (STAGE 1c halo suppression), then
+ * accum' = accumPrev + tentWeight(gInput,gammaJ,step)*blended. `u` =
+ * (gammaJ, step, coarseW, coarseH); `u2` = (damp, unused, unused,
+ * unused). Fusing expand+diff+accumulate into one pass (rather than three)
+ * is what keeps the total per-discretization-level pass count to
+ * ~2×levels instead of ~4×levels.
+ */
 const LOCALTONE_ACCUMULATE_LAPLACIAN_SHADER = /* wgsl */ `
 @group(0) @binding(0) var accumPrev: texture_2d<f32>;
 @group(0) @binding(1) var gInputLevel: texture_2d<f32>;
 @group(0) @binding(2) var gFine: texture_2d<f32>;
 @group(0) @binding(3) var gCoarse: texture_2d<f32>;
-@group(0) @binding(4) var<uniform> u: vec4f; // x=gammaJ, y=step, z=coarseW, w=coarseH
+@group(0) @binding(4) var identityContrib: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> u: vec4f; // x=gammaJ, y=step, z=coarseW, w=coarseH
+@group(0) @binding(6) var<uniform> u2: vec4f; // x=damp
 ${FULLSCREEN_VS}
 ${LOCALTONE_KERNEL_WGSL}
 @fragment
@@ -407,10 +481,12 @@ fn fs(@builtin(position) pos: vec4f) -> @location(0) f32 {
   }
   let expanded = 4.0 * sum;
   let contrib = textureLoad(gFine, o, 0).r - expanded;
+  let idc = textureLoad(identityContrib, o, 0).r;
+  let blended = mix(idc, contrib, u2.x);
   let g = textureLoad(gInputLevel, o, 0).r;
   let wgt = max(0.0, 1.0 - abs(g - u.x) / u.y);
   let acc = textureLoad(accumPrev, o, 0).r;
-  return acc + wgt * contrib;
+  return acc + wgt * blended;
 }
 `;
 
@@ -1388,6 +1464,7 @@ export class GraphRenderer {
     const pCollapse = this.localTonePipeline('localtone/collapse', LOCALTONE_COLLAPSE_SHADER, 'r32float');
     const pZero = this.localTonePipeline('localtone/zero', LOCALTONE_ZERO_SHADER, 'r32float');
     const pComposite = this.localTonePipeline('localtone/composite', LOCALTONE_COMPOSITE_SHADER, 'rgba16float');
+    const pLaplacianDiff = this.localTonePipeline('localtone/laplacianDiff', LOCALTONE_LAPLACIAN_DIFF_SHADER, 'r32float');
 
     const logLuma = mk(levels[0]!.w, levels[0]!.h);
 
@@ -1408,6 +1485,27 @@ export class GraphRenderer {
       });
     }
 
+    // STAGE 1c: the INPUT's own (unremapped) Laplacian pyramid, precomputed
+    // ONCE — levelDamp blends each discretization level's REMAPPED
+    // contribution back toward this UNTOUCHED value (see
+    // LOCALTONE_LAPLACIAN_DIFF_SHADER's doc comment). Top level needs no
+    // separate texture (L[top]=G[top]=gInput[n-1], reused directly by
+    // LOCALTONE_ACCUMULATE_TOP_SHADER).
+    const identityLap: GPUTexture[] = [];
+    for (let l = 0; l < n - 1; l++) {
+      const t = mk(levels[l]!.w, levels[l]!.h);
+      passes.push({
+        pipeline: pLaplacianDiff,
+        target: t.createView(),
+        entries: [
+          { binding: 0, resource: gInput[l]!.createView() },
+          { binding: 1, resource: gInput[l + 1]!.createView() },
+          { binding: 2, resource: { buffer: uni([levels[l + 1]!.w, levels[l + 1]!.h, 0, 0]) } },
+        ],
+      });
+      identityLap.push(t);
+    }
+
     // Persistent ping-ponged accumulator pyramid, seeded to zero.
     const accumA = levels.map((lv) => mk(lv.w, lv.h));
     const accumB = levels.map((lv) => mk(lv.w, lv.h));
@@ -1426,13 +1524,13 @@ export class GraphRenderer {
     for (let l = 0; l < n - 1; l++) gRemap.push(mk(levels[l + 1]!.w, levels[l + 1]!.h));
 
     for (const gammaJ of gammas) {
-      const beta = betaForLevel(gammaJ, shadows, highlights);
+      const { sAmt, hAmt } = levelAmounts(gammaJ, shadows, highlights);
       passes.push({
         pipeline: pRemap,
         target: gRemap[0]!.createView(),
         entries: [
           { binding: 0, resource: logLuma.createView() },
-          { binding: 1, resource: { buffer: uni([gammaJ, sigmaR, beta, 0]) } },
+          { binding: 1, resource: { buffer: uni([gammaJ, sAmt, hAmt, 0]) } },
         ],
       });
       for (let l = 0; l < n - 1; l++) {
@@ -1454,7 +1552,9 @@ export class GraphRenderer {
             { binding: 1, resource: gInput[l]!.createView() },
             { binding: 2, resource: gRemap[l]!.createView() },
             { binding: 3, resource: gRemap[l + 1]!.createView() },
-            { binding: 4, resource: { buffer: uni([gammaJ, step, levels[l + 1]!.w, levels[l + 1]!.h]) } },
+            { binding: 4, resource: identityLap[l]!.createView() },
+            { binding: 5, resource: { buffer: uni([gammaJ, step, levels[l + 1]!.w, levels[l + 1]!.h]) } },
+            { binding: 6, resource: { buffer: uni([levelDamp(l, sigmaR), 0, 0, 0]) } },
           ],
         });
       }
@@ -1465,7 +1565,7 @@ export class GraphRenderer {
           { binding: 0, resource: curAccum[n - 1]!.createView() },
           { binding: 1, resource: gInput[n - 1]!.createView() },
           { binding: 2, resource: gRemap[n - 1]!.createView() },
-          { binding: 3, resource: { buffer: uni([gammaJ, step, 0, 0]) } },
+          { binding: 3, resource: { buffer: uni([gammaJ, step, levelDamp(n - 1, sigmaR), 0]) } },
         ],
       });
       [curAccum, nextAccum] = [nextAccum, curAccum];
