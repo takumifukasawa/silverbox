@@ -572,6 +572,177 @@ the repo — these few coordinates are measurement observations.)
 DSC03298 ISO 320 → 0.35; DSC04260 ISO 500 → 0.35; DSC06787 ISO 200 → 0.35;
 DSC07349 ISO 200 → 0.35; DSC09305 ISO 1000 → 0.35.
 
+## Stage base-3: diagnosis of the acrlook/dcp DSC03298 regression
+
+Trigger: stage base-2's own landing note attributed DSC03298's near-neutral
+regression (silverbox R/G 1.34→1.90 across builtin→acrlook) to "dcp/
+pipeline.ts's Stage-1 simplifications: no CameraCalibration/AnalogBalance
+composition" — flagged UNVERIFIED. This pass built a fresh LR-DNG-tag
+extraction (Adobe's own `lr-dng-20260903` per-shot DNG conversions,
+exiftool) and a from-scratch camera→XYZ→display reference to test that
+attribution predictively, per the conductor's diagnose-before-code brief.
+
+### DNG-tag facts (all 5 scenes; `lr-dng-20260903/*.dng`, exiftool)
+
+CameraCalibration1/2 = `1.0037 0 0 / 0 1 0 / 0 0 0.9744` (diagonal,
+IDENTICAL across all 5 scenes — a per-camera-model constant, not per-shot).
+AnalogBalance = `1 1 1` (true identity) on all 5. ColorMatrix1/2,
+ForwardMatrix1/2, CalibrationIlluminant1/2 (17=StdA, 21=D65),
+ProfileHueSatMapDims (90×30×1) are also identical across all 5 (profile-
+level, as expected). BaselineExposure = 0.35 on all 5 (matches round-3's
+earlier finding).
+
+**Decisive fact: the LOCALLY-INSTALLED "Sony ILCE-7CM2 Adobe Standard.dcp"
+itself carries NEITHER CameraCalibration1/2 NOR AnalogBalance tags at all**
+(verified via `exiftool -a -G1 -s -n` on the .dcp directly — only
+ColorMatrix1/2, ForwardMatrix1/2, CalibrationIlluminant1/2,
+ProfileHueSatMapDims/ProfileLookTableDims are present; `parser.ts` also
+never attempted to parse either tag, matching dcp-profile.md's "explicitly
+deferred" note). **The stage-base-2 attribution COLLAPSES**: the non-
+identity CameraCalibration seen in Adobe's DNG conversions is NOT sourced
+from the profile file our pipeline reads — it is data ACR bakes into every
+DNG conversion for this camera model from somewhere else entirely (likely
+an Adobe-internal per-model correction not exposed by any locally-installed
+file), so "parse CameraCalibration from the DCP" would be a no-op fix: there
+is nothing to parse. Its magnitude is also small (≤2.6% diagonal) — even
+applied as a hardcoded constant (which would cross dcp-profile.md's own
+legal line: reading the user's OWN LR-exported DNGs at runtime is not
+something the shipped app can rely on, and hardcoding a number derived from
+them is closer to "distributing Adobe's derived calibration data" than
+"reading a locally-installed file") it would not have been large enough to
+explain the measured regression.
+
+### WB gain and illuminant-fraction validation (both essentially exact)
+
+Dumped `image.color` (camMul/camXyz/rgbCam) for all 5 scenes via a new
+`__debug.imageColorForVerify()` hook (CanvasView.tsx — kept; harmless,
+additive, test/diagnostic-only surface). `camMul` (libraw's as-shot
+multiplier) reciprocal matches each DNG's own `AsShotNeutral` to 4+
+significant digits on every scene (e.g. DSC03298: camMul R/G,B/G =
+1.92578/1.81738 vs 1/AsShotNeutral = 1.92578/1.81741) — round-2's "WB
+derivation is correct" finding is reconfirmed, more precisely: this is
+bit-level agreement, not just "within 49-124K", for the reciprocal-neutral
+itself. Feeding that camMul through the engine's own Planckian-locus CCT
+estimator and `illuminantFraction` gives fractions within ~3% of the
+values recorded in this doc's round-2 data appendix (DSC03298: computed
+0.526 vs recorded 0.541 at ~4051K vs ~4100K; DSC06787/09305: computed
+0.7895 vs recorded 0.792 at ~5126K vs ~5137K). **Both WB gain and
+illuminant-interpolation fraction are essentially correct for DSC03298** —
+neither explains a regression as large as the one measured.
+
+### fix① re-examined: structurally inapplicable to dcp/acrlook, and its
+### builtin-mode test was confounded by profile-fit overfitting
+
+`computeWbColorMatrixCorrection` was re-run numerically against DSC03298's
+reconstructed near-neutral camera pixel: it moves the result FURTHER from
+LR's target (reproducing the DORMANT-fix's own doc-comment finding). But
+`wbCorrection.ts`'s own doc comment already establishes fix① ONLY feeds the
+`builtin` profile source (dcp/acrlook already do their own full illuminant-
+interpolated reconstruction via ForwardMatrix — applying fix① there would
+double-transform); it CANNOT be "woken" for dcp/acrlook at all, by design.
+Separately: DSC03298 is one of only 3 scenes `profileFit.ts`'s builtin
+lattice was fit on (this doc's own "Data" section, months earlier) — so
+testing fix① against builtin-mode DSC03298 tests it against a scene the
+STATISTICAL LATTICE has already memorized its own ad-hoc compensation for;
+a regression there does not generalize evidence against fix①'s formula.
+Net: fix① stays dormant — correctly, but for a different combination of
+reasons than the current dormant-doc-comment states (not "wait for
+CameraCalibration composition", which is a dead end; rather "inapplicable
+to the modes this task targets, and its one negative data point is
+confounded"). Doc comment left AS IS pending a cleaner, held-out re-test if
+anyone revisits builtin-mode's own tone/color gap later — out of scope here.
+
+### The real mechanism: ProfileHueSatMap/LookTable is numerically unstable on
+### DSC03298's abundant DARK near-neutral content, but the shipped lattice
+### can't be fixed by damping inside `renderDcpPixel`
+
+Stage-by-stage ablation (bundled `pipeline.ts`, DSC03298's own near-neutral
+pixel mean, reconstructed camera-native → XYZ D50 → ProPhoto): reconstruction
++ ForwardMatrix ALONE lands close to LR's target (R/G 0.71 vs LR 0.72, B/G
+1.65 vs LR 1.52 — within ~2-8%). Applying the DCP's OWN ProfileHueSatMap on
+top moves it sharply AWAY (R/G 0.41, B/G 2.13) — LookTable and the ACR Look
+table add little more. The pixel's HSV reading at that point is h≈235°
+(blue), s≈0.40 (NOT near-zero) at v≈0.005 — a genuinely dark camera-native
+value where plain HSV saturation is well known to be numerically unstable
+(tiny absolute R/G/B differences → large relative hue/sat swings), and
+DSC03298 (a shadowed stone bridge) has an unusually large fraction of its
+frame reading as both dark AND near-neutral (46.5% of pixels at Lab
+C*<6 in the 2048px LR export) — exposing this instability far more than
+the other 4, generally brighter, scenes.
+
+A candidate fix (damp the HueSatMap/LookTable hue/sat/val correction toward
+identity as V→0, named constant `HUESAT_STABILITY_V_FLOOR`) was implemented
+in `renderDcpPixel` and its own golden-math check in verify-dcp.mjs, and
+DID reproduce the ablation's improvement when tested pixel-by-pixel in
+isolation. **It was then reverted** after full-pipeline validation showed
+it barely moves the real, shipped render at all (acrlook DSC03298 R/G
+0.414→0.409, B/G 1.918→1.993 — net negligibly different, B/G slightly
+WORSE): `bakeDcpLattice` bakes the DCP into `profileFit.ts`'s shared,
+UNIFORM N³=17³ residual lattice (node spacing 1/16≈0.0625 in working-space
+RGB), sampled by GPU/CPU trilinear interpolation — `renderDcpPixel` is only
+ever EVALUATED at the 17 discrete grid nodes along each axis, not at real
+pixels. Probed directly: the grey-diagonal's node 0 is (working=0, trivial
+zero-correction) and node 1 is ALREADY at v≈0.0625 in ProPhoto terms — above
+any reasonable near-black damping floor, so damping barely engages even
+though real near-neutral pixels in this scene have v as low as 0.001-0.009
+(median 0.0039; 99.7% below 0.05). The lattice's own trilinear blend toward
+node 0 already provides SOME attenuation purely from working-space
+proximity, unrelated to my per-node damping logic, and that geometry-driven
+attenuation is what's actually visible in the real render — my damping code
+was inert for the pixels that matter. A genuine fix needs either a denser
+lattice near black (touches `PROFILE_LATTICE_N`/the shared trilinear
+sampler builtin mode also rides — bigger blast radius) or moving the
+correction outside the baked lattice entirely (touches the shared
+`PROFILE_WGSL`/`profileResidual` CPU/GPU pair) — both real projects, out of
+this diagnostic pass's scope. **This is the actionable lead for the next
+implementer**, not the collapsed CameraCalibration attribution.
+
+### Corrected 5-scene re-measurement (current shipped code, no engine
+### changes landed this pass — methodology below)
+
+Near-neutral proxy corrected from stage base-2's own (unrecovered) ad hoc
+script: mask built from Lightroom's OWN base JPEG (`lr-sweep-20260901/base/
+<scene>.jpg` — confirmed via XMP: WhiteBalance=As Shot, LookName=Adobe
+Color, Exposure2012=0.00, matching this doc's original "Data" section
+exactly) at Lab C*<6, THEN sampled at those same pixel coordinates in each
+of our own CLI renders (resized to LR's own 1365×2048 dims) — masking an
+image against its OWN C* is circular (trivially ≈1) and was step base-2's
+likely mistake; this is the non-circular form the original report's whole-
+frame methodology implies. Geometry sanity (zero-shift NCC, builtin luma vs
+LR luma): 0.93-0.96 on 4/5 scenes; DSC09305 is low (0.67) — its own numbers
+below are lower-confidence.
+
+| scene | mode | R/G | B/G | LR target R/G | LR target B/G |
+|---|---|---|---|---|---|
+| DSC03298 | builtin | 0.679 | 2.227 | 0.723 | 1.518 |
+| DSC03298 | dcp | 0.443 | 1.777 | 0.723 | 1.518 |
+| DSC03298 | acrlook | 0.414 | 1.918 | 0.723 | 1.518 |
+| DSC04260 | builtin/dcp/acrlook | 1.02/1.00/1.00 | 0.93/0.95/0.95 | 0.984 | 1.000 |
+| DSC06787 | builtin/dcp/acrlook | 1.02/1.02/1.02 | 1.02/1.03/1.02 | 1.017 | 1.019 |
+| DSC07349 | builtin/dcp/acrlook | 1.37/1.28/1.33 | 0.74/0.77/0.75 | 0.982 | 1.013 |
+| DSC09305† | builtin/dcp/acrlook | 1.08/1.05/1.06 | 0.91/0.92/0.92 | 1.045 | 0.969 |
+
+† low-NCC scene, lower confidence.
+
+DSC03298 (this task's target scene): every mode is far outside the ~10%
+acceptance band on at least one axis (builtin B/G +47%, dcp R/G -39%,
+acrlook R/G -43%/B/G +26%) — none is close to clean, and acrlook is not
+better than builtin here. DSC07349 independently regresses ~30-40% on R/G
+in ALL THREE modes (a pre-existing, still-unresolved finding per round-2 —
+untouched by this pass). DSC04260/06787 stay clean (within ~5%) as before.
+**Table is NOT clean — the CONDUCTOR HOLD stays in place** (appStore.ts,
+~line 4611, comment updated to reflect this pass's corrected findings
+rather than the collapsed CameraCalibration attribution).
+
+### Gates
+
+typecheck (tsc, both projects) clean; `npm run test:unit` 357/357 passed;
+verify:acrlook, verify:dcp, verify:dcp-doubletone, verify:golden, verify:
+develop all "all checks passed" — all run AFTER reverting the ineffective
+pipeline.ts change, so these reflect the actual shipped (unchanged) engine.
+Only change landed this pass: `CanvasView.tsx`'s `imageColorForVerify()`
+debug hook (additive, test-surface only).
+
 ## Round-4 probe (2026-09-03): is PV2012 BASE itself scene-adaptive? — REFUTED on the tested axis
 
 Analysis-only probe, no repo/engine changes. Scripts, JSON and 2 plots in

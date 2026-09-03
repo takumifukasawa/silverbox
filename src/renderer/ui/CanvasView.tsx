@@ -196,6 +196,16 @@ declare global {
       /** In-page access to the decoded linear pixels for reference math. */
       imageForVerify(): { data: Float32Array; width: number; height: number } | null;
       /**
+       * STAGE BASE-3 diagnostic hook: the current image's raw camera color
+       * metadata (camMul/camXyz/rgbCam — RawDecoder.ts's `CameraColorInfo`),
+       * exactly as threaded into `wbModel`/the DCP pipeline. Lets an external
+       * reference-implementation script (scratchpad-only) reconstruct the
+       * SAME camera-native pixel the engine's own DCP pipeline sees, without
+       * re-deriving the decode. Null when no image or no color metadata
+       * (e.g. a JPEG source).
+       */
+      imageColorForVerify(): { camMul: [number, number, number, number]; camXyz: number[][]; rgbCam: number[][] | null } | null;
+      /**
        * Fit-profile tooling (scripts/fit-profile.mjs): the CURRENT graph's
        * DEVELOPED output in working-space linear Rec.2020, at a long edge of
        * ≤ maxDim. Renders through the real GPU export path (renderToPixels →
@@ -1584,6 +1594,10 @@ export function CanvasView() {
       imageForVerify() {
         const image = useAppStore.getState().image;
         return image ? { data: image.data, width: image.width, height: image.height } : null;
+      },
+      imageColorForVerify() {
+        const color = useAppStore.getState().image?.color;
+        return color ? { camMul: color.camMul, camXyz: color.camXyz, rgbCam: color.rgbCam ?? null } : null;
       },
       async developedForFit(maxDim) {
         const s = useAppStore.getState();

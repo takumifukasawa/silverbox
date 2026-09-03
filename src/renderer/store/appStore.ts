@@ -1557,21 +1557,31 @@ interface AppState {
    * measurement pass (docs/research/lr-base-gap.md's follow-up) found it does
    * NOT reliably improve near-neutral color accuracy: measured across the 5
    * report scenes, DSC03298 (the scene it specifically targets — the mired-
-   * interpolation-weight 0.541 bridge shot) moved FURTHER from LR's target
-   * (near-neutral R/G ratio 1.341→1.752, B/G 0.603→0.660), and the 4 clean
-   * (near-D65) scenes moved negligibly. Root cause suspected: this fix only
-   * interpolates ColorMatrix1/2, but dcp-profile.md's own prior research
-   * already documented that ColorMatrix/CameraCalibration+AnalogBalance
-   * composition is a SEPARATE, unaddressed Stage-1 approximation gap in
-   * dcp/pipeline.ts — likely the dominant remaining error for this scene,
-   * which a ColorMatrix-only interpolation can't reach. Left implemented
-   * (correct construction: exactly identity whenever the shot's estimated
-   * CCT sits at ColorMatrix2's own illuminant, by the ratio-composition
-   * proof in wbCorrection.ts's doc comment) but DORMANT rather than ship a
-   * measured regression — wiring it back in (openImageByPath's `void
-   * get().refreshWbColorMatrixCorrection();` and the CLI render path's
-   * `await` of the same) is a two-line change once CameraCalibration/
-   * AnalogBalance composition (or another accuracy pass) closes that gap.
+   * interpolation-weight 0.541 bridge shot) moved FURTHER from LR's target,
+   * and the 4 clean (near-D65) scenes moved negligibly.
+   *
+   * STAGE BASE-3 CORRECTION: the original "CameraCalibration/AnalogBalance
+   * composition gap" root-cause guess above has since COLLAPSED — verified
+   * directly that the locally-installed Adobe Standard DCP carries NEITHER
+   * tag (exiftool on the .dcp itself), so there is nothing for a
+   * CameraCalibration fix to parse. Also newly noted: `wbCorrection.ts`'s own
+   * doc comment already scopes this correction to the `builtin` profile
+   * source ONLY (dcp/acrlook do their own full illuminant-interpolated
+   * reconstruction already, so this fix structurally cannot apply there —
+   * it was never a candidate for those modes' own regression). And DSC03298
+   * is one of only 3 scenes `profileFit.ts`'s builtin lattice was fit on, so
+   * a regression measured against builtin-mode DSC03298 is confounded by
+   * that scene's own statistical overfit, not clean evidence against this
+   * fix's formula. Net: still correctly dormant, but "wiring it back in once
+   * CameraCalibration composition closes the gap" is no longer the right
+   * story — see lr-base-gap.md's stage-base-3 addendum for the actual
+   * (still-open) lead on dcp/acrlook's own DSC03298 regression (near-black
+   * ProfileHueSatMap/LookTable instability, not this fix's concern at all).
+   * Left implemented (correct construction: exactly identity whenever the
+   * shot's estimated CCT sits at ColorMatrix2's own illuminant, by the
+   * ratio-composition proof in wbCorrection.ts's doc comment) but DORMANT —
+   * a held-out (non-training-scene) re-test of builtin-mode accuracy would
+   * be needed before reconsidering waking it, out of scope here.
    */
   refreshWbColorMatrixCorrection(): Promise<void>;
   // --- LUT import node (docs/brief-bank/lut-import-node.md) ------------------
@@ -4608,16 +4618,33 @@ export const useAppStore = create<AppState>((set, get) => {
       // develop's own headless renders use, so it must stay off there too.
       // `acrLookAvailableSync` never blocks (module-cache read + background
       // warm-up — see its own doc comment), so this adds no latency when allowed.
-      // CONDUCTOR HOLD (stage base-2 landing review): production
-      // auto-default is DISABLED for now — the acrlook mode's measured
-      // 5-scene acceptance came back PARTIAL (DSC03298's near-neutral cast
-      // REGRESSES 1.34→1.90 R/G, inherited from dcp/pipeline.ts's Stage-1
-      // simplifications: no CameraCalibration/AnalogBalance composition —
-      // see the stage base-2 report + lr-base-gap.md). Until that pipeline
-      // gap is closed and the 5-scene table is clean, acrlook stays a
-      // user-selectable option in the Inspector, never the seeded default.
-      // The test env-var gate below is kept so harnesses can exercise the
-      // seeded path deliberately.
+      // CONDUCTOR HOLD (stage base-2 landing review; RE-VERIFIED, still
+      // held, stage base-3): production auto-default stays DISABLED — the
+      // 5-scene near-neutral table is still not clean on re-measurement.
+      // The stage-base-2 attribution (CameraCalibration/AnalogBalance
+      // composition) has since COLLAPSED: the locally-installed Adobe
+      // Standard DCP carries neither tag at all (verified directly), so
+      // there was nothing for dcp/pipeline.ts to parse — that was never the
+      // real cause. Stage base-3's diagnosis (docs/research/lr-base-gap.md's
+      // own addendum): WB gain and illuminant-fraction are both essentially
+      // exact for DSC03298; the actual mechanism is the DCP's own
+      // ProfileHueSatMap/LookTable being numerically unstable on this
+      // scene's unusually large fraction of DARK near-neutral content (a
+      // shadowed stone bridge) — confirmed by ablation, but a damping fix at
+      // the renderDcpPixel level turned out to be INERT in the shipped
+      // product, because bakeDcpLattice bakes into profileFit.ts's shared
+      // uniform 17³ lattice and real dark pixels are reached almost entirely
+      // by trilinear interpolation toward the lattice's (trivial) black
+      // corner, not by evaluating renderDcpPixel near black at all — a real
+      // fix needs a denser lattice or a differently-positioned correction,
+      // out of that diagnostic pass's scope (implemented, measured
+      // ineffective, and reverted rather than shipped inert). DSC07349 also
+      // still regresses ~30-40% in ALL THREE modes (builtin/dcp/acrlook
+      // alike — a pre-existing, separately unresolved finding). Until the
+      // near-black HueSatMap/LookTable lead is actually closed and the
+      // 5-scene table is clean, acrlook stays a user-selectable option in
+      // the Inspector, never the seeded default. The test env-var gate below
+      // is kept so harnesses can exercise the seeded path deliberately.
       const acrLookAutoAllowed = window.silverbox.testFlags.isTest && window.silverbox.testFlags.acrLookAutoDefault;
       const acrLookAvailable = acrLookAutoAllowed
         ? acrLookAvailableSync(image.capture?.cameraMake, image.capture?.cameraModel)
