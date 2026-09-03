@@ -521,3 +521,22 @@ matrix; (2) "local Adobe look" profile mode: dng_big_table decoder +
 LookTable stage on the existing DCP pipeline + the PV2012 look tone curve,
 sourced from the user's ACR install; (3) per-ISO BaselineExposure probe
 via LR-plugin DNG export (still the open tone-axis item).
+
+## Round-3 probe: per-ISO BaselineExposure hypothesis REFUTED
+
+LR-plugin DNG export of the 5 ARWs (plugin v2.1.1; v2.1 lesson: extra
+LR_DNG_* option keys make every rendition fail SILENTLY — use LR defaults
+and iterate rendition:waitForRender so failures are logged): Adobe's
+effective BaselineExposure is **0.35 EV, constant across ISO 200–1000**.
+The ISO-correlated scene-adaptive tone gap (r=0.755–0.886) therefore has a
+DIFFERENT cause — ISO was confounded with something else in these 5 scenes
+(plausibly scene brightness/statistics; n=5 cannot separate them). Two
+usable facts: (1) silverbox's shipped baselineExposureEV=0.5 vs Adobe's
+0.35 is a small static −0.15 EV correction candidate for a future base
+refit; (2) the remaining ~0.5-stop RMS scene-adaptive tone component now
+points toward LR's PV2012 base being genuinely scene-adaptive (an E6-like
+statistics-driven layer active at flat settings) — approximating it would
+reuse the scene-statistics machinery localtone already has, but that is a
+design decision, not a measurement, and needs its own probe (e.g. one
+scene rendered at synthetically varied exposure offsets through LR).
+DNGs + log at ~/../lr-calib/lr-dng-20260903/ (outside repo).
