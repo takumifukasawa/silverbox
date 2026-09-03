@@ -571,3 +571,192 @@ the repo — these few coordinates are measurement observations.)
 **Per-DNG BaselineExposure readings** (plugin v2.1.1 exports, exiftool):
 DSC03298 ISO 320 → 0.35; DSC04260 ISO 500 → 0.35; DSC06787 ISO 200 → 0.35;
 DSC07349 ISO 200 → 0.35; DSC09305 ISO 1000 → 0.35.
+
+## Round-4 probe (2026-09-03): is PV2012 BASE itself scene-adaptive? — REFUTED on the tested axis
+
+Analysis-only probe, no repo/engine changes. Scripts, JSON and 2 plots in
+`scratchpad/adaptive-base/` (this session's scratchpad; `common.py` +
+`step1`-`step5`, same sRGB-decode conventions as `scratchpad/base-gap/`).
+Targets the last unexplained component flagged above: the round-3 probe's
+speculation that the residual ~0.5-stop RMS scene-adaptive tone gap (§2 of
+the original report) means "LR's PV2012 base being genuinely scene-adaptive
+(an E6-like statistics-driven layer active at flat settings)".
+
+### Method
+
+New data: LR default-develop (sliders 0) **and** LR Exposure=+1 renders of
+the SAME 5 scenes (`~/Desktop/FFF/lr-calib/lr-sweep-20260901/{base,ev_p1}`,
+sRGB JPEG, long edge 2048 — both LR's own output, no silverbox involved).
+
+**Key idea**: if LR's base tone mapping is one fixed monotonic curve `C`
+applied to scene-referred linear light, and Exposure is a PRE-curve linear
+gain (Adobe's documented Exposure2012 behavior), then `base = C(L)` and
+`ev1 = C(2L)`, so `ev1 = C(2 · C⁻¹(base))`. Define `D(x) := C(2·C⁻¹(x))` —
+a function of the OBSERVED base-pixel value alone, no need to know `L` or
+invert `C` explicitly, **as long as `C` is static (shared across scenes)**.
+So: if `C` is static, `delta(x) := D(x) − x` is ONE curve shared by all 5
+scenes; if `C` (or something upstream/inside it) is scene-adaptive, `delta`
+diverges scene-to-scene. Exact same falsifiable structure as the original
+report's §2 static-vs-adaptive test, applied here to LR-base → LR-ev1
+(single software, single slider) instead of silverbox-base → LR-base
+(cross-renderer, multi-factor).
+
+Per scene: decode both renders to linear Rec.709 log2-luma, exclude
+either-side-clipped pixels (any channel ≥ 252/255), bin `delta` by `base`
+luma (48 bins, ≥200px/bin, `step2_delta_curve.py`).
+
+**Sanity-checking the Exposure2012-is-pre-curve-gain assumption**: if
+Exposure were instead a POST-curve (output-domain) gain, `delta` would be
+trivially flat at +1.0 everywhere regardless of `C`'s shape. It is not (see
+below — it ranges 0.2 to 1.85 stops) — this by itself rules out a
+post-curve-gain model and is consistent with Adobe's documented pre-curve
+placement.
+
+### Geometry — PASS
+
+Zero-shift NCC (log2-luma, 8× downsample) 0.988–0.992 on all 5 scenes,
+exact dims match — expected, since Exposure alone doesn't move geometry
+(`step1_geometry.py`).
+
+### Headline finding: near-perfect cross-scene collapse on the ABSOLUTE luma axis
+
+`plot1_delta_overlay.png`: all 5 scenes' `delta(base_stops)` curves trace
+the same shape almost exactly across the whole well-populated range (noisy
+scatter only below ≈−9 stops, where 8-bit JPEG quantization dominates on
+both sides — same caveat as the original report). The shape itself is
+**not** flat — real curvature, consistent with a genuine tone-curve
+toe/shoulder: rises from ≈1.05–1.15 stops around −9.5 stops, peaks at
+**≈1.79 stops around −6.9 stops** (i.e. one stop of scene-linear gain there
+moves LR's output by ~1.8 stops — a lifted-toe/shadow-contrast region),
+then falls steadily through the midtones, crossing 1.0 stop around −1.9
+stops, down to **≈0.21 stops at −0.15 stops** (strong highlight
+compression, as expected approaching the white point).
+
+Mirroring the original report's `step2b` method exactly (n-weighted global
+fit per bin + per-scene residual, `step4_static_test.py`, well-populated
+range −7.85..−0.95 stops where all 5 scenes have data):
+
+| scene | mean resid | RMS resid | range |
+|---|---|---|---|
+| DSC03298 | −0.033 | 0.060 | [−0.166, +0.030] |
+| DSC04260 | −0.016 | 0.045 | [−0.120, +0.028] |
+| DSC06787 | +0.055 | 0.060 | [+0.018, +0.101] |
+| DSC07349 | −0.018 | 0.032 | [−0.072, +0.039] |
+| DSC09305 | +0.017 | 0.028 | [−0.003, +0.084] |
+
+**Overall RMS residual after the best possible single static curve: 0.047
+stops** — about **10× smaller** than the original report's 0.49–0.506-stop
+irreducible residual for the silverbox-vs-LR-base static-curve test, and
+close to the 8-bit-JPEG-quantization noise floor the original report
+already flagged for deep-shadow bins. For reference, the deviation from a
+FLAT delta=+1.0 (the naive prediction) over the same range is **mean +0.431,
+RMS 0.522 stops** — i.e. the curve has ~10× more real shape-structure than
+it has scene-to-scene divergence. In plain terms: **LR's response to the
+Exposure slider has a large, real, non-trivial shape (a genuine tone
+curve), but that shape is essentially the SAME for every scene tested.**
+
+No correlation of the (tiny) per-scene residual with ISO (r = −0.06, n=5),
+frame log2-luma std (r = −0.18 for mean residual, +0.52 for RMS residual —
+weak/noisy either way), or frame mean (r = +0.72, but the residual
+magnitude itself is inside the quantization-noise band, so this is not
+treated as a real effect) — consistent with the residual being measurement
+noise rather than a signal.
+
+### Collapse analysis: rules out a hidden percentile-relative (H/S-like) term
+
+The brief's specific alternative hypothesis — a hidden Shadows/Highlights-
+style percentile-relative adaptive term baked into the "flat" base curve
+(mirroring silverbox's own `localToneNode.ts` scene-adaptive amplitude law,
+which keys off frame log2-luma std and p25/p75 percentile anchors) — was
+tested directly (`step3_collapse.py`): re-bin `delta` against
+`base_stops − anchor` for anchor ∈ {mean, p50, p75, p25} of each scene's
+own frame stats, and compare cross-scene collapse quality (n-weighted RMS
+std across scenes at matched relative-x) against the absolute-x baseline.
+
+| anchor | n-weighted RMS cross-scene std (stops) |
+|---|---|
+| **absolute (no shift)** | **0.046** |
+| frame mean | 0.217 |
+| frame p50 (median) | 0.283 |
+| frame p75 | 0.255 |
+| frame p25 | 0.224 |
+
+Every frame-relative anchor makes the collapse **worse**, not better
+(`plot2_collapse_by_anchor.png`) — the opposite of the H/S-like-term
+signature (which would collapse better under a percentile-relative axis,
+since that mechanism is by construction invariant to a uniform stop shift
+of the whole frame). This is direct evidence the measured curve shape is
+the ordinary static parametric tone curve, not a disguised frame-adaptive
+Shadows/Highlights-style layer.
+
+### Verdict
+
+**REFUTED, moderate-high confidence, on the specific axis this probe can
+test**: LR's response to the Exposure slider (equivalently, the shape of
+its base tone-mapping curve `C`, as isolated via the doubling relationship)
+shows **no material scene-adaptive component** — residual RMS 0.047 stops,
+an order of magnitude below both the original 0.49-stop gap and the ISO-
+correlation slope (0.35 stops/stop) found earlier in this document. The
+round-3 probe's "E6-like statistics-driven layer" speculation is not
+supported by this direct test.
+
+**Important scope limitation** (why this doesn't fully close the question):
+this design can only detect scene-adaptivity in the RESPONSE TO the
+Exposure slider — i.e. whether `C`'s shape/relative behavior varies by
+scene. It CANNOT detect a hidden per-scene constant DC-level term (e.g. an
+auto-exposure-like brightness normalization baked into what "0 EV" means
+for a given scene) that would apply identically regardless of the Exposure
+slider's position, because such a term would appear in BOTH the base and
+ev1 renders and cancel out of `delta` by construction. (A back-of-envelope
+check: since the measured `delta(x)` curve has real slope away from 1 in
+most of its range, a per-scene DC shift `δ` would show up as a combined
+horizontal+vertical displacement of that scene's curve in the collapse
+test above — and no such displacement is observed, which bounds `δ` for
+these 5 scenes to something small relative to the curve's own slope, but
+does not rule out a small one, and the falling right-hand segment near
+the white point — where the curve is steepest, hence most diagnostic for a
+DC-shift test — has the fewest well-populated bins.) That DC-normalization
+hypothesis remains the live candidate for the original 0.49-stop residual
+and the ISO correlation, and needs the follow-up already proposed in the
+round-3 probe: one scene rendered at synthetically varied exposure offsets
+through LR, so the SAME frame content sits at deliberately different
+absolute brightness while any hidden normalization term is forced to
+reveal itself.
+
+### Implications for silverbox
+
+1. **The original static-curve-fit gap (§2, 0.49–0.506 stops RMS) is now
+   better explained as a fit-quality problem, not a hidden adaptive
+   mechanism.** `A7C2_BASE_CURVE` was fit from ONE scene; this probe shows
+   Adobe's actual curve has substantial shape (up to ~1.8 stops of local
+   gain near the toe, compressing to ~0.2 near the shoulder) that a
+   single-scene fit is unlikely to capture faithfully across the full
+   working range. Re-prioritizes Option 1 (multi-scene base-curve refit)
+   from "cheapest, partial fix" to "cheapest, LIKELY-COMPLETE fix for the
+   luma axis" — the scene-adaptive floor this document worried about
+   appears not to exist (on the Exposure-response axis).
+2. **A useful, reusable byproduct**: `delta(base_stops)`, being
+   scene-independent to within ~0.05 stops, is effectively a direct,
+   multi-scene-averaged measurement of `C`'s own local log-log slope (to
+   first order, `delta(x) ≈` the local derivative of `C` in stops-per-stop
+   at output level `x`, since it is exactly `C`'s response to a 1-stop
+   input doubling). This is a cheap, non-LR-interactive way to VALIDATE or
+   directly inform a refit of `A7C2_BASE_CURVE`'s shape (particularly its
+   toe and shoulder steepness) without needing new LR exports beyond what
+   already exists in `~/Desktop/FFF/lr-calib/lr-sweep-20260901/`.
+3. **Do not build a "hidden always-on H/S layer" into the base curve** —
+   the collapse analysis actively argues against that architecture for
+   whatever gap remains; the percentile-relative machinery silverbox
+   already has (`localToneNode.ts`) should stay scoped to the explicit
+   Shadows/Highlights sliders, not be pressed into modeling the base gap.
+4. **Next step, if pursued**: the DC-normalization hypothesis above is the
+   most promising remaining lead for the ISO correlation / residual base
+   gap. Cheapest test: reuse the existing 5-scene LR sweep infrastructure
+   (`SilverboxAutoProbe.lrplugin`, already proven in this session) to
+   render ONE scene at several synthetic exposure offsets (e.g. via a
+   pre-scaled duplicate DNG, or LR's own Exposure slider swept across a
+   wide range while watching for any DEVIATION from the now-confirmed
+   static `C`) — if `C` stays static even under large synthetic brightness
+   swings of the same content, the DC-normalization hypothesis is
+   effectively closed too and the remaining gap must be attributed
+   elsewhere (most likely: fit quality, per finding 1 above).
