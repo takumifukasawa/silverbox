@@ -132,3 +132,63 @@ Findings:
 4. Cross-terms: hi_m100 also darkens a patch only 0.5 stops below a bright surround (−0.218) — absolute-level dependence coexists with the offset response; the hi_m100 point at offset 5 (−3.89) matches E1's bg0.5 crush (−4.01) at its 5.17-stop offset.
 
 Analysis: patch-center medians via tifffile, gamma-1.8 linearized; results in the harvest directory's analysis-r2/r3-results.json.
+
+---
+
+## Round-4 addendum (2026-09-03): DR-spread amplitude law — a real but small percentile-relative term for Shadows, a bigger and noisier one for Highlights, and neither reproduces the real-photo secant
+
+9 additive frame-filling scenes (`gen-tone-experiments-r4.mjs`): 1024² canvas split left/right into dark/bright halves so p25=dark, p75=bright exactly and realized p90−p10 = nominal spread S (confirmed numerically to 3 decimals — probe patches are too small, ~0.4%/patch, to move frame percentiles). Two sets: `b050` (bright=0.5, S∈{0,2,4,6,8,10}) and `b0125` (bright=0.125, S∈{0,4,8}, the absolute-vs-relative disambiguator). Probes: 64px squares, `sh` band in the bright half at offsets {1,2,3,4} stops below p75, `hi` band in the dark half at offsets {1,2,3,4} stops above p25 (clip-skipped past 0.9). Metric: delta-over-own-base = log2(configLinLuma/baseLinLuma), central 32px of each patch, tifffile + gamma-1.8 linearize (same discipline as rounds 1–3; base readback matched declared patch values to <0.1% everywhere, confirming patch placement/decode correctness).
+
+**sh_p100 delta vs S, b050 (stops):**
+
+| offset | S=0 | S=2 | S=4 | S=6 | S=8 | S=10 |
+|---|---|---|---|---|---|---|
+| 1 | 0.266 | 0.208 | 0.104 | 0.119 | 0.149 | 0.182 |
+| 2 | 0.327 | 0.355 | 0.183 | 0.209 | 0.260 | 0.318 |
+| 3 | 1.021 | 0.785 | 0.261 | 0.298 | 0.372 | 0.455 |
+| 4 | 1.126 | 0.964 | 0.305 | 0.388 | 0.483 | 0.591 |
+
+**hi_m100 delta vs S, b050 (stops):**
+
+| offset | S=2 | S=4 | S=6 | S=8 | S=10 |
+|---|---|---|---|---|---|
+| 1 | −0.928 | −0.825 | −0.841 | −0.393 | −0.272 |
+| 2 | −1.293 | −1.553 | −1.331 | −0.788 | −0.621 |
+| 3 | — | −2.262 | −2.142 | −1.475 | −0.968 |
+| 4 | — | −2.337 | −3.186 | −2.505 | −1.234 |
+
+**1. ceiling_sh(DRspread) is U-shaped, not monotonic — and only the S≥4 arm is a clean law.** All four offsets peak at S=0, fall sharply to a minimum at S=4, then rise **linearly** from S=4→S=10 (least-squares fit, R²=0.97–0.997): `delta_sh(offset, S) ≈ intercept(offset) + slope(offset)·S` for S∈[4,10], with slope growing roughly proportionally to offset — slope₁=0.0131, slope₂=0.0229, slope₃=0.0327, slope₄=0.0478 stop/stop (≈0.012×offset). The S=0→S=4 falling arm is NOT a clean law (see finding 4 — it's a measurement-design artifact, not physical DR-dependence) and should not be used for fitting. **Curve shape changes with S, then converges**: normalized to offset=4, the offset1:2:3:4 ratio is knee-shaped at S=0/2 (0.24:0.29:0.91:1.0 / 0.22:0.37:0.81:1.0 — weak until offset≈2.5–3, then jumps) but settles onto a **stable, S-independent shape for S≥6**: 0.307:0.538:0.769:1.0 identical to 3 decimals at S=6, 8, and 10.
+
+**2. Highlights DR dependence: real, refutes "none" — but noisier and non-monotonic.** hi_m100 shows a clear trend with S over the reliable S≥4 range (weakening crush magnitude as S grows), confirmed NOT to be an absolute-value artifact by the b0125 cross-check (finding 3). Linear fits over available S: offset1 slope=0.087 (R²=0.86), offset2 slope=0.106 (R²=0.72), offset3 slope=0.228 (R²=0.94), offset4 slope=0.199 but R²=0.41 — offset4 has a genuine hump (deepest crush at S=6, −3.186, not at the extremes), breaking monotonicity outright. So: DR-dependence is real for Highlights, larger in magnitude than Shadows' (0.09–0.23 vs 0.01–0.05 stop/stop), but the law is not as clean — flagged, not resolved.
+
+**3. Anchor test: strongly percentile-relative, small residual absolute term at S=0.** `b0125` (bright=0.125) vs `b050` (bright=0.5) at matched offset and S, despite probe absolute values differing by 4× throughout:
+
+| offset | S=4 sh_p100 (b050 / b0125) | S=8 sh_p100 (b050 / b0125) | S=0 sh_p100 (b050 / b0125) |
+|---|---|---|---|
+| 1 | 0.104 / 0.101 | 0.149 / 0.143 | 0.266 / 0.199 |
+| 2 | 0.183 / 0.180 | 0.260 / 0.254 | 0.327 / 0.311 |
+| 3 | 0.261 / 0.258 | 0.372 / 0.366 | 1.021 / 0.913 |
+| 4 | 0.305 / 0.303 | 0.483 / 0.477 | 1.126 / 1.053 |
+
+hi_m100 shows the same pattern (e.g. offset3 S=4: −2.262 vs −2.252; offset2 S=8: −0.788 vs −0.794). At S=4 and S=8 the two brightness sets agree to within ~0.006 stops (sub-2% relative) — essentially exact. At S=0 a real but modest gap opens (7–25% relative, larger at low offsets) — a small absolute-level term coexisting with the dominant percentile-relative mechanism, consistent with round-3's finding #4 (cross-terms exist) but clearly secondary here. **Verdict: percentile-relative anchoring, confirmed with high confidence** (S≥4); the S=0 residual is noted, not fully explained.
+
+**4. Low-DR continuity: FAILS to reproduce round-3 — flagged loudly.** `r4_b050_s0` sh_p100 vs round-3's addendum table (same surround=0.5, same offsets 1–4):
+
+| offset | r4 s0 | r3 | abs diff | ratio |
+|---|---|---|---|---|
+| 1 | 0.266 | 0.016 | +0.250 | 16.6× |
+| 2 | 0.327 | 0.298 | +0.029 | 1.10× |
+| 3 | 1.021 | 0.620 | +0.401 | 1.65× |
+| 4 | 1.126 | 0.831 | +0.294 | 1.35× |
+
+Does not reproduce within noise at any offset (offset 1 is a dramatic outlier; 2–4 are all elevated by 10–65%). **Root-cause hypothesis (not independently confirmed): a real design confound, not an LR/catalog-state drift.** Round-3 placed exactly ONE 64px patch per file on an otherwise perfectly uniform frame; round-4's S=0 file packs FOUR probe patches (offsets 1–4 simultaneously) into the same frame. The frame-percentile check (p10/p90 both pinned to the 0.5 background) rules out a simple "percentile shift" explanation — the patches are too small to move p10/p90 — so if the multi-probe design is the cause, the mechanism must be something other than global percentile position (a genuine local/whole-image adaptivity to the mere presence of additional shadow-valued content elsewhere in frame, echoing Q3/E6's "more dark content → more lift" but operating far below E6's percentile-moving threshold). **Practical consequence: round-4's absolute S=0 values should not be trusted as a zero-DR baseline or reconciled against r3 at all** — only the internal S-trend within round-4's own (constant multi-probe) design is usable for law-fitting, which is why finding 1 restricts the clean fit to S≥4.
+
+**5. Slider law under DR: linear, no DR-dependent nonlinearity.** sh_p50 / sh_p100 = **0.500 ± 0.0004** at every single (offset, S) combination tested (24 points, b050 set) — the slider halves the effect identically regardless of scene dynamic range. This extends round-3's finding #2 (slider linearity at fixed surround) cleanly into the DR-varying regime: no evidence the "DR term" from the real-photo diagnosis's 1.9–2.35 slider-ratio deviations enters through the slider itself; it must live in the ceiling/amplitude term instead.
+
+**6. Reconciliation with the real-photo secant — does NOT retro-predict it, and favors "different mechanism" over "E6 doesn't move percentiles."** The stage-1e real-photo diagnosis estimated ≈0.35 stop/stop (Shadows, offset 3, real-photo DR 4.4→7.6). Interpolating round-4's clean S≥4 law to the same window: offset 3 secant = **0.0277 stop/stop** (least-squares slope over S=4..10: 0.0327) — **12–13× smaller** than the diagnosis's estimate. For comparison, round-2's E6 corner-patch law (Q3) gives a similar-magnitude slope, ≈0.02 stop/stop (dr4→dr12, realized spread 4.0→8.4, confounded with falling corner mean). **Round-4's half-frame design genuinely moves frame percentiles by exactly S stops (verified numerically) yet still produces a slope in the same small ballpark as E6's corner patches, which do NOT move percentiles.** This is evidence AGAINST the brief's "E6's corner geometry just doesn't move the frame percentiles" hypothesis — if percentile-movement were the missing ingredient, round-4 should have shown a much larger slope than E6, and it did not. The ~150–350× gap to the real-photo secant is therefore more likely a **different mechanism entirely** — most plausibly something that only a continuous, structured real-photo histogram (or genuine spatial/textural local-adaptivity) can trigger, which these two-flat-region synthetic scenes cannot recreate by construction. Notably, **Highlights comes much closer**: hi_m100's offset-3 secant over the same window is 0.197–0.228 stop/stop (finding 2), only 1.5–1.8× short of 0.35 — raising the possibility that the real-photo diagnosis's ~0.35 stop/stop figure, attributed to Shadows, may have partly reflected a Highlights-band or cross-band effect, or that Shadows and Highlights genuinely have very different DR-sensitivity magnitudes that the diagnosis's real-photo sample (limited scenes) didn't separate cleanly.
+
+**ev1_sh50 cross-check (kept minimal per scope):** `ev1_sh50` (Exposure+1 combined with Shadows+50) delta ≈ `sh_p50 delta + 1.0` almost exactly at every unclipped probe (e.g. offset4 sh: 1.1522 vs sh_p50+1=1.1523; offset3 hi: 1.1306 vs 1.1306 exact), consistent with roughly additive composition of Exposure and Shadows in log2 space; the one large miss (hi4: 0.598 vs 1.013) is a highlight-clipping case (dark-half hi4 pushed to ~1.0 linear by the +1 EV before Shadows is even applied). No further exploration attempted — matches the brief's scope note.
+
+**Confidence:** **high** for the S≥4 shadows law's shape and slope-vs-offset relationship (R²=0.97–0.997, cross-confirmed by the b0125 percentile-relative match to <2%); **high** for percentile-relative anchoring (finding 3); **high but unresolved** for the r3 non-reproduction (the measurement itself is solid — the *explanation* is a plausible, not confirmed, hypothesis); **moderate** for the highlights law (real, but noisier, R² as low as 0.41, non-monotonic at offset 4); **moderate** for the reconciliation verdict in finding 6 — it rules out one specific brief hypothesis with reasonably strong evidence but does not identify the true mechanism behind the real-photo secant.
+
+Analysis: scripts, `results-r4.json`, `results-r4-raw.json`, `results-r4-percentiles.json`, and 3 plots (`plot1-delta-vs-S.png`, `plot2-b050-vs-b0125.png`, `plot3-s0-vs-r3-continuity.png`) are in the harvest directory's `analysis-r4/` subfolder.
