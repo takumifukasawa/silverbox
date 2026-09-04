@@ -1397,3 +1397,297 @@ not re-run per the brief (no fix ⇒ nothing to verify against).
    (DSC07349 remains a documented, unfixed color-divergence outlier) is
    unchanged. Nothing here reopens or narrows any other open item in this
    document.
+
+## Stage base-7b: a fitted COMBINED (dr, db) black-offset DOES converge on
+## DSC07349 — base-7's "no scalar/lever closes the gap" conclusion was
+## partly an artifact of a `userCblack` semantics bug in its own harness —
+## but the fit is confirmed per-shot and underivable from any readable
+## metadata; STOPPED per brief, no fix landed
+
+Trigger: base-7 tested `userBlack` scalars and SINGLE-channel `userCblack`
+bumps (R+100 alone, B+100 alone) plus one hand-picked combined attempt
+(`userCblack=[612,512,412,512]`, "R+100,B−100"), and concluded the lever
+"overshoots catastrophically" and is "too coarse/nonlinear near this
+scene's low signal level." This pass fits a proper 2-unknown/2-target
+combined correction directly. Analysis-only per the brief: no repo/engine
+files were touched (`git status` clean at `f569a78` throughout); everything
+lives in this session's own scratchpad (`base7-diag/`, extending base-7's
+own scripts as instructed).
+
+### 0. Root-caused first: base-7's `userCblack` baseline itself was broken —
+### it is a per-channel OFFSET, not an absolute level
+
+`libraw-wasm`'s own typings say it plainly (`index.d.ts:50`, quoted in the
+brief): `userCblack?: [number, number, number, number]` — *"Per-channel
+black offsets: red, green, blue, green2."* **Offsets**, added on top of the
+existing black point — not the four channels' absolute black *values*.
+base-7's own levers scripts (`levers.mjs`, `levers2.mjs`) never noticed:
+every "unchanged" channel in every one of its `userCblack` tests was filled
+with `512` (the metadata black), on the implicit assumption that `512 ==
+no-op`. It is not. Verified directly (`verify-offset.mjs`, DSC07349, decode+WB
+Rec.2020-linear → sRGB-linear R/G,B/G against the same 231,033-px mask
+base-7 built):
+
+| setting | R/G | B/G |
+|---|---|---|
+| no `userCblack` (true baseline) | 1.1838 | 0.8597 |
+| `userCblack=[0,0,0,0]` | **1.1838** | **0.8597** (exact match — confirms 0 = no-op) |
+| `userCblack=[512,512,512,512]` | 0.2447 | 0.1803 (base-7's own "R+100" baseline before adding the +100!) |
+| `userCblack=[10,0,0,0]` (R offset +10 only) | 1.1383 | 0.8573 |
+| `userCblack=[0,0,-10,0]` (B offset −10 only) | 1.1890 | 0.8932 |
+
+So every one of base-7's `userCblack` measurements was silently applying a
+**+512 offset to all four channels** before adding its stated per-channel
+delta — e.g. "userCblack R+100" (`[612,512,512,512]`) was actually "everything
++512, R additionally +100," not "R+100 alone." That single confound fully
+explains base-7's reported "catastrophic overshoot" (rg 0.06–0.26, bg
+0.08–0.31) — those numbers describe a +512-black-point image, not a small
+per-channel nudge. With the correct zero-offset baseline, the real lever is
+smooth, modest, and — critically — has the right sign structure (§1).
+
+### 1. Fit: (dr, db) converges to within ~0.2% of LR's target on both axes
+
+Single-axis sweeps (`fit-axis.mjs`, correct offset semantics,
+`userCblack=[dr,0,0,0]` and `[0,0,-db,0]`, dr/db ∈ 0..80) on DSC07349:
+
+| dr (R offset) | R/G | B/G (cross term) |   | db (B offset, subtracted) | B/G | R/G (cross term) |
+|---|---|---|---|---|---|---|
+| 0 | 1.1838 | 0.8597 |   | 0 | 0.8597 | 1.1838 |
+| 10 | 1.1383 | 0.8573 |   | 10 | 0.8932 | 1.1890 |
+| 20 | 1.0947 | 0.8549 |   | 20 | 0.9267 | 1.1943 |
+| 30 | 1.0543 | 0.8527 |   | 30 | 0.9605 | 1.1996 |
+| 40 | 1.0159 | 0.8506 |   | 40 | 0.9944 | 1.2051 |
+| 50 | 0.9788 | 0.8486 |   | 50 | 1.0285 | 1.2106 |
+| 60 | 0.9428 | 0.8467 |   | 60 | 1.0626 | 1.2160 |
+| 80 | 0.8720 | 0.8428 |   | 80 | 1.1313 | 1.2268 |
+
+Both main effects are close to linear (mild concave curvature on the R
+axis, essentially linear on the B axis) over the whole 0–80 range — a sharp
+contrast with base-7's broken, wildly nonlinear-looking data. Cross terms
+exist (touching R nudges B/G slightly, and vice versa) but are an order of
+magnitude smaller than the main effects and themselves near-linear. Fit
+method: linear system from the local slopes near the target region, one
+verification decode, one Newton refinement from a numerical Jacobian
+(3 extra decodes), converging in two rounds:
+
+| candidate | dr | db | R/G | B/G |
+|---|---|---|---|---|
+| linear-model prediction | 61 | 49 | 0.9611 | 1.0091 |
+| Newton step 1 | 55 | 50 | **0.9837** | **1.0139** |
+| **LR target** | | | **0.9820** | **1.0130** |
+
+**Fitted: `userCblack = [55, 0, −50, 0]`** (R black +55, B black −50, G/G2
+untouched). Residuals: R/G +0.17%, B/G +0.09% — both within base-6/base-7's
+own "genuinely clean" bar (~1–2%). **Guard check**: the fit never moved G —
+it was held at offset 0 throughout, by construction, and a 2-unknown/2-target
+solve using only (dr, db) converged cleanly, so there was never a forced-G
+signal to report. The model (R up, B down, G fixed) is sufficient for this
+scene.
+
+This directly **overturns base-7's headline conclusion** ("no scalar value
+closes both axes… the lever is far too coarse/nonlinear to hand-tune
+usefully") for the *combined, correctly-zeroed* lever — that conclusion was
+correct only for the single-axis and bugged-baseline data base-7 actually
+had.
+
+### 2. No-regression check: the fit is sharply, severely per-shot
+
+Same `userCblack=[55,0,-50,0]` applied unchanged to all 5 italy scenes
+(`no-regression.mjs`), measured against each scene's own LR-JPEG-derived
+near-neutral mask target:
+
+| scene | setting | R/G err% | B/G err% |
+|---|---|---|---|
+| DSC07349 (fit target) | baseline | +20.55% | −15.13% |
+| DSC07349 | **fitted** | **+0.17%** | **+0.08%** |
+| DSC06787 (same cam_mul) | baseline | −0.10% | −0.84% |
+| DSC06787 | fitted | **−9.44%** | **+4.80%** |
+| DSC09305 (same cam_mul) | baseline | +2.87% | −3.81% |
+| DSC09305 | fitted | **−13.42%** | **+7.68%** |
+| DSC04260 (different WB) | baseline | −3.34% | +0.43% |
+| DSC04260 | fitted | **−35.43%** | **+46.34%** |
+| DSC03298 (different WB) | baseline | −29.38% | +34.74% |
+| DSC03298 | fitted | **−186.76%** (sign-flipped negative mean) | **+241.73%** |
+
+Even the two scenes sharing DSC07349's exact `cam_mul`/WB preset — the
+closest possible siblings, already within ~1–4% of their own LR targets at
+baseline — regress by 5–16 percentage points on both axes. The two
+differently-exposed scenes regress catastrophically (DSC03298's fitted R
+mean goes *negative* in sRGB-linear terms — some R pixels are pushed below
+zero by the black subtraction and the Rec.2020→sRGB matrix's negative
+off-diagonal terms turn that into a net-negative channel mean). **This
+answers the brief's diagnostic question directly**: the needed correction
+is emphatically per-shot, not a constant miscalibration we could apply
+everywhere — Adobe is doing something scene-specific here that a fixed
+override cannot reproduce, confirming (not just reproducing) base-7's
+qualitative verdict, now on trustworthy data.
+
+### 3. Sky effect: NOT small — this scene's "sky" is itself near-black, so
+### the brief's own physics expectation doesn't hold here
+
+Measured (`sky-effect.mjs`) the fitted override's effect on the same sky
+mask base6-diag/`ablate-sky.mjs` uses (upper 35% of frame, LR hue
+180–300°, C\*>8), decode+WB only (Stage A, no DCP — this script's own
+simplified libraw-wasm→3×3-matrix pipeline, not the full Electron bypass
+render, so absolute numbers aren't directly comparable to §4 below, but the
+baseline-vs-fitted *relative* comparison is apples-to-apples):
+
+| | L | C\* | a, b |
+|---|---|---|---|
+| baseline | 10.64 | 9.12 | 0.44, −9.11 |
+| fitted | 9.65 | 14.50 | −1.03, −14.47 |
+| Δ | −0.99 | **+5.38 (+58.97%)** | |
+
+The brief's stated expectation was "black deltas are additive in raw
+domain → strong in darks, ~1–2% in bright sky." That assumption presumes
+the sky is bright. **It is not, in this frame**: DSC07349's sky-hue mask
+(upper 35%, blue/violet twilight afterglow) sits at L≈10–15 in every
+pipeline this and base-6 measured it in (§4's LR target for the same mask
+is L=19.86 — still very dark, nowhere near a "bright sky"). Because the
+sky region is in the *same* near-black brightness regime as the neutral
+mask the fit was tuned on, the black-offset override moves it by a
+non-trivial +59% relative chroma shift, not the ~1–2% the brief predicted.
+**Correction to the brief's framing**: for THIS scene, "dark neutral" and
+"sky" are not on opposite ends of the dynamic range — treating the sky
+question as safely decoupled from the black-level question would be wrong
+for DSC07349 specifically (may not generalize to brighter-sky scenes).
+
+### 4. Sky-chroma confound check: partly a measurement artifact, but a real
+### deficit remains even apples-to-apples
+
+Reused base-6's own `ablate-sky.mjs` pipeline verbatim (same sky mask, same
+`bypass-cache/DSC07349.jpg` Stage-A render via the real Electron app, same
+DCP bundle) and extended it (`confound-check.mjs`) to (a) capture Stage E's
+raw working-RGB output instead of just its derived Lab, and (b) apply the
+app's *actual* seeded `ACRLOOK_BASE_CURVE`
+(`src/renderer/engine/color/baseCurve.ts`) on top — reproducing what the
+app truly renders by default (DCP acrlook profile stages **plus** the
+separate `toneCurve.rgb` the app seeds on fresh-open, `appStore.ts:2457`,
+which `ablate-sky.mjs`'s own Stage E does not include):
+
+| stage | C\* | ratio vs LR (24.79) |
+|---|---|---|
+| LR target | 24.79 | 1.000 |
+| [A] decode+WB only, no curve | 9.96 | 0.402 (60% deficit — base-6's headline number) |
+| [A] + `ACRLOOK_BASE_CURVE` only (synthetic) | 16.43 | 0.663 (34% deficit) |
+| [E] full DCP acrlook tables, no app curve | 7.62 | 0.307 (69% deficit — *worse* than [A] alone) |
+| **[E] + `ACRLOOK_BASE_CURVE`** (= TRUE default full render) | **14.22** | **0.574 (43% deficit)** |
+
+Two findings:
+
+- **The curve-stage measurement artifact is real and sizeable.** Applying
+  just the app's own tone curve to Stage A alone (no DCP tables at all)
+  recovers 44% of the raw 60%-deficit gap (0.402→0.663 ratio) — an S-curve
+  mechanically adds chroma near black, exactly as the brief suspected.
+  Comparing a curve-less intermediate stage straight against LR's fully-
+  curved final render overstates the "defect" by roughly this much.
+- **It does not explain the deficit away.** The apples-to-apples number —
+  the app's actual default full render (DCP tables + the real seeded
+  curve) against LR's final render — still sits at a 43% chroma deficit.
+  Notably, the DCP profile's own HueSatMap/LookTable/PV2012 curve stages
+  (Stage E before the app's extra curve) make chroma *worse* than Stage A
+  alone here (7.62 vs 9.96) on this specific dark/desaturated sky region —
+  it is only Silverbox's own additional `ACRLOOK_BASE_CURVE` that recovers
+  most of the gap, and even that doesn't close it.
+
+**Verdict**: the sky-chroma "defect" is genuinely both — about 30
+percentage points of the naive 60%-deficit headline number is a
+measurement artifact of comparing pre-curve to post-curve renders, but a
+real, substantial ~43%-deficit gap remains in the actual default full
+render vs LR. It is not fully explained by the curve-stage confound.
+
+### 5. Per-shot derivation: nothing found in readable metadata; corrects
+### base-7's "long dark exposure" guess along the way
+
+Full `exiftool -a -G1 -s` dump (all tags, all IFDs, Sony maker notes) for
+DSC07349 vs both same-`cam_mul` siblings (DSC06787, DSC09305), diffed
+line-by-line. Every tag that differs falls into one of two buckets:
+(a) expected per-shot capture parameters with no plausible causal link to
+sensor black level (timestamps, GPS/focus/AF-point data, `ShutterCount`,
+battery level, preview/thumbnail byte offsets), or (b) lens-geometry
+correction-coefficient tables (`DistortionCorrParams`,
+`VignettingCorrParams`, `ChromaticAberrationCorrParams` — present in three
+separate IFDs) that are keyed by aperture and focus distance, which
+legitimately differ because DSC07349 was shot at a very different aperture
+(see below) — not evidence of anything sensor-black-related.
+
+`BlackLevel` (both `[SubIFD]` and `[SR2SubIFD]` copies) is `512 512 512
+512` identically on all three files, confirming base-7's §1 finding again.
+`WB_RGGBLevelsAuto` (the camera's own internal auto-WB *estimate* — not
+the as-shot WB actually used, which is confirmed bit-identical camMul
+across these three) differs per scene (2529/1024/1024/1585 vs
+2424/1024/1024/1657 vs 2185/1024/1024/1818 for 07349/06787/09305) — but
+this is a chromaticity estimate over the frame content, not a black-level
+tag, and there is no principled way to derive a black *offset* from it.
+**Nothing found** connecting any readable tag to a per-channel black
+correction, within the 30-minute timebox.
+
+One correction worth recording along the way: base-7 speculated the
+mechanism might be "real per-channel black-level drift on a long twilight
+exposure." The EXIF data refutes the "long exposure" half of that guess:
+DSC07349 is `f/13, 1/160s, ISO 203, LightValue 13.7` — a *fast*,
+small-aperture, low-ISO, brighter-metered-than-either-sibling exposure
+(DSC06787 is f/3.5 1/1000s LV 12.6; DSC09305 is f/2.8 1/125s LV 6.6).
+DSC07349 is not dim or long — it is a heavily stopped-down shot (plausibly
+into or near the sun, consistent with the sunstar-prone f/13) producing an
+extreme-dynamic-range frame where the *neutral-mask region specifically*
+(sea/horizon, in shadow) is dark even though the frame overall is not
+underexposed. Whatever mechanism makes libraw's black handling diverge
+here, "long dark exposure" is not the right mental model for this file.
+
+### Conclusion
+
+The fitted, correctly-parameterized combined override **does converge**
+(§1) — base-7's negative verdict on the `userCblack` lever itself was
+partly an artifact of its own harness bug (§0), not a true property of the
+lever. But §2 shows just as firmly as base-7 did that the specific
+numbers needed are per-shot: the same fitted `(dr,db)` regresses every
+other scene tested, mildly on the two closest siblings and catastrophically
+on the two differently-exposed ones. §5 found no readable metadata signal
+that predicts `(dr,db)` per file. Recommendation: **(a)** — a per-scene
+override is possible (§1 proves it, correcting base-7's "no fit exists"),
+but it is underivable from anything exposed to this app (§5); a real
+auto-fix still requires either forking/patching libraw-wasm to read
+`cblack[4]` directly (base-7's own §1 recommendation, unchanged) or an
+Adobe-side signal this project has no access to. §3 and §4 are new,
+scene-specific caveats for whoever picks this up next: this particular
+scene's "sky" is itself dark enough that the black-level question and the
+sky-chroma question are NOT independent here, and the sky-chroma deficit
+survives a fair curve-stage comparison at roughly 43%, down from the naive
+60% headline but still real.
+
+### Gates
+
+No repo files were changed this pass (`git status` clean at `f569a78`
+throughout, confirmed before and after) — typecheck/vitest/verify chain
+unaffected by construction, not re-run per the brief (analysis-only, no
+engine changes, no subagents).
+
+### Honest residuals / next steps for whoever picks this up
+
+1. §0's discovery means base-7's entire §3 lever-sweep table (the
+   `userCblack` rows specifically; the `userBlack`/other-lever rows are
+   unaffected since `userBlack` is a plain scalar with no offset-vs-absolute
+   ambiguity) should be treated as void, not as evidence the lever is
+   unusable — this document should be read with that correction in mind if
+   anyone revisits base-7's raw numbers directly.
+2. §1's fit used a local-linear model plus one Newton step from a 3-point
+   numerical Jacobian — good enough for a 0.1–0.2% residual here, but it
+   is an empirical fit to ONE scene's ONE mask, not a validated model of
+   the underlying mechanism. It says nothing about *why* R needs +55 and B
+   needs −50 specifically for this file.
+3. §3's sky-effect measurement used a simplified libraw-wasm→matrix
+   pipeline (no `baselineExposureEV`, no full color-management chain) for
+   speed; the relative (+59%) comparison should hold, but the absolute
+   chroma numbers there are not on the same footing as §4's (which used
+   the real bypass render). A future pass wanting precise absolute
+   sky-chroma-under-override numbers should route the override through
+   the real bypass pipeline instead.
+4. §5's exiftool diff was manual and time-boxed at 30 minutes; it is
+   thorough (every tag, all IFDs) but not exhaustive proof nothing
+   correlates — e.g. binary maker-note blobs `exiftool` doesn't decode
+   into named tags were not inspected.
+5. No repo files were changed; the base-5/base-6/base-7 status quo
+   (DSC07349 remains a documented, unfixed color-divergence outlier, now
+   with a confirmed-but-underivable fix shape) is unchanged. Nothing here
+   reopens or narrows any other open item in this document.
