@@ -2200,3 +2200,20 @@ one-off diagnostics, not wired into any verify script.
    between A and B (or requests a different design entirely) using this
    pass's tables and the `test-artifacts/base5r-choice/index.html` eyeball
    strip.
+
+## Stage base-8 (prevalence): fork NOT justified — the black-level outlier is rare
+
+54 measurable scenes (hstudio_running + ref-green, LR base vs silverbox
+builtin decode+WB, base-7b C*<6 mask; 1 unmeasurable <2% mask). Near-
+neutral channel-ratio error distribution:
+
+| axis | median | p75 | p90 | max |
+|---|---|---|---|---|
+| \|R/G\| | 1.1% | 2.0% | 3.9% | 16.4% |
+| \|B/G\| | 0.5% | 1.3% | 2.6% | 10.5% |
+
+- **0/54 reach DSC07349's class** (its decode error was R/G +44% / B/G −27%). Nothing in this 54-scene set comes remotely close — the worst single scene (DSC03056) is +16.4%/+10.5%, less than half of 07349's severity.
+- Only **1/54 (2%)** exceeds 10% on either axis; **4/54 (7%)** exceed 5%. The bulk sit at ±1-2%, i.e. as clean as the good Italy scenes.
+- **VERDICT: do NOT fork/patch libraw-wasm.** The per-shot black-level divergence severe enough to matter is rare (≤2% at a moderate threshold, 0% at 07349's severity) and shows no shootable-condition clustering in this set. DSC07349 stays a documented decode-level outlier; the fork's proven-but-large cost isn't repaid. Revisit only if the user's real editing surfaces it repeatedly on a specific body/condition.
+
+Caveat: this set is a different body than the A7C2 (07349's camera); black-level behavior can be body-specific, so this bounds prevalence for THESE bodies. If the user shoots the 07349 body heavily in high-DR/backlit conditions, a targeted re-measure on that body's shots is the cheap re-check.
