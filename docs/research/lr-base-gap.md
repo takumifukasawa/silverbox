@@ -2217,3 +2217,245 @@ neutral channel-ratio error distribution:
 - **VERDICT: do NOT fork/patch libraw-wasm.** The per-shot black-level divergence severe enough to matter is rare (≤2% at a moderate threshold, 0% at 07349's severity) and shows no shootable-condition clustering in this set. DSC07349 stays a documented decode-level outlier; the fork's proven-but-large cost isn't repaid. Revisit only if the user's real editing surfaces it repeatedly on a specific body/condition.
 
 Caveat: this set is a different body than the A7C2 (07349's camera); black-level behavior can be body-specific, so this bounds prevalence for THESE bodies. If the user shoots the 07349 body heavily in high-DR/backlit conditions, a targeted re-measure on that body's shots is the cheap re-check.
+
+## Stage base-9 (bridge axis decomposition): DSC03298's remaining gap is
+## CHROMA-dominated, not luma — confirmed whole-frame and in the lit-stone
+## region specifically; neither base-5r candidate curve touches it; the
+## V-floor damping hypothesis is REFUTED for this region; analysis-only
+
+Trigger: the user eyeballed the `base5r-choice` strip and said "まだ結構違う、
+明るさか彩度か不明、多分主に彩度" (still quite different, unsure if it's
+brightness or saturation, probably mainly saturation). This pass decomposes
+DSC03298's remaining silverbox-vs-LR gap into L\*/C\*/hue and a CIEDE2000
+axis split, whole-frame and in 3 rough regions, for the current shipped
+acrlook render and both base-5r candidate curves, to settle which axis
+dominates before anyone spends more effort on curve choice. Analysis-only,
+no engine/repo changes, no subagents. New scripts in this session's
+`scratchpad/base9-diag/decompose.mjs` (whole-frame + region decomposition)
+and `scratchpad/base7-diag/base9-ablate-bridge.mjs` +
+`scratchpad/base4-diag/base9-reconcile.mjs` (origin-stage ablation, reusing
+base-7c's real Rec.2020 decode + `base6-diag/bundle.mjs`'s DCP primitives).
+
+### Method
+
+Lab: D65, corrected piecewise f() (slope kappa/116 = 7.787037037, **not**
+kappa directly — the exact off-by-116x trap `measure-neutral.mjs`'s and
+`measure-color-sideeffect.mjs`'s own comments warn about; re-verified
+against both before writing new code). CIEDE2000: Sharma/Wu/Dalal 2005
+reference algorithm, kL=kC=kH=1. Geometry: all 4 images involved (LR base,
+current shipped acrlook-base-exports, curveA-exports, curveB-exports) are
+already pixel-identical 1365×2048 with sub-8px alignment (the original
+report's §1 NCC check) — straight per-pixel comparison, no resize/shift.
+
+Region masks (position + luma/hue, deliberately "rough" per the brief) were
+derived by eyeballing a crop of LR's own DSC03298.jpg (a night shot of the
+Bridge of Sighs, Venice): **sky** = `y<0.45H ∧ C*>5 ∧ hue∈(190°,260°)`;
+**lit bridge stonework** = the arch box `x∈(0.40,0.87)W, y∈(0.46,0.60)H`
+gated on `luma>0.03` (drops the dark underside/shadow gaps inside the box);
+**dark water/shadow** = `y>0.65H ∧ luma<0.01`. Sanity-checked mask
+fractions (the brief's explicit "watch" item, given two prior harnesses hit
+Lab-math bugs): sky 4,112px (0.1%), bridge 75,135px (2.7%), water
+947,523px (33.9%) of 2,795,520 total — all comfortably above a 500px floor
+the script hard-fails under; the dominant near-neutral-dark-frame share
+(most of the remaining ~63%) matches base-3's independently-measured 46.5%
+C\*<6 fraction for this same scene, a useful cross-check that nothing was
+degenerate.
+
+### 1. Whole-frame + region decomposition, current shipped render
+
+| region | n | ΔL\* | ΔC\* (\|ΔC\*\|) | Δhue (\|Δhue\|) | dE00 | L / C / H share |
+|---|---|---|---|---|---|---|
+| whole frame | 2,795,520 | +0.45 | +1.54 (3.50) | −1.2° (8.1°, n=1.59M) | 2.52 | **9% / 52% / 39%** |
+| lit bridge stone | 75,135 | +0.57 | +6.43 (8.33) | +12.3° (29.2°) | 7.00 | **6% / 60% / 34%** |
+| sky | 4,112 | −2.27 | −10.06 (10.42) | −21.9° | 8.06 | **6% / 58% / 36%** |
+| dark water/shadow | 947,523 | +0.48 | +1.46 (1.73) | −4.9° (6.4°) | 1.70 | **5% / 75% / 19%** |
+
+(ΔL\*/ΔC\*/Δhue = LR − ours, signed; hue stats gated on LR C\*>5 per pixel,
+near-neutral hue being numerically unstable — base-3's own established
+convention. L/C/H share = each axis's weighted-squared CIEDE2000 term
+(ΔX/SX)² as a fraction of the sum of the three — the RT interaction cross
+term is excluded from the share by construction (a cross term isn't
+attributable to one axis), reported separately below where it matters.)
+
+**This directly answers "明るさか彩度か": chroma dominates everywhere, by a
+wide margin, confirming the user's own guess.** Lightness owns only 5-9% of
+the whole-frame/bridge/sky/water dE00 budget; chroma owns 52-75%; hue a
+real but secondary 19-39%. The lit bridge stonework the user was actually
+looking at is the clearest case: **60% chroma, 6% lightness** — the
+region's brightness is essentially already correct (ΔL\*=+0.57, a
+non-issue) while its color is badly off. Sky's cross (RT) term is large
+(mean −14.8, comparable to dE00 itself) — CIEDE2000's RT rotation is
+calibrated to peak near hue≈275°, exactly this region's hue, so the sky's
+36% "hue share" number should be read as directionally real but the
+precise split there is the least trustworthy of the four rows; bridge/water
+have small cross terms (−0.34, +0.05) and are trustworthy at face value.
+
+### 2. Do curve A / B touch the chroma gap? No — confirmed, quantitatively
+
+| region | metric | current | curve A | curve B |
+|---|---|---|---|---|
+| whole | \|ΔC\*\| | 3.50 | 4.39 (**worse**) | 3.58 (flat) |
+| bridge | \|ΔC\*\| | 8.33 | 8.34 (flat) | 8.28 (flat) |
+| sky | \|ΔC\*\| | 10.42 | 10.64 (flat) | 11.14 (flat) |
+| bridge | dE00 | 7.00 | 9.53 (**worse**) | 8.48 (**worse**) |
+| bridge | L/C/H share | 6/60/34 | 32/41/27 | 27/47/27 |
+
+Both candidates leave bridge \|ΔC\*\| essentially unchanged (8.33→8.34/8.28
+— noise-level) while driving ΔL\* sharply more negative (+0.57→−6.26/−5.22,
+matching base-5r's own −0.760/−0.594-stop real-render numbers exactly) —
+the extra lightness error pushes bridge dE00 up 21-36% and correspondingly
+inflates the L-axis share of the budget from 6% to 27-32%, but this is the
+curve making the SCENE WORSE, not the chroma gap getting better. Whole-frame
+\|ΔC\*\| actually gets worse under curve A. **Neither curve reduces the
+chroma gap on any region measured; both make dE00 worse on the bridge and
+leave it roughly flat-to-worse everywhere else.** This directly confirms
+the brief's suspicion: if chroma is what's driving "まだ結構違う", **curve
+choice (A vs B vs current) is not the fix** — base-5r's own recommendation
+(ship curve A for the luma reasons it already established) stands, but
+picking between A/B will not visibly close the gap the user is reacting to.
+
+### 3. Where does the bridge's chroma deficit come from?
+
+Stage-by-stage average color (decode+WB → +ForwardMatrix → +HueSatMap →
++ACR Look table → +PV2012 curve → +app's `ACRLOOK_BASE_CURVE`), computed by
+averaging each stage's linear working-RGB across all 75,135 bridge pixels
+then converting the averaged color to Lab once — matching base-6/base-7c's
+own established methodology for tracing a DCP pipeline stage-by-stage (NOT
+directly comparable in magnitude to §1's per-pixel-then-averaged numbers;
+see the reconciliation below for why, and don't cross-read the two):
+
+| stage | C\* | ratio vs LR (6.11) | hue |
+|---|---|---|---|
+| LR target | 6.11 | 1.000 | 295.1° |
+| decode+WB only (no DCP at all) | 9.38 | 1.534 | 280.3° |
+| +ForwardMatrix (pre-HueSatMap) | **5.78** | **0.945** | 276.0° |
+| +HueSatMap (DCP's own Adobe Standard table) | 9.07 | 1.484 | 273.6° |
+| +ACR Look table (Adobe Color) | 9.10 | 1.488 | 271.5° |
+| +PV2012 curve (= "acrlook" DCP output) | 9.81 | 1.605 | 272.3° |
+| +app `ACRLOOK_BASE_CURVE` (= TRUE default) | 12.55 | 2.053 | 277.4° |
+
+**This is qualitatively different from base-6/7b's sunset (DSC07349) sky
+finding** (the brief's cross-reference question). There, Stage A started
+under-saturated (ratio 0.402, a 60% deficit) and the app's own curve
+recovered 44% of that deficit (→0.663) — a genuine "curve mostly-fixes a
+pre-curve deficit" story, still 43%-deficit short even so. **Here, the
+bridge is never under-saturated at any stage — it starts OVER-saturated
+even before any DCP matrix touches it** (ratio 1.534 at raw decode+WB) and
+gets progressively MORE over-saturated through the pipeline, finishing at
+2.053. The DCP's own HueSatMap adds a sharp +57% relative jump (5.78→9.07)
+right after ForwardMatrix alone had landed close to LR (0.945, the closest
+any stage gets); the app's own final curve adds another +28% relative jump
+(9.81→12.55) on top. So: **not a curve-recoverable deficit like the sunset
+case — the opposite shape entirely.**
+
+Reconciling with §1's per-pixel numbers (why "over-saturated" here doesn't
+contradict "chroma too LOW" there): mean-of-per-pixel C\* on the SAME bridge
+mask is LR **23.95** vs current **17.52** — a −6.43 gap that reproduces §1's
+bridge ΔC\*=6.43 exactly (23.95−17.52=6.43, an exact internal cross-check).
+Averaging pixel colors first (as this ablation table does) instead cancels
+much of that per-pixel chroma via hue variance — LR's bridge has real local
+color texture (warm-lit stone, cooler recesses, near-neutral highlights)
+that partially cancels to C\*=6.11 on averaging, while our render's bridge
+pixels carry a more *directionally consistent* cast (hue pinned at
+~270-280° — blue/violet — at literally every pipeline stage, including
+before any DCP matrix) that survives averaging much better, landing at
+C\*=12.90. **Two distinct, compatible findings, not a contradiction**: our
+render is (a) locally flatter/less colorful than LR pixel-by-pixel (the
+dE2000-dominant defect §1 measures), while simultaneously (b) carrying a
+uniform blue/violet color cast in the aggregate that a per-channel curve
+cannot fix (global monotonic remaps don't rotate hue). (b)'s hue (~270-280°)
+and its presence from the very first decode+WB stage — *before* any DCP
+matrix — is consistent with this document's own already-diagnosed root
+cause for this exact scene (Round-2 attribution: libraw's forced
+ColorMatrix2/D65 weight of 1.0 vs Adobe's mired-interpolated 0.541 at this
+scene's 4100K As-Shot). This is not a new mystery; it is new evidence that
+the color-matrix illuminant-interpolation fix already on record (Round-2's
+"pending GO" remediation plan) is the right lever, not a base-curve refit.
+(a)'s local-flatness is not something that fix is guaranteed to close by
+itself — worth a follow-up chroma-texture check after it lands.
+
+### 4. Is `HUESAT_STABILITY_V_FLOOR` (0.08) suppressing chroma restoration
+### here? — REFUTED for the lit-bridge region specifically
+
+Reimplemented `renderDcpPixel`'s per-stage logic locally (bundle.mjs's own
+`HUESAT_STABILITY_V_FLOOR` binding is a read-only ESM export, can't be
+monkeypatched) with the V-floor as a parameter, run per-pixel across all
+75,135 bridge pixels at both 0.08 (shipped) and 0 (damping fully disabled):
+
+| stage | C\*(floor=0.08) | C\*(floor=0) | ΔC\* | relative |
+|---|---|---|---|---|
+| +HueSatMap | 9.07 | 9.12 | +0.050 | 0.55% |
+| +ACR Look table | 9.10 | 9.17 | +0.076 | 0.83% |
+| +PV2012 curve | 9.81 | 9.89 | +0.075 | 0.77% |
+
+Negligible at every stage (<1% relative). The mechanism: bridge-region HSV
+V stats (LR mean 0.2155, min 0.0307; current mean 0.1966, min 0.0116) sit
+mostly well above the 0.08 floor — `smoothstep01(0, 0.08, v)` is already
+saturated near 1 (damping fully disengaged) for the bulk of these "lit"
+pixels by construction of the mask (`luma>0.03` was specifically chosen to
+select the *lit* stone, not the scene's darkest near-black content). This
+**refutes the brief's specific hypothesis for this region**: the low-V
+damping is not what's suppressing chroma restoration on the bridge stone
+the user is looking at — it extends base-3's own earlier finding (which
+was about the shared 17³ lattice's node spacing making the damping
+"inert for the pixels that matter" near-neutral-wide) to a direct,
+lattice-free, per-pixel re-test scoped to just this region, same
+conclusion via a different mechanism (V already clears the floor here,
+rather than the lattice never sampling near enough to black to engage it).
+The V-floor is not the lever to pull.
+
+### Recommendation
+
+**Do not choose between curve A and curve B to address "まだ結構違う" — it
+won't help.** The remaining DSC03298 gap the user is seeing is
+chroma-dominated (52-75% of dE00's axis budget across whole-frame/bridge/
+sky/water, vs 5-9% for lightness), and neither candidate curve measurably
+touches the chroma gap on any region (bridge \|ΔC\*\| flat within noise);
+base-5r's curve-A recommendation should still ship for the *luma* reasons
+that pass established (it demonstrably helps the 3 clean cluster scenes),
+but it will not close what the user is reacting to on this scene. The
+actual fix target, per §3's ablation, is the color-matrix
+illuminant-interpolation defect already diagnosed in this document's
+Round-2 section (dual-illuminant ColorMatrix1↔2 mired interpolation,
+"pending GO") — new evidence here: the bridge's blue/violet hue cast is
+present from the earliest decode+WB stage (before any DCP processing),
+matching that defect's predicted signature, not a HueSatMap/LookTable/
+V-floor/curve issue (all measured and found to not be the cause, or in the
+DCP tables' case, to actively make it worse rather than better). A
+secondary, likely-separate finding — LR's per-pixel local chroma texture on
+the bridge stone (23.95) exceeds ours (17.52) by ~27% even independent of
+the aggregate color-cast direction — is flagged as a follow-up check after
+the matrix fix lands, not something this pass's evidence attributes to any
+mechanism currently in scope.
+
+### Gates
+
+Analysis-only; `git status` clean throughout (no repo/engine files touched,
+confirmed before and after at HEAD `1d7d76a`). No subagents used, per the
+brief. New scratchpad scripts (`base9-diag/decompose.mjs`,
+`base7-diag/base9-ablate-bridge.mjs`, `base4-diag/base9-reconcile.mjs`) are
+one-off diagnostics, not wired into any verify script.
+
+### Honest residuals
+
+1. Region masks are deliberately rough (position box + luma/hue threshold,
+   per the brief) — not a segmentation model. The bridge box likely
+   includes a thin sliver of the flanking dark building edges and excludes
+   some of the bridge's own shadowed underside; "roughly" was the brief's
+   own framing and the masks were eyeballed against a real crop, not
+   guessed blind, but exact-pixel-boundary precision was not attempted.
+2. §3's stage-by-stage ablation uses chroma-of-averaged-color per stage
+   (matching base-6/7c precedent) specifically because it is what makes a
+   stage-by-stage *trend* readable; it is explicitly NOT the same statistic
+   as §1's per-pixel-averaged numbers and the two must not be cross-read
+   without the §3 reconciliation paragraph's context — flagged prominently
+   above to head off exactly that mistake.
+3. This pass did not re-derive or re-test the Round-2 color-matrix fix
+   itself (still "pending GO," unimplemented) — §3's finding is additional
+   supporting evidence for that existing, already-scoped remediation plan,
+   not a new implementation or a new proposal.
+4. Sky's CIEDE2000 cross (RT) term is large relative to its own dE00 (mean
+   −14.8 vs mean dE00 8.06) because RT peaks near hue≈275°, this region's
+   hue — the reported 58%/36% C/H split for sky should be read as
+   directionally correct (chroma still clearly larger than hue) but less
+   precise than the bridge/water rows, where the cross term is small.
