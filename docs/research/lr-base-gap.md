@@ -2459,3 +2459,248 @@ one-off diagnostics, not wired into any verify script.
    hue — the reported 58%/36% C/H split for sky should be read as
    directionally correct (chroma still clearly larger than hue) but less
    precise than the bridge/water rows, where the cross term is small.
+
+## Stage base-10 (acrlook bridge chroma origin): base-9's own fix target was
+## a false lead for acrlook — its "over-saturated" narrative was a chroma-of-
+## the-mean statistical artifact, its recommended fix (Round-2 matrix
+## interpolation) is structurally a no-op for acrlook, and the deficit is
+## NOT reachable by ANY point on the ForwardMatrix1↔2 interpolation line;
+## analysis-only
+
+Trigger: base-9's own Recommendation section pointed at "the color-matrix
+illuminant-interpolation defect already diagnosed... Round-2's pending-GO
+remediation plan" as the fix target for the bridge's chroma gap. That
+attribution is wrong for acrlook specifically: `pipeline.ts`'s
+`renderDcpPixel` (line 447) already illuminant-interpolates ForwardMatrix
+via `cameraToXyzD50Matrix(dcp, fraction)` for both `dcp` and `acrlook`
+modes — base-9's own §3 ablation table even USED this same interpolated
+matrix (fraction≈0.526) without noticing. The Round-2 fix (`wbCorrection.ts`,
+`computeWbColorMatrixCorrection`) is explicitly scoped to the `builtin`
+profile source only (its own doc comment, lines 59-66: "this correction
+only feeds the BUILTIN profile source... applying this correction [to dcp/
+acrlook] too would double-transform the pixel"; enforced structurally by
+`graphDoc.ts`'s `DEVELOP_KIND` branch). So base-9's recommended fix is a
+structural no-op if pointed at acrlook — this pass finds the actual origin.
+Analysis-only, no engine/repo changes, no subagents, per the brief. New
+script: `scratchpad/base10-diag/diag.mjs` (reuses `base6-diag/bundle.mjs`'s
+DCP primitives and `base7-diag`'s cached real Rec.2020 decode of
+DSC03298 — no new decode, same inputs base-9/base-7c already validated).
+
+### Method, and a second statistical trap caught before it corrupted this
+### pass's own numbers
+
+Same Lab math as base-9 (corrected piecewise f(), slope kappa/116 =
+7.787037037; CIEDE2000 not needed here, this pass only tracks L\*/C\*/hue).
+Same bridge mask rule (`x∈(0.40,0.87)W, y∈(0.46,0.60)H, luma>0.03`, LR's own
+JPEG), rebuilt independently: n=75,135 (2.69% of frame) — reproduces
+base-9's mask count exactly, and this script's own per-pixel LR/current
+C\* on that mask (23.95 / 17.52, ΔC\*=6.43) reproduces base-9's §1 bridge
+row exactly, confirming the mask and Lab math are the shared, validated
+baseline before anything new is computed.
+
+The brief's warned-about trap ("WATCH the Lab f() 116x bug") was not the
+116x-kappa bug itself (already fixed and re-verified, per the method note
+above) — it was a **second, distinct aggregation trap**, caught mid-pass:
+this script's first draft computed a single "region hue" per image via a
+chroma-weighted circular mean of every pixel's hue (`atan2(Σ sin·C, Σ
+cos·C)`), then differenced the two regions' aggregate hues. That gave
+ΔHue=**59.4°** for the current render vs LR — nearly 5× base-9's own
+established Δhue=12.27° for the identical mask/images. The two are
+different statistics (aggregate-hue-difference vs mean-of-per-pixel-hue-
+differences), and the region's real hue variance (warm-lit stone facets vs
+cooler recesses) makes them diverge sharply — the same "mean-of-X vs
+X-of-mean" family of bug as base-9's own reconciled §3 finding (C\* of
+averaged RGB ≠ mean of per-pixel C\*). Every hue number below was rebuilt
+to base-9's own convention instead (per-pixel Δhue, LR-gated on C\*>5,
+averaged arithmetically) and cross-checked to reproduce 12.27°/29.18°
+exactly (confirmed: 12.27°/29.18°, n=72,506, above) before trusting any new
+number derived the same way.
+
+### 1. Reconstruction fidelity: EXACT route, EXACT round-trip — not the origin
+
+`color.rgbCam` (libraw's `rgb_cam`) is present and well-conditioned for
+DSC03298 (`det(top-3×3)=2.96`, far from singular) — `cameraFromWorkingMatrix`
+therefore picks `exactCameraFromWorkingMatrix`, never the `camXyz`-based
+`approxCameraFromWorkingMatrix` fallback, for this photo. Round-trip
+(`native → working → native`, via the SAME two composed matrices, run on
+all 75,135 real bridge-mask pixels, not synthetic vectors): mean relative
+error **1.32×10⁻¹⁶**, max **4.26×10⁻¹⁶** — float64 machine-epsilon noise,
+not measurable loss. **Reconstruction is exact; it is not, and cannot be,
+the origin of an 8-unit C\* deficit.**
+
+### 2. Stage-by-stage origin, per-pixel-correct convention (mean of
+### per-pixel C\*/Δhue — base-9's §1 convention, NOT its §3 aggregate one)
+
+| stage | C\* | ratio vs LR (23.95) | meanΔhue vs LR | \|Δhue\| |
+|---|---|---|---|---|
+| LR target | 23.95 | 1.000 | — | — |
+| +ForwardMatrix (interpolated, pre-tables) | 8.36 | **0.349** | +11.0° | 31.8° |
+| +HueSatMap (Adobe Standard's own table) | 12.58 | 0.525 | +10.3° | 31.6° |
+| +ACR Look table (Adobe Color) | 12.12 | 0.506 | +12.5° | 32.0° |
+| +PV2012 curve (= "acrlook" DCP output) | 12.75 | 0.533 | +11.6° | 31.9° |
+| +app `ACRLOOK_BASE_CURVE` (= TRUE final render) | 16.96 | 0.708 | +10.8° | 32.1° |
+
+(final-stage C\*=16.96 vs the real app export's 17.52 — a small ~3%
+residual from this script evaluating `renderDcpPixel` directly per-pixel
+rather than through the app's baked+trilinear-interpolated N³ lattice; not
+material to any conclusion below.)
+
+**This is the opposite conclusion from base-9's own §3** (which, using the
+chroma-of-averaged-RGB convention, found ForwardMatrix landing at ratio
+0.945 — "closest to LR", read as "already fine, don't touch" — and
+HueSatMap then "overshooting" to 1.484). Under the per-pixel-correct
+convention: ForwardMatrix alone delivers only **35%** of LR's target
+chroma, and every downstream stage **adds** chroma rather than removing it
+(HueSatMap +4.22, app curve +4.21 — the two largest single contributors;
+the ACR Look table itself is close to neutral, −0.46) — the render is
+under-saturated at every single stage, never over. Base-9's "over-
+saturated" narrative was the chroma-of-the-mean artifact from the start;
+it was never really about this region's per-pixel color.
+
+Hue tells the more useful story: meanΔhue sits in a narrow **+10° to
++12.5°** band across all five stages, essentially flat from the very first
+post-matrix stage through the final render — no stage rotates hue by any
+material amount (the ACR Look table, the stage with the most degrees of
+freedom to do so, moves it by only ~2°). |Δhue|≈32° throughout reflects
+real per-pixel hue spread within the region (texture, not a coherent
+mis-rotation), not a systematic angle error — see the reverse-check below
+for direct confirmation this signed number is not the dominant lever
+either. **The deficit is a chroma-magnitude problem, present from the
+earliest possible stage, not a hue-angle problem** — this directly answers
+the brief's Q4: correct(-ish) hue, low chroma, at the matrix stage itself.
+
+### 3. Fraction-reachability sweep: LR's chroma is UNREACHABLE by ANY
+### fraction, physical or absurdly extrapolated
+
+Swept `cameraToXyzD50Matrix(dcp, t)` for t ∈ [−2.0, 3.0] (step 0.1 — the
+DNG-legal range is [0,1]; swept 2-3× past it each direction specifically to
+test whether LR's target lies on the ForwardMatrix1↔2 line AT ALL, not just
+within the physically legal segment), full final render, per-pixel-correct
+C\*/Δhue on the bridge mask:
+
+| t | final C\* | final Δhue vs LR | matrix-only C\* | matrix-only Δhue |
+|---|---|---|---|---|
+| −2.0 | 17.97 | +8.2° | 10.40 | +11.8° |
+| 0.00 | 16.95 | +10.1° | 8.73 | +11.4° |
+| 0.53 (shipped) | 16.96 | +10.8° | 8.38 | +11.0° |
+| 1.00 | 16.82 | +11.5° | 8.08 | +10.2° |
+| 2.60 | 18.23 | +0.1° | 7.55 | +0.4° |
+| **3.00 (max)** | **18.78** | −3.9° | 7.53 | −3.5° |
+
+Final C\* is nearly flat across the ENTIRE physical range (16.82-16.96 for
+t∈[0,1] — the shipped fraction is already at essentially the best point in
+that segment) and only climbs by extrapolating absurdly far past it (t=3,
+three widths of the legal segment beyond ColorMatrix2). Even there it
+tops out at **18.78 — still 5.2 C\* units short of LR's 23.95**, and does
+so by trading away the hue match that WAS present near the shipped
+fraction (Δhue swings from +10.8° at t=0.53 to −3.9° at t=3 — the C\*
+gain past t≈2.6 comes from a genuine hue *rotation* toward the LR side,
+not a saturation increase per se, and it's not enough regardless).
+Matrix-only C\* actually *shrinks* as t increases (8.38→7.53) — the
+final-render C\* gain at high t comes entirely from how the post-matrix
+tables/curve interact with a rotated hue, not from the matrix producing
+more saturation. **No point on this 1-parameter matrix family — inside
+[0,1] or absurdly outside it — reaches LR's chroma.** This conclusively
+answers the brief's Q3: fraction choice cannot close this gap, at all,
+by construction; and directly falsifies base-9's own recommended fix
+target for acrlook (which assumed nudging this fraction was the lever).
+
+### 4. Reverse-check verdict: LR's implied color does NOT lie on the
+### CM1↔CM2 (ForwardMatrix1↔2) line — confirmed by §3 rather than a
+### separate matrix solve
+
+The brief asked for a directly-solved "matrix that would hit LR's C\*/hue
+exactly," compared against CM1/CM2/interpolated. §3's wide sweep already
+answers the load-bearing part of this more rigorously than a single-matrix
+least-squares fit would (a fit against two aggregate scalar targets, C\*
+and hue, is underdetermined for a 9-parameter matrix and would need to
+assume a particular direction to resolve it — the sweep instead tests the
+ENTIRE actual 1-parameter family this pipeline can produce, run through the
+real per-pixel non-linear downstream chain, not an aggregate approximation
+of it). Since the swept line's own maximum achievable C\* (18.78, at an
+already-nonphysical t=3) never reaches 23.95, **LR's implied color
+demonstrably does not lie on the ForwardMatrix1↔ForwardMatrix2
+interpolation line, at any point on it, physical or not.** Whatever
+produces LR's extra chroma on this scene is categorically outside the
+"pick a better fraction" family — confirming the brief's own CRITICAL
+CONTEXT framing and closing off that entire branch of remediation for
+acrlook.
+
+### 5. Two levers already ruled out (checked, not assumed)
+
+- **`HUESAT_STABILITY_V_FLOOR` (0.08) damping**: re-checked under the
+  per-pixel-correct convention (base7-diag's own earlier check used the
+  chroma-of-the-mean convention and found <1% effect — re-confirmed here
+  with the fixed statistic, not just trusted): disabling the floor entirely
+  (0.08→0) raises HueSatMap/AcrLook/Pv2012-curve C\* by only +0.50-0.52
+  (12.58→13.10, 12.12→12.62, 12.75→13.27 — ~4% relative, ~7% of the
+  6.99-unit final-stage gap). Real, small, and nowhere near sufficient —
+  confirms and extends base-9's §4 refutation.
+- **Architecture mismatch (Standard-DCP-plus-Look-XMP vs a hypothetical
+  real "Adobe Color.dcp")**: considered and ruled out by inspection, not
+  measurement — `localAdobeProfile.ts`'s own doc comment (lines 1-46,
+  citing this document's earlier dcp-profile.md research) already
+  establishes that "Adobe Color" genuinely IS a cross-camera Look XMP
+  layered on the per-camera Adobe Standard DCP in real ACR/Lightroom too,
+  not a separate profile file this implementation is missing — so this is
+  not an approximation gap to close.
+
+### Verdict: not reachable within the currently-modeled DCP/acrlook math
+
+Every lever this pipeline currently exposes for chroma — the illuminant
+fraction (§3/§4), the V-floor damping (§5), the base curve's shape (base-9
+§2: curve A/B leave bridge \|ΔC\*\| flat within noise) — has now been
+checked and found unable to close a ~7-unit final-stage C\* gap (16.96/
+17.52 vs 23.95). Reconstruction is exact (§1). The architecture matches
+real ACR (§5). **This is an honest "not reachable without X":** the
+acrlook pipeline, as currently modeled (Adobe Standard DCP + Adobe Color
+Look XMP + app curve, all correctly implemented per this pass's checks),
+structurally cannot produce enough chroma on this scene's lit stone,
+regardless of any of its existing tunable parameters. Closing it would
+need something not currently in the model — most plausibly an explicit
+saturation/vibrance-style lever independent of the DCP tables (there is
+none today; every chroma change currently comes from the DCP/Look tables
+themselves or the shared base curve's per-channel shape, and both are
+already maxed out for this region within their own data). **Not
+recommended as a same-pass fix**: base-9's own §1 found the sunset scene's
+HueSatMap/LookTable already SLIGHTLY RESTORES chroma (unlike the bridge,
+where the same tables merely add some but fall short) — a single uniform
+saturation multiplier tuned to close the bridge's gap risks overshooting
+scenes where the DCP already tracks LR reasonably, so this needs a
+multi-scene calibration pass (per this project's existing Lightroom-
+calibration convention for "feel" constants), not a one-scene patch.
+Possible upstream contributor not tested in this pass, flagged for a
+follow-up rather than assumed: whether the as-shot WB temperature/tint
+this pipeline estimates from libraw's `cam_mul` for this shot actually
+matches Adobe's own as-shot WB estimate for the same raw file — a
+different starting camera-native RGB, upstream of everything measured
+here, would move chroma at every downstream stage simultaneously without
+showing up as a fraction, V-floor, or curve effect.
+
+### Gates
+
+Analysis-only; `git status` clean throughout (no repo/engine files
+touched, confirmed before and after at HEAD `a9e2e61`). No subagents used,
+per the brief. New scratchpad script (`base10-diag/diag.mjs`) is a one-off
+diagnostic, not wired into any verify script.
+
+### Honest residuals
+
+1. §2's final-stage C\* (16.96) sits ~3% below the real app's export-
+   measured 17.52 (base-9 §1) because this script evaluates
+   `renderDcpPixel` directly per pixel rather than through the app's baked
+   N³ trilinear lattice (`bakeDcpLattice`/`bakeAcrLookLattice`) the real
+   render path uses — not material to any conclusion (both numbers agree
+   the final render reaches ~70-73% of LR's target C\*), but not literally
+   bit-identical to a real export either.
+2. §4's "reverse-check" answers the brief's actual question (does LR's
+   color lie on the CM1↔CM2 line) via the full sweep rather than an
+   independently-solved 3×3 matrix — flagged in §4 as the deliberate
+   choice and why a separate least-squares solve would be less rigorous
+   here, not a shortcut taken for lack of time.
+3. The "upstream WB estimate" possibility named in the Verdict is
+   unconfirmed speculation, explicitly flagged as such — this pass did not
+   have access to Adobe's own as-shot WB estimate for DSC03298 to check it
+   against, and it is named as a follow-up direction, not a finding.
+4. This pass, like base-9, covers only DSC03298's lit-bridge-stone region
+   in acrlook mode — no claim is made about other scenes/regions/modes.
