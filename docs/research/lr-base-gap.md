@@ -1691,3 +1691,259 @@ engine changes, no subagents).
    (DSC07349 remains a documented, unfixed color-divergence outlier, now
    with a confirmed-but-underivable fix shape) is unchanged. Nothing here
    reopens or narrows any other open item in this document.
+
+## Stage base-7c: DSC03298's per-shot black offset DOES converge (R/G
+## nearly exact, B/G partially closed) but does NOT explain its luma-curve
+## incompatibility with the {04260,06787,09305} cluster — two independent
+## defects, not one; analysis-only, no fix landed
+
+Trigger: does base-7b's per-shot black-offset mechanism ALSO explain
+DSC03298's two remaining documented divergences — its B/G +10.8% gap in
+acrlook mode, and its luma transfer curve's incompatibility with the other
+three "clean" Italy scenes? Analysis-only per the brief: no repo/engine
+files touched, no commits, no subagents; everything lives in this
+session's own `base7-diag/` scratchpad, extending base-7b's own
+fit-axis/fit-joint plumbing.
+
+### 1. Two-axis (dr, db) fit for DSC03298: converges, but with a much
+### coarser achievable floor than DSC07349's — and userCblack turns out to
+### be INTEGER-truncated, not continuous
+
+Recomputing the near-neutral (LR Lab C\*<6) mask target with base-7b's
+exact method (`mask-generic.mjs`, sRGB-linear R/G,B/G of the pooled LR-JPEG
+mask) gives `linRG=0.7230, linBG=1.5180` — matching base-4's earlier
+0.723/1.518 essentially exactly, confirming methodological consistency.
+Baseline (no override) in the SAME crude-fixed-3×3-matrix pipeline
+base-7b's fit-axis.mjs used: `rgLin=0.5106, bgLin=2.0455` — a much larger
+gap than DSC07349 ever had (+41.6%/−25.8% vs target, vs DSC07349's
+−17%/+17.9%).
+
+A coarse sweep (`fit-axis-03298.mjs`) hit an immediate surprise: `dr=-20`
+alone overshot the R/G target by nearly 2× (0.5106→1.3513), and `db=100`
+alone crashed B/G through zero into negative territory — DSC03298's masked
+region sits much closer to raw black than DSC07349's, so the per-unit
+sensitivity is roughly **10× steeper**. A finer sweep (`fit-axis-03298-
+fine.mjs`, dr∈[0,−20], db∈[0,50]) found both axes near-linear in that
+narrower window, predicting `dr≈−5.3, db≈12.8` by local-slope interpolation.
+
+Attempting a Newton refinement with fractional (dr, db) surfaced a second,
+more important discovery: **`userCblack` values are silently truncated
+toward zero (`Math.trunc`-style) by the libraw-wasm binding, not rounded**.
+Two inputs differing by <0.1 (`dr=-5.993` vs `dr=-6.0`) landed on
+*different* integers (−5 vs −6) and produced a ~5%-of-ratio jump in the
+result (reproduced 5× identically per input — fully deterministic, just
+non-continuous). This invalidates every "fractional" intermediate point in
+this pass's own working notes; the real search space is integer-only. A
+20-point integer grid (`dr∈{−4,−5,−6,−7}, db∈{12..16}`) was evaluated
+directly:
+
+| dr | db | R/G | B/G | R/G err | B/G err |
+|---|---|---|---|---|---|
+| −6 | 12 | 0.7290 | 1.5690 | +0.83% | +3.36% |
+| **−6** | **13** | **0.7272** | **1.5315** | **+0.58%** | **+0.89%** |
+| −6 | 14 | 0.7256 | 1.4948 | +0.36% | −1.53% |
+| −6 | 15 | 0.7239 | 1.4589 | +0.12% | −3.89% |
+| −7 | 14 | 0.7624 | 1.4986 | +5.45% | −1.28% |
+
+**Fitted: `userCblack=[-6, 0, 13, 0]`** — the best joint-L2 point on the
+grid, residuals R/G +0.58%, B/G +0.89%. This is coarser than DSC07349's
+0.17%/0.09% fit (§1 of base-7b) purely because of the ~10× steeper local
+slope combined with integer-only granularity — a real, structural
+limitation of this lever for this scene, not a fitting-methodology
+weakness. As in base-7b, G was held at offset 0 throughout by construction
+(only R and B are touched).
+
+**Reconciling the brief's own aside** ("stage-B ForwardMatrix-only
+continuous reference was R/G 0.721/B-G 1.634 vs LR 0.723/1.518"): that
+number comes from a *different* pipeline (the real DCP ForwardMatrix, not
+this fit's crude fixed-3×3 camera→sRGB matrix), so it is not directly
+comparable to this section's baseline (0.5106/2.0455). A supplementary
+check (`stagea-mask-check-03298.mjs`) re-measured the SAME mask through
+the REAL decode pipeline (libraw `outputColor:8`/Rec.2020 + WB, +
+`settings.baselineExposureEV=0.5` gain, mapped to sRGB primaries via
+`WORK_TO_SRGB` — no DCP tables yet, i.e. true Stage A) for both baseline
+and the fitted override:
+
+| | R/G | B/G |
+|---|---|---|
+| baseline (real pipeline) | 0.5060 (−30.0%) | 2.2342 (+47.2%) |
+| **fitted override, real pipeline** | **0.7127 (−1.4%)** | **1.6817 (+10.8%)** |
+| LR target | 0.7230 | 1.5180 |
+
+Two things worth flagging: (a) the crude-matrix pipeline's baseline
+(0.5106/2.0455) and the real pipeline's baseline (0.5060/2.2342) turn out
+to be close on R/G but quite different on B/G — the brief's cited
+"0.721/1.634" figure is a THIRD number again (post-ForwardMatrix, not
+post-WB), so all three pipelines disagree on the raw size of the gap, a
+real methodological hazard worth remembering next time this file is
+touched; (b) applying the SAME integer override fit in the crude pipeline
+to the REAL pipeline still helps enormously (R/G closes to within 1.4%,
+B/G improves from +47% to +10.8%) but does **not** fully close B/G — and
+that residual **+10.8%** figure lands almost exactly on the brief's own
+cited "B/G +10.8% in acrlook" number. Direct answer to the brief's framed
+question: the remaining B/G gap is **not** smaller than the black-fit can
+express — the black-fit demonstrably buys most of the correction (47%→
+10.8%) — but it also does not fully close it; some residual B/G defect
+survives the best integer (dr,db) this lever can express, whether measured
+in the crude matrix or the real pipeline.
+
+### 2. Luma-curve compatibility retest: the override does NOT bring
+### DSC03298 into the {04260,06787,09305} cluster — because it can't:
+### the curve mismatch and the WB mismatch are different defects
+
+Built a `{04260,06787,09305}` "cluster curve" by running base-5's
+`fit-acrlook-curve.mjs fit` with `SCENES_OVERRIDE=DSC04260,DSC06787,
+DSC09305` (real official `acrlook-identity-exports`, unmodified pipeline —
+these three scenes need no override): joint curve `[[0,0],[9,21],[14,33],
+[26,58],[47,95],[65,122],[88,153],[134,205],[255,255]]`, in-sample
+residuals mean −0.018/−0.078/+0.093 stops (all well inside the 0.25 gate).
+
+Testing DSC03298 against this curve requires a render of "acrlook profile
++ identity toneCurve.rgb" **with the fitted override baked into the raw
+decode** — but the real app has no hook to pass a custom `userCblack` into
+its actual decode path (confirmed: `render-acrlook-identity.mjs` drives the
+real Electron app end-to-end via Playwright with no such seam; base-7b's
+own conclusion — "requires forking/patching libraw-wasm... this project
+has no access to" — still holds). Building this analysis-only, without
+touching the app, required a standalone reconstruction
+(`decode-03298-rec2020.mjs` + `dcp-render-03298.mjs`): real
+`librawDecoder.ts` `OPEN_SETTINGS` decode (± `userCblack`) via libraw-wasm
+directly, nearest-neighbor downsampled in-browser to LR's own 1365×2048
+dims (full 4688×7028 16-bit RGB was too large for a single Playwright
+CDP-pipe transfer — confirmed by an actual crash — and isn't needed for a
+population-level curve fit), then the real DCP pipeline
+(`bundle.mjs`'s `renderDcpPixel`, ForwardMatrix + HueSatMap + AcrLook
+LookTable + PV2012 curve, ~36s/2.8M-pixel image) applied per-pixel in
+Node, exported as JPEG.
+
+**A first pass of this reconstruction had a large, systematic ~0.63-stop
+brightness bug** (sanity-checked against the one REAL official render
+available, the baseline-no-override identity export: mean Δ=0.633 stops,
+38.4% kept). Root-caused by reading `decodeWorker.ts`/`shared/ipc.ts`
+rather than guessed: the reconstruction was missing
+`settings.baselineExposureEV`'s shipped default of **0.5** — a linear gain
+(`2^EV`) applied at decode, before any DCP processing
+(`linearizeRgb16(..., baselineExposureGain(EV))`), which this standalone
+script had no reason to know about since it isn't part of the DCP profile
+math it was otherwise faithfully replicating. Adding that gain closed
+almost the whole gap (mean Δ 0.633→**0.087** stops, RMS 0.833→0.563) —
+good enough to trust the reconstruction's differential (baseline vs
+fitted) comparison, with the residual ~0.09 stop / 0.56 RMS understood as
+coming from the remaining simplifications (no `raw_inset_crops` crop-frame
+fix, nearest-neighbor not box-filter downsample) rather than a real
+pipeline error.
+
+Cross-applying the cluster curve to both reconstructions vs LR's real
+DSC03298.jpg (`cluster-crossapply-03298.mjs`, exact
+`fit-acrlook-curve.mjs` methodology: REC.709 stops, exact sRGB EOTF,
+LR_STOPS_FLOOR=−8, clipped-pixel exclusion, per-channel curve application):
+
+| | mean (stops) | RMS (stops) | n | verdict (gate ≤0.25) |
+|---|---|---|---|---|
+| baseline (no override) | −0.646 | 1.015 | 1,486,130 | does NOT join cluster |
+| **fitted (`userCblack=[-6,0,13,0]`)** | **−0.641** | 1.011 | 1,486,130 | **does NOT join cluster** |
+
+**THE KEY QUESTION's answer is NO.** The fitted black override moves the
+cluster-curve residual by 0.005 stops — noise-level, not a real effect —
+while base-4's own historical 5-scene LOSO runs (held-out DSC03298,
+`fit-output*.log`) independently put its real-render residual in the same
+−0.41 to −0.77 stop range, a useful external consistency check on this
+reconstruction's −0.646 baseline number.
+
+**Why this makes sense, not just an empirical dead end**: the (dr,db) fit
+holds G at offset 0 by construction (§1, both here and in base-7b) — it
+only ever touches R and B. REC.709 luma is G-dominated (0.7152 weight vs
+0.2126+0.0722 combined for R+B), so a lever that structurally cannot move
+G is structurally limited in how much it can ever move a luma-only metric,
+almost regardless of how well it fixes color balance. The WB/chroma defect
+(§1, R/G and B/G) and the luma-curve defect (§2) are consistent with being
+**two independent problems**: a per-shot black level explains (most of)
+the former and is mechanically incapable of explaining the latter. The
+brief's original framing — bundling "B/G +10.8%" and "luma-curve
+incompatibility" together as possibly-one-cause — turns out to be wrong;
+they need separate explanations.
+
+### 3. Refit design recommendation: fallback path, not the clean 4-scene
+### plan
+
+Since DSC03298 does NOT join the cluster (§2), base-5r's refit should
+follow the brief's option **(b)**: a **3-scene fit** (`{04260,06787,
+09305}`, already computed in §2 as the "cluster curve") **with an 03298
+guard-constraint**, not a clean 4-scene fit with a black-override
+preprocessing step. Concretely:
+
+- The 3-scene cluster curve (§2's `[[0,0],[9,21],[14,33],[26,58],[47,95],
+  [65,122],[88,153],[134,205],[255,255]]`) is already a solid candidate on
+  its own merits — in-sample LOSO worst |mean| 0.157 stops, comfortably
+  inside the 0.25 gate, using only real official renders, no override
+  needed.
+- DSC03298 (and, per base-7b, DSC07349 — the other documented per-shot
+  outlier) should stay **excluded from the fit population** but ideally
+  checked as a **guard**: render each under the candidate curve and confirm
+  it doesn't regress from wherever it sits today (this pass's own
+  −0.646-stop number is now that baseline for DSC03298; base-7b's §2 has
+  the equivalent for DSC07349). A guard that only checks "no regression"
+  (not "must join") is the honest framing, since neither scene is fixable
+  by this curve by design.
+- **Per-shot black overrides are NOT a viable in-product preprocessing
+  step** for either outlier, restating base-7b's own unresolved
+  conclusion once more: the fitted `(dr,db)` is per-shot and underivable
+  from any metadata this app can read (base-7b §5's exhaustive EXIF diff
+  found nothing), and — new information from this pass — even where a fit
+  converges (DSC03298 does, unlike base-7's original despair), it only
+  partially closes the real-pipeline B/G gap (§1) and doesn't touch the
+  luma-curve gap at all (§2). There is no "per-photo dev setting" or
+  "sidecar field" design worth speccing yet, because there is no reliable
+  way to populate it automatically, and hand-tuning two more free
+  parameters per outlier photo is not a product feature — it's manual
+  colorist work LR itself is presumably doing via some internal per-scene
+  adaptive process this app has no access to (echoing `baseCurve.ts`'s own
+  documented finding that Adobe's PV2012 tone mapping is "internal,
+  undocumented, per-scene-adaptive").
+- **Net recommendation**: ship the 3-scene cluster curve as
+  `ACRLOOK_BASE_CURVE`'s base-5r refit, document DSC03298 and DSC07349 as
+  two separate, still-open, still-per-shot-only color/tone outliers (not
+  one bundled issue), and do not build any black-level-override plumbing
+  into the product from this thread of investigation.
+
+### Gates
+
+No repo files were changed (`git status` clean at `2485033` throughout;
+this stage's own scratchpad work lives entirely under this session's
+`base7-diag/`) — typecheck/vitest/verify chain unaffected by construction,
+not re-run per the brief (analysis-only, no engine changes, no
+subagents).
+
+### Honest residuals / caveats for whoever picks this up next
+
+1. §1's fit is calibrated against base-7b's own crude fixed-3×3-matrix
+   pipeline (as the brief explicitly asked, "for consistency") — §1's own
+   supplementary check shows the SAME override lands differently (still
+   helpful, not identical) when run through the real DCP pipeline. Anyone
+   refitting numerically should pick ONE pipeline and stay in it; this
+   pass deliberately used both and reported both rather than picking a
+   winner.
+2. §1 discovered `userCblack` truncates to integers — this should be
+   treated as a hard constraint on ANY future fit using this lever, on
+   any scene, not just DSC03298; base-7b's own DSC07349 fit
+   (`dr=55,db=50`) happened to use integers already so is unaffected, but
+   its written Newton-refinement narrative implicitly reads as continuous
+   and should be read with this correction in mind.
+3. §2's standalone DCP reconstruction is a real, substantial piece of
+   one-off infrastructure (raw decode + full DCP pipeline in plain Node,
+   no app) built for this diagnostic; it is NOT wired into any verify
+   script or made reusable, and carries known simplifications (no
+   `raw_inset_crops` crop-frame fix, nearest-neighbor downsample, ~0.09
+   stop / 0.56 RMS residual fidelity gap even after the EV0.5 fix). Trust
+   its DIFFERENTIAL numbers (baseline vs fitted, both built the same way)
+   more than either absolute number in isolation.
+4. §2's −0.646-stop cluster-residual number for DSC03298 should be treated
+   as "in the right ballpark, cross-checked against base-4's independent
+   −0.41 to −0.77 range" rather than a precise, reproducible-to-the-mil
+   measurement — the reconstruction pipeline was hand-built once for this
+   pass and never independently re-verified against a second real render.
+5. This pass found NO new avenue for automatically deriving DSC03298's
+   black offset (same conclusion as base-7b §5 for DSC07349) and no new
+   avenue for the luma-curve gap either. Both outliers remain open,
+   unfixed, and now confirmed independent of each other for DSC03298
+   specifically.
