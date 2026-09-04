@@ -1947,3 +1947,256 @@ subagents).
    avenue for the luma-curve gap either. Both outliers remain open,
    unfixed, and now confirmed independent of each other for DSC03298
    specifically.
+
+## Stage base-5r eval: two ACRLOOK_BASE_CURVE refit candidates, evaluated —
+## recommendation: candidate A (3-scene cluster fit)
+
+Trigger: base-7c's own design fork left two viable refit shapes on the table
+without picking between them — "Curve A" (cluster fit on the 3 known-clean
+scenes {DSC04260, DSC06787, DSC09305}) vs "Curve B" (a 4-scene compromise
+joint fit adding DSC03298, excluding DSC07349). This pass fits both,
+evaluates both on real renders of all 5 scenes with the candidate curve
+injected via the `setToneCurvePoints` debug hook (no engine code touched —
+analysis/eyeball material only, per the brief), and recommends one.
+Everything lives in this session's `scratchpad/base4-diag/` (extending
+base-5's own `fit-acrlook-curve.mjs`, which already supports a
+`SCENES_OVERRIDE` env var for exactly this kind of scene-subset fit); no
+repo/engine files were changed, no commits made, no subagents used.
+
+### 1. Both curves, fit with `fit-acrlook-curve.mjs`'s existing machinery
+
+**Curve A** (`SCENES_OVERRIDE=DSC04260,DSC06787,DSC09305`) reproduces
+base-7c's own reported cluster curve exactly (cross-check, not a new fit):
+
+```
+[[0,0],[9,21],[14,33],[26,58],[47,95],[65,122],[88,153],[134,205],[255,255]]
+```
+
+| held out (LOSO) | mean (stops) | RMS (stops) |
+|---|---|---|
+| DSC04260 | −0.016 | 0.277 |
+| DSC06787 | −0.091 | 0.323 |
+| DSC09305 | +0.157 | 0.618 |
+
+Worst \|LOSO mean\| = **0.157** — comfortably inside the 0.25 gate, matching
+base-7c's own number.
+
+**Curve B** (`SCENES_OVERRIDE=DSC03298,DSC04260,DSC06787,DSC09305`, joint
+4-scene fit, DSC07349 excluded per base-7's decode-level finding that its
+divergence is per-shot and underivable):
+
+```
+[[0,0],[9,19],[13,27],[21,45],[44,89],[57,105],[80,143],[125,196],[255,255]]
+```
+
+In-sample residuals: DSC03298 mean=−0.593 rms=0.727; DSC04260 mean=+0.058
+rms=0.271; DSC06787 mean=+0.041 rms=0.260; DSC09305 mean=+0.188 rms=0.607.
+**DSC03298 does not pull into line even in its own training fit** — a
+−0.593-stop in-sample residual is barely better than curve A's out-of-sample
+−0.760 on the same scene (§2 below) — direct, quantitative confirmation of
+base-7c's §2 finding that the luma-curve gap and the WB/black-level gap are
+independent defects; a joint fit that includes DSC03298's pixels cannot buy
+much because no monotonic PCHIP curve can simultaneously satisfy its
+outlier transfer function and the other three scenes'.
+
+| held out (LOSO) | mean (stops) | RMS (stops) |
+|---|---|---|
+| DSC03298 | −0.751 | 0.879 |
+| DSC04260 | +0.078 | 0.296 |
+| DSC06787 | +0.129 | 0.298 |
+| DSC09305 | +0.331 | 0.715 |
+
+Worst \|LOSO mean\| = **0.751** — fails the 0.25 gate badly, entirely driven
+by DSC03298 (dropping it: worst is DSC09305 at 0.331, still outside the
+gate but far closer). Expected and diagnostic, not a bug: including an
+outlier scene in a 4-scene training set both fails to fix that scene AND
+measurably degrades LOSO robustness on the three clean scenes relative to
+curve A (compare +0.157/−0.091/−0.016 above to +0.331/+0.129/+0.078 here —
+every one of the three shared scenes gets a worse LOSO number under curve
+B than under curve A).
+
+### 2. Real-render 5-scene evaluation (current shipped curve vs A vs B)
+
+Rendered all 5 scenes through the real interactive app (acrlook profile
+source, amount 100, `setToneCurvePoints(id, 'rgb', <candidate>)` injected
+after the acrlook bake settles — same idiom as `render-acrlook-identity.mjs`,
+new script `render-acrlook-custom-curve.mjs`), 2048px long edge, then
+measured with `fit-acrlook-curve.mjs measure` against LR's own base JPEGs
+(exact same pixel-paired, clipped-pixel-excluded, `LR_STOPS_FLOOR`-gated
+method as every other measurement in this document). "current" reuses the
+already-on-disk `acrlook-base-exports/` (shipped `ACRLOOK_BASE_CURVE`,
+unchanged this pass):
+
+| scene | current mean (RMS) | A mean (RMS) | B mean (RMS) |
+|---|---|---|---|
+| DSC03298 | +0.149 (0.364) | **−0.760 (0.880)** | −0.594 (0.720) |
+| DSC04260 | +0.576 (0.696) | −0.027 (0.263) | +0.049 (0.256) |
+| DSC06787 | +0.676 (0.791) | −0.075 (0.284) | +0.046 (0.257) |
+| DSC07349 | −0.278 (0.471) | **−1.049 (1.091)** | −0.959 (1.006) |
+| DSC09305 | +0.829 (1.111) | +0.089 (0.535) | +0.186 (0.588) |
+| pooled mean | +0.390 | −0.364 | **−0.254** |
+
+(mean = LR − ours, stops; positive = LR brighter than our render.)
+
+Real-render numbers for the 3 cluster scenes track the in-sample fit
+residuals from §1 closely (A: −0.027/−0.075/+0.089 here vs −0.018/−0.078/
++0.093 in the analytical fit — sub-0.01-stop agreement, confirming the
+`setToneCurvePoints` injection round-trips faithfully through the real
+export pipeline). Both candidates are a large, unambiguous improvement over
+current on the 3 clean scenes (mean errors drop from +0.58/+0.68/+0.83 to
+roughly ±0.03–0.19). **DSC07349 was not merely "unfixed" as the brief
+anticipated — it measurably worsens under both candidates**, from −0.278
+(current) to −1.049 (A) / −0.959 (B): current's weaker, shallower curve
+happens to sit closer to this scene's own (already-too-bright, per base-6/7)
+transfer than either steeper refit does; both candidates apply MORE
+midtone lift than current, which pushes an already-too-bright scene
+further past LR. This is consistent with — not contradicting — base-7's
+"per-shot, structurally out of reach" verdict for DSC07349: no curve fit on
+the other scenes was ever going to help it, and a curve that fixes the
+other 4 better necessarily moves further from whatever accidentally-close
+alignment the current shallower curve has with this one outlier.
+DSC03298 gets WORSE under both candidates than under current (+0.149 →
+−0.760 / −0.594) — expected per base-7c §2 (it never joins the cluster) —
+but note current's own +0.149 is itself not "correct", just closer to zero
+by coincidence of an under-fit shallow curve; A/B's more accurate curve for
+the other 4 scenes necessarily overshoots this one further in the dark
+direction (steeper curve ⇒ more midtone lift ⇒ a scene that's already
+naturally darker than the cluster gets pushed relatively further dark by
+the SAME absolute-input-value curve, since DSC03298's own tonal
+distribution sits low — see base-7c's own reconstruction, −0.646 stops
+under the cluster curve, cross-checked here at −0.760 via the real render;
+same ballpark, different pipeline).
+
+### 3. Color side-effect check — real, measurable, and expected
+
+`toneCurve.rgb` composes the per-channel curve first, then the RGB master
+curve, "so the shader does exactly one lookup per channel"
+(`developNode.ts:572-573`) — i.e. the master curve is applied to R, G, B
+**independently**, not to a derived luma channel (matching Lightroom's own
+"RGB" channel point-curve architecture). A monotonic nonlinear per-channel
+remap is not ratio-preserving in general, so some near-neutral color drift
+between candidates is expected, not a bug. Spot-checked on DSC03298 (the
+brief's suggested scene — also the largest WB/color outlier, a useful
+stress case), same Lab C\*<6 mask methodology as §3a of this document (mask
+built from LR's own base JPEG, 46.5% of frame — cross-checked exactly
+against this doc's earlier 46.5%/0.6762/1.5165 numbers):
+
+| render | R/G | B/G |
+|---|---|---|
+| LR (self, target) | 0.6763 | 1.5164 |
+| current (shipped) | 0.6583 | 1.6987 |
+| curve A | 0.6713 | 1.5844 |
+| curve B | 0.6809 | 1.5866 |
+
+Drift relative to "current" (isolates the curve's own effect, holding the
+DCP/profile stages fixed): **curve A: ΔR/G +1.98%, ΔB/G −6.73%. Curve B:
+ΔR/G +3.44%, ΔB/G −6.60%.** Real and non-negligible — B/G moves by ~6.7%
+purely from swapping the tone curve, on top of whatever the DCP/profile
+stages already contribute to this scene's known B/G error. Both candidates
+happen to move DSC03298's ratios TOWARD the LR target on both axes here
+(R/G 0.658→0.671/0.681 vs target 0.676; B/G 1.699→1.584/1.587 vs target
+1.516) — a coincidental partial improvement, not something either curve
+was fit to do (both fits are luma-only; the WB/color axis is a completely
+separate, unrelated mechanism per base-7c §2's "two independent defects"
+finding). Since this is inherent per-channel-curve architecture (LR's own
+point curve works the same way), it is not something a future curve fit
+should try to "fix" — just something worth remembering when reading
+future WB/neutral-ratio regressions: part of any observed shift could be
+curve-driven, not DCP/profile-driven.
+
+### 4. Choice-aid artifact
+
+Eyeball comparison strips (LR | current | A | B, full 2048px-long-edge
+renders) for DSC03298 (the bridge) and DSC06787 (a clean cluster scene),
+plus the 5-scene summary table from §2, published to
+`test-artifacts/base5r-choice/index.html` (gitignored; plain static page,
+no design system — a working choice aid, not a report). Source images
+copied from this session's `scratchpad/base4-diag/{acrlook-base-exports,
+curveA-exports,curveB-exports}/` and LR's own
+`~/Desktop/FFF/lr-calib/lr-sweep-20260901/base/`.
+
+### Recommendation: candidate A
+
+**Ship curve A** (the 3-scene cluster fit) as `ACRLOOK_BASE_CURVE`'s
+base-5r refit, exactly as base-7c's own §3 already recommended before this
+pass had real-render evidence to confirm it. Reasoning, weighted toward
+"LRの見た目再現" (matching LR's look) for the user's actual most-eyeballed
+scene:
+
+- **On the 3 clean scenes, A and B are nearly tied** (both closely track
+  the same in-sample fit, since 3 of B's 4 training scenes overlap A's
+  entire training set) — B's small use of DSC03298 in its training data buys
+  it a slightly better DSC06787 number (+0.046 vs A's −0.075) but a worse
+  DSC09305 number (+0.186 vs A's +0.089) and worse LOSO robustness on
+  every shared scene (§1). Not a clear win either way on the scenes both
+  curves are actually trying to serve.
+- **On DSC03298 specifically — the user's most-eyeballed scene — B is only
+  marginally less bad than A** (−0.594 vs −0.760, a 0.166-stop difference)
+  while accepting real costs elsewhere (worse LOSO robustness on the clean
+  scenes, and B's own in-sample DSC03298 residual of −0.593 proves this
+  gap is NOT closable by curve-fitting at all — B is not "partially fixing"
+  DSC03298, it is spending fit capacity on a scene that structurally
+  cannot benefit, at the other three scenes' expense). Base-7c already
+  proved (§2, the −0.641 vs −0.646 near-zero-difference finding) that even
+  a black-level-corrected DSC03298 doesn't join the cluster; this pass
+  independently confirms via real end-to-end renders that a curve fit
+  aimed partway at DSC03298 doesn't meaningfully help it either. **The
+  0.166-stop gap does not read as a visible difference in the eyeball strip
+  at `test-artifacts/base5r-choice/index.html`** — both A and B render
+  DSC03298 clearly darker than LR, indistinguishably so to the eye; the
+  actual fix for the bridge's gap is not in the curve-fit design space this
+  task explores (per base-7c/base-7b: it needs either libraw-level
+  `cblack[4]` access or acceptance as a documented outlier).
+- **Curve A is the simpler, more principled design**: fit only on scenes
+  the curve can actually serve well, document DSC03298/DSC07349 as
+  separate open outliers (already this document's standing recommendation
+  since base-7c), rather than diluting the fit with an outlier's pixels for
+  a marginal, non-visible gain on that outlier and a measurable LOSO-
+  robustness cost on the scenes that matter.
+
+Net: **A is not just simpler but strictly better on every scene except a
+statistically-noise-level margin on DSC03298 that base-7c already showed
+isn't fixable by this mechanism.** Recommend shipping curve A, documenting
+DSC03298 and DSC07349 as before (now with fresh real-render numbers: A
+regresses DSC03298 to −0.760 and DSC07349 to −1.049 relative to today's
+shipped curve — both already-known outliers moving further from LR, an
+expected and accepted trade-off of fitting the curve correctly for the
+scenes it can serve, not a new problem this pass introduced).
+
+### Gates
+
+No repo/engine files were changed this pass (`git status` clean at
+`c5f5b94` throughout, confirmed before and after) — typecheck/vitest/verify
+chain unaffected by construction, not re-run per the brief (analysis-only,
+curve injected via the test-mode `setToneCurvePoints` debug hook, no
+subagents). The two new scratchpad scripts
+(`render-acrlook-custom-curve.mjs`, `measure-color-sideeffect.mjs`) are
+one-off diagnostics, not wired into any verify script.
+
+### Honest residuals / next steps for whoever picks this up
+
+1. §3's color-side-effect check used only DSC03298 (the brief's suggested
+   spot-check scene, also the largest color outlier) — a clean scene
+   (e.g. DSC06787) was not spot-checked the same way; the qualitative
+   claim ("per-channel curve ⇒ real but small ratio drift, a few percent")
+   should generalize since it follows directly from the shared
+   `developNode.ts` mechanism, but the exact magnitude on a clean scene is
+   unmeasured.
+2. §2's real-render pooled-mean numbers (current +0.390, A −0.364, B
+   −0.254) are unweighted-per-scene means, matching this document's
+   existing convention (`fit-acrlook-curve.mjs measure`'s own pooled-mean
+   line) — note this is a DIFFERENT weighting than §1's n-weighted
+   pooled-pixel fit itself, consistent with how every other measurement in
+   this document reports "pooled mean" (unweighted-per-scene) vs "fit"
+   (n-weighted-pixel) separately; don't conflate the two when reading
+   across sections.
+3. This pass did not re-derive or question base-7c's own decision to
+   exclude DSC07349 from curve B's training set ("decode-blocked" per the
+   brief) — base-7/base-7b's own findings (color divergence is per-shot,
+   underivable, unrelated to luma-curve fitting) are the standing
+   justification, unchanged here.
+4. The candidate curve is not yet landed in `engine/color/baseCurve.ts` —
+   per the brief, that's a follow-up tiny commit after the user picks
+   between A and B (or requests a different design entirely) using this
+   pass's tables and the `test-artifacts/base5r-choice/index.html` eyeball
+   strip.
