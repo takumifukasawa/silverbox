@@ -1,0 +1,16 @@
+{
+  "_harness": "managed by agent-harness — 直すなら harness/adapters/codex/hooks.json（正本）を直して harness update",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"$(git rev-parse --show-toplevel)/.harness/scripts/codex-deny.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

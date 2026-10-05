@@ -1,0 +1,20 @@
+{
+  "_doc": "orchestrator が毎ターン読み直す作業メモ。gitignore（ブランチ名など個人ローカルの値を含む。別の人が続ける時は捨ててゼロから起動し、実装済み範囲は git 履歴から拾い直す）。確定したことは spec / 規律 / コードのコメントに書き戻し、ここには未確定だけ残す。",
+  "plan": "docs/plans/active/<slug>.md",
+  "phase": "prepare | iterate | review | done",
+  "updated_at": "YYYY-MM-DD",
+  "branch": "",
+  "base_commit": "",
+  "progress": { "done": 0, "total": 0 },
+  "done_summaries": [
+    "T01: 1 行サマリ"
+  ],
+  "current_task": null,
+  "retry_count": 0,
+  "open_questions": [],
+  "unconfirmed_assumptions": [],
+  "final_review": {
+    "status": "not_started | done",
+    "unresolved_findings": []
+  }
+}

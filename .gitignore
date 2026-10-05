@@ -8,3 +8,8 @@ test-artifacts/
 test-assets/
 .claude/worktrees/
 tone-experiments-out/
+.harness/state/
+.harness/backup/
+.harness/conflicts/
+.harness/source.local
+.harness/private-patterns.local
