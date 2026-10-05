@@ -1,0 +1,1976 @@
+#!/usr/bin/env bash
+# harness — agent-harness をプロジェクトに導入・更新・吸い上げする CLI
+#
+#   harness init   [--source <path|git-url>] [--ref <branch|tag>] [--agents claude,codex]
+#   harness update [--ref <branch|tag>]
+#   harness status
+#   harness diff
+#   harness upstream <path>...
+#   harness check  [--fast]
+#   harness gc     [--days N] [--strict]  # docs の腐敗検知
+#   harness doctor                        # 環境と導入状態の診断
+#   harness task   start|done <id>        # 所要時間の記録。id はタスクでもレビューでもよい（docs/spec/task-timing.md）
+#   harness eta    [--json]               # 進捗と残り時間の推定を出す（docs/spec/task-timing.md）
+#   harness self-install [--dir <dir>]   # `harness` を PATH に置く（Windows は harness.cmd も）
+#   harness version
+#
+# source の解決順: 環境変数 HARNESS_SOURCE > .harness/source.local > .harness/manifest.json の source
+#   manifest はコミットされる共有ファイル。機械依存の絶対パスは書かず、この PC / この worktree 用の
+#   source は .harness/source.local（gitignore 対象）か HARNESS_SOURCE で与える。
+#
+# 設計: DESIGN.md §6（所有権）, §8（コマンド）。依存は git と bash だけ。
+# この CLI 自身も .harness/bin/harness（+ harness.cmd）としてプロジェクトに同梱されるので、
+# clone した PC では `.harness/bin/harness update` がそのまま動く。
+# PATH に置いた harness は、プロジェクト内では同梱コピーへ委譲する（版がプロジェクトに固定される）。
+set -euo pipefail
+
+DEFAULT_SOURCE="https://github.com/takumifukasawa/agent-harness.git"
+MANIFEST_REL=".harness/manifest.json"
+SOURCE_LOCAL_REL=".harness/source.local"
+BEGIN_RE='<!-- harness:begin'
+END_RE='<!-- harness:end -->'
+
+# ---------------------------------------------------------------- util
+die()  { echo "harness: $*" >&2; exit 1; }
+info() { echo "harness: $*"; }
+now() { date +%Y-%m-%d; }
+ts() { date +%Y%m%d-%H%M%S; }
+
+# ---------------------------------------------------------------- A3: 途中失敗の可視化
+# init / update は apply_plan（ファイルを配る）→ write_manifest（manifest.json を書く）の順で
+# 進む。set -e のもとでは apply_plan の途中（mkdir -p や cp）が失敗すると、manifest.json を
+# 書く前にスクリプトごと落ちる。そのとき途中まで配ったファイルが $ROOT に残るのに、「manifest は
+# 書いていないので導入は完了していない」と気づく手段が無かった（docs/spec/no-silent-failures.md
+# の A3。実機再現: docs をファイルで塞いで init すると 20 件超の残骸が残るが、それを教える
+# メッセージは無く、doctor も manifest.json が無いというだけで即 exit 2 していた）。
+#
+# cmd_init / cmd_update は apply_plan を呼ぶ直前に INSTALL_TRAP_MODE を立て、write_manifest が
+# 成功したら空に戻す。その区間で（原因を問わず）非 0 終了したら、ここで案内を出す。区間の外
+# （まだ 1 つもファイルを配る前、または manifest.json を書き終えた後）の失敗では何も言わない
+# （残骸が無い/導入は完了しているので、この案内は的外れになる）。
+#
+# reexec_if_vendored が作る一時コピー（HARNESS_REEXEC_TMP）の掃除もここで兼ねる。trap は 1 つの
+# シグナルにつき 1 つしか効かない（後から trap すると前のものが黙って消える）ので、2 か所に
+# 分けて trap すると cmd_update の一時ファイル掃除が消える。1 か所にまとめて両方を面倒見る。
+INSTALL_TRAP_MODE=""
+on_script_exit() {
+  local status=$?
+  [ -n "${HARNESS_REEXEC_TMP:-}" ] && rm -f "$HARNESS_REEXEC_TMP"
+  if [ -n "$INSTALL_TRAP_MODE" ] && [ "$status" -ne 0 ]; then
+    {
+      echo
+      echo "harness: ${INSTALL_TRAP_MODE} は失敗した（終了コード ${status}）。上に出ているエラーを直す。"
+      if [ "$INSTALL_TRAP_MODE" = init ]; then
+        echo "         manifest.json はまだ書いていない。この導入はまだ完了していない。"
+      else
+        echo "         manifest.json はまだ今回の内容に更新していない（途中まで配った分と manifest の記録が食い違っている可能性がある）。"
+      fi
+      echo "         上の出力にある '+' / 'seed' / 'update' / 'restore' 行の分だけ、${ROOT:-このディレクトリ} に途中までのファイルが残っている可能性がある（自動では消さない）。"
+      echo "         原因を直してから同じコマンド（${INSTALL_TRAP_MODE}）をもう一度実行する（配布は冪等）。状態を確認するには: bash .harness/bin/harness doctor"
+    } >&2
+  fi
+  return 0
+}
+
+# 内容ハッシュ。フィルタを通さない生バイトで取る。
+# 素の `git hash-object` は .gitattributes の text/eol と core.autocrlf を適用するので、CRLF 化しただけの
+# 導入コピーを「未変更」と誤判定する。これに騙されるのは status の MODIFIED 判定、update の上書き判断、
+# 検査 "installed copies in sync" の 3 つ全部（scripts/doctor.sh の content_eq と同じ方針）。
+#
+# ハッシュ 1 件につき `git hash-object` を 1 プロセス起動すると、init / update のようにファイル数ぶん
+# 繰り返す経路で**計算ではなくプロセス起動が支配的**になる（実測 2026-09-21: 82 ファイルを 1 件ずつなら
+# 0.92 秒、`--stdin-paths` でまとめて 1 回なら 0.032 秒）。そこで `git hash-object --stdin-paths` を
+# **1 プロセスだけ常駐**させ、fifo でパスを 1 行送ってハッシュを 1 行読む。`--no-filters` は付けたまま
+# なので、上の CRLF の意味論は変わらない。常駐に失敗した / パスが行指向で渡せない場合は 1 件ずつの
+# 起動へそのまま落ちるので、結果は常に同じ。
+# fifo の fd は 3（パスを書く側）と 4（ハッシュを読む側）で固定する。
+HASH_SRV_DIR=""      # 常駐サーバの fifo 置き場（空なら常駐していない＝1 件ずつ起動する）
+
+# `git hash-object --stdin-paths` に 1 行として渡せるパスか。渡せないものは呼び出し側で 1 件ずつに落とす。
+#   - 改行 / CR を含む: 行区切りが壊れる（git は行末の CR も落とす）
+#   - `"` で始まる: git がその行を C クォートとして解釈し、アンクォートしてしまう
+hash_path_line_safe() { # path
+  case "$1" in
+    ""|'"'*) return 1;;
+    *$'\n'*|*$'\r'*) return 1;;
+  esac
+  return 0
+}
+
+# 常駐サーバを起動する（起動できなければ黙って 1 件ずつの経路のままにする）。
+# ハッシュを何度も取る経路（apply_plan / status / diff）の頭で呼ぶ。hash_of の中から呼んでも、
+# hash_of は `$(...)` の subshell で呼ばれるため fd が親に残らず毎回起動し直しになるので、ここは親で呼ぶ。
+hash_server_start() {
+  [ -n "$HASH_SRV_DIR" ] && return 0
+  command -v mkfifo >/dev/null 2>&1 || return 0
+  # `--stdin-paths` と `--no-filters` を同時に解する git か、空の標準入力で 1 回だけ確かめる。
+  # 解さない git でここを飛ばすと、常駐は起動だけして即死し、最初の 1 件で read の待ち時間を丸ごと
+  # 捨てることになる（実測: 待ち時間ぶん init が 1.5 秒 → 12 秒に伸びた）。プロセス 1 つで防げる。
+  git hash-object --no-filters --stdin-paths </dev/null >/dev/null 2>&1 || return 0
+  local d h; d="$(mktemp -d 2>/dev/null)" || return 0
+  mkfifo "$d/in" "$d/out" 2>/dev/null || { rm -rf "$d"; return 0; }
+  # fifo は `<>`（読み書き）で開く。片側だけで開くと相手が開くまでブロックするので、git の起動に
+  # 失敗した場合にここで永久に止まる。両端を自分で持てば open は必ず即座に返る。
+  # コマンドを伴わない `exec 2>/dev/null` は 1 行に見えて実はシェル全体に永続適用され、以後の
+  # stderr が全部消える（bash のよくある落とし穴。tech-debt #15）。`{ ...; } 2>/dev/null` に
+  # 包むと、fd 2 のリダイレクトはこのブロックの実行中だけに限定される一方、exec が本来やりたい
+  # fd 3 / 4 の恒久的な差し替えはブロックを抜けても残る（`{ }` の redirect は exec 前の fd を
+  # 退避 → 復元するが、exec 自身が明示的に開いた fd 3 / 4 はその退避の対象ではないため）。
+  { exec 3<>"$d/in" 4<>"$d/out"; } 2>/dev/null || { rm -rf "$d"; return 0; }
+  # 子からは fifo の fd 3 / 4 を落とす。子が in の書き側を持ったままだと、親が fd 3 を閉じても
+  # git に EOF が届かず終了しない。
+  git hash-object --no-filters --stdin-paths <"$d/in" >"$d/out" 2>/dev/null 3>&- 4>&- &
+  HASH_SRV_DIR="$d"
+  # 疎通確認。既知の 1 件で往復できることをここで一度だけ確かめ、駄目なら常駐をやめて 1 件ずつに戻す
+  # （上の能力確認を通っていれば普通は通る。標準出力が行ごとに流れない git 実装への保険）。
+  printf 'harness hash probe\n' >"$d/probe"
+  h="$(hash_ask "$d/probe")" || h=""
+  case "$h" in ""|*[!0-9a-f]*) hash_server_stop;; esac
+  return 0
+}
+
+hash_server_stop() {
+  [ -n "$HASH_SRV_DIR" ] || return 0
+  # ここも同じ理由（tech-debt #15）で `{ ...; } 2>/dev/null` に包む。bare exec の 2>/dev/null は
+  # 1 行に見えてシェル全体へ永続適用されるので、包まないと stop 後の（apply_plan / cmd_update の
+  # 残り、次のコマンド呼び出し等）stderr まで一緒に消える。
+  { exec 3>&- 4>&-; } 2>/dev/null || true
+  rm -rf "$HASH_SRV_DIR" 2>/dev/null || true
+  HASH_SRV_DIR=""
+  return 0
+}
+
+# 常駐サーバに 1 件聞く。返らなければ空を返す（呼び出し側が 1 件ずつの経路へ落ちる）。
+# `read -t` はサーバが死んだ場合の保険。bash 3.2 の -t は整数秒しか取れない（決定 0006）。
+hash_ask() { # path → hash（取れなければ空 + 非 0）
+  local h=""
+  printf '%s\n' "$1" >&3 2>/dev/null && read -t 10 -r h <&4 2>/dev/null || h=""
+  [ -n "$h" ] || return 1
+  printf '%s' "$h"
+}
+
+hash_of() { # file
+  local h=""
+  if [ -n "$HASH_SRV_DIR" ] && hash_path_line_safe "$1"; then h="$(hash_ask "$1")" || h=""; fi
+  [ -n "$h" ] || h="$(git hash-object --no-filters "$1" 2>/dev/null || true)"
+  [ -n "$h" ] || die "内容ハッシュを取れない: $1（git が要る）"
+  printf '%s' "$h"
+}
+
+# grep -c は 0 件のとき "0" を出して exit 1 を返す。`|| echo 0` を足すと出力が "0\n0" になり、
+# 続く整数比較が「integer expression expected」で失敗して条件が常に偽になる。数は必ずここを通す。
+count_lines() { # 正規表現 ファイル → 整数
+  local n; n="$(grep -c "$1" "$2" 2>/dev/null || true)"; n="${n%%[!0-9]*}"; printf '%s' "${n:-0}"
+}
+
+# 上書き前に変更前の内容を .harness/backup/<ts>/ へ退避する（ローカルの変更を黙って捨てない）
+backup_file() { # backup_dir dest_rel
+  mkdir -p "$1/$(dirname "$2")" && cp "$ROOT/$2" "$1/$2"
+}
+
+project_root() {
+  local r; r="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+  # Git for Windows は C:/... を返す。MSYS の /c/... 形式に揃える（比較やメッセージの一貫性のため）
+  if command -v cygpath >/dev/null 2>&1; then cygpath -u "$r"; else echo "$r"; fi
+}
+
+# 「同じスクリプトか」はパス文字列や -ef で判定しない（Windows で C:/ と /c/ と /tmp が混在し一致しない）。
+# 内容が同一なら同じものとして扱う。この用途（委譲の抑止、自己上書きの回避）では内容一致で十分。
+# ここだけは改行コードの違いを無視する（hash_of の生バイト比較とは別）。CRLF 化しただけの同梱コピーを
+# 「別のスクリプト」と見なすと、正本側の bin/harness が壊れた同梱コピーへ exec してしまい、直す道が塞がる。
+same_script() { # a b
+  [ -f "$1" ] && [ -f "$2" ] || return 1
+  [ "$(tr -d '\r' <"$1" | git hash-object --stdin)" = "$(tr -d '\r' <"$2" | git hash-object --stdin)" ]
+}
+
+# この CLI が agent-harness リポジトリの中から実行されているなら、そのパスを返す
+# 標準入力から実行された（curl <公開 URL>/bin/harness | bash -s -- init）ときは BASH_SOURCE が
+# 設定されない。set -u のもとで素に参照すると "BASH_SOURCE[0]: unbound variable" になり、
+# ここでは subshell が死ぬだけなので**エラーを出しながら処理は続く**という分かりにくい出方をする
+# （2026-09-20、macOS bash 3.2.57 で実測）。その場合は「リポジトリの中からではない」とみなす。
+self_repo() {
+  local src="${BASH_SOURCE[0]:-}" here
+  [ -n "$src" ] || { echo ""; return 0; }
+  here="$(cd "$(dirname "$src")" 2>/dev/null && pwd || echo "")"
+  [ -n "$here" ] && [ -f "$here/../VERSION" ] && [ -d "$here/../harness" ] && (cd "$here/.." && pwd) || echo ""
+}
+
+# source（ローカルパス or git URL）を解決し、ペイロードのあるディレクトリを返す
+# git URL の場合は ~/.cache/agent-harness/<hash> に clone / fetch する
+resolve_source() {
+  local src="$1" ref="${2:-}"
+  if [ -d "$src" ]; then
+    (cd "$src" && pwd); return
+  fi
+  local cache="${HOME}/.cache/agent-harness/$(printf '%s' "$src" | sha256sum | cut -c1-12)"
+  if [ ! -d "$cache/.git" ]; then
+    info "fetching $src" >&2
+    git clone --quiet "$src" "$cache" >&2 || die "clone に失敗: $src"
+  else
+    git -C "$cache" fetch --quiet --tags origin >&2 || die "fetch に失敗: $src"
+  fi
+  if [ -n "$ref" ]; then
+    git -C "$cache" checkout --quiet "$ref" >&2 || die "ref が見つからない: $ref"
+    git -C "$cache" pull --quiet --ff-only origin "$ref" >/dev/null 2>&1 || true
+  else
+    local def
+    def="$(git -C "$cache" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)"
+    git -C "$cache" checkout --quiet "$def" >&2 && git -C "$cache" pull --quiet --ff-only origin "$def" >&2 || true
+  fi
+  echo "$cache"
+}
+
+# ---------------------------------------------------------------- source の解決順
+# manifest.json は**コミットされる共有ファイル**なので、機械依存の絶対パスを置かない（決定 0004）。
+# その PC / その worktree だけの source は gitignore 対象の上書きへ逃がす。
+#   解決順: 環境変数 HARNESS_SOURCE > .harness/source.local > manifest.json の source
+# これを外すと、worktree の中の update が manifest（= main tree の絶対パス）を見に行き、
+# main tree の未コミット変更を取り込む（2026-09-18 に実害。docs/learnings.md）。
+read_source_local() { # file → 先頭の実効行（# で始まる行と空行は読み飛ばす）
+  local v
+  v="$(sed -e 's/\r$//' -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$1" 2>/dev/null | head -1 || true)"
+  printf '%s' "$v"
+}
+
+# 実効 source を "値<TAB>由来" で返す（ROOT が決まってから呼ぶ）
+effective_source() {
+  local v
+  if [ -n "${HARNESS_SOURCE:-}" ]; then printf '%s\t%s' "$HARNESS_SOURCE" "env HARNESS_SOURCE"; return 0; fi
+  if [ -f "$ROOT/$SOURCE_LOCAL_REL" ]; then
+    v="$(read_source_local "$ROOT/$SOURCE_LOCAL_REL")"
+    [ -n "$v" ] && { printf '%s\t%s' "$v" "$SOURCE_LOCAL_REL"; return 0; }
+  fi
+  printf '%s\t%s' "$(manifest_get source)" "manifest"
+}
+
+# 機械ローカルの source を書く。gitignore 対象なのでコミットされない。
+write_source_local() { # path
+  mkdir -p "$ROOT/.harness"
+  {
+    echo "# harness の source の機械ローカル上書き。gitignore 対象＝コミットしない。"
+    echo "# manifest.json の source は共有値（既定は公開リポジトリの URL）。この PC の clone や"
+    echo "# worktree を使いたいときだけ、その絶対パスを 1 行書く（# で始まる行と空行は無視する）。"
+    echo "# 解決順: 環境変数 HARNESS_SOURCE > .harness/source.local > manifest.json の source"
+    printf '%s\n' "$1"
+  } >"$ROOT/$SOURCE_LOCAL_REL"
+}
+
+# manifest に書いてよい共有値か（URL なら共有できる。ローカル絶対パスは機械依存なので不可）
+is_shared_source() { # value
+  case "$1" in
+    http://*|https://*|ssh://*|git://*|git@*) return 0;;
+    *) return 1;;
+  esac
+}
+
+# ---------------------------------------------------------------- manifest
+# 1 エントリ 1 行の JSON。bash だけで読めるよう、書式を固定する。
+#   {"path":"...","src":"...","ownership":"managed|seed|merge|generated","sha256":"...","source_sha256":"..."}
+manifest_path() { echo "$ROOT/$MANIFEST_REL"; }
+
+manifest_get() { # key
+  sed -n "s/^  \"$1\": *\"\(.*\)\",\{0,1\}$/\1/p" "$(manifest_path)" | head -1
+}
+
+# path<TAB>src<TAB>ownership<TAB>sha256<TAB>source_sha256
+manifest_entries() {
+  [ -f "$(manifest_path)" ] || return 0
+  grep '^    {"path"' "$(manifest_path)" | sed -E \
+    's/.*"path":"([^"]*)".*"src":"([^"]*)".*"ownership":"([^"]*)".*"sha256":"([^"]*)".*"source_sha256":"([^"]*)".*/\1\t\2\t\3\t\4\t\5/'
+}
+
+# bash 3.2 には連想配列（declare -A）が無いので、apply_plan の「更新前の manifest から
+# path ごとに sha256 / source_sha256 を引く」だけを、一時ファイル + awk の検索に置き換える
+# （決定 0006）。apply_plan の開始時に OLD_ENTRIES_FILE へ manifest_entries を書き出しておく。
+OLD_ENTRIES_FILE=""
+old_manifest_field() { # path field(4=sha256|5=source_sha256)
+  [ -n "$OLD_ENTRIES_FILE" ] && [ -f "$OLD_ENTRIES_FILE" ] || return 0
+  awk -F'\t' -v p="$1" -v f="$2" '$1==p{v=$f;found=1} END{if(found)print v}' "$OLD_ENTRIES_FILE"
+}
+
+# 収集したエントリ（配列 ENTRIES、TSV 行）から manifest を書く
+write_manifest() {
+  local version="$1" source="$2" ref="$3" agents="$4"
+  local out; out="$(manifest_path)"
+  mkdir -p "$(dirname "$out")"
+  {
+    echo "{"
+    echo "  \"harness_version\": \"$version\","
+    echo "  \"source\": \"$source\","
+    echo "  \"source_ref\": \"$ref\","
+    echo "  \"installed_at\": \"$(now)\","
+    echo "  \"agents\": \"$agents\","
+    echo "  \"files\": ["
+    local n=${#ENTRIES[@]} i=0 e
+    for e in "${ENTRIES[@]}"; do
+      i=$((i + 1))
+      IFS=$'\t' read -r p s o h sh <<<"$e"
+      printf '    {"path":"%s","src":"%s","ownership":"%s","sha256":"%s","source_sha256":"%s"}%s\n' \
+        "$p" "$s" "$o" "$h" "$sh" "$([ $i -lt $n ] && echo ',')"
+    done
+    echo "  ]"
+    echo "}"
+  } >"$out"
+}
+
+# ---------------------------------------------------------------- install plan
+# ペイロード → プロジェクトの対応表を TSV で出す: src<TAB>dest<TAB>ownership
+# src は $PAYLOAD 配下の相対パス（"@self" は CLI 自身）
+plan() {
+  local agents="$1" f rel
+  # CLI 自身（+ Windows の PowerShell / cmd から呼ぶためのシム）
+  echo -e "@self\t.harness/bin/harness\tmanaged"
+  echo -e "@self-cmd\t.harness/bin/harness.cmd\tmanaged"
+  # スクリプト
+  for f in "$PAYLOAD/scripts/"*; do
+    [ -f "$f" ] || continue
+    echo -e "scripts/$(basename "$f")\t.harness/scripts/$(basename "$f")\tmanaged"
+  done
+  echo -e "checks.seed.sh\t.harness/checks.sh\tseed"
+  # 状態の雛形
+  for f in "$PAYLOAD/state-template/"*; do
+    [ -f "$f" ] || continue
+    echo -e "state-template/$(basename "$f")\t.harness/state-template/$(basename "$f")\tmanaged"
+  done
+  # スキル → .agents/skills/
+  while IFS= read -r f; do
+    rel="${f#"$PAYLOAD"/skills/}"
+    echo -e "skills/$rel\t.agents/skills/$rel\tmanaged"
+    case ",$agents," in *,claude,*) echo -e "skills/$rel\t.claude/skills/$rel\tmanaged";; esac
+  done < <(find "$PAYLOAD/skills" -type f | sort)
+  # docs 雛形 → docs/（seed）
+  while IFS= read -r f; do
+    rel="${f#"$PAYLOAD"/docs-template/}"
+    echo -e "docs-template/$rel\tdocs/$rel\tseed"
+  done < <(find "$PAYLOAD/docs-template" -type f ! -name .gitkeep | sort)
+  # AGENTS.md（merge）
+  echo -e "AGENTS.core.md\tAGENTS.md\tmerge"
+  # Claude アダプタ
+  case ",$agents," in *,claude,*)
+    echo -e "adapters/claude/CLAUDE.md.template\tCLAUDE.md\tmanaged"
+    echo -e "adapters/claude/settings.fragment.json\t.harness/adapters/claude.settings.fragment.json\tmanaged"
+    for r in implementer reviewer; do
+      echo -e "docs-template/roles/$r.md\t.claude/agents/$r.md\tgenerated"
+    done
+  ;; esac
+  # Codex アダプタ: 役割文を明示呼び出し用スキルに（$role-implementer）+ 標準 deny の hook（決定 0009）
+  case ",$agents," in *,codex,*)
+    for r in implementer reviewer; do
+      echo -e "docs-template/roles/$r.md\t.agents/skills/role-$r/SKILL.md\tgenerated"
+    done
+    # Codex の PreToolUse hook。Claude 側の .claude/settings.json の deny と同じ 5 つを止める。
+    # Codex を使わないプロジェクトには配らない（--agents の指定に従う）。
+    echo -e "adapters/codex/hooks.json\t.codex/hooks.json\tmanaged"
+    echo -e "adapters/codex/deny.sh\t.harness/scripts/codex-deny.sh\tmanaged"
+  ;; esac
+  # git hooks
+  echo -e "@pre-commit\t.githooks/pre-commit\tmanaged"
+}
+
+# ペイロード側の内容をファイルに書き出す（src の種類ごとの生成を含む）
+render_src() { # src dest_tmp
+  local src="$1" tmp="$2"
+  case "$src" in
+    @self)
+      if [ -n "$SELF_PATH" ]; then cp "$SELF_PATH" "$tmp"; else cp "$PAYLOAD/../bin/harness" "$tmp"; fi ;;
+    @self-cmd) write_cmd_shim "$tmp" ;;
+    AGENTS.core.md)
+      # マーカーの版はペイロードの VERSION から埋める（手で合わせない）
+      sed "s/<!-- harness:begin v=[^ ]* -->/<!-- harness:begin v=${HVER} -->/" "$PAYLOAD/$src" >"$tmp" ;;
+    @pre-commit)
+      cat >"$tmp" <<'EOF'
+#!/usr/bin/env bash
+# agent-harness managed: 速い検査だけを pre-commit で回す（有効化: git config core.hooksPath .githooks）
+exec bash "$(git rev-parse --show-toplevel)/.harness/scripts/check.sh" --fast
+EOF
+      ;;
+    *) cp "$PAYLOAD/$src" "$tmp" ;;
+  esac
+}
+
+# Windows 用シム。cmd / PowerShell から `harness ...` を bash の本体へ渡す（Git for Windows の bash）。
+write_cmd_shim() { # dest
+  printf '@echo off\r\nbash "%%~dp0harness" %%*\r\n' >"$1"
+}
+
+# docs/roles/<r>.md → .claude/agents/<r>.md（kind=agent）または .agents/skills/role-<r>/SKILL.md（kind=skill）
+render_agent() { # role_src_file dest_tmp role_name kind
+  local role="$1" tmp="$2" name="$3" kind="${4:-agent}" desc
+  # description は H1（例: "# implementer — 実装（タスク 1 つにつき 1 体）"）から取る
+  desc="$(grep -m1 '^# ' "$role" | sed 's/^# *//; s/"/\\"/g')"
+  {
+    echo "---"
+    if [ "$kind" = "skill" ]; then
+      echo "name: role-$name"
+      echo "description: 役割「${name}」として動く。統括（task-orchestrate）から指示を受けて呼ばれる。${desc:-}"
+    else
+      echo "name: $name"
+      echo "description: ${desc:-agent-harness role $name}"
+      # model は書かない。frontmatter の model はユーザーのサブエージェント既定（CLAUDE_CODE_SUBAGENT_MODEL）より
+      # 優先され、inherit でも親（統括）のモデルで走る（決定 0011、2026-09-29 実機確認）。モデルは統括が起動時に渡す。
+    fi
+    echo "---"
+    echo
+    echo "<!-- generated by agent-harness from docs/roles/$name.md — edit the source, not this file -->"
+    echo
+    cat "$role"
+  } >"$tmp"
+}
+
+# AGENTS.md の managed ブロックを差し替え / 挿入する。ブロック外（プロジェクトの記述）は必ず残す。
+#   - ブロックが複数あれば 1 つに畳む（最初のブロックの位置に新版を置き、残りの領域は落とす）
+#   - end マーカーが見つからない begin は、その 1 行だけを落とす。ファイル末尾までを巻き込んで消すと
+#     プロジェクトの記述が飛ぶので、残骸を残す方を選ぶ（残骸は呼び出し側が案内する）
+merge_agents_md() { # block_file dest
+  local block="$1" dest="$2" tmp
+  tmp="$(mktemp)"
+  if [ -f "$dest" ] && grep -q "$BEGIN_RE" "$dest"; then
+    awk -v blk="$block" -v b="$BEGIN_RE" -v e="$END_RE" '
+      NR==FNR {                                  # 1 周目: 落とす行に印を付ける
+        if (index($0,b)==1) { if (open) del[open]=1; open=FNR }
+        else if (open && index($0,e)==1) { for (i=open;i<=FNR;i++) del[i]=1; open=0 }
+        next
+      }
+      FNR==1 && open { del[open]=1; open=0 }     # 2 周目の頭: end の無い begin は 1 行だけ落とす
+      {
+        if (del[FNR]) { if (!put) { while ((getline l < blk) > 0) print l; put=1 } ; next }
+        print
+      }' "$dest" "$dest" >"$tmp"
+  elif [ -f "$dest" ]; then
+    { cat "$block"; echo; cat "$dest"; } >"$tmp"
+  else
+    { cat "$block"; echo; echo "# プロジェクト固有のルール"; echo; echo "<!-- ここから下はプロジェクトが書く。目的、ディレクトリ構成、ビルド/テストコマンド、規約、やらないこと -->"; } >"$tmp"
+  fi
+  mv "$tmp" "$dest"
+}
+
+# managed ブロックだけを取り出してハッシュ。ブロックが複数あれば全部を連結して見る
+# （先頭だけを見ると、ブロックが重複していても「未変更」になり、status も update も気付かない）。
+block_hash() { # file
+  awk -v b="$BEGIN_RE" -v e="$END_RE" 'index($0,b)==1{p=1} p{print} p&&index($0,e)==1{p=0}' "$1" | git hash-object --stdin
+}
+
+ensure_gitignore() {
+  local gi="$ROOT/.gitignore" line
+  for line in ".harness/state/" ".harness/backup/" ".harness/conflicts/" "$SOURCE_LOCAL_REL"; do
+    grep -qxF "$line" "$gi" 2>/dev/null || echo "$line" >>"$gi"
+  done
+}
+
+# Windows の core.autocrlf で bash スクリプトが CRLF になると動かず、ハッシュ比較も狂う。LF を強制する。
+ensure_gitattributes() {
+  local ga="$ROOT/.gitattributes" line
+  # ハッシュ比較の対象（managed / generated とその生成元）はすべて LF 固定にする
+  for line in ".harness/** text eol=lf" ".harness/bin/harness.cmd text eol=crlf" ".githooks/** text eol=lf" ".agents/** text eol=lf" ".claude/** text eol=lf" "docs/roles/** text eol=lf" "AGENTS.md text eol=lf" "CLAUDE.md text eol=lf"; do
+    grep -qxF "$line" "$ga" 2>/dev/null || echo "$line" >>"$ga"
+  done
+}
+
+# サブディレクトリの AGENTS.md の隣に CLAUDE.md アダプタを置く
+ensure_nested_claude_md() {
+  local f d
+  while IFS= read -r f; do
+    d="$(dirname "$f")"
+    [ "$d" = "$ROOT" ] && continue
+    if [ ! -f "$d/CLAUDE.md" ]; then
+      cp "$PAYLOAD/adapters/claude/CLAUDE.md.template" "$d/CLAUDE.md"
+      info "  + ${d#"$ROOT"/}/CLAUDE.md (adapter for nested AGENTS.md)"
+    fi
+  done < <(find "$ROOT" -name AGENTS.md -not -path '*/.git/*' -not -path '*/node_modules/*' -not -path '*/.harness/*')
+}
+
+# ---------------------------------------------------------------- apply (init/update 共通)
+# 各 plan 行を所有権規則で適用し、ENTRIES を組み立てる
+apply_plan() { # agents mode(init|update)
+  local agents="$1" mode="$2"
+  hash_server_start   # ファイル数ぶんハッシュを取る経路。1 件ずつ git を起動しない（hash_of 参照）
+  local backup="$ROOT/.harness/backup/$(ts)" conflicts="$ROOT/.harness/conflicts"
+  # bash 3.2 に連想配列は無い（決定 0006）。path→sha256/source_sha256 の引き当ては
+  # old_manifest_field()（一時ファイル + awk）で行う。抜けた古い manifest ("" になる)。
+  OLD_ENTRIES_FILE="$(mktemp)"
+  # manifest.json が壊れていて "path" 行が 1 つも無い（grep が 0 件で exit 1 を返す）ことがある
+  # （B3 の想定シナリオ）。元は `< <(manifest_entries)` という process substitution 越しに読んでいて
+  # set -e の対象外だったので落ちなかった。ここは直接のコマンドなので || true で同じ耐性を保つ。
+  manifest_entries >"$OLD_ENTRIES_FILE" || true
+
+  # seed の配布先と大文字小文字違いの既存ファイルの衝突（tech-debt #13）。判定ロジックは
+  # harness/scripts/seed-case.sh に集約してあり（doctor.sh と共有。理由はそのファイルの
+  # コメント）、apply_plan は $PAYLOAD から直接 source する（他の render_src 等と同じく、
+  # 配布中の版が正）。無ければ（古い source）検出せずスキップする。
+  local seed_ci=0
+  if [ -f "$PAYLOAD/scripts/seed-case.sh" ]; then
+    . "$PAYLOAD/scripts/seed-case.sh"
+    fs_case_insensitive "$ROOT" && seed_ci=1
+  fi
+
+  ENTRIES=()
+  local n_new=0 n_up=0 n_res=0 n_keep=0 n_conf=0 n_seed=0 n_caseconf=0
+  local src dest own tmp abs newhash curhash srchash
+  # 一時ファイルは 1 つを使い回す（render_src / render_agent はいずれも > で上書きするので、
+  # 前のファイルの内容が残ることはない）。plan の行ごとに mktemp + rm を起動すると、それだけで
+  # 88 プロセス ≒ 0.16 秒になる（実測 2026-09-21。`docs/spec/check-speed.md` の B2）。
+  tmp="$(mktemp)"
+  while IFS=$'\t' read -r src dest own; do
+    abs="$ROOT/$dest"
+    srchash=""
+    case "$own" in
+      generated)
+        # 生成元は プロジェクト側の seed（docs/roles/x.md）。無ければペイロードの雛形から。
+        local rolename rolefile kind="agent"
+        rolename="$(basename "$src" .md)"
+        rolefile="$ROOT/docs/roles/$rolename.md"
+        [ -f "$rolefile" ] || rolefile="$PAYLOAD/$src"
+        case "$dest" in .agents/skills/role-*) kind="skill";; esac
+        render_agent "$rolefile" "$tmp" "$rolename" "$kind"
+        srchash="$(hash_of "$rolefile")"
+        ;;
+      merge) render_src "$src" "$tmp" ;;
+      *)     render_src "$src" "$tmp" ;;
+    esac
+    newhash="$(hash_of "$tmp")"
+
+    if [ "$own" = "seed" ]; then
+      # [ -f "$abs" ] は case を区別しない FS では大文字小文字違いの既存ファイルにも真になる
+      # （それが tech-debt #13 の原因）ので、その判定より前に seed_case_collision で別に見る。
+      local seed_existing=""
+      if [ "$seed_ci" = 1 ]; then
+        seed_existing="$(seed_case_collision "$ROOT" "$dest" "$seed_ci" 2>/dev/null)" || true
+      fi
+      if [ -f "$abs" ]; then n_keep=$((n_keep + 1)); else
+        mkdir -p "$(dirname "$abs")"; cp "$tmp" "$abs"; n_seed=$((n_seed + 1)); info "  seed  $dest"
+      fi
+      if [ -n "$seed_existing" ]; then
+        n_caseconf=$((n_caseconf + 1))
+        info "  CASE-CONFLICT $dest ($(case_collision_reason "$dest" "$seed_existing" seed))"
+        info "    直し方: $(case_collision_fix "$dest" "$seed_existing")"
+      fi
+      ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"-"$'\t'"-")
+    elif [ "$own" = "merge" ]; then
+      # AGENTS.md: managed ブロックだけを現行版に戻す。ブロック外（プロジェクトの記述）は触らない。
+      # ブロックの中を手で直していても conflicts に逃がさず直す（ブロックは harness が正本。決定 0002）。
+      local nbegin=0 nend=0
+      if [ -f "$abs" ]; then
+        nbegin="$(count_lines "$BEGIN_RE" "$abs")"; nend="$(count_lines "$END_RE" "$abs")"
+      fi
+      if [ "$nbegin" -eq 1 ] && [ "$nend" -eq 1 ]; then
+        curhash="$(block_hash "$abs")"
+        if [ "$curhash" = "$newhash" ]; then
+          n_keep=$((n_keep + 1)); ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"$newhash"$'\t'"-"); continue
+        fi
+        backup_file "$backup" "$dest"
+        merge_agents_md "$tmp" "$abs"; n_up=$((n_up + 1))
+        info "  merge $dest (managed ブロックを現行版に戻した。変更前: ${backup#"$ROOT"/}/$dest)"
+      elif [ "$nbegin" -ge 1 ]; then
+        # マーカーが壊れている（ブロックの重複、end の消失）。1 対に畳む。
+        backup_file "$backup" "$dest"
+        merge_agents_md "$tmp" "$abs"; n_up=$((n_up + 1))
+        info "  merge $dest (マーカーが壊れていた: begin=$nbegin end=$nend → 1 対に畳んだ。変更前: ${backup#"$ROOT"/}/$dest)"
+        [ "$nend" -lt "$nbegin" ] && info "        end マーカーの無かったブロックの中身は消さずに残してある。要らなければ手で消す。"
+      else
+        merge_agents_md "$tmp" "$abs"; n_up=$((n_up + 1)); info "  merge $dest"
+      fi
+      ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"$(block_hash "$abs")"$'\t'"-")
+    elif [ "$dest" = "CLAUDE.md" ]; then
+      # CLAUDE.md は import スタブ。プロジェクトが書いた内容は残し、@AGENTS.md の行だけを保証する
+      # （managed だが上書きはしない。テンプレを被せると既存の記述が消えるため。決定 0002）。
+      if [ ! -f "$abs" ]; then
+        mkdir -p "$(dirname "$abs")"; cp "$tmp" "$abs"; n_new=$((n_new + 1)); info "  +     $dest"
+      else
+        curhash="$(hash_of "$abs")"
+        if [ "$curhash" = "$newhash" ]; then
+          n_keep=$((n_keep + 1))
+        elif [ "$curhash" = "$(old_manifest_field "$dest" 4)" ]; then
+          # 導入時のまま = プロジェクトは何も書いていない。新しい雛形に入れ替える
+          backup_file "$backup" "$dest"; cp "$tmp" "$abs"; n_up=$((n_up + 1)); info "  update $dest"
+        elif ! grep -q '^@AGENTS\.md' "$abs"; then
+          backup_file "$backup" "$dest"
+          { echo "@AGENTS.md"; echo; cat "$abs"; } >"$tmp.new" && mv "$tmp.new" "$abs"
+          n_up=$((n_up + 1)); info "  merge $dest (@AGENTS.md の import を足した。プロジェクトの記述は残す)"
+        else
+          n_keep=$((n_keep + 1))   # プロジェクトが書いた内容がある。import はある。触らない
+        fi
+      fi
+      ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"$(hash_of "$abs")"$'\t'"$srchash")
+    else
+      # managed / generated: harness が正本。ローカルの変更は元に戻す（変更前は backup へ）
+      if [ ! -f "$abs" ]; then
+        mkdir -p "$(dirname "$abs")"; cp "$tmp" "$abs"; n_new=$((n_new + 1)); info "  +     $dest"
+      else
+        curhash="$(hash_of "$abs")"
+        if [ "$curhash" = "$newhash" ]; then
+          n_keep=$((n_keep + 1))
+        elif [ -z "$(old_manifest_field "$dest" 4)" ]; then
+          # manifest に無いのに存在する = harness が入れたのではないファイル。壊さず conflict に
+          mkdir -p "$conflicts/$(dirname "$dest")"; cp "$tmp" "$conflicts/$dest.new"; n_conf=$((n_conf + 1))
+          info "  CONFLICT $dest (exists, not from harness) -> .harness/conflicts/$dest.new"
+          ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"$curhash"$'\t'"$srchash")
+          continue
+        elif [ "$curhash" = "$(old_manifest_field "$dest" 4)" ]; then
+          backup_file "$backup" "$dest"
+          cp "$tmp" "$abs"; n_up=$((n_up + 1)); info "  update $dest"
+        else
+          # 導入時から変わっている（手で編集、CRLF 化、生成物の drift）。正本の内容に戻す。
+          backup_file "$backup" "$dest"
+          cp "$tmp" "$abs"; n_res=$((n_res + 1))
+          if [ "$own" = "generated" ]; then
+            info "  restore $dest (生成物。直すなら生成元 docs/roles/ を直す。変更前: ${backup#"$ROOT"/}/$dest)"
+          else
+            info "  restore $dest (ローカルの変更を戻した。変更前: ${backup#"$ROOT"/}/$dest)"
+          fi
+        fi
+      fi
+      newhash="$(hash_of "$abs")"
+      ENTRIES+=("$dest"$'\t'"$src"$'\t'"$own"$'\t'"$newhash"$'\t'"$srchash")
+    fi
+  done < <(plan "$agents")
+  rm -f "$tmp"
+  rm -f "$OLD_ENTRIES_FILE"; OLD_ENTRIES_FILE=""
+  hash_server_stop
+
+  chmod +x "$ROOT/.harness/bin/harness" "$ROOT/.githooks/pre-commit" "$ROOT/.harness/scripts/"*.sh 2>/dev/null || true
+  ensure_gitignore
+  ensure_gitattributes
+  case ",$agents," in *,claude,*) ensure_nested_claude_md;; esac
+  git -C "$ROOT" config core.hooksPath .githooks 2>/dev/null || true
+
+  echo
+  info "$mode done: new=$n_new updated=$n_up restored=$n_res unchanged=$n_keep seeded=$n_seed conflicts=$n_conf case_conflicts=$n_caseconf"
+  [ "$n_res" -gt 0 ] && info "restored: managed / generated は harness が正本なので正本の内容に戻した。残したい変更があるなら .harness/backup/ から拾い、harness upstream で正本へ戻してから update する"
+  [ "$n_conf" -gt 0 ] && info "conflicts: .harness/conflicts/ を見て、新版を採るか harness upstream で戻すか決める"
+  [ "$n_caseconf" -gt 0 ] && info "case_conflicts: この環境は大文字小文字を区別しないため、上の CASE-CONFLICT 行の既存ファイルと同じ扱いになっている（tech-debt #13）。「直し方」の git mv で寄せる（自動では直さない）"
+  [ -d "$backup" ] && info "backup: ${backup#"$ROOT"/}"
+  return 0
+}
+
+# .claude/settings.json に断片をマージする。node があれば自動、無ければ手順を案内。
+# 管理するのは「permissions.deny の断片にある項目」と「hooks のうち command に .harness/ を含む項目」だけ。
+# それ以外の項目（プロジェクトが書いたもの）は触らない。上書き前にバックアップ。
+merge_claude_settings() {
+  local agents="$1"
+  case ",$agents," in *,claude,*) ;; *) return 0;; esac
+  local frag="$PAYLOAD/adapters/claude/settings.fragment.json" dest="$ROOT/.claude/settings.json"
+  [ -f "$frag" ] || return 0
+  if ! command -v node >/dev/null 2>&1; then
+    echo
+    info "node が無いので .claude/settings.json は自動マージしない。断片を手で反映:"
+    info "  .harness/adapters/claude.settings.fragment.json"
+    return 0
+  fi
+  mkdir -p "$ROOT/.claude"
+  local changed
+  changed="$(node - "$frag" "$dest" <<'EOF'
+const fs = require('fs');
+const [frag, dest] = process.argv.slice(2);
+const f = JSON.parse(fs.readFileSync(frag, 'utf8'));
+let s = {};
+if (fs.existsSync(dest)) {
+  try { s = JSON.parse(fs.readFileSync(dest, 'utf8')); }
+  catch (e) { console.error('settings.json が JSON として読めない: ' + e.message); process.exit(3); }
+}
+const before = JSON.stringify(s);
+// permissions.deny: 断片の項目を足す（重複なし）。プロジェクトの項目は残す
+if (f.permissions && Array.isArray(f.permissions.deny)) {
+  s.permissions = s.permissions || {};
+  const cur = Array.isArray(s.permissions.deny) ? s.permissions.deny : [];
+  for (const d of f.permissions.deny) if (!cur.includes(d)) cur.push(d);
+  s.permissions.deny = cur;
+}
+// hooks: 各イベントで、command に ".harness/" を含む既存項目を外し、断片の項目を足す
+const isHarness = (entry) => Array.isArray(entry.hooks) && entry.hooks.some(h => typeof h.command === 'string' && h.command.includes('.harness/'));
+if (f.hooks) {
+  s.hooks = s.hooks || {};
+  for (const ev of Object.keys(f.hooks)) {
+    const kept = (Array.isArray(s.hooks[ev]) ? s.hooks[ev] : []).filter(e => !isHarness(e));
+    s.hooks[ev] = kept.concat(f.hooks[ev]);
+  }
+}
+const after = JSON.stringify(s);
+if (before === after) { console.log('unchanged'); process.exit(0); }
+fs.writeFileSync(dest + '.harness-new', JSON.stringify(s, null, 2) + '\n');
+console.log('changed');
+EOF
+)" || { info "  settings.json のマージに失敗（${changed}）。断片を手で反映: .harness/adapters/claude.settings.fragment.json"; return 0; }
+  if [ "$changed" = "changed" ]; then
+    if [ -f "$dest" ]; then
+      local b="$ROOT/.harness/backup/$(ts)"; mkdir -p "$b/.claude"; cp "$dest" "$b/.claude/settings.json"
+    fi
+    mv "$dest.harness-new" "$dest"
+    info "  merge .claude/settings.json (deny + .harness/ hooks。プロジェクトの項目は保持)"
+  fi
+}
+
+# ---------------------------------------------------------------- commands
+cmd_init() {
+  local source="" ref="" agents="claude,codex"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --source) source="$2"; shift 2;;
+      --ref) ref="$2"; shift 2;;
+      --agents) agents="$2"; shift 2;;
+      *) die "unknown option: $1";;
+    esac
+  done
+  ROOT="$(project_root)"
+  trap on_script_exit EXIT
+  [ -f "$(manifest_path)" ] && die "既に導入済み（$MANIFEST_REL がある）。harness update を使う"
+  [ -z "$source" ] && source="$(self_repo)"
+  [ -z "$source" ] && source="$DEFAULT_SOURCE"
+  # ローカルパスは絶対パスにして保存する（相対のままだと別ディレクトリからの update で壊れる）
+  [ -d "$source" ] && source="$(cd "$source" && pwd)"
+  local srcdir; srcdir="$(resolve_source "$source" "$ref")"
+  PAYLOAD="$srcdir/harness"; SELF_PATH="$srcdir/bin/harness"
+  [ -d "$PAYLOAD" ] || die "ペイロードが無い: $PAYLOAD"
+  local version; version="$(tr -d '\r\n' <"$srcdir/VERSION")"; HVER="$version"
+  # manifest に書くのは共有値だけ。ローカルパス（--source でも self_repo() でも）は機械依存なので
+  # .harness/source.local へ逃がす（決定 0004）。既定は公開リポジトリの URL。
+  local shared_source="$source" local_source=""
+  if ! is_shared_source "$source"; then shared_source="$DEFAULT_SOURCE"; local_source="$source"; fi
+  info "init  project=$ROOT"
+  info "      source=$source ref=${ref:-default} version=$version agents=$agents"
+  INSTALL_TRAP_MODE=init
+  apply_plan "$agents" init
+  write_manifest "$version" "$shared_source" "$ref" "$agents"
+  INSTALL_TRAP_MODE=""
+  if [ -n "$local_source" ]; then
+    write_source_local "$local_source"
+    info "  + $SOURCE_LOCAL_REL (${local_source}。この PC 用。gitignore 対象＝コミットしない)"
+    info "      manifest の source は共有値 ${shared_source}（機械依存の絶対パスは共有ファイルに書かない）"
+  fi
+  merge_claude_settings "$agents"
+  echo
+  info "次: docs/spec/ に何を作るかを書き、.harness/checks.sh に検査を登録する。セッション開始は session-catchup。"
+  info "     導入直後の環境確認は harness doctor。"
+}
+
+# update は .harness/bin/harness 自身を上書きする。実行中のスクリプトを上書きすると bash が壊れた内容を
+# 読み続けるので、同梱コピーから起動されたときは一時ファイルに自分を写してそこから再実行する。
+reexec_if_vendored() {
+  [ -n "${HARNESS_REEXEC:-}" ] && return 0
+  # 標準入力から実行中なら BASH_SOURCE が無い（同梱コピーを実行しているはずがないので何もしない）
+  local me="${BASH_SOURCE[0]:-}" vendored="$ROOT/.harness/bin/harness" tmp
+  # main で maybe_delegate が同じ 2 つを比べている。その結果があればそれを使う（VENDORED_SAME）。
+  [ "${VENDORED_SAME:-}" = 1 ] || same_script "$me" "$vendored" || return 0
+  tmp="$(mktemp)"; cp "$me" "$tmp"
+  HARNESS_REEXEC=1 HARNESS_REEXEC_TMP="$tmp" exec bash "$tmp" update "$@"
+}
+
+cmd_update() {
+  local ref=""
+  ROOT="$(project_root)"
+  reexec_if_vendored "$@"
+  trap on_script_exit EXIT
+  while [ $# -gt 0 ]; do
+    case "$1" in --ref) ref="$2"; shift 2;; *) die "unknown option: $1";; esac
+  done
+  [ -f "$(manifest_path)" ] || die "未導入（$MANIFEST_REL が無い）。harness init を使う"
+  local source source_from agents oldver
+  IFS=$'\t' read -r source source_from <<<"$(effective_source)"
+  agents="$(manifest_get agents)"; oldver="$(manifest_get harness_version)"
+  [ -z "$ref" ] && ref="$(manifest_get source_ref)"
+  local srcdir; srcdir="$(resolve_source "$source" "$ref")"
+  PAYLOAD="$srcdir/harness"; SELF_PATH="$srcdir/bin/harness"
+  # 「何を配るか」を決める plan() は**今動いている CLI のもの**が使われる。source 側の CLI が
+  # それより新しければ、新しい版で増えた配布エントリが丸ごと漏れる（実測 2026-09-21: 配布
+  # エントリを 2 行足しても 1 回目の update は new=0、CLI 自身が入れ替わった 2 回目でようやく
+  # 配られた。tech-debt #12）。source の内容で更新するのだから、判断も source 側の CLI にさせる。
+  if [ -z "${HARNESS_FROM_SOURCE:-}" ] && [ -f "$SELF_PATH" ] && ! same_script "${BASH_SOURCE[0]:-}" "$SELF_PATH"; then
+    # reexec_if_vendored が作った一時コピーがあれば先に消す（exec で EXIT trap は失われる）
+    [ -n "${HARNESS_REEXEC_TMP:-}" ] && rm -f "$HARNESS_REEXEC_TMP"
+    if [ -n "$ref" ]; then
+      HARNESS_FROM_SOURCE=1 exec bash "$SELF_PATH" update --ref "$ref"
+    else
+      HARNESS_FROM_SOURCE=1 exec bash "$SELF_PATH" update
+    fi
+  fi
+  local version; version="$(tr -d '\r\n' <"$srcdir/VERSION")"; HVER="$version"
+  # manifest に書き戻すのは共有値だけ。旧形式（source に機械依存の絶対パス）で導入された
+  # プロジェクトは、ここでその値を .harness/source.local へ移し、manifest を共有値へ直す。
+  local shared_source; shared_source="$(manifest_get source)"
+  [ -z "$shared_source" ] && shared_source="$DEFAULT_SOURCE"
+  if ! is_shared_source "$shared_source"; then
+    if [ "$source_from" = "manifest" ]; then
+      write_source_local "$shared_source"
+      info "  + $SOURCE_LOCAL_REL (${shared_source}。manifest にあった機械依存のパスを移した。gitignore 対象)"
+      source_from="$SOURCE_LOCAL_REL"
+    fi
+    shared_source="$DEFAULT_SOURCE"
+  fi
+  info "update $oldver -> $version  (source=$source [$source_from] ref=${ref:-default})"
+  if [ "$oldver" != "$version" ] && [ -f "$srcdir/CHANGELOG.md" ]; then
+    echo; echo "── CHANGELOG（$oldver より新しい分）"
+    awk -v old="## [$oldver]" 'index($0,old)==1{exit} /^## \[/{p=1} p' "$srcdir/CHANGELOG.md" | sed 's/^/   /'
+    echo
+  fi
+  INSTALL_TRAP_MODE=update
+  apply_plan "$agents" update
+  write_manifest "$version" "$shared_source" "$ref" "$agents"
+  INSTALL_TRAP_MODE=""
+  merge_claude_settings "$agents"
+}
+
+cmd_status() {
+  ROOT="$(project_root)"
+  [ -f "$(manifest_path)" ] || die "未導入（$MANIFEST_REL が無い）"
+  local ver src src_from ref; ver="$(manifest_get harness_version)"; ref="$(manifest_get source_ref)"
+  IFS=$'\t' read -r src src_from <<<"$(effective_source)"
+  echo "harness $ver  source=$src [$src_from] ref=${ref:-default}  installed=$(manifest_get installed_at)"
+  # source がローカルディレクトリのときだけ版を比べる。URL のときはネットワークに触らない
+  # （status は読み取りだけの表示。clone は update の仕事）。
+  if [ -d "$src" ] && [ -f "$src/VERSION" ]; then
+    local latest; latest="$(cat "$src/VERSION")"
+    [ "$latest" != "$ver" ] && echo "  latest at source: $latest  (harness update で取り込む)"
+  elif [ "$src_from" = "manifest" ]; then
+    echo "  source はこの PC のローカルディレクトリではない。clone を使うなら機械ローカルの上書きを置く:"
+    echo "    echo '<agent-harness を clone した絶対パス>' > $SOURCE_LOCAL_REL   (gitignore 対象＝コミットしない)"
+  fi
+  echo
+  local p s o h sh cur state n_mod=0 n_miss=0
+  hash_server_start
+  while IFS=$'\t' read -r p s o h sh; do
+    if [ ! -e "$ROOT/$p" ]; then state="missing"; n_miss=$((n_miss + 1))
+    elif [ "$o" = "seed" ]; then state="seed"
+    elif [ "$o" = "merge" ]; then cur="$(block_hash "$ROOT/$p")"; [ "$cur" = "$h" ] && state="unchanged" || { state="MODIFIED"; n_mod=$((n_mod + 1)); }
+    else
+      cur="$(hash_of "$ROOT/$p")"
+      if [ "$cur" = "$h" ]; then state="unchanged"; else state="MODIFIED"; n_mod=$((n_mod + 1)); fi
+      if [ "$o" = "generated" ] && [ -n "$sh" ] && [ "$sh" != "-" ]; then
+        local rolefile="$ROOT/docs/roles/$(basename "$s")"
+        [ -f "$rolefile" ] && [ "$(hash_of "$rolefile")" != "$sh" ] && state="$state, source-changed (harness update で再生成)"
+      fi
+    fi
+    printf '  %-10s %-9s %s\n' "$o" "$state" "$p"
+  done < <(manifest_entries)
+  hash_server_stop
+  echo
+  echo "modified=$n_mod missing=$n_miss   (MODIFIED な managed は harness diff で確認し、汎用なら harness upstream で戻す)"
+}
+
+cmd_diff() {
+  ROOT="$(project_root)"
+  [ -f "$(manifest_path)" ] || die "未導入"
+  local src src_from ref; ref="$(manifest_get source_ref)"
+  IFS=$'\t' read -r src src_from <<<"$(effective_source)"
+  local srcdir; srcdir="$(resolve_source "$src" "$ref")"
+  PAYLOAD="$srcdir/harness"; SELF_PATH="$srcdir/bin/harness"; HVER="$(tr -d '\r\n' <"$srcdir/VERSION")"
+  local p s o h sh cur tmp any=0
+  hash_server_start
+  while IFS=$'\t' read -r p s o h sh; do
+    [ "$o" = "seed" ] && continue
+    [ -f "$ROOT/$p" ] || continue
+    if [ "$o" = "merge" ]; then cur="$(block_hash "$ROOT/$p")"; else cur="$(hash_of "$ROOT/$p")"; fi
+    [ "$cur" = "$h" ] && continue
+    any=1; tmp="$(mktemp)"
+    if [ "$o" = "generated" ]; then echo "── $p: generated（生成元 docs/roles を直すのが正。この差分は再生成で消える）"; rm -f "$tmp"; continue; fi
+    render_src "$s" "$tmp"
+    echo "── $p  (source: $s)"
+    if [ "$o" = "merge" ]; then
+      diff -u "$tmp" <(awk -v b="$BEGIN_RE" -v e="$END_RE" 'index($0,b)==1{q=1} q{print} q&&index($0,e)==1{q=0}' "$ROOT/$p") || true
+    else
+      diff -u "$tmp" "$ROOT/$p" || true
+    fi
+    rm -f "$tmp"
+  done < <(manifest_entries)
+  hash_server_stop
+  [ "$any" = 0 ] && echo "差分なし（managed ファイルは導入時のまま）"
+  return 0
+}
+
+cmd_upstream() {
+  ROOT="$(project_root)"
+  [ -f "$(manifest_path)" ] || die "未導入"
+  [ $# -gt 0 ] || die "usage: harness upstream <path>..."
+  local src src_from; IFS=$'\t' read -r src src_from <<<"$(effective_source)"
+  # upstream は正本のツリーに書き戻すので、ローカルの clone が要る。manifest（共有ファイル）には
+  # 機械依存のパスを書かせない。指す先は機械ローカルの上書きで与える（決定 0004）。
+  [ -d "$src" ] || die "source がこの PC のローカルディレクトリではない（${src}。由来: ${src_from}）。
+  直し方: agent-harness を clone し、その絶対パスを機械ローカルの上書きに置く（gitignore 対象＝コミットしない）
+          echo '<clone した絶対パス>' > $SOURCE_LOCAL_REL
+  一度きりなら: HARNESS_SOURCE=<clone した絶対パス> bash .harness/bin/harness upstream $*"
+  local p s o h sh target
+  for target in "$@"; do
+    target="${target#./}"
+    local found=0
+    while IFS=$'\t' read -r p s o h sh; do
+      [ "$p" = "$target" ] || continue
+      found=1
+      case "$o" in
+        seed) die "$p は seed（プロジェクトの資産）。上流に戻すものではない";;
+        generated) die "$p は生成物。生成元 docs/roles/ を直し、そちらを共有する";;
+      esac
+      case "$s" in @*) die "$p は CLI 内部生成。bin/harness を直す";; esac
+      if grep -qiE 'password|secret|token|api[_-]?key' "$ROOT/$p"; then
+        info "WARN: $p に秘密情報らしき語がある。共有物になるので確認する"
+      fi
+      if [ "$o" = "merge" ]; then
+        # 正本には必ずブロック 1 つ。ここだけは先頭のブロックで打ち切る（万一重複していても
+        # 壊れた正本を配らない。重複は harness update が 1 対に畳む）。
+        awk -v b="$BEGIN_RE" -v e="$END_RE" 'index($0,b)==1{q=1} q{print} q&&index($0,e)==1{exit}' "$ROOT/$p" >"$src/harness/$s"
+      else
+        cp "$ROOT/$p" "$src/harness/$s"
+      fi
+      info "upstream $p -> $src/harness/$s"
+    done < <(manifest_entries)
+    [ "$found" = 1 ] || die "manifest に無い: $target"
+  done
+  echo
+  info "次: $src でレビュー → commit → CHANGELOG.md に「プロジェクト側で必要な作業」→ VERSION を上げる"
+}
+
+# ---------------------------------------------------------------- task timing（spec: docs/spec/task-timing.md）
+# `harness task start <id>` / `harness task done <id>` が .harness/state/stages.json に時刻を書く。
+# id はタスク（T01 等）でもレビュー（review）でもよく、同じ仕組みで扱う（spec C1）。レビューを
+# 特別扱いしない＝ここは stages.json の "tasks" 配列の中身を一切見ない（review はそこに存在しない）。
+#
+# 時刻は ISO 8601 / UTC。`date -d` は GNU 専用で、過去に無言スキップの事故を起こしている
+# （tech-debt #8）。ここは `-d` を使わず `date -u +書式` だけで取るので GNU / BSD どちらでも同じ。
+#
+# jq を前提にしない（AGENTS.md: 依存は git と bash だけ）。stages.json の既存の "tasks" 配列
+# （orchestrator / implementer が自由形式で書く）には一切触れず、新しい "timings" 配列だけを
+# 読み書きする。1 エントリ 1 行の JSON にして、manifest.json / write_manifest と同じ「行指向で
+# 読み書きする」流儀に揃える（jq が無い環境でも動く経路を残す）。
+#
+# "timings" は常に stages.json の先頭 "{" の直後（他のどのキーより前）に挿入する（新規挿入時。
+# 既に存在する場合は元の位置のまま丸ごと差し替える。timings_write_block 参照）。
+#
+# レビュー指摘（T03 #1）: 「timings の後ろに必ず他のキーが続く（＝閉じ "]" の後ろには常にコンマが
+# 要る）」という前提が、この 3 日で 4 回目の落とし穴になった。この前提が破れる具体例
+# （キーが 1 つも無い "{\n}\n" に挿入すると、唯一のキーになった timings の後ろにトレーリング
+# カンマが残る）が実機で踏まれた。以前はこの「カンマを打つか」の判断が timings_ensure_block
+# （新規挿入時は常にカンマを打つ）と timings_render_block（レンダリング時も常にカンマを打つ）の
+# 2 箇所に分散しており、どちらを直しても対症療法にしかならなかった。**判断はここで 1 箇所に
+# 集約する**: 実際に書き込む直前（timings_write_block）で、timings ブロックの直後に他の内容が
+# 続くかどうかを stages.json の実物から判定し、その結果（"," か ""）を timings_render_block に
+# 引数で渡す。timings_render_block 自身はもうカンマを打つかどうかを判断しない。
+
+utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+valid_timing_id() { case "$1" in ""|*[!A-Za-z0-9_.-]*) return 1;; *) return 0;; esac; }
+
+# "timings" 配列 -> 標準出力: TSV（id\tstarted_at\tdone_at。値が無ければ "-"＝null 相当）。
+# 標準エラー: 解釈できなかった箇所の警告（1 行 1 件。何も無ければ何も出さない）。
+#
+# tasks_extract と同じ、"{" / "}" の depth を追う状態機械にする。以前はここだけ「1 エントリ
+# 1 行」を前提にした単一の sed で id/started_at/done_at を一度に拾っており、統括が
+# stages.json を `python -c "json.dump(..., indent=2)"` で書き換えて生まれる展開形式
+# （1 フィールド 1 行）を読めなかった。しかもエラーを出さず「記録が無い」と言っていた
+# （no-silent-failures 違反。docs/spec/no-silent-failures.md。実機で踏んだ）。tasks_extract は
+# 既にこの depth 方式で「圧縮 1 行」「展開（1 フィールド 1 行）」のどちらも区別なく読めているので、
+# 同じ書き方に揃える（同じファイル内で読み方の方式が 2 つあるのをやめる。jq/node には頼らない）。
+#
+# 値の無いフィールドを空文字のまま TSV に置くと、後段の `IFS=$'\t' read` で壊れる: bash の
+# read はタブを「IFS 空白」として扱い、連続するタブ（＝空フィールド）を 1 つの区切りとして
+# まとめてしまうため、フィールドがずれて started_at と done_at が入れ替わる（実機で踏んだ。
+# manifest.json 側が値の無い sha256 に "-" を使っているのも同じ理由と見られる）。ここでは
+# 「値が無い」を必ず "-" という非空文字で表し、空フィールドを一切作らないことでこれを避ける。
+#
+# harness/state-template/stages.json は初期状態の "timings" を 1 行の空配列 `"timings": [],`
+# として配る。この形は開き "[" と閉じ "]" が同じ行にあるので、開き括弧の regex にだけマッチして
+# intbl=1 のまま次の行へ突入すると、それを timings のエントリと誤認して食い込む（実機で再現。
+# 配布直後の stages.json に harness task start を初めて呼ぶと壊れる）。1 行で閉じている
+# 空配列は中身が無いので、intbl に入れず読み飛ばす。
+#
+# 「記録が無い」（該当 id の timings 自体が無い）と「書式が想定と違って読めない」（id を
+# 読み取れないエントリがある／配列が閉じないまま入力が終わった）は別物なので混同しない
+# （B6 / no-silent-failures）。後者は標準エラーへ出し、呼び出し側の cmd_eta がまとめて
+# 「記録が無い」とは別扱いで報告する。
+timings_extract() { # stages_file
+  awk '
+    function strip_strings(s,    r) {
+      r = s
+      gsub(/"([^"\\]|\\.)*"/, "\"\"", r)
+      return r
+    }
+    # 1 行から "key": の値を取り出す。無ければ ""。JSON の null は文字列 "null" として返す。
+    function extract_val(line, key,    t) {
+      if (line !~ ("\"" key "\"[[:space:]]*:")) return ""
+      t = line
+      sub(("^.*\"" key "\"[[:space:]]*:[[:space:]]*"), "", t)
+      if (t ~ /^null/) return "null"
+      sub(/^"/, "", t)
+      sub(/".*/, "", t)
+      return t
+    }
+    /^[[:space:]]*"timings"[[:space:]]*:[[:space:]]*\[[[:space:]]*\][,]?[[:space:]]*$/ { next }
+    /^[[:space:]]*"timings"[[:space:]]*:[[:space:]]*\[/ {
+      intbl=1; depth=0; id=""; started=""; doneat=""; entered=0; next
+    }
+    intbl && depth==0 && /^[[:space:]]*\][,]?[[:space:]]*$/ { intbl=0; next }
+    intbl {
+      if ($0 ~ /\{/) entered=1
+      v = extract_val($0, "id");         if (v != "" && id == "")      id = v
+      v = extract_val($0, "started_at"); if (v != "" && started == "") started = (v == "null") ? "-" : v
+      v = extract_val($0, "done_at");    if (v != "" && doneat == "")  doneat  = (v == "null") ? "-" : v
+      line = strip_strings($0)
+      opens = gsub(/\{/, "{", line)
+      closes = gsub(/\}/, "}", line)
+      depth += opens - closes
+      if (depth == 0 && entered == 1) {
+        if (id != "") {
+          print id "\t" (started == "" ? "-" : started) "\t" (doneat == "" ? "-" : doneat)
+        } else {
+          print "timings 配列の中に id を読み取れないエントリがある（書式が想定と違う可能性がある）" > "/dev/stderr"
+        }
+        id=""; started=""; doneat=""; entered=0
+      }
+      next
+    }
+    END {
+      if (intbl == 1) {
+        print "timings 配列の閉じ \"]\" が見つからないまま入力が終わった（書式が想定と違う可能性がある）" > "/dev/stderr"
+      }
+    }
+  ' "$1"
+}
+
+# TSV の id 行を新しい started_at/done_at に置き換える（無ければ末尾に足す）。既存の並びは保つ。
+# new_started/new_done は「無い」を空文字で渡してよい（ここで "-" に正規化する）。
+timings_upsert_tsv() { # tsv_file id new_started new_done
+  local tsv="$1" id="$2" ns="$3" nd="$4" tmp
+  tmp="$(mktemp)"
+  awk -F'\t' -v OFS='\t' -v id="$id" -v ns="$ns" -v nd="$nd" '
+    BEGIN { if (ns=="") ns="-"; if (nd=="") nd="-" }
+    $1==id { print id, ns, nd; done=1; next }
+    { print }
+    END { if (!done) print id, ns, nd }
+  ' "$tsv" >"$tmp"
+  mv "$tmp" "$tsv"
+}
+
+# TSV -> "timings": [ ... ] ブロック全体（キー行〜閉じ "]" まで）を標準出力へ。
+#
+# comma（"," または ""）は呼び出し元 timings_write_block が 1 箇所で判断した結果をそのまま
+# 使うだけで、ここでは一切判断しない（レビュー指摘 T03 #1。この関数がかつて「後ろには必ず
+# 他のキーが続く」と決め打って常に "," を返していたのが、キーが 1 つも無い stages.json を
+# 壊す事故の一因だった）。配列そのものの要素間カンマ（1 件目・2 件目…の区切り）は timings 自身の
+# 要素数だけで決まる別の判断なので、従来どおりここで扱う。
+timings_render_block() { # tsv_file comma
+  local tsv="$1" comma="${2-,}" n i=0 id s d sq dq c
+  n="$(wc -l <"$tsv" | tr -d '[:space:]')"
+  if [ -z "$n" ]; then n=0; fi
+  echo '  "timings": ['
+  while IFS=$'\t' read -r id s d; do
+    i=$((i + 1))
+    sq="null"
+    if [ -n "$s" ] && [ "$s" != "-" ]; then sq="\"$s\""; fi
+    dq="null"
+    if [ -n "$d" ] && [ "$d" != "-" ]; then dq="\"$d\""; fi
+    c=","
+    if [ "$i" -eq "$n" ]; then c=""; fi
+    printf '    {"id": "%s", "started_at": %s, "done_at": %s}%s\n' "$id" "$sq" "$dq" "$c"
+  done <"$tsv"
+  printf '  ]%s\n' "$comma"
+}
+
+# stages.json の "timings" ブロックを新しい内容で書く（無ければ先頭 "{" の直後に挿入し、既に
+# あれば元の位置のまま丸ごと差し替える）。1 行目が "{" でなければ die（A4: 壊れている・想定と
+# 違う形式の stages.json は引き続き失敗させる。弱めない）。
+#
+# レビュー指摘（T03 #1〜#3）: 「timings の後ろに必ず他のキーが続く」という前提が、この 3 日で
+# 4 回目の落とし穴になった（配布テンプレートの 1 行空配列を読み書きどちらでも壊した話、
+# 最小 state のキー順で壊れた話、そして今回のキー 0 個の "{}" で壊れた話）。この関数では
+# 「マーカー行を一旦挿入し、その次の行を見る」方式で、timings ブロックの位置や既存有無に
+# 関わらず同じ 1 つのロジックで「閉じ "]" の直後にカンマが要るか」を判断する:
+#
+#   1. 既存の "timings" ブロック（1 行空配列 or 複数行）があればそれを丸ごとマーカー行に
+#      置き換える。無ければ先頭 "{" の直後にマーカー行を挿入する（この判定の正規表現は
+#      timings_extract と揃えてある。1 行空配列の特別扱いが要る理由は同関数のコメント参照）。
+#   2. マーカー行の次の行を見る。空白を除いて "}" だけ（＝オブジェクトの閉じ括弧そのもの）
+#      なら、timings は挿入・差し替え後にこのオブジェクトの唯一かつ最後のキーになる
+#      ＝カンマ不要。それ以外（他のキーが続く）ならカンマが要る。
+#   3. その結果を timings_render_block に渡してブロック本体を作り、マーカー行をそれに
+#      置き換える。
+#
+# このため、"timings" が今どこにあるか・既存かどうか・オブジェクトが空かどうかに関わらず、
+# カンマを打つかどうかの判断はここ 1 箇所だけで行われる（timings_render_block はもう判断しない。
+# 呼び出し側 cmd_task も判断しない）。
+timings_write_block() { # stages_file tsv_file
+  local f="$1" tsv="$2" first
+  first="$(sed -n '1p' "$f")"
+  if [ "$first" != "{" ]; then
+    die "${f} の 1 行目が '{' ではない（想定と違う形式なので timings を追加できない）。手動で \"timings\": [] を足してから再実行する。"
+  fi
+
+  local marker='##HARNESS_TIMINGS_BLOCK##' skeleton tmp
+  skeleton="$(mktemp)"
+  if grep -qE '^[[:space:]]*"timings"[[:space:]]*:[[:space:]]*\[' "$f"; then
+    # 既存の timings ブロック（1 行空配列 or 複数行）を丸ごとマーカー 1 行に置き換える。
+    # 正規表現は timings_extract と同じ（1 行で閉じた空配列を特別扱いする理由も同じ）。
+    awk -v marker="$marker" '
+      /^[[:space:]]*"timings"[[:space:]]*:[[:space:]]*\[[[:space:]]*\][,]?[[:space:]]*$/ {
+        print marker; next
+      }
+      /^[[:space:]]*"timings"[[:space:]]*:[[:space:]]*\[/ {
+        print marker; inblock = 1; next
+      }
+      inblock && /^[[:space:]]*\][,]?[[:space:]]*$/ { inblock = 0; next }
+      inblock { next }
+      { print }
+    ' "$f" >"$skeleton"
+  else
+    # "timings" が無い: 先頭 "{" の直後にマーカーを挿入する。
+    { sed -n '1p' "$f"; printf '%s\n' "$marker"; sed -n '2,$p' "$f"; } >"$skeleton"
+  fi
+
+  # 判断はここだけ: マーカーの次の行が（前後の空白を除いて）"}" だけかどうか。
+  local after comma
+  after="$(awk -v marker="$marker" '$0==marker{getline nxt; print nxt; exit}' "$skeleton")"
+  after="$(printf '%s' "$after" | tr -d '[:space:]')"
+  if [ "$after" = "}" ]; then comma=""; else comma=","; fi
+
+  local block; block="$(mktemp)"
+  timings_render_block "$tsv" "$comma" >"$block"
+
+  tmp="$(mktemp)"
+  awk -v marker="$marker" -v blockfile="$block" '
+    BEGIN { while ((getline line < blockfile) > 0) { n++; b[n] = line }; close(blockfile) }
+    $0==marker { for (i = 1; i <= n; i++) print b[i]; next }
+    { print }
+  ' "$skeleton" >"$tmp"
+  mv "$tmp" "$f"
+  rm -f "$skeleton" "$block"
+}
+
+# .harness/state/ や stages.json が無いのは、task-orchestrate をまだ始めていない普通の状態で
+# もある。黙って何もしないのではなく、はっきり案内して exit 1 にする（no-silent-failures）。
+# `harness eta`（読む側）専用: 記録が無いところを読んでも仕方が無いので、eta は今回も state を
+# 自動で作らない（作るのは書く側の `harness task` だけ。docs/spec/timing-anywhere.md A1 が
+# 対象にしているのは `harness task start` であって `harness eta` ではない。T02 の担当範囲）。
+require_stages_file() { # root -> 標準出力に stages.json のパス（無ければ die で exit 1）
+  local root="$1" state_dir stages
+  state_dir="${root}/.harness/state"
+  stages="${state_dir}/stages.json"
+  if [ ! -d "$state_dir" ]; then
+    die "${state_dir} が無い（task-orchestrate をまだ始めていないか、ここが対象のプロジェクトではない）。task-orchestrate の準備フェーズで .harness/state/stages.json を作ってから使う。"
+  fi
+  if [ ! -f "$stages" ]; then
+    die "${stages} が無い。${state_dir} に stages.json を用意してから使う（task-orchestrate の準備フェーズを見る）。"
+  fi
+  printf '%s' "$stages"
+}
+
+# ---------------------------------------------------------------- timing-anywhere（docs/spec/timing-anywhere.md T01）
+# A1: `.harness/state/` が無い状態で `harness task start <id>` を叩いても記録を始められる。
+# 最小限の state（tasks: [], timings: []）をここで自動で作る。A2: 作ったことは黙らない
+# （info で必ず言う。no-silent-failures は「黙って失敗しない」だけでなく「黙って動作を
+# 変えない」side にも及ぶと解釈した）。
+#
+# 実装上の注意: この関数は require_stages_file と違い、呼び出し側で `$(...)` に包んで呼ばない
+# （state_dir/stages のパスを引数で受け取り、標準出力には何も返さない）。info は標準出力に
+# 書くので、もし `stages="$(ensure_task_state ...)"` のように command substitution 経由で
+# 呼ぶと、info が出したメッセージまで stages 変数に混入して壊れる。cmd_task 側は先にパスを
+# 自分で組み立ててから、このデータ状態確認用の関数を「素通し呼び出し」する。
+#
+# 境界の判断（TT5: .harness/state/ はあるが stages.json だけが無い場合をどう扱うか。spec が
+# 実装者の判断に委ねている点）: ディレクトリの有無は実装の都合であり、使う側から見れば
+# 「.harness/state/ 一式が無い」（旧 TT4）も「ディレクトリだけあって stages.json が無い」
+# （旧 TT5）も、どちらも「この題材の記録をまだ始めていない」という同じ状態にしか見えない。
+# ここでディレクトリの有無で挙動を分けると「たまたま .harness/state/ が空で存在していた」
+# ような些末な違いで記録できたりできなかったりする（実際 .harness/state/ 配下には
+# reports/ のように stages.json より先に作られ得るディレクトリがある）。よってどちらも
+# 「無ければ作る」側に倒す。
+#
+# 一方で stages.json が**存在するのに**読めない・想定した形式でない場合（例: 1 行目が "{" で
+# 始まらない、JSON として壊れている）は「無い」ではなく「壊れている」であり、A4 のとおり
+# 引き続き失敗させる（弱めない）。ここでは新規作成しかしない＝既存ファイルの中身の妥当性には
+# 一切踏み込まず、その判定は既存の timings_write_block の die にそのまま委ねる。
+ensure_task_state() { # state_dir stages
+  local state_dir="$1" stages="$2" dir_created=0 file_created=0
+  if [ ! -d "$state_dir" ]; then
+    mkdir -p "$state_dir" || die "${state_dir} を作れなかった（権限を確認する）。"
+    dir_created=1
+  fi
+  if [ ! -f "$stages" ]; then
+    # キーの順序はどちらでもよい（timings_write_block がカンマの要不要を実物から判断するので、
+    # "timings" が唯一のキーでも最後のキーでも壊れない。レビュー指摘 T03 #1）。ここでは単に
+    # 自然な順（tasks が先、timings が後）で書く。
+    printf '%s\n' '{' '  "tasks": [],' '  "timings": []' '}' >"$stages" \
+      || die "${stages} を作れなかった（権限を確認する）。"
+    file_created=1
+  fi
+  if [ "$dir_created" = 1 ]; then
+    info "${state_dir} が無かったので作った（tasks: [] / timings: [] の最小 state）。計画を立てない小さな作業でも harness task start/done は使える（docs/spec/timing-anywhere.md A1）。"
+  elif [ "$file_created" = 1 ]; then
+    info "${stages} が無かったので作った（tasks: [] / timings: [] の最小 state）。計画を立てない小さな作業でも harness task start/done は使える（docs/spec/timing-anywhere.md A1）。"
+  fi
+}
+
+# harness task <start|done> <id>
+cmd_task() {
+  local sub="${1:-}"
+  case "$sub" in
+    start|done) : ;;
+    "") die "usage: harness task <start|done> <id>";;
+    *)  die "unknown task subcommand: ${sub} (usage: harness task <start|done> <id>)";;
+  esac
+  shift
+  local id="${1:-}"
+  [ -n "$id" ] || die "usage: harness task ${sub} <id>"
+  valid_timing_id "$id" || die "id に使える文字は英数字・_・.・- のみ: '${id}'"
+
+  ROOT="$(project_root)"
+  local state_dir="${ROOT}/.harness/state"
+  local stages="${state_dir}/stages.json"
+  ensure_task_state "$state_dir" "$stages"
+
+  local tsv; tsv="$(mktemp)"
+  timings_extract "$stages" >"$tsv"
+
+  local existing had_entry=0 old_started="" old_done="" rid
+  existing="$(awk -F'\t' -v id="$id" '$1==id{print; exit}' "$tsv")"
+  if [ -n "$existing" ]; then
+    had_entry=1
+    IFS=$'\t' read -r rid old_started old_done <<<"$existing"
+    # timings_extract は「値が無い」を "-" で表す（TSV の空フィールドは read で壊れるため）。
+    # ここから先の判定は空文字を「無い」として比較するので、"-" を空文字へ戻す。
+    if [ "$old_started" = "-" ]; then old_started=""; fi
+    if [ "$old_done" = "-" ]; then old_done=""; fi
+  fi
+
+  local now note=""
+  now="$(utc_now)"
+  local new_started="$old_started" new_done="$old_done"
+
+  # 3/5（no-silent-failures）: id が stages.json に見つからなくても失敗しない（review は
+  # tasks 配列に無いのが正常なので、tasks 配列自体を見ない＝特別扱いしない。C1）。ただし
+  # start/done の対応が取れない組み合わせ（二重 start、start 無し done 等）は note で知らせる。
+  if [ "$sub" = start ]; then
+    if [ "$had_entry" = 1 ] && [ -n "$old_started" ] && [ -z "$old_done" ]; then
+      note="${id} はすでに ${old_started} に start 済み。started_at を ${now} に上書きした。"
+    elif [ "$had_entry" = 1 ] && [ -n "$old_done" ]; then
+      note="${id} は ${old_done} に done 済みの記録があった。再び start したので done_at をクリアした。"
+    fi
+    new_started="$now"; new_done=""
+  else
+    if [ "$had_entry" = 0 ]; then
+      note="${id} の start 記録が無い（先に harness task start ${id} を呼んでいない）。started_at は不明のまま done_at だけ記録する。"
+    elif [ -z "$old_started" ]; then
+      note="${id} は started_at が記録されていない（不明）。done_at だけ記録する。"
+    elif [ -n "$old_done" ]; then
+      note="${id} はすでに ${old_done} に done 済み。done_at を ${now} に上書きした。"
+    fi
+    new_done="$now"
+  fi
+
+  timings_upsert_tsv "$tsv" "$id" "$new_started" "$new_done"
+  timings_write_block "$stages" "$tsv"
+  rm -f "$tsv"
+
+  info "task ${sub} ${id}: ${now}"
+  if [ -n "$note" ]; then
+    info "$note"
+  fi
+}
+
+# ---------------------------------------------------------------- eta（docs/spec/task-timing.md）
+#
+# `harness task start/done` が残した記録から、進捗と残り時間を出す。設計は spec の B/C 節どおり:
+#   B1/B1b : 完了数/全体数・経過時間・残りの推定・推定完了時刻（幅）を出す。記録は UTC だが
+#            表示はローカルタイム（iso_to_epoch / epoch_to_local で変換する。GNU/BSD 両対応）。
+#   B2     : 残りの推定は「完了タスクの実測 最小〜最大」を残タスク数に**そのまま掛ける**。
+#            単純平均は使わない（実測が数倍ばらつくため。ばらつきをならすと大きく外す）。
+#   B3     : 実績（完了タスクの実測）が 0 件、または進行中の題材が無ければ「不明」と言う。
+#            数字を捏造しない。**レビューも同じ扱い**にする: id "review" の timings が
+#            started_at/done_at ともそろって初めて「実績あり」とし、無ければ不明。
+#            docs/spec/task-timing.md の C2 は過去の実測（17/10/10 分）を書き残しているが、
+#            それを既定値としてここに埋め込まない: 実際にレビューを回すまでは "review" の
+#            timings は存在しない設計（C1）なので、その既定値が効くのは「タスク実行中で
+#            まだレビューをしていない」まさに知りたい局面ではなく、レビューが終わった後
+#            （もう要らなくなった後）だけになる。古い数値を機械の中に静かに固定するより、
+#            「不明」と言い切るほうが B3 の趣旨に合う（判断の理由は T02 の report にも書いた）。
+#   C2     : レビューの推定は「残数 × 幅」ではなく**固定枠**（観点を増やしても並列なので
+#            さほど伸びない）。今回の実装では review の timings 1 件（started_at/done_at）を
+#            そのままその固定枠として使う（複数回ぶんの履歴を溜める設計は範囲外。spec の
+#            「範囲外」節: 履歴を溜めてタスクの性質ごとに見積もることはしない）。
+#   B6     : 記録が欠けているタスク（done/in_progress なのに timings が無い・不完全）を
+#            出力自身が指摘する。gc に検査を足す方式は取らない（決定 0010）。
+#
+# tasks_extract は timings_extract と姉妹関係にあるが、"tasks" 配列の要素はネストした配列・
+# オブジェクト（acceptance / spec_refs / rules / files_scope / depends_on / result）を含む
+# 複数行オブジェクトなので、"{" / "}" の対応関係だけを追って各タスクの境界を判定する
+# （"[" / "]" は見ない。acceptance 等の配列はこの depth 計算に影響しない）。値の中に含まれる
+# "{" "}" は文字列を取り除いてから数えるので、日本語の説明文に中括弧が混ざっても壊れない。
+#
+# レビュー指摘（T05 #5）: id/status の捕捉が「(a) 行頭が \"id\": で始まる」という
+# 位置固定の正規表現に加えて「(b) depth==1 になってから初めて捕捉を試みる」という条件つきだった
+# ため、1 タスク 1 行の圧縮形式（例: {"id": "T01", "status": "done"}）は読めなかった: 圧縮形式は
+# 開き "{" と "id" が同じ行にあり、その行を処理する時点ではまだ depth が 0（この行の分の "{" を
+# 数える前）のため (b) が常に成立せず、(a) も行頭が "{" なので不成立になる。展開形式（1 フィール
+# ド 1 行）はこの直後の行で depth が既に 1 になっているのでたまたま両方成立していただけで、実際は
+# 2 つの読み方が偶然噛み合っていた。CHANGELOG（T03）は「tasks_extract は既に圧縮 1 行・展開の
+# 両方を読める」と書いていたが、これは誤りだった（実測で反証: 圧縮形式のタスクは無警告で
+# total_tasks から消える）。timings_extract の extract_val（行内のどこにあっても "key": の値を
+# 拾う非固定位置マッチ）と entered フラグ（"{" を見た後で depth が 0 に戻ったら 1 エントリ分と
+# 見なす）に方式を揃え、depth==1 という前提を外した。これで展開形式・圧縮形式のどちらも同じ
+# コードで読める（jq/node には頼らない）。id/status はタスクの最上位フィールドにしか現れない
+# 前提（result オブジェクトのフィールドは commit/questions/report_path/note_for_next で
+# id/status と衝突しない）で、timings_extract と同じ「最初に見つかった値を採用し、以降は
+# 上書きしない」規則を使う。
+tasks_extract() { # stages_file -> TSV: id\tstatus
+  awk '
+    function strip_strings(s,    r) {
+      r = s
+      gsub(/"([^"\\]|\\.)*"/, "\"\"", r)
+      return r
+    }
+    function extract_val(line, key,    t) {
+      if (line !~ ("\"" key "\"[[:space:]]*:")) return ""
+      t = line
+      sub(("^.*\"" key "\"[[:space:]]*:[[:space:]]*"), "", t)
+      sub(/^"/, "", t)
+      sub(/".*/, "", t)
+      return t
+    }
+    /^[[:space:]]*"tasks"[[:space:]]*:[[:space:]]*\[[[:space:]]*\][,]?[[:space:]]*$/ { next }
+    /^[[:space:]]*"tasks"[[:space:]]*:[[:space:]]*\[/ { intbl=1; depth=0; id=""; status=""; entered=0; next }
+    intbl && depth==0 && /^[[:space:]]*\][,]?[[:space:]]*$/ { intbl=0; next }
+    intbl {
+      if ($0 ~ /\{/) entered=1
+      v = extract_val($0, "id");     if (v != "" && id == "")     id = v
+      v = extract_val($0, "status"); if (v != "" && status == "") status = v
+      line = strip_strings($0)
+      opens = gsub(/\{/, "{", line)
+      closes = gsub(/\}/, "}", line)
+      depth += opens - closes
+      if (depth == 0 && entered == 1) {
+        print id "\t" (status == "" ? "unknown" : status)
+        id = ""; status = ""; entered = 0
+      }
+      next
+    }
+  ' "$1"
+}
+
+# timings TSV から 1 id 分の行を引く。"started\tdone"（値が無ければ "-"）を返す。
+# id 自体が見つからなければ何も出力しない（呼び出し側は `[ -z "$look" ]` で判定する）。
+timing_lookup() { # timings_tsv id
+  awk -F'\t' -v id="$2" '$1==id{print $2"\t"$3; exit}' "$1"
+}
+
+# ISO 8601 UTC（"2026-09-25T09:27:07Z"）-> epoch 秒。GNU/BSD date の両方言に対応する
+# （gc.sh の date_to_epoch と同じ理由。tech-debt #8: date -d は GNU 専用）。
+# 読めなければ何も出力せず非 0 を返す（呼び出し側で「解釈できない」を報告する）。
+iso_to_epoch() { # iso8601_utc
+  date -u -d "$1" +%s 2>/dev/null && return 0
+  date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$1" +%s 2>/dev/null && return 0
+  return 1
+}
+
+# epoch 秒 -> ローカルタイムの "HH:MM"（B1b: 記録は UTC だが表示は人間が読むローカルタイム）。
+# GNU は `date -d @epoch`、BSD/macOS は `date -r epoch`（どちらも既定でローカルタイムに直す）。
+epoch_to_local_hm() { # epoch
+  date -d "@$1" +%H:%M 2>/dev/null && return 0
+  date -r "$1" +%H:%M 2>/dev/null && return 0
+  return 1
+}
+
+# 秒 -> 分（四捨五入）。表示用（JSON 側は秒のまま出すので丸めない）。
+human_minutes() { # seconds
+  local s="$1"
+  echo $(( (s + 30) / 60 ))
+}
+
+# 秒 -> 人が読みやすい経過表記（末尾の単位まで込みで返す）。60 分未満は今までどおり "NN 分"、
+# 以上は "H時間M分"（統括が実機で「経過 2732 分」を踏んだ。セッションが日をまたぐと分だけの
+# 積算は読みにくい。表示だけの改善で、中断を考慮しない計算そのものは変えない＝spec の
+# 「範囲外」節どおり）。JSON 側は秒のままで変えない（機械可読なので丸めや単位変換をしない）。
+human_duration() { # seconds
+  local s="$1" total_min h m
+  total_min=$(( (s + 30) / 60 ))
+  h=$(( total_min / 60 ))
+  m=$(( total_min % 60 ))
+  if [ "$h" -gt 0 ]; then
+    printf '%s時間%s分' "$h" "$m"
+  else
+    printf '%s 分' "$m"
+  fi
+}
+
+# JSON 文字列の中身をエスケープする（前後のダブルクォートは呼び出し側で付ける）。
+json_esc() { # string
+  printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# harness eta [--json]
+cmd_eta() {
+  local json=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --json) json=1; shift;;
+      *) die "unknown option: $1 (usage: harness eta [--json])";;
+    esac
+  done
+
+  ROOT="$(project_root)"
+  local stages; stages="$(require_stages_file "$ROOT")"
+
+  local now_epoch generated_at
+  now_epoch="$(date +%s)"
+  generated_at="$(utc_now)"
+
+  local tasks_tsv timings_tsv timings_warn
+  tasks_tsv="$(mktemp)"; timings_tsv="$(mktemp)"; timings_warn="$(mktemp)"
+  tasks_extract "$stages" >"$tasks_tsv"
+  timings_extract "$stages" >"$timings_tsv" 2>"$timings_warn"
+
+  # timings_extract が標準エラーへ出した「書式が想定と違って読めない」警告を集める。B6 の
+  # 「記録が無い」（missing_lines/missing_json）とは別物として扱う（区別がつくことが受け入れ
+  # 条件）。0 件なら以降は素通りする。
+  local parse_warnings=() pw_line
+  if [ -s "$timings_warn" ]; then
+    while IFS= read -r pw_line; do
+      [ -n "$pw_line" ] && parse_warnings+=("$pw_line")
+    done <"$timings_warn"
+  fi
+  rm -f "$timings_warn"
+
+  local total done_count
+  total="$(wc -l <"$tasks_tsv" | tr -d '[:space:]')"; [ -z "$total" ] && total=0
+  done_count="$(awk -F'\t' '$2=="done"{c++} END{print c+0}' "$tasks_tsv")"
+
+  # 完了タスクの所要時間（秒）のサンプルと、記録が欠けているタスクの一覧（B6）を集める。
+  # todo はまだ着手していないのが正常なので見ない。in_progress/done/blocked/failed は
+  # 着手した（started_at があるはず）とみなして見る。
+  local sample_count=0 sample_min="" sample_max=""
+  local missing_lines=() missing_json=()
+  local tid tstatus
+  while IFS=$'\t' read -r tid tstatus; do
+    [ -z "$tid" ] && continue
+    [ "$tstatus" = "todo" ] && continue
+    local look started dat
+    look="$(timing_lookup "$timings_tsv" "$tid")"
+    if [ -z "$look" ]; then
+      missing_lines+=("${tid}（${tstatus}）: 記録が無い（harness task start ${tid} を呼んでいない）")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"no_record\"}")
+      continue
+    fi
+    IFS=$'\t' read -r started dat <<<"$look"
+    if [ "$started" = "-" ]; then
+      missing_lines+=("${tid}（${tstatus}）: started_at が記録されていない")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"missing_started_at\"}")
+      continue
+    fi
+    [ "$tstatus" != "done" ] && continue   # in_progress 等は started_at さえあれば正常
+    if [ "$dat" = "-" ]; then
+      missing_lines+=("${tid}（${tstatus}）: done_at が記録されていない")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"missing_done_at\"}")
+      continue
+    fi
+    local se de
+    if ! se="$(iso_to_epoch "$started")"; then
+      missing_lines+=("${tid}（${tstatus}）: started_at '${started}' を解釈できない")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"unparseable_started_at\"}")
+      continue
+    fi
+    if ! de="$(iso_to_epoch "$dat")"; then
+      missing_lines+=("${tid}（${tstatus}）: done_at '${dat}' を解釈できない")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"unparseable_done_at\"}")
+      continue
+    fi
+    if [ "$de" -lt "$se" ]; then
+      missing_lines+=("${tid}（${tstatus}）: done_at が started_at より前になっている")
+      missing_json+=("{\"id\": \"$(json_esc "$tid")\", \"status\": \"$(json_esc "$tstatus")\", \"reason\": \"done_before_start\"}")
+      continue
+    fi
+    local dur=$((de - se))
+    sample_count=$((sample_count + 1))
+    if [ -z "$sample_min" ] || [ "$dur" -lt "$sample_min" ]; then sample_min="$dur"; fi
+    if [ -z "$sample_max" ] || [ "$dur" -gt "$sample_max" ]; then sample_max="$dur"; fi
+  done <"$tasks_tsv"
+
+  # ---------------------------------------------------------------- T02（docs/spec/timing-anywhere.md B1〜B4）
+  # tasks が空（total==0、phase は後段で no_tasks になる）だと、上のループは $tasks_tsv 起点
+  # なので一度も回らず、sample_count/sample_min/sample_max は常に 0 のまま——「進捗（N/M）を
+  # 出せない」のは正しいが（B2。分母が無いので捏造しない）、「所要時間や実行中の経過も一切
+  # 出せない」まで一緒くたにしていた。timings 自体には実績が乗っていることがある（計画を
+  # 立てない小さな作業を harness task start/done だけで記録した場合。spec 冒頭の実例）。
+  #
+  # ここでは $timings_tsv（tasks を経由しない、timings 配列そのもの）を直接見て:
+  #   - 完了した記録（started_at/done_at とも有効で done_at >= started_at）の件数・最小/最大/
+  #     平均所要時間（B1）
+  #   - 実行中の記録（done_at が null）それぞれの経過時間（B3）
+  # を拾う。tasks が無い前提なので「id が何のタスクか」「進捗が何 / 何か」は判断できない
+  # （捏造しない）。started_at が無い・日付として解釈できない・done_at が started_at より前、
+  # といった書式の問題は「記録が無い」のではなく「読めない」なので、既存の parse_warnings
+  # （timings_parse_warnings）に回す（B6 と同じ区別を no_tasks 経路でも保つ）。
+  local record_count=0 record_sum=0 record_min="" record_max=""
+  local running_records=()
+  if [ "$total" -eq 0 ]; then
+    local nr_id nr_s nr_d
+    while IFS=$'\t' read -r nr_id nr_s nr_d; do
+      [ -z "$nr_id" ] && continue
+      if [ "$nr_s" = "-" ]; then
+        parse_warnings+=("${nr_id}: started_at が記録されていない（所要・経過時間とも計算できない）")
+        continue
+      fi
+      local nr_se
+      if ! nr_se="$(iso_to_epoch "$nr_s")"; then
+        parse_warnings+=("${nr_id}: started_at '${nr_s}' を解釈できない")
+        continue
+      fi
+      if [ "$nr_d" = "-" ]; then
+        # B3: 実行中（done_at が null）。「id\t開始epoch\t経過秒」を積む
+        running_records+=("${nr_id}"$'\t'"${nr_se}"$'\t'"$((now_epoch - nr_se))")
+        continue
+      fi
+      local nr_de
+      if ! nr_de="$(iso_to_epoch "$nr_d")"; then
+        parse_warnings+=("${nr_id}: done_at '${nr_d}' を解釈できない")
+        continue
+      fi
+      if [ "$nr_de" -lt "$nr_se" ]; then
+        parse_warnings+=("${nr_id}: done_at が started_at より前になっている")
+        continue
+      fi
+      local nr_dur=$((nr_de - nr_se))
+      record_count=$((record_count + 1))
+      record_sum=$((record_sum + nr_dur))
+      if [ -z "$record_min" ] || [ "$nr_dur" -lt "$record_min" ]; then record_min="$nr_dur"; fi
+      if [ -z "$record_max" ] || [ "$nr_dur" -gt "$record_max" ]; then record_max="$nr_dur"; fi
+    done <"$timings_tsv"
+  fi
+  local record_avg=0
+  if [ "$record_count" -gt 0 ]; then
+    record_avg=$(( (record_sum + record_count / 2) / record_count ))
+  fi
+
+  local in_progress_id
+  in_progress_id="$(awk -F'\t' '$2=="in_progress"{print $1; exit}' "$tasks_tsv")"
+
+  # review（C1: tasks 配列には無い id。C2: 固定枠として扱うため、started/done がそろった
+  # 1 件をそのまま「レビューの所要時間」の実績とする）。
+  local review_look review_started review_done
+  review_look="$(timing_lookup "$timings_tsv" "review")"
+  review_started=""; review_done=""
+  if [ -n "$review_look" ]; then
+    IFS=$'\t' read -r review_started review_done <<<"$review_look"
+    [ "$review_started" = "-" ] && review_started=""
+    [ "$review_done" = "-" ] && review_done=""
+  fi
+  # レビュー指摘（T04 #2）: started_at/done_at が非空だが日付として解釈できない値
+  # （コピペミスで "T"/"Z" が欠けた・別形式で書いた等）のとき、以前は phase 判定側だけが
+  # 「非空なら有効」という別の緩い基準を使っており、review_known と食い違って黙って
+  # all_done / *_in_progress と誤認していた（no-silent-failures 再発）。ここで review_known
+  # と同じ iso_to_epoch 検証を行い、解釈できない値は phase 判定でも「無い」ものとして扱い、
+  # かつ黙らせず timings_parse_warnings へ回す（B6 の「記録が無い」とは別の理由として書く）。
+  local review_known=0 review_min="" review_max=""
+  local review_started_valid=0 review_done_valid=0
+  local rse="" rde=""
+  if [ -n "$review_started" ]; then
+    if rse="$(iso_to_epoch "$review_started")"; then
+      review_started_valid=1
+    else
+      parse_warnings+=("review の started_at '${review_started}' を解釈できない")
+    fi
+  fi
+  if [ -n "$review_done" ]; then
+    if rde="$(iso_to_epoch "$review_done")"; then
+      review_done_valid=1
+    else
+      parse_warnings+=("review の done_at '${review_done}' を解釈できない")
+    fi
+  fi
+  if [ "$review_started_valid" -eq 1 ] && [ "$review_done_valid" -eq 1 ] && [ "$rde" -ge "$rse" ]; then
+    review_known=1; review_min=$((rde - rse)); review_max=$review_min
+  fi
+
+  # 経過時間（B1）: timings（タスク・review 問わず）の最も早い started_at から今まで。
+  local earliest_epoch=""
+  local rid rs rd
+  while IFS=$'\t' read -r rid rs rd; do
+    [ "$rs" = "-" ] && continue
+    local e
+    e="$(iso_to_epoch "$rs")" || continue
+    if [ -z "$earliest_epoch" ] || [ "$e" -lt "$earliest_epoch" ]; then earliest_epoch="$e"; fi
+  done <"$timings_tsv"
+  local elapsed_seconds=""
+  [ -n "$earliest_epoch" ] && elapsed_seconds=$((now_epoch - earliest_epoch))
+
+  # 現在の題材（B1: 進行中の題材について出す。B3: 進行中の題材が無ければ不明）。
+  # 優先順位: 実行中のタスク > 実行中のレビュー > 全部完了 > レビュー待ち > 未着手待ち。
+  local phase
+  if [ "$total" -eq 0 ]; then
+    phase="no_tasks"
+  elif [ -n "$in_progress_id" ]; then
+    phase="task_in_progress"
+  elif [ "$review_started_valid" -eq 1 ] && [ "$review_done_valid" -eq 0 ]; then
+    phase="review_in_progress"
+  elif [ "$done_count" -eq "$total" ] && [ "$review_known" -eq 1 ]; then
+    # review_known（started_at/done_at 双方が解釈でき、順序も正しい）を使う。review_done_valid
+    # だけで判定すると、started_at が壊れていても done_at さえ読めれば all_done と言えてしまい、
+    # review_duration.known:false と矛盾する（レビュー指摘 T04 #2 の自己矛盾そのもの）。
+    phase="all_done"
+  elif [ "$done_count" -eq "$total" ]; then
+    phase="awaiting_review"
+  else
+    phase="pending"
+  fi
+
+  local current_kind="" current_id="" current_started_epoch="" current_elapsed=""
+  case "$phase" in
+    task_in_progress)
+      current_kind="task"; current_id="$in_progress_id"
+      local look started
+      look="$(timing_lookup "$timings_tsv" "$in_progress_id")"
+      if [ -n "$look" ]; then
+        IFS=$'\t' read -r started _ <<<"$look"
+        if [ "$started" != "-" ] && current_started_epoch="$(iso_to_epoch "$started")"; then
+          current_elapsed=$((now_epoch - current_started_epoch))
+        fi
+      fi
+      ;;
+    review_in_progress)
+      current_kind="review"; current_id="review"
+      if current_started_epoch="$(iso_to_epoch "$review_started")"; then
+        current_elapsed=$((now_epoch - current_started_epoch))
+      fi
+      ;;
+  esac
+
+  # 残りタスク数への掛け算（B2: 残タスク数 × 実測の最小/最大。単純平均はしない）。
+  # 残り 0 件なら実績が無くても「0」と言い切れる（掛ける対象が無いだけで、捏造ではない）。
+  #
+  # レビュー指摘（T04 #3）: total==0（tasks が 1 件も無い＝phase: no_tasks）でも
+  # remaining_count は 0-0=0 になり、「残り 0 件で確定」と区別できず known:true（epoch=今）を
+  # 捏造していた。total==0 は「掛ける対象が無い」ではなく「そもそも題材が無い」なので、
+  # 同じ入力のテキスト出力（B3: 不明）と揃え、先に task_known=0 のまま確定させる。
+  local remaining_count=$((total - done_count))
+  [ "$remaining_count" -lt 0 ] && remaining_count=0
+  local task_known=0 remain_min=0 remain_max=0
+  if [ "$total" -eq 0 ]; then
+    task_known=0
+  elif [ "$remaining_count" -eq 0 ]; then
+    task_known=1
+  elif [ "$sample_count" -gt 0 ]; then
+    task_known=1
+    remain_min=$((remaining_count * sample_min))
+    remain_max=$((remaining_count * sample_max))
+  fi
+  local eta_tasks_min_epoch="" eta_tasks_max_epoch=""
+  if [ "$task_known" -eq 1 ]; then
+    eta_tasks_min_epoch=$((now_epoch + remain_min))
+    eta_tasks_max_epoch=$((now_epoch + remain_max))
+  fi
+
+  # レビュー込みの完了見込み（C2: 固定枠をタスク側の見込みに足すだけ。レビューが既に
+  # done ならその分の追加時間は 0 として扱う＝all_done）。
+  local eta_review_known=0 eta_review_min_epoch="" eta_review_max_epoch=""
+  if [ "$task_known" -eq 1 ]; then
+    if [ "$phase" = "all_done" ]; then
+      eta_review_known=1
+      eta_review_min_epoch="$eta_tasks_min_epoch"; eta_review_max_epoch="$eta_tasks_max_epoch"
+    elif [ "$review_known" -eq 1 ]; then
+      eta_review_known=1
+      eta_review_min_epoch=$((eta_tasks_min_epoch + review_min))
+      eta_review_max_epoch=$((eta_tasks_max_epoch + review_max))
+    fi
+  fi
+
+  if [ "$json" -eq 1 ]; then
+    printf '{\n'
+    printf '  "generated_at": "%s",\n' "$(json_esc "$generated_at")"
+    printf '  "phase": "%s",\n' "$phase"
+    printf '  "done_tasks": %s,\n' "$done_count"
+    printf '  "total_tasks": %s,\n' "$total"
+    printf '  "remaining_tasks": %s,\n' "$remaining_count"
+    if [ -n "$elapsed_seconds" ]; then printf '  "elapsed_seconds": %s,\n' "$elapsed_seconds"
+    else printf '  "elapsed_seconds": null,\n'; fi
+    case "$phase" in
+      task_in_progress|review_in_progress)
+        if [ -n "$current_elapsed" ]; then
+          printf '  "current": {"kind": "%s", "id": "%s", "elapsed_seconds": %s},\n' "$current_kind" "$(json_esc "$current_id")" "$current_elapsed"
+        else
+          printf '  "current": {"kind": "%s", "id": "%s", "elapsed_seconds": null},\n' "$current_kind" "$(json_esc "$current_id")"
+        fi
+        ;;
+      *) printf '  "current": {"kind": "%s"},\n' "$phase";;
+    esac
+    # T02（B1/B3/B4）: tasks が空でも timings の実績が読めるように、no_tasks のときだけ
+    # records（完了した記録の件数・最小/最大/平均秒）と running_records（実行中の記録の一覧）
+    # を足す。他の phase では tasks 側の task_duration が同じ役目を果たしているので出さない。
+    if [ "$phase" = "no_tasks" ]; then
+      if [ "$record_count" -gt 0 ]; then
+        printf '  "records": {"known": true, "count": %s, "min_seconds": %s, "max_seconds": %s, "avg_seconds": %s},\n' \
+          "$record_count" "$record_min" "$record_max" "$record_avg"
+      else
+        printf '  "records": {"known": false, "count": 0, "min_seconds": null, "max_seconds": null, "avg_seconds": null},\n'
+      fi
+      printf '  "running_records": ['
+      if [ "${#running_records[@]}" -eq 0 ]; then
+        printf '],\n'
+      else
+        printf '\n'
+        local rr_i rr_n; rr_n="${#running_records[@]}"
+        rr_i=0
+        while [ "$rr_i" -lt "$rr_n" ]; do
+          local rr_id2 rr_se2 rr_el2
+          IFS=$'\t' read -r rr_id2 rr_se2 rr_el2 <<<"${running_records[$rr_i]}"
+          if [ "$rr_i" -lt $((rr_n - 1)) ]; then
+            printf '    {"id": "%s", "elapsed_seconds": %s},\n' "$(json_esc "$rr_id2")" "$rr_el2"
+          else
+            printf '    {"id": "%s", "elapsed_seconds": %s}\n' "$(json_esc "$rr_id2")" "$rr_el2"
+          fi
+          rr_i=$((rr_i + 1))
+        done
+        printf '  ],\n'
+      fi
+    fi
+    if [ "$sample_count" -gt 0 ]; then
+      printf '  "task_duration": {"known": true, "sample_count": %s, "min_seconds": %s, "max_seconds": %s},\n' "$sample_count" "$sample_min" "$sample_max"
+    else
+      printf '  "task_duration": {"known": false, "sample_count": 0, "min_seconds": null, "max_seconds": null},\n'
+    fi
+    if [ "$review_known" -eq 1 ]; then
+      printf '  "review_duration": {"known": true, "min_seconds": %s, "max_seconds": %s},\n' "$review_min" "$review_max"
+    else
+      printf '  "review_duration": {"known": false, "min_seconds": null, "max_seconds": null},\n'
+    fi
+    if [ "$task_known" -eq 1 ]; then
+      printf '  "eta_tasks_only": {"known": true, "min_epoch": %s, "max_epoch": %s},\n' "$eta_tasks_min_epoch" "$eta_tasks_max_epoch"
+    else
+      printf '  "eta_tasks_only": {"known": false, "min_epoch": null, "max_epoch": null},\n'
+    fi
+    if [ "$eta_review_known" -eq 1 ]; then
+      printf '  "eta_with_review": {"known": true, "min_epoch": %s, "max_epoch": %s},\n' "$eta_review_min_epoch" "$eta_review_max_epoch"
+    else
+      printf '  "eta_with_review": {"known": false, "min_epoch": null, "max_epoch": null},\n'
+    fi
+    printf '  "missing_records": ['
+    if [ "${#missing_json[@]}" -eq 0 ]; then
+      printf '],\n'
+    else
+      printf '\n'
+      local i n; n="${#missing_json[@]}"
+      i=0
+      while [ "$i" -lt "$n" ]; do
+        if [ "$i" -lt $((n - 1)) ]; then printf '    %s,\n' "${missing_json[$i]}"
+        else printf '    %s\n' "${missing_json[$i]}"; fi
+        i=$((i + 1))
+      done
+      printf '  ],\n'
+    fi
+    # B6 / no-silent-failures: 「記録が無い」（missing_records）とは別に、timings 自体を
+    # 解釈できなかった箇所を出す（timings_extract のコメント参照）。空なら [] のまま。
+    printf '  "timings_parse_warnings": ['
+    if [ "${#parse_warnings[@]}" -eq 0 ]; then
+      printf ']\n'
+    else
+      printf '\n'
+      local j m; m="${#parse_warnings[@]}"
+      j=0
+      while [ "$j" -lt "$m" ]; do
+        if [ "$j" -lt $((m - 1)) ]; then printf '    "%s",\n' "$(json_esc "${parse_warnings[$j]}")"
+        else printf '    "%s"\n' "$(json_esc "${parse_warnings[$j]}")"; fi
+        j=$((j + 1))
+      done
+      printf '  ]\n'
+    fi
+    printf '}\n'
+  else
+    # B6 / no-silent-failures: phase を問わず先に出す。「記録が無い」（後段の missing_lines）
+    # とは別物であることが分かるよう、文言も分けて書く（受け入れ条件: 区別がつくこと）。
+    if [ "${#parse_warnings[@]}" -gt 0 ]; then
+      echo "harness eta: ※ timings の書式の一部を解釈できなかった（「記録が無い」ではなく書式が想定と違う可能性がある）:"
+      local pw
+      for pw in "${parse_warnings[@]}"; do
+        echo "  - ${pw}"
+      done
+    fi
+    if [ "$phase" = "no_tasks" ]; then
+      # T02（B1/B2/B3）: 進捗（N/M）は tasks が無いので出せないと正直に言う（捏造しない）。
+      # ただし timings 自体には実績が乗っていることがあるので、そこは黙らず出す。
+      echo "harness eta: 進捗（N/M）は不明（${stages} に tasks が無い。計画を立てない小さな作業では正常）"
+      if [ "$record_count" -gt 0 ]; then
+        echo "  記録 ${record_count} 件（$(human_minutes "$record_min")〜$(human_minutes "$record_max") 分、平均 $(human_minutes "$record_avg") 分）"
+      else
+        echo "  完了した記録: まだ無い（所要時間は不明）"
+      fi
+      if [ "${#running_records[@]}" -gt 0 ]; then
+        local rr_line rr_id3 rr_se3 rr_el3
+        for rr_line in "${running_records[@]}"; do
+          IFS=$'\t' read -r rr_id3 rr_se3 rr_el3 <<<"$rr_line"
+          echo "  実行中: ${rr_id3}（$(epoch_to_local_hm "$rr_se3") 開始、$(human_duration "$rr_el3")経過）"
+        done
+      else
+        echo "  実行中の記録: 無い"
+      fi
+    else
+      local head="harness eta: ${done_count}/${total} done"
+      if [ -n "$elapsed_seconds" ]; then head="${head}（経過 $(human_duration "$elapsed_seconds")）"
+      else head="${head}（経過 不明）"; fi
+      echo "$head"
+
+      case "$phase" in
+        task_in_progress)
+          if [ -n "$current_elapsed" ]; then
+            echo "  実行中: ${current_id}（$(epoch_to_local_hm "$current_started_epoch") 開始、$(human_duration "$current_elapsed")経過）"
+          else
+            echo "  実行中: ${current_id}（開始時刻は記録されていない）"
+          fi
+          ;;
+        review_in_progress)
+          if [ -n "$current_elapsed" ]; then
+            echo "  実行中: レビュー（$(epoch_to_local_hm "$current_started_epoch") 開始、$(human_duration "$current_elapsed")経過）"
+          else
+            echo "  実行中: レビュー（開始時刻は記録されていない）"
+          fi
+          ;;
+        awaiting_review) echo "  タスクは全て完了。レビュー未着手（harness task start review 待ち）";;
+        all_done)        echo "  完了（タスク・レビューとも done）";;
+        pending)         echo "  実行中のタスクなし（次のタスク未着手）";;
+      esac
+
+      if [ "$remaining_count" -gt 0 ]; then
+        echo "  残りタスク: ${remaining_count} 件"
+        if [ "$sample_count" -gt 0 ]; then
+          echo "  タスクの所要時間の推定: $(human_minutes "$sample_min")〜$(human_minutes "$sample_max") 分/件（完了実績 ${sample_count} 件） → 残り計 $(human_minutes "$remain_min")〜$(human_minutes "$remain_max") 分"
+          echo "  完了見込み（タスクのみ）: $(epoch_to_local_hm "$eta_tasks_min_epoch")〜$(epoch_to_local_hm "$eta_tasks_max_epoch")"
+        else
+          echo "  タスクの所要時間の推定: 不明（完了実績が 0 件）"
+        fi
+      fi
+
+      if [ "$phase" != "all_done" ]; then
+        if [ "$review_known" -eq 1 ]; then
+          echo "  レビューの所要時間の推定: $(human_minutes "$review_min")〜$(human_minutes "$review_max") 分（固定枠。観点数を増やしても残数には掛けない）"
+        else
+          echo "  レビューの所要時間の推定: 不明（review の実績記録が無い）"
+        fi
+        if [ "$eta_review_known" -eq 1 ]; then
+          echo "  完了見込み（レビュー込み）: $(epoch_to_local_hm "$eta_review_min_epoch")〜$(epoch_to_local_hm "$eta_review_max_epoch")"
+        else
+          echo "  完了見込み（レビュー込み）: 不明"
+        fi
+      fi
+
+      if [ "${#missing_lines[@]}" -gt 0 ]; then
+        echo "  ※ 記録が欠けている:"
+        local m
+        for m in "${missing_lines[@]}"; do
+          echo "    - ${m}"
+        done
+      fi
+    fi
+  fi
+
+  rm -f "$tasks_tsv" "$timings_tsv"
+}
+
+cmd_check() {
+  ROOT="$(project_root)"
+  [ -f "$ROOT/.harness/scripts/check.sh" ] || die "未導入（.harness/scripts/check.sh が無い）"
+  exec bash "$ROOT/.harness/scripts/check.sh" "$@"
+}
+
+cmd_gc() {
+  ROOT="$(project_root)"
+  [ -f "$ROOT/.harness/scripts/gc.sh" ] || die "gc.sh が無い（harness update で入る）"
+  exec bash "$ROOT/.harness/scripts/gc.sh" "$@"
+}
+
+cmd_doctor() {
+  ROOT="$(project_root)"
+  if [ ! -f "$ROOT/.harness/scripts/doctor.sh" ]; then
+    # 未導入は「診断自体ができない環境不備」= exit 2（doctor.sh 側の判定と合わせる）
+    echo "harness doctor: 導入コピーが無い（$ROOT/.harness/scripts/doctor.sh が見つからない）" >&2
+    echo "  直し方: このディレクトリで harness init を実行する" >&2
+    echo "          例: bash <agent-harness を clone した場所>/bin/harness init --source <同じ場所>" >&2
+    exit 2
+  fi
+  exec bash "$ROOT/.harness/scripts/doctor.sh" "$@"
+}
+
+cmd_version() {
+  local r; r="$(self_repo)"
+  if [ -n "$r" ]; then echo "harness (repo) $(tr -d '\r\n' <"$r/VERSION")"; else
+    ROOT="$(project_root)"; [ -f "$(manifest_path)" ] && echo "harness (installed) $(manifest_get harness_version)" || echo "harness (standalone)"
+  fi
+}
+
+# `harness` を PATH 上に置く。Windows では harness.cmd も置き、PowerShell / cmd から使えるようにする。
+cmd_self_install() {
+  local dir=""
+  while [ $# -gt 0 ]; do case "$1" in --dir) dir="$2"; shift 2;; *) die "unknown option: $1";; esac; done
+  # 標準入力から実行中は BASH_SOURCE が無い。素に参照すると案内の die に届く前に落ちるので :- を付ける
+  local me="${BASH_SOURCE[0]:-}"
+  [ -f "$me" ] || die "標準入力から実行中は self-install できない。clone した bin/harness か、導入済みプロジェクトの .harness/bin/harness から実行する"
+  local win=0; case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) win=1;; esac
+  if [ -z "$dir" ]; then
+    if [ "$win" = 1 ]; then dir="$HOME/bin"; else dir="$HOME/.local/bin"; fi
+  fi
+  mkdir -p "$dir"
+  cp "$me" "$dir/harness" && chmod +x "$dir/harness"
+  info "installed: $dir/harness"
+  if [ "$win" = 1 ]; then
+    write_cmd_shim "$dir/harness.cmd"; info "installed: $dir/harness.cmd (PowerShell / cmd 用)"
+  fi
+  case ":$PATH:" in *":$dir:"*) info "PATH に入っている。新しいシェルで 'harness version' を確認";;
+    *) info "PATH に $dir を追加する:"
+       if [ "$win" = 1 ]; then
+         info "  PowerShell: [Environment]::SetEnvironmentVariable('Path', \$env:Path + ';$(cygpath -w "$dir" 2>/dev/null || echo "$dir")', 'User')"
+         info "  Git Bash は ~/bin を自動で PATH に含める（新しいシェルで有効）"
+       else
+         info "  echo 'export PATH=\"$dir:\$PATH\"' >> ~/.bashrc"
+       fi;;
+  esac
+}
+
+usage() { # 冒頭のコメントをそのまま usage にする。標準入力から実行中は読み出せないので短縮版を出す
+  local src="${BASH_SOURCE[0]:-}"
+  if [ -n "$src" ] && [ -f "$src" ]; then
+    sed -n '2,19p' "$src" | sed 's/^# \{0,1\}//'
+  else
+    echo "harness <init|update|status|diff|upstream|check|gc|doctor|task|eta|self-install|version>"
+    echo "  標準入力から実行中のため詳しい usage を読み出せない。clone した bin/harness か、導入済みプロジェクトの .harness/bin/harness から実行する。"
+  fi
+}
+
+# PATH 上の harness から呼ばれ、プロジェクトに同梱コピーがあれば、そちらへ委譲する（版をプロジェクトに固定）
+maybe_delegate() {
+  local cmd="${1:-}"
+  case "$cmd" in init|self-install|version|--version|-v|""|help|-h|--help) return 0;; esac
+  # update の再実行（reexec_if_vendored）で来たときは、同梱コピーと同じ内容であることを
+  # 再実行の前に確かめてある。同じ判定をもう一度やらない（same_script は git を 2 回起動する。
+  # update 1 回で 3 回呼ばれていた分が、この行と VENDORED_SAME で 1 回になる。実測 2026-09-21）。
+  case "$cmd" in update)
+    [ -n "${HARNESS_REEXEC:-}" ] && { VENDORED_SAME=1; return 0; }
+    # source 側の CLI へ渡したあと（HARNESS_FROM_SOURCE）は、同梱コピーへ戻さない。
+    # 戻すと source ↔ 同梱コピーを往復して終わらない。
+    [ -n "${HARNESS_FROM_SOURCE:-}" ] && return 0
+  ;; esac
+  local root vendored me="${BASH_SOURCE[0]:-}"
+  root="$(project_root)"; vendored="$root/.harness/bin/harness"
+  [ -f "$vendored" ] || return 0
+  if same_script "$me" "$vendored"; then VENDORED_SAME=1; return 0; fi   # 既に同梱コピー（と同じ内容）を実行中
+  exec bash "$vendored" "$@"
+}
+
+# ---------------------------------------------------------------- main
+ROOT=""; PAYLOAD=""; SELF_PATH=""; HVER=""
+# maybe_delegate が出した「実行中のスクリプト＝同梱コピー」の判定を持ち回る（1=同じ / 空=未判定）。
+VENDORED_SAME=""
+# `source bin/harness` された場合（tests/hash-server-stderr.sh が hash_server_start /
+# hash_server_stop を CLI を経由せず直接呼ぶために使う。tech-debt #15 の回帰検査）は、
+# ここから下の CLI 分岐を走らせない。通常実行（bash bin/harness ... / 標準入力実行）では走る。
+# `(return 0 2>/dev/null)` は「sourced か」を BASH_SOURCE の比較より確実に見分ける（標準入力
+# 実行では BASH_SOURCE が空になり $0 との比較が誤判定するため）。
+HARNESS_SOURCED=0
+(return 0 2>/dev/null) && HARNESS_SOURCED=1
+if [ "$HARNESS_SOURCED" = 0 ]; then
+  maybe_delegate "$@"
+  case "${1:-}" in
+    init)     shift; cmd_init "$@";;
+    self-install) shift; cmd_self_install "$@";;
+    update)   shift; cmd_update "$@";;
+    status)   shift; cmd_status "$@";;
+    diff)     shift; cmd_diff "$@";;
+    upstream) shift; cmd_upstream "$@";;
+    check)    shift; cmd_check "$@";;
+    gc)       shift; cmd_gc "$@";;
+    doctor)   shift; cmd_doctor "$@";;
+    task)     shift; cmd_task "$@";;
+    eta)      shift; cmd_eta "$@";;
+    version|--version|-v) cmd_version;;
+    ""|help|-h|--help) usage;;
+    *) die "unknown command: $1 (harness help)";;
+  esac
+fi

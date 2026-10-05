@@ -1,0 +1,25 @@
+{
+  "_harness": "0.0.1 — merge these entries into .claude/settings.json. Entries whose command contains '.harness/' are managed by the harness.",
+  "permissions": {
+    "deny": [
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git reset --hard*)",
+      "Bash(git branch -D*)",
+      "Bash(gh repo delete*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.harness/scripts/session-start.sh\" || true",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

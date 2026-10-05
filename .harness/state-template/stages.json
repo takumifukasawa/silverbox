@@ -1,0 +1,25 @@
+{
+  "_doc": "タスク一覧。orchestrator は current_task のタスクだけを取り出して読み（jq '.tasks[] | select(.id==\"T03\")' など）、終わったぶんは開かない。progress.json と分けるのは肥大化を防ぐため（1 ファイルだと 10 タスクで 100KB 超になった実例あり）。implementer の戻り値のうち status はタスク直下に、残りは result に転記する。status が blocked のタスクが残っている間は最終レビューに入らない。",
+  "tasks": [
+    {
+      "id": "T01",
+      "title": "",
+      "status": "todo | in_progress | done | blocked | failed",
+      "acceptance": ["検査で確認できる条件を文で数件。例: 設定で無効にしている対象には作成できない"],
+      "spec_refs": ["docs/spec/<file>.md#<section>"],
+      "rules": ["<path>/AGENTS.md"],
+      "files_scope": [],
+      "depends_on": [],
+      "model": "inherit",
+      "_model_doc": "そのエージェントで有効なモデル名を書く（Claude: opus / sonnet / inherit。Codex: codex exec --model に渡す名前、または inherit）。inherit は「起動時に指定しない」の意味で、Claude Code ではサブエージェント既定（CLAUDE_CODE_SUBAGENT_MODEL）になる。設計余地あり → 上位、定型 → 下位。Claude / Codex とも同じ粒度で指定できる。",
+      "result": {
+        "commit": null,
+        "questions": [],
+        "report_path": null,
+        "note_for_next": ""
+      }
+    }
+  ],
+  "timings": [],
+  "_timings_doc": "harness task start <id> / harness task done <id> が書く（docs/spec/task-timing.md）。id はタスク（T01 等）でもレビュー（review 等）でもよく、この tasks 配列に無くても構わない（レビューを特別扱いしない）。このキー自体が無くても harness task は壊れず、無ければ先頭に自動で足す。手で編集しない。"
+}
