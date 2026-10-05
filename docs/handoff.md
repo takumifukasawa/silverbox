@@ -7,9 +7,9 @@
 
 ## いま何をしているか（1〜3 行）
 
-agent-harness を導入した（main）。開発の本線は 2026-09-04 から止まっており、再開点は
-「RAW を開いた時のデフォルト描画をどうするか」という設計方針の決定（下の「未確定事項」）。
-本線の作業ブランチは `wip/localtone-stage1`（main より先行。base-match の調査記録もそちらにある）。
+agent-harness を導入して main に push した（`14b1845`）。このセッションは main で終わっている。
+開発の本線は 2026-09-04 から止まっており、再開点は「RAW を開いた時のデフォルト描画をどうするか」という設計方針の決定（下の「未確定事項」）。
+本線の作業ブランチは `wip/localtone-stage1`（main より 27 コミット先行。base-match の調査記録もそちらにある。ハーネスはまだ入っていない）。
 
 ## 状態
 
@@ -24,6 +24,7 @@ agent-harness を導入した（main）。開発の本線は 2026-09-04 から�
 
 ## NEXT（依存順。順序制約があれば明記）
 
+0. 本線の作業に戻るときは `git switch wip/localtone-stage1`。ハーネスをそちらでも効かせたいなら先に `git merge main`（main 側の差分はハーネス導入のみ。`.gitignore` と `.claude/settings.json` は wip 側で未変更なので衝突しない見込み）。
 1. **設計方針の決定**（ユーザー判断。下記）。これが 2〜4 を全部ゲートしている。
 2. 判断材料として 5 シーンの 3 枚並べを作る: linear-raw | B-1（トーンカーブ + as-shot WB + カメラ行列のみ、Adobe の look なし）| 現行 acrlook。
 3. 方針に従って `seedDefaultLook` が `toneCurve` に書く初期値を決める（base curve と調整用トーンカーブは同じフィールド `developNode.ts` の `toneCurve`）。acrlook の base curve refit（base-5r の Curve A/B）は B を選ぶと不要になりうる。
