@@ -3,7 +3,7 @@
 <!-- 最終更新は絶対日付で。session-handoff が更新し、session-catchup が最初に読む。
      長期タスクの機械可読な進行状態は .harness/state/ に置き、ここには人間向けの要約だけ書く。 -->
 
-最終更新: 2026-10-05
+最終更新: 2026-10-06
 
 ## いま何をしているか（1〜3 行）
 
@@ -23,6 +23,8 @@ agent-harness を導入して main に push した（`14b1845`）。このセッ
 | agent-harness | 導入済み | `bash .harness/bin/harness doctor` / `check` |
 
 ## NEXT（依存順。順序制約があれば明記）
+
+- **2026-10-06 追加**: レイヤ構造を決定（暫定）— ベーストーンを独立段にし、ユーザーのトーンカーブは常に平らから始める（`docs/decisions/0001-base-tone-separate-stage.md`、LR / Resolve と同じ分け方）。計画は `docs/plans/active/base-tone-stage.md`（最終 GO 待ち。フェーズ 1 は見た目を変えないリファクタなので、下の A/B/C とは独立に進められる）。
 
 0. 本線の作業に戻るときは `git switch wip/localtone-stage1`。ハーネスをそちらでも効かせたいなら先に `git merge main`（main 側の差分はハーネス導入のみ。`.gitignore` と `.claude/settings.json` は wip 側で未変更なので衝突しない見込み）。
 1. **設計方針の決定**（ユーザー判断。下記）。これが 2〜4 を全部ゲートしている。

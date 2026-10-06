@@ -4,6 +4,7 @@
 
 | # | タイトル | 状態 | 日付 |
 |---|---|---|---|
+| [0001](0001-base-tone-separate-stage.md) | Base tone is its own stage; user tone curve always starts flat | 採用（暫定） | 2026-10-06 |
 
 ## テンプレート
 
