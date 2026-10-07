@@ -1510,6 +1510,8 @@ interface AppState {
   // --- DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) -----
   /** 'idle' (no DCP configured), 'loading' (readFile+parse+bake in flight), 'ready' (a lattice was baked and posted to the worker), 'error' (see dcpProfileError). Drives the minimal Inspector UI's status line. */
   dcpProfileStatus: 'idle' | 'loading' | 'ready' | 'error';
+  /** Whether the currently baked DCP carries a ProfileToneCurve (baked into its lattice) — the Inspector warns when a base tone is stacked on top of it. False unless a bake is 'ready'. */
+  dcpHasToneCurve: boolean;
   /** Actionable message from the last failed load (bad path, not a DCP, malformed structure — see engine/color/dcp/parser.ts) — null when status isn't 'error'. */
   dcpProfileError: string | null;
   /** Bumped once a DCP bake lands worker-side — mirrors imageNodeRev's "an async op settled, re-render" role (the bake itself needs file IO, so it can't happen inside buildPlan). */
@@ -5829,6 +5831,7 @@ export const useAppStore = create<AppState>((set, get) => {
 
   // --- DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) -----
   dcpProfileStatus: 'idle',
+  dcpHasToneCurve: false,
   dcpProfileError: null,
   dcpProfileRev: 0,
   async refreshDcpProfile() {
@@ -5837,11 +5840,11 @@ export const useAppStore = create<AppState>((set, get) => {
     const profile = devNode?.develop?.profile;
     if (!profile || profileSource(profile) !== 'dcp' || !profile.dcpPath) {
       mirrorDcpLattice(null);
-      set((s) => ({ dcpProfileStatus: 'idle', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
+      set((s) => ({ dcpProfileStatus: 'idle', dcpHasToneCurve: false, dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
       return;
     }
     const nodeId = devNode!.id; // devNode is defined here (the guard above returns when it isn't)
-    set({ dcpProfileStatus: 'loading', dcpProfileError: null });
+    set({ dcpProfileStatus: 'loading', dcpHasToneCurve: false, dcpProfileError: null });
     try {
       const buf = await window.silverbox.readFile(profile.dcpPath);
       const parsed = parseDcp(buf, profile.dcpPath);
@@ -5856,7 +5859,7 @@ export const useAppStore = create<AppState>((set, get) => {
       );
       const lattice = bakeDcpLattice(parsed, cameraFromWorking, wbModel.asShot.temp, PROFILE_LATTICE_N);
       mirrorDcpLattice(lattice);
-      set((s) => ({ dcpProfileStatus: 'ready', dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
+      set((s) => ({ dcpProfileStatus: 'ready', dcpHasToneCurve: parsed.toneCurve != null, dcpProfileError: null, dcpProfileRev: s.dcpProfileRev + 1 }));
       // DCP double-tone fix (docs/brief-bank/dcp-double-tone-fix.md, option a').
       // bakeDcpLattice above bakes the DCP's OWN ProfileToneCurve INTO the
       // lattice, so the fresh-open base curve seeded into toneCurve.rgb
@@ -5902,7 +5905,7 @@ export const useAppStore = create<AppState>((set, get) => {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       mirrorDcpLattice(null);
-      set((s) => ({ dcpProfileStatus: 'error', dcpProfileError: message, dcpProfileRev: s.dcpProfileRev + 1 }));
+      set((s) => ({ dcpProfileStatus: 'error', dcpHasToneCurve: false, dcpProfileError: message, dcpProfileRev: s.dcpProfileRev + 1 }));
     }
   },
   setDevelopProfileSource(nodeId, source) {

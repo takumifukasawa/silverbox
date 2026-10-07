@@ -259,6 +259,40 @@ function BwSection({ node, params }: { node: GraphNode; params: DevelopParams })
 }
 
 /**
+ * Base tone (docs/decisions/0001 + 0002): the named display transform that
+ * maps the neutral decode into display range. 'None' is the fresh-RAW
+ * default; presets carry the choice with the basic-tone family.
+ */
+function BaseToneSelect({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
+  const setDevelopBaseTone = useAppStore((s) => s.setDevelopBaseTone);
+  const dcpToneActive = useAppStore((s) => s.dcpHasToneCurve && s.dcpProfileStatus === 'ready');
+  const value = sanitizeBaseTone(profile.baseTone);
+  // A tone-carrying DCP already maps tone inside the profile lattice; a base
+  // tone on top applies tone twice. Allowed (a deliberate stack is legal), but
+  // never silent.
+  const doubleTone = profile.source === 'dcp' && dcpToneActive && value !== 'none';
+  return (
+    <>
+      <div className="param-row">
+        <span className="param-label">Base tone</span>
+        <select data-testid="base-tone-select" value={value} onChange={(ev) => setDevelopBaseTone(nodeId, sanitizeBaseTone(ev.target.value))}>
+          {BASE_TONE_IDS.map((id) => (
+            <option key={id} value={id}>
+              {BASE_TONE_LABELS[id]}
+            </option>
+          ))}
+        </select>
+      </div>
+      {doubleTone && (
+        <div className="dcp-profile-error" data-testid="base-tone-dcp-hint">
+          この DCP はトーンカーブを内蔵しています。ベーストーンと二重にかかるので、DCP 使用時は None がおすすめです。
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
  * DCP camera-profile mode (docs/brief-bank/dcp-profile.md, stage 1) —
  * minimal source selector: Built-in (today's base-curve + round-6 lattice,
  * the default) vs a user-chosen .dcp file, executing the DNG spec's own
@@ -267,28 +301,6 @@ function BwSection({ node, params }: { node: GraphNode; params: DevelopParams })
  * component (rendered by the caller) blends either mode's result the same
  * way, so it isn't duplicated here.
  */
-/**
- * Base tone (docs/decisions/0001 + 0002): the named display transform that
- * maps the neutral decode into display range. 'None' is the fresh-RAW
- * default; presets carry the choice with the basic-tone family.
- */
-function BaseToneSelect({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
-  const setDevelopBaseTone = useAppStore((s) => s.setDevelopBaseTone);
-  const value = sanitizeBaseTone(profile.baseTone);
-  return (
-    <div className="param-row">
-      <span className="param-label">Base tone</span>
-      <select data-testid="base-tone-select" value={value} onChange={(ev) => setDevelopBaseTone(nodeId, sanitizeBaseTone(ev.target.value))}>
-        {BASE_TONE_IDS.map((id) => (
-          <option key={id} value={id}>
-            {BASE_TONE_LABELS[id]}
-          </option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
 function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
   const setDevelopProfileSource = useAppStore((s) => s.setDevelopProfileSource);
   const setDevelopProfileDcpPath = useAppStore((s) => s.setDevelopProfileDcpPath);

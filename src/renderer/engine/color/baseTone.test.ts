@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { applyBaseToneCpu, BASE_TONE_IDS, baseToneWgslBody, sanitizeBaseTone, type BaseToneId } from './baseTone';
 import { compileDevelop, defaultDevelopParams, type DevelopParams } from '../graph/developNode';
 import { mergeDevelopParams } from '../graph/graphDoc';
+import { pickDevelopFamilies } from '../graph/presetFamilies';
 
 const WB_IDENTITY: [number, number, number] = [1, 1, 1];
 const TONES = BASE_TONE_IDS.filter((id) => id !== 'none') as Exclude<BaseToneId, 'none'>[];
@@ -81,5 +82,30 @@ describe('base tone — sanitize', () => {
     expect(sanitizeBaseTone('filmic-v9')).toBe('none');
     expect(sanitizeBaseTone(3)).toBe('none');
     expect(mergeDevelopParams({ profile: { amount: 0, baseTone: 'nope' } }).profile.baseTone).toBe('none');
+  });
+});
+
+describe('base tone — robustness', () => {
+  it.each(TONES)('%s stays finite for Inf / huge / negative input', (id) => {
+    for (const px of [[Infinity, Infinity, Infinity], [1e30, 0.2, 0.1], [-0.5, 0.3, -1]] as [number, number, number][]) {
+      for (const v of applyBaseToneCpu(id, px)) expect(Number.isFinite(v)).toBe(true);
+    }
+  });
+});
+
+describe('base tone — old docs and presets', () => {
+  it('a pre-0001 doc (no baseTone key) compiles to exactly the passes of an explicit none', () => {
+    const old = mergeDevelopParams({ profile: { amount: 100 }, toneCurve: { rgb: [[0, 0], [116, 180], [255, 255]] } });
+    const explicit = mergeDevelopParams({ profile: { amount: 100, baseTone: 'none' }, toneCurve: { rgb: [[0, 0], [116, 180], [255, 255]] } });
+    const ids = (p: DevelopParams) => compileDevelop(p, WB_IDENTITY, 1).passes.map((x) => x.shaderId);
+    expect(ids(old)).toEqual(ids(explicit));
+    expect(ids(old).some((s) => s.startsWith('develop/baseTone'))).toBe(false);
+  });
+
+  it('a preset carries baseTone with the basic-tone family, and leaves it alone without it', () => {
+    const preset = withBaseTone('agx');
+    const open = withBaseTone('sigmoid');
+    expect(pickDevelopFamilies(preset, open, new Set(['basic-tone'])).profile.baseTone).toBe('agx');
+    expect(pickDevelopFamilies(preset, open, new Set(['wb'])).profile.baseTone).toBe('sigmoid');
   });
 });

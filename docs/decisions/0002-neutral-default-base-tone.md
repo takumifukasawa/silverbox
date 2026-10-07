@@ -30,6 +30,10 @@ user prefers a Resolve-style neutral default with looks supplied by presets.
 - Presets carry it automatically (it lives in `profile`, which travels with
   the `basic-tone` family), so "looks via presets" works without new plumbing.
 - LR Like (the A7C2 LR-fitted curve) is NOT offered as a base tone.
+- A base tone stacked on a tone-carrying DCP profile applies tone twice. It
+  is allowed (a deliberate stack is legal) but never silent: the Inspector
+  shows a hint while `source` is 'dcp', the baked DCP has a
+  ProfileToneCurve, and the base tone is not 'none'. Nothing is auto-changed.
 
 ## 落選案と落選理由
 

@@ -252,7 +252,10 @@ independent of `amount`/`source` and applies later in the Develop chain
 Absent or unrecognized values sanitize to `'none'` (rule 7), so docs written
 before this field render exactly as before — their default look lives in
 their stored `toneCurve` points instead. Each id's math is frozen forever; a
-changed formula ships under a new id. Additive, no schema version bump.
+changed formula ships under a new id. Additive, no schema version bump —
+but NOT round-trip-safe through an older build: its Develop sanitize only
+keeps keys it knows, so it renders the photo without the base tone and drops
+the key if it saves.
 
 ### 4.2 Edges and ports
 

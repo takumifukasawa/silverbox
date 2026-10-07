@@ -550,8 +550,9 @@ export interface SilverboxApi {
    * `acrLookAutoDefault` (SILVERBOX_TEST_ACR_DEFAULT, stage base-2,
    * docs/research/lr-base-gap.md) re-enables AUTO-DISCOVERY of the local
    * Adobe Camera Raw files (per-camera "Adobe Standard" DCP + the shared
-   * "Adobe Color.xmp" Look, used by both fix ①'s WB color-matrix correction
-   * and fix ②'s "Adobe Color (local)" default-mode seeding) INSIDE the
+   * "Adobe Color.xmp" Look, used by fix ①'s WB color-matrix correction and
+   * the "Adobe Color (local)" profile option's availability probe — it no
+   * longer seeds a default look, docs/decisions/0002) INSIDE the
    * suite — off for every other script. UNLIKE `lensProfileAutoDefault`/
    * `baseCurveDefault`, this does NOT ride `forceDefaults`: those two seed
    * from static, machine-independent tables, but this discovery reads REAL

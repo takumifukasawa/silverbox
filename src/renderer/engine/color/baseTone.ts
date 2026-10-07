@@ -33,6 +33,8 @@ export function sanitizeBaseTone(v: unknown): BaseToneId {
 }
 
 const PRE_GAIN = 2.0;
+/** rgba16float's max finite value — the pre-gained input is clamped here so a stray Inf can't turn into NaN. */
+const INPUT_MAX = 65504.0;
 /** Reinhard white point: the pre-gained sensor-saturation peak (≈1.41 · 2). */
 const REINHARD_WHITE = 2.83;
 /** Sigmoid: contrast exponent, and the scale/normalizer solved so 0.18 → 0.18 with REINHARD_WHITE → 1. */
@@ -65,7 +67,7 @@ const wgslCols = (cols: readonly (readonly [number, number, number])[]): string 
  * or null for 'none'. Wrapped by developNode's nodePassWgsl.
  */
 export function baseToneWgslBody(id: BaseToneId): string | null {
-  const pre = `  let x = max(c * ${f(PRE_GAIN)}, vec3f(0.0));\n`;
+  const pre = `  let x = clamp(c * ${f(PRE_GAIN)}, vec3f(0.0), vec3f(${f(INPUT_MAX)}));\n`;
   switch (id) {
     case 'none':
       return null;
@@ -127,7 +129,8 @@ const mulCols = (cols: readonly (readonly [number, number, number])[], v: Rgb): 
 /** CPU mirror of baseToneWgslBody — same constants, same operation order. */
 export function applyBaseToneCpu(id: BaseToneId, px: Rgb): Rgb {
   if (id === 'none') return px;
-  const x: Rgb = [Math.max(px[0] * PRE_GAIN, 0), Math.max(px[1] * PRE_GAIN, 0), Math.max(px[2] * PRE_GAIN, 0)];
+  const pre = (v: number) => Math.min(Math.max(v * PRE_GAIN, 0), INPUT_MAX);
+  const x: Rgb = [pre(px[0]), pre(px[1]), pre(px[2])];
   switch (id) {
     case 'reinhard': {
       const L = Math.max(WORKING_LUMA[0] * x[0] + WORKING_LUMA[1] * x[1] + WORKING_LUMA[2] * x[2], 1e-6);

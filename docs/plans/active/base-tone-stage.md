@@ -13,19 +13,19 @@ user can pick a base tone in the Inspector and presets carry it.
 
 ## 受け入れ条件（検査で確認できる形に）
 
-- [ ] `harness check` passes; `npm run verify` has no NEW failures vs the
+- [x] `harness check` passes; `npm run verify` has no NEW failures vs the
       2026-10-07 baseline (`test-artifacts/logs/verify-baseline-2026-10-07.log`);
       scripts that asserted the old seeded look are updated to the new default
       with the reason in their own comments.
-- [ ] Unit tests: each base tone's WGSL and CPU mirror agree; `none` emits no
+- [x] Unit tests: each base tone's WGSL and CPU mirror agree; `none` emits no
       pass; values above 1.0 roll off (not clamp) for every non-none id.
-- [ ] Old docs (no `baseTone` key) sanitize to 'none' and render unchanged.
-- [ ] Unknown `baseTone` string sanitizes quietly to 'none' (sidecar-spec rule 7).
-- [ ] Fresh RAW open: profile.amount 0, baseTone 'none', toneCurve identity,
+- [x] Old docs (no `baseTone` key) sanitize to 'none' and render unchanged.
+- [x] Unknown `baseTone` string sanitizes quietly to 'none' (sidecar-spec rule 7).
+- [x] Fresh RAW open: profile.amount 0, baseTone 'none', toneCurve identity,
       sharpen 40 / color NR 25 / lens profile kept.
-- [ ] Inspector shows a base-tone selector; preset save/apply with the
+- [x] Inspector shows a base-tone selector; preset save/apply with the
       basic-tone family round-trips it.
-- [ ] sidecar-spec.md + COLOR.md "Default rendering" describe the new model.
+- [x] sidecar-spec.md + COLOR.md "Default rendering" describe the new model.
 
 ## タスク分解（依存順）
 
@@ -35,7 +35,7 @@ user can pick a base tone in the Inspector and presets carry it.
 | 2 | Engine: BASETONE pass (WGSL) + CPU mirror, after tone, before toneCurve; formulas from `scripts/drt-compare/drts.mjs` | 済 | unit tests |
 | 3 | Store: seedDefaultLook seeds neutral (no profile amount, no curve) | 済 | keeps old-doc juggling paths |
 | 4 | UI: base-tone selector in the Inspector profile area | 済（手触りの確認待ち） | UX → pause for user hand-test |
-| 5 | Verify: update scripts that pinned the old seed; full suite vs baseline | 未着手 | |
+| 5 | Verify: update scripts that pinned the old seed; full suite vs baseline | 済 | basecurve / profilefit / dcp-doubletone rewritten; suite 78/78 vs baseline 77/77 |
 | 6 | Docs: sidecar-spec.md, COLOR.md, tech-debt (slider calibration / auto-tone fit against old seed) | 済 | |
 
 ## 決定ログ（日付・決めたこと・理由・落選案）
@@ -61,6 +61,13 @@ user can pick a base tone in the Inspector and presets carry it.
   line, verify-basetone 20/20, unit 379 incl. 22 new). Removed dead acrlook
   auto-default plumbing (acrLookAvailableSync). Undo: base-tone picks never
   coalesce (found by verify-basetone).
+
+- 2026-10-07: final review (3 reviewers: spec / completeness / compat+engine).
+  Fixed: DCP-with-tone-curve + base tone double-tone now shows an Inspector
+  hint (dcpHasToneCurve state, verify-dcp-doubletone 1C); preset-family and
+  old-doc-compile unit tests; Inf/NaN guard (input clamp 65504, both sides);
+  sidecar-spec forward-compat caveat; orphaned Inspector comment. Accepted,
+  not fixed: auto-tone ignores the base tone (tech-debt #1, needs a refit).
 
 ## 未確定事項（人間の判断待ち）
 

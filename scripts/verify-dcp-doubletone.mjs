@@ -33,6 +33,8 @@
  *  3. User-edited curve guard → a curve edited away from the seed is NOT
  *     flattened when a tone-carrying DCP becomes active.
  *  4. One ⌘Z after a flatten restores the base curve.
+ *  1C. A non-None base tone on a tone-carrying DCP shows the double-tone hint
+ *      in the Inspector (decision 0002: allowed, never silent).
  */
 import { execFileSync } from 'node:child_process';
 import { linkSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -181,6 +183,18 @@ try {
   await setDcpPath(idB, toneCarryingDcp); // choosing the path bakes + flattens
   await waitBaked(revB);
   check('path B: toneCurve.rgb is now identity — the dcpPath-choose flow reaches the flatten too', pointsEqual(await devCurve(), IDENTITY), await devCurve());
+
+  // A base tone stacked on a tone-carrying DCP double-tones: allowed, never silent.
+  console.log('verify-dcp-doubletone (1C. base tone on a tone-carrying DCP shows a hint):');
+  await page.locator(`.react-flow__node[data-id="${idB}"]`).click();
+  const hint = page.locator('[data-testid="base-tone-dcp-hint"]');
+  check('no hint while base tone is None', (await hint.count()) === 0, await hint.count());
+  await page.evaluate((id) => window.__debug.setDevelopBaseTone(id, 'agx'), idB);
+  await hint.waitFor({ state: 'visible', timeout: 5_000 }).catch(() => {});
+  check('hint appears for base tone AgX + tone-carrying DCP', (await hint.count()) === 1, await hint.count());
+  await page.evaluate((id) => window.__debug.setDevelopBaseTone(id, 'none'), idB);
+  await hint.waitFor({ state: 'detached', timeout: 5_000 }).catch(() => {});
+  check('hint disappears when base tone goes back to None', (await hint.count()) === 0, await hint.count());
 
   // === 2. tone-LESS DCP: base curve MUST be kept =============================
   console.log('verify-dcp-doubletone (2. tone-less DCP keeps the base curve — it is the only tone):');
