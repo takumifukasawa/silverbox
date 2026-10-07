@@ -36,7 +36,7 @@ agent-harness を導入して main に push した（`14b1845`）。このセッ
 
 共通条件: as-shot WB・カメラ行列・レンズ補正 ON・シャープ 40/色NR 25。LR 基準は `test-artifacts/localtone-compare-assets/full/*_base_lr.jpg`。Δ = LR との輝度中央値差（stops）、彩度× = 粗い彩度指標の LR 比。
 
-| scene | linear-raw Δ / 彩度× | LR風カーブ (profile 0 + A7C2 curve; 旧称 B-1) | acrlook (100 + ACRLOOK curve) |
+| scene | linear-raw Δ / 彩度× | LR Like (profile 0 + A7C2 curve; 旧称 B-1) | acrlook (100 + ACRLOOK curve) |
 |---|---|---|---|
 | DSC03298 | −1.66 / 0.38 | −0.46 / 0.96 | −0.10 / 0.85 |
 | DSC04260 | −1.60 / 0.40 | −0.32 / 0.84 | −0.39 / 0.79 |
@@ -44,7 +44,7 @@ agent-harness を導入して main に push した（`14b1845`）。このセッ
 | DSC07349 | −0.66 / 0.30 | +0.46 / 0.70 | +0.37 / 0.60 |
 | DSC09305 | −1.61 / 0.31 | −0.49 / 0.74 | −0.62 / 0.61 |
 
-読み: Adobe の look を入れない LR風カーブ が、輝度・彩度とも acrlook と同等かそれ以上に LR に近い（彩度は 5/5 で LR風カーブ が上）。acrlook の追加価値はこの 5 シーンでは見えない。sunset（DSC07349）の LR の青緑はどの案でも出ない。注意: acrlook の輝度差はここでは平均 −0.25 で、base-2 報告の「−0.03」とずれる（指標とマスクの違いか未調査）。
+読み: Adobe の look を入れない LR Like が、輝度・彩度とも acrlook と同等かそれ以上に LR に近い（彩度は 5/5 で LR Like が上）。acrlook の追加価値はこの 5 シーンでは見えない。sunset（DSC07349）の LR の青緑はどの案でも出ない。注意: acrlook の輝度差はここでは平均 −0.25 で、base-2 報告の「−0.03」とずれる（指標とマスクの違いか未調査）。
 
 ## 未確定事項（人間の判断待ち）
 

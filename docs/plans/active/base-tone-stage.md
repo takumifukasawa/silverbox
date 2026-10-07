@@ -49,7 +49,7 @@ profile mode. Profile-source switching no longer edits the user's curve.
   (`scripts/drt-compare/`, custom-shader node after a neutral Develop; +1 EV
   pre-gain; 5 Italy scenes). Mean vs LR (Δ EV / saturation ratio): none −1.39/0.37,
   Reinhard −0.57/0.63, Sigmoid −0.82/0.70, AgX −0.21/0.66, ACES −1.31/0.58,
-  LR風カーブ (A7C2, 旧称 B-1) −0.23/0.80. Facts found: custom nodes DO receive values >1.0
+  LR Like (A7C2, 旧称 B-1) −0.23/0.80. Facts found: custom nodes DO receive values >1.0
   (headroom capped by sensor saturation ≈1.41 = baseline +0.5 EV, no 1.0 clamp);
   so presets must set the base-tone STAGE, not just toneCurve, to get roll-off.
 
@@ -62,5 +62,7 @@ profile mode. Profile-source switching no longer edits the user's curve.
   looks via presets; wants to compare DRT patterns first. Implies presets must
   be able to set `baseTone` (and a "preset applied on open" setting, like LR's
   raw defaults, is the proposed mitigation for dull thumbnails).
+- User direction 2026-10-07 (tentative): the LR-fitted tone (comparison label
+  "LR Like", = A7C2 curve) probably does NOT need to ship as a product option.
 - What the base tone contains long-term (handoff A/B/C; B-2 = generic
   LR-independent tone mapper, not yet rendered for comparison).
