@@ -19,6 +19,7 @@ import { srgbDecode, srgbEncode } from '../color/srgb';
 import { WGSL_WORKING_LUMA, WORKING_LUMA } from '../color/workingSpace';
 import { applyProfileCpu, DEFAULT_PROFILE, PROFILE_LATTICE_N, packProfileLattice } from '../color/profileFit';
 import { buildToneCurveLut, TONE_CURVE_LUT_SIZE } from '../color/toneCurve';
+import { applyBaseToneCpu, baseToneWgslBody, sanitizeBaseTone, type BaseToneId } from '../color/baseTone';
 import { lumaCpu, nodePassWgsl, smoothstepCpu, WGSL_LUMA, WGSL_SRGB_DECODE, WGSL_SRGB_ENCODE } from './wgslCommon';
 import {
   BW_MIX_STRENGTH,
@@ -195,6 +196,14 @@ export interface ProfileParams {
   amount: number;
   source?: 'builtin' | 'dcp' | 'acrlook';
   dcpPath?: string;
+  /**
+   * Named display transform (engine/color/baseTone.ts; decisions 0001/0002).
+   * Lives here, beside the camera profile (Capture One's "Base
+   * Characteristics" grouping), but is independent of `amount`/`source` and
+   * runs later in the chain — after the Basic tone stage, before the user
+   * tone curve. Absent = 'none', so pre-0001 docs render unchanged.
+   */
+  baseTone?: BaseToneId;
 }
 
 /** `source` defaults to 'builtin' when absent (older/hand-authored docs). */
@@ -248,7 +257,7 @@ export function defaultDevelopParams(): DevelopParams {
   return {
     // identity (no pass); fresh RAW opens seed amount 100 under the
     // default-look gate (appStore.seedDefaultLook), JPEG/restored keep 0.
-    profile: { amount: 0, source: 'builtin', dcpPath: '' },
+    profile: { amount: 0, source: 'builtin', dcpPath: '', baseTone: 'none' },
     basic: {
       temp: 0,
       tint: 0,
@@ -598,6 +607,16 @@ fn curveLut(v: f32, ch: u32) -> f32 {
   c = srgbDecode(vec3f(curveLut(enc.x, 0u), curveLut(enc.y, 1u), curveLut(enc.z, 2u)));
 `,
 });
+
+const baseToneWgslCache = new Map<BaseToneId, string>();
+function baseToneWgsl(id: BaseToneId, body: string): string {
+  let w = baseToneWgslCache.get(id);
+  if (!w) {
+    w = nodePassWgsl({ body });
+    baseToneWgslCache.set(id, w);
+  }
+  return w;
+}
 
 // 8-band HSL in display space, between ToneCurve and saturation/vibrance
 // (spec §6 order). All-zero = identity = skipped, so the RGB↔HSL round-trip
@@ -1351,6 +1370,8 @@ export function compileDevelop(
     b.shadows !== 0 ||
     b.whites !== 0 ||
     b.blacks !== 0;
+  const baseTone = sanitizeBaseTone(params.profile.baseTone);
+  const baseToneBody = baseToneWgslBody(baseTone);
   const curveActive = !isIdentityToneCurve(params.toneCurve);
   const hslActive = !isIdentityHsl(params.hsl);
   const bwActive = !isIdentityBw(params.bw);
@@ -1386,6 +1407,10 @@ export function compileDevelop(
     );
   }
   if (toneActive) passes.push({ shaderId: 'develop/tone', wgsl: TONE_WGSL, uniforms: packTone(b, wbGains) });
+  if (baseToneBody) {
+    // linear, unclamped — the one stage that can roll off values above 1.0
+    passes.push({ shaderId: `develop/baseTone/${baseTone}`, wgsl: baseToneWgsl(baseTone, baseToneBody), uniforms: new ArrayBuffer(0) });
+  }
   if (lut) {
     passes.push({ shaderId: 'develop/toneCurve', wgsl: TONECURVE_WGSL, uniforms: lut.buffer as ArrayBuffer });
   }
@@ -1437,6 +1462,7 @@ export function compileDevelop(
           // FIRST — exact mirror of PROFILE_WGSL/PROFILE_WGSL_ENCODED (trilinear + amount blend).
           if (profileActive) out = applyProfileCpu(profileLattice, out, params.profile.amount, profileLatticeDomain);
           if (toneActive) out = cpuDevelopTone(out, b, wbGains);
+          if (baseToneBody) out = applyBaseToneCpu(baseTone, out);
           if (lut) out = cpuToneCurve(out, lut);
           if (hslBands) out = cpuHsl(out, hslBands);
           if (bwBands) out = cpuBw(out, bwBands);

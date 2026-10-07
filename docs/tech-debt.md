@@ -5,4 +5,4 @@
 
 | # | 内容 | 影響範囲 | 起票日 | 状態 |
 |---|---|---|---|---|
-| 1 | 例: `src/x` が `ui` 層から `repository` を直接参照している | 依存方向の不変条件違反 | YYYY-MM-DD | 未着手 / 着手中 / 返済済 |
+| 1 | Basic スライダー（highlights/shadows/whites）の応答曲線と auto-tone v2 は、A7C2 ベースカーブがトーン段の直後にある前提で LR に合わせて調整されている（2026-09-02）。既定がベーストーンなし（決定 0002）になり、選ぶベーストーンごとに効き方が変わる | `developNode.ts` TONE_WGSL / cpuDevelopTone の帯域定数、`autoTone.ts` | 2026-10-07 | 未着手 |

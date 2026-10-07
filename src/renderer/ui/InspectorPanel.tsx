@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
 import { parsePresetFile } from '../engine/graph/presetDoc';
+import { BASE_TONE_IDS, BASE_TONE_LABELS, sanitizeBaseTone } from '../engine/color/baseTone';
 import {
   BLEND_KIND,
   BLEND_PARAM_DEFS,
@@ -266,6 +267,28 @@ function BwSection({ node, params }: { node: GraphNode; params: DevelopParams })
  * component (rendered by the caller) blends either mode's result the same
  * way, so it isn't duplicated here.
  */
+/**
+ * Base tone (docs/decisions/0001 + 0002): the named display transform that
+ * maps the neutral decode into display range. 'None' is the fresh-RAW
+ * default; presets carry the choice with the basic-tone family.
+ */
+function BaseToneSelect({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
+  const setDevelopBaseTone = useAppStore((s) => s.setDevelopBaseTone);
+  const value = sanitizeBaseTone(profile.baseTone);
+  return (
+    <div className="param-row">
+      <span className="param-label">Base tone</span>
+      <select data-testid="base-tone-select" value={value} onChange={(ev) => setDevelopBaseTone(nodeId, sanitizeBaseTone(ev.target.value))}>
+        {BASE_TONE_IDS.map((id) => (
+          <option key={id} value={id}>
+            {BASE_TONE_LABELS[id]}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
 function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
   const setDevelopProfileSource = useAppStore((s) => s.setDevelopProfileSource);
   const setDevelopProfileDcpPath = useAppStore((s) => s.setDevelopProfileDcpPath);
@@ -467,6 +490,7 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         </div>
       )}
       <Section title="Profile">
+        <BaseToneSelect nodeId={node.id} profile={params.profile} />
         <DcpSourceControls nodeId={node.id} profile={params.profile} />
         <ParamSlider
           nodeId={node.id}

@@ -87,26 +87,32 @@ AdobeRGB / Display P3 with ICC tags (print, when needed), HDR (PQ or
 gain-map JPEG/AVIF — same primaries as the working space). LUT bakes
 remain display-space→display-space transforms of the color chain.
 
-### Default rendering (baseline exposure + base curve)
+### Default rendering (neutral; base tone is a named stage)
 
-A neutral scene-referred RAW decode carries no display intent, so a fresh ARW
-renders darker than the camera's own JPEG — measuring DSC02993.ARW against its
-in-camera JPEG (percentile-matched encoded luma) put the camera about **+1.45
-EV brighter at p50**, but roughly flat (±0.1 EV) at the p10/p90 tails, so a flat
-exposure push would clip what the camera's curve rolls off. Silverbox matches
-Lightroom's **2-stage** default look:
+**Since 2026-10-07 (docs/decisions/0001 + 0002) a fresh RAW open is
+neutral**: no camera-profile emulation (`profile.amount` 0), no base tone
+(`profile.baseTone` 'none'), identity tone curve. What a fresh open still
+seeds are the corrections:
 
 1. **Baseline exposure** — a fixed linear gain (`settings.baselineExposureEV`,
    default 0.5 EV) applied at decode time to RAW only (see `shared/ipc.ts`).
-2. **Base curve** — a display TONE CURVE fitted from a reference rendering
-   (`engine/color/baseCurve.ts`), seeded as VISIBLE, editable, deletable points
-   into the Develop node's `toneCurve.rgb` on a fresh ARW open (no sidecar).
-   It is NOT hidden decode magic: the points appear in the tone-curve editor,
-   Reset removes them, and JPEG opens / restored sidecars are never seeded.
-3. **Default sharpening** — fresh RAW opens also seed `detail.sharpen`
-   40/1.0/0 (Lightroom's RAW-import default; JPEG opens stay 0 because
-   in-camera JPEGs are pre-sharpened), visible in the Detail section like
-   every other piece of the default look.
+2. **Default sharpening / color NR** — `detail.sharpen` 40/1.0/0 and
+   `noiseColor` 25 (Lightroom's RAW-import defaults; JPEG opens stay 0).
+
+A neutral decode renders dark and flat (sRGB encoding only, no roll-off;
+~1.4 EV under LR's default). The display transform is the **base tone**
+(`engine/color/baseTone.ts`): a named, user-chosen stage in LINEAR working
+space between the Basic tone stage and the user tone curve, so it can roll
+off values above 1.0 (headroom up to sensor saturation ≈1.41 after the
+baseline gain) — the tone curve itself acts in clamped display space and
+cannot. Ids: `reinhard`, `sigmoid` (Resolve DaVinci-DRT-like), `agx`, `aces`;
+each adds its own +1 EV pre-gain. Looks beyond that come from presets.
+Comparison: the "デフォルト描画 比較" artifact / `scripts/drt-compare/`.
+
+History (pre-2026-10-07, kept for old docs): fresh opens seeded the
+LR-fitted base curve below as visible points into `toneCurve.rgb` plus the
+fitted profile at amount 100. Docs saved then still carry those points and
+render unchanged.
 
 **Calibrated 2026-07-12 against Lightroom Classic** (the user's decision: LR's
 default rendering is the reference, not the in-camera JPEG). The shipped curve

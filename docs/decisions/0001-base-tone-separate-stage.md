@@ -1,7 +1,7 @@
 # 0001: Base tone is its own stage; the user tone curve always starts flat
 
 - 日付: 2026-10-06
-- 状態: 採用（暫定 — ユーザーは「1 な気がする」。実装着手前に最終確認する）
+- 状態: 採用（2026-10-07 ユーザー GO「この方針で実装を進めてみよう」）
 
 ## 背景
 
@@ -45,21 +45,20 @@ flat, in every profile mode.
   −1 brings a 150%-white cloud back to 75% with its detail (camera-like);
   after it, the cloud is already squeezed to 100% and darkening only yields
   flat grey (JPEG-like). Same split as Lightroom and Capture One.
-- The stage is recorded in the document (not resolved from code at render
-  time), so a sidecar renders the same forever. A doc WITHOUT the field
+- The stage is recorded in the document as `develop.profile.baseTone` (not
+  resolved from code at render time), so a sidecar renders the same forever. A doc WITHOUT the field
   means "no base tone" — every existing sidecar renders unchanged (its
   toneCurve still carries the old seeded points).
 - It stays visible and removable as a named setting (Basic/Profile area),
   keeping COLOR.md's "no hidden decode magic" intent — it is just no longer
   disguised as user curve points.
-- Profile modes set it instead of juggling the user curve: builtin →
-  the camera base curve, acrlook → ACRLOOK_BASE_CURVE, tone-carrying DCP →
-  none (the DCP's own curve is the base tone).
+- Profile modes never write the user curve for NEW docs (fresh opens leave
+  it identity). The existing flatten/swap-if-equals-seed code stays only for
+  OLD docs whose toneCurve still holds the pre-0001 seed.
 
-WHAT the base tone contains (LR-fitted A7C2 curve vs a generic,
-LR-independent tone mapper — the A/B/C default-look question in
-`docs/handoff.md`) is a separate, still-open decision; this one only fixes
-the layering. Phase 1 keeps today's curves byte-for-byte.
+WHAT the base tone contains is decision 0002. (This record originally
+planned a render-identical phase 1 keeping today's curves; 0002 supersedes
+that part — the fresh-open default becomes "none".)
 
 ## 落選案と落選理由
 

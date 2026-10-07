@@ -1,25 +1,21 @@
 /**
- * Default BASE CURVE verify (COLOR.md "default rendering").
+ * Fresh-open tone defaults + old-doc base-curve compatibility.
  *
- * A fresh ARW open seeds the Develop node's toneCurve.rgb with the
- * camera-matched base curve (baseCurve.ts) — the visible, editable, deletable
- * second stage of the default look (baseline exposure is the first). Runs with
- * SILVERBOX_TEST_BASE_CURVE_DEFAULT=1 so that seeding fires inside the suite;
- * it is suppressed for every other script (so seeding never shifts their
- * fresh-ARW baselines — same mechanism as the lens-profile default).
+ * Until 2026-10-07 a fresh ARW seeded the LR-fitted base curve (baseCurve.ts)
+ * into toneCurve.rgb and this script asserted that seed. Decision 0002
+ * (docs/decisions/0002-neutral-default-base-tone.md) made fresh opens
+ * neutral, so the contract this script guards changed:
  *
- * Checks:
- *  1. Fresh ARW open seeds toneCurve.rgb with EXACTLY the shipped points, and
- *     graphDirty stays false (it IS the default look, not an edit).
- *  2. The seeded render's mid-percentile encoded luma lands far closer to the
- *     camera JPEG's than the identity-curve render (>60% closer at p50).
- *  3. JPEG open: identity curve, untouched.
- *  4. Curve Reset restores identity (a darker render); reopening re-seeds.
- *  5. Sidecar round-trip: the curve travels as ordinary tone-curve points and
- *     reopens identical; a sidecar SAVED WITHOUT the curve reopens WITHOUT it
- *     (a restored doc is never re-seeded).
- *  6. Without the env flag (plain SILVERBOX_TEST): a fresh ARW open does NOT
- *     seed — baseline protection for the other 38 scripts.
+ *  1. Fresh ARW open (SILVERBOX_TEST_BASE_CURVE_DEFAULT=1 opts into the real
+ *     fresh-open defaults): identity toneCurve.rgb, graphDirty false, and the
+ *     RAW corrections still seeded (sharpen 40/1.0/0, color NR 25/50/50).
+ *  2. JPEG open: identity curve, sharpen/NR 0.
+ *  3. OLD-DOC compatibility: a sidecar carrying the pre-0002 seeded points
+ *     (A7C2_BASE_CURVE) reopens with exactly those points and the same
+ *     render — old photos never change look.
+ *  4. Curve Reset restores identity; a restored doc without the curve is not
+ *     re-seeded.
+ *  5. Without the env flag (plain SILVERBOX_TEST): nothing is seeded.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -135,38 +131,28 @@ async function withApp(env, fn) {
 
 const IDENTITY = [[0, 0], [255, 255]];
 
-// === flagged run: checks 1–5 =================================================
-await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openImage, devCurve, histP50, resetCurve, pageErrors }) => {
+// === flagged run: checks 1–4 =================================================
+await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openImage, devCurve, devId, histP50, resetCurve, pageErrors }) => {
   const graphDirty = () => page.evaluate(() => window.__debug.graphDirty());
   const saveSidecar = async () => {
     await page.keyboard.press('Meta+s');
     await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
   };
 
-  // --- 1. fresh open seeds the exact points, graphDirty false ---
-  console.log('verify-basecurve (fresh ARW seeds the base curve):');
+  // --- 1. fresh open is neutral; RAW corrections still seeded ---
+  console.log('verify-basecurve (fresh ARW: neutral tone, corrections seeded):');
   await openImage(ARW_PATH);
-  const seeded = await devCurve();
-  check('fresh ARW seeds toneCurve.rgb with the exact shipped points', pointsEqual(seeded, EXPECTED_POINTS), seeded);
-  check('graphDirty stays false (the base curve IS the default look)', (await graphDirty()) === false, await graphDirty());
-  // Default RAW sharpening rides the same default-look seeding (LR seeds RAW
-  // imports with 40/1.0/0; JPEGs stay 0 — asserted in the JPEG section below).
-  const seededSharpen = await page.evaluate(() => {
-    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
-    return dev?.develop?.detail?.sharpen ?? null;
-  });
-  check(
-    'fresh ARW seeds default sharpening 40/1.0/0 (LR RAW default)',
-    seededSharpen && seededSharpen.amount === 40 && seededSharpen.radius === 1.0 && seededSharpen.masking === 0,
-    seededSharpen
-  );
-  // Default color NR rides the same seeding (manual-noise-reduction pack):
-  // LR Classic seeds RAW imports with Color 25 (Detail 50 / Smoothness 50);
-  // Luminance NR stays 0 — JPEGs stay 0 too, asserted in the JPEG section.
+  check('fresh ARW keeps toneCurve.rgb at identity (decision 0002)', pointsEqual(await devCurve(), IDENTITY), await devCurve());
+  check('graphDirty stays false on a fresh open', (await graphDirty()) === false, await graphDirty());
   const seededDetail = await page.evaluate(() => {
     const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
     return dev?.develop?.detail ?? null;
   });
+  check(
+    'fresh ARW seeds default sharpening 40/1.0/0 (LR RAW default)',
+    seededDetail && seededDetail.sharpen.amount === 40 && seededDetail.sharpen.radius === 1.0 && seededDetail.sharpen.masking === 0,
+    seededDetail?.sharpen
+  );
   check(
     'fresh ARW seeds default color NR 25/50/50 (LR RAW default), luminance NR untouched',
     seededDetail &&
@@ -176,60 +162,35 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
       seededDetail.noiseLuminance.amount === 0,
     seededDetail
   );
-  const seededP50 = await histP50();
 
-  // --- 4a. Reset restores identity (a darker render) ---
-  console.log('verify-basecurve (Reset restores identity):');
-  await resetCurve();
-  check('Reset restores the identity curve', pointsEqual(await devCurve(), IDENTITY), await devCurve());
-  const identityP50 = await histP50();
-  check('identity render is darker than the seeded render (p50 lower)', identityP50 < seededP50, { identityP50, seededP50 });
-
-  // --- 4b. reopening re-seeds ---
-  await openImage(ARW_PATH);
-  check('reopening a fresh ARW re-seeds the base curve', pointsEqual(await devCurve(), EXPECTED_POINTS), await devCurve());
-
-  // --- 3. JPEG open: identity, untouched ---
+  // --- 2. JPEG open: identity, untouched ---
   console.log('verify-basecurve (JPEG open is untouched):');
   await openImage(JPG_PATH);
-  check('JPEG open keeps the identity curve (no base curve)', pointsEqual(await devCurve(), IDENTITY), await devCurve());
-  const jpegSharpen = await page.evaluate(() => {
-    const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
-    return dev?.develop?.detail?.sharpen ?? null;
-  });
-  check('JPEG open keeps sharpening at 0 (LR behavior: in-camera JPEGs are pre-sharpened)', jpegSharpen?.amount === 0, jpegSharpen);
+  check('JPEG open keeps the identity curve', pointsEqual(await devCurve(), IDENTITY), await devCurve());
   const jpegDetail = await page.evaluate(() => {
     const dev = window.__debug.graphState().nodes.find((n) => n.kind === 'Develop');
     return dev?.develop?.detail ?? null;
   });
-  check('JPEG open keeps color NR at 0 (no default-look NR for JPEGs)', jpegDetail?.noiseColor?.amount === 0, jpegDetail);
-  const jpegP50 = await histP50();
+  check('JPEG open keeps sharpening at 0 (in-camera JPEGs are pre-sharpened)', jpegDetail?.sharpen?.amount === 0, jpegDetail?.sharpen);
+  check('JPEG open keeps color NR at 0', jpegDetail?.noiseColor?.amount === 0, jpegDetail?.noiseColor);
 
-  // --- 2. seeded render lands far closer to the JPEG at p50 ---
-  console.log('verify-basecurve (seeded render approaches the camera JPEG):');
-  const beforeGap = Math.abs(identityP50 - jpegP50);
-  const afterGap = Math.abs(seededP50 - jpegP50);
-  const shrink = beforeGap > 0 ? 1 - afterGap / beforeGap : 0;
-  console.log(
-    `  info: p50 — identity ${identityP50}, seeded ${seededP50}, JPEG ${jpegP50} (gap ${beforeGap} → ${afterGap}, ${(shrink * 100).toFixed(0)}% closer)`
-  );
-  check('seeded p50 is >60% closer to the JPEG than the identity render', shrink > 0.6, { beforeGap, afterGap, shrink });
-
-  // --- 5a. sidecar round-trip: the curve travels + reopens identical ---
-  console.log('verify-basecurve (sidecar round-trip):');
+  // --- 3. old-doc compatibility: pre-0002 seeded points survive a round-trip ---
+  console.log('verify-basecurve (old doc with the pre-0002 seed reopens unchanged):');
   await openImage(ARW_PATH);
+  await page.evaluate(([id, pts]) => window.__debug.setToneCurvePoints(id, 'rgb', pts), [await devId(), EXPECTED_POINTS]);
+  check('the old seed points took', pointsEqual(await devCurve(), EXPECTED_POINTS), await devCurve());
   const savedP50 = await histP50();
   await saveSidecar();
   await openImage(ARW_PATH);
-  check('saved base curve reopens identical', pointsEqual(await devCurve(), EXPECTED_POINTS), await devCurve());
-  // Same curve points ⇒ same render; the p50 is a histogram-bin readout, so
-  // allow a 1-bin median-boundary jitter.
+  check('old seed points reopen identical (never re-seeded, never flattened)', pointsEqual(await devCurve(), EXPECTED_POINTS), await devCurve());
   const reopenedP50 = await histP50();
   check('reopened render matches (p50 within 1 bin)', Math.abs(reopenedP50 - savedP50) <= 1, { savedP50, reopenedP50 });
 
-  // --- 5b. a sidecar saved WITHOUT the curve reopens without it (no re-seed) ---
-  console.log('verify-basecurve (deleted-curve sidecar is not re-seeded):');
+  // --- 4. Reset → identity; a restored doc without the curve is not re-seeded ---
+  console.log('verify-basecurve (Reset + no re-seed):');
   await resetCurve();
+  check('Reset restores the identity curve', pointsEqual(await devCurve(), IDENTITY), await devCurve());
+  check('identity render is darker than the old-seed render (p50 lower)', (await histP50()) < savedP50, { savedP50 });
   check('graphDirty true after removing the curve (a real edit)', (await graphDirty()) === true, await graphDirty());
   await saveSidecar();
   await openImage(ARW_PATH);

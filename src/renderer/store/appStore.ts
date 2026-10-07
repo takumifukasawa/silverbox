@@ -63,6 +63,7 @@ import {
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
 import { defaultDevelopParams, identityCurvePoints, profileSource, type CurvePoints, type DevelopParams } from '../engine/graph/developNode';
+import type { BaseToneId } from '../engine/color/baseTone';
 import { PROFILE_LATTICE_N, profileForModel } from '../engine/color/profileFit';
 import { neutralLumaSample, solveAutoTone } from '../engine/color/autoTone';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, decodeAcrLookTable, type Mat3 as DcpMat3, type ParsedDcp } from '../engine/color/dcp';
@@ -1524,9 +1525,12 @@ interface AppState {
   refreshDcpProfile(): Promise<void>;
   /** Update the Develop node's profile source/DCP path (Inspector's minimal UI); `amount` keeps riding updateNodeParam like every other numeric slider. */
   setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp' | 'acrlook'): void;
+  /** Named display transform for this Develop node (engine/color/baseTone.ts; docs/decisions/0002). */
+  setDevelopBaseTone(nodeId: string, baseTone: BaseToneId): void;
   setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
+
   // --- "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-gap.md) -----
-  /** Whether the local Adobe Standard DCP (for THIS photo's camera model) + the local ACR "Adobe Color.xmp" Look BOTH exist — drives the Inspector's option visibility (hidden/disabled, never a dead selectable option) and `seedDefaultLook`'s default-mode choice. Re-probed on every image open (the camera model can change between photos); independent of whether 'acrlook' is the ACTIVE source. */
+  /** Whether the local Adobe Standard DCP (for THIS photo's camera model) + the local ACR "Adobe Color.xmp" Look BOTH exist — drives the Inspector's option visibility (hidden/disabled, never a dead selectable option). Re-probed on every image open (the camera model can change between photos); independent of whether 'acrlook' is the ACTIVE source. */
   acrLookAvailable: boolean;
   /** 'idle' (mode not active), 'loading' (readFile+decode+bake in flight), 'ready' (a lattice was baked and posted), 'error' (see acrLookError) — drives the minimal Inspector status line, mirrors dcpProfileStatus's role. */
   acrLookStatus: 'idle' | 'loading' | 'ready' | 'error';
@@ -1849,8 +1853,6 @@ interface AcrLookAsset {
   decoded: Awaited<ReturnType<typeof decodeAcrLookTable>>;
 }
 let acrLookAssetCache: Promise<AcrLookAsset | null> | null = null;
-/** Sync-readable mirror of `acrLookAssetCache`'s settled value — `undefined` until the FIRST load settles (see `acrLookAvailableSync` below, which needs a non-blocking read). */
-let acrLookAssetResolved: AcrLookAsset | null | undefined;
 async function loadAcrLookAssetCached(): Promise<AcrLookAsset | null> {
   acrLookAssetCache ??= (async () => {
     try {
@@ -1862,36 +1864,8 @@ async function loadAcrLookAssetCached(): Promise<AcrLookAsset | null> {
     } catch {
       return null;
     }
-  })().then((result) => {
-    acrLookAssetResolved = result;
-    return result;
-  });
+  })();
   return acrLookAssetCache;
-}
-
-/**
- * Non-blocking availability check for `seedDefaultLook`'s default-mode
- * choice (docs/research/lr-base-gap.md, stage base-2, fix ②): `seedDefaultLook`
- * is a PURE function (no IO — see its own doc comment), so it cannot itself
- * probe the filesystem; this reads whatever is ALREADY WARM in the module
- * caches above and fires a background warm-up otherwise, returning `false`
- * for THIS call (the common case: the first photo of a session/camera model
- * falls back to 'builtin', same as today; the SECOND photo of the same
- * camera — the common batch-import/session case — sees the warmed-up
- * answer). Never awaited by a caller that needs a synchronous answer.
- */
-function acrLookAvailableSync(make: string | null | undefined, model: string | null | undefined): boolean {
-  if (!make || !model) return false;
-  const dcpKey = `${make}|${model}`;
-  if (!adobeStandardDcpCache.has(dcpKey)) {
-    void loadAdobeStandardDcpCached(make, model);
-    return false;
-  }
-  if (acrLookAssetResolved === undefined) {
-    void loadAcrLookAssetCached();
-    return false;
-  }
-  return adobeStandardDcpCache.get(dcpKey) != null && acrLookAssetResolved != null;
 }
 
 // --- Autosave flush-on-switch (conductor review finding, data loss) --------
@@ -2384,18 +2358,9 @@ export function seedDefaultLook(
     usedSidecar: boolean;
     kind: 'raw' | 'jpg';
     testFlags: Window['silverbox']['testFlags'];
-    /**
-     * Stage base-2, fix ②: whether the local Adobe Standard DCP + ACR
-     * "Adobe Color" Look BOTH exist for THIS photo's camera — resolved by
-     * the caller (this function stays pure/no-IO — see its own doc comment;
-     * `acrLookAvailableSync` is the caller-side probe). Defaults `false`
-     * (today's builtin default) when omitted — only openImageByPath's main
-     * flow currently threads a real value through.
-     */
-    acrLookAvailable?: boolean;
   }
 ): { graph: GraphDoc; wbModel: WbModel } {
-  const { usedSidecar, kind, testFlags: flags, acrLookAvailable = false } = opts;
+  const { usedSidecar, kind, testFlags: flags } = opts;
   // per-image WB model; resolve the as-shot placeholder (temp 0) in the
   // loaded/default doc so WB sliders always show real Kelvin values
   const wbModel = createWbModel({ camMul: image.color?.camMul, camXyz: image.color?.camXyz, rgbCam: image.color?.rgbCam });
@@ -2437,24 +2402,18 @@ export function seedDefaultLook(
       ),
     };
   }
-  // Default BASE CURVE (COLOR.md "default rendering"): a fresh RAW open (no
-  // sidecar) seeds the Develop node's toneCurve.rgb with the camera-matched
-  // base curve — the visible, editable, deletable second stage of the
-  // default look (baseline exposure is the first, at decode). JPEG opens and
-  // restored sidecars are never touched (a restored doc keeps whatever it
-  // stored, so a user who deleted the curve reopens without it).
-  // Suppressed inside the verify suite (testFlags.isTest) except for
-  // verify-basecurve (baseCurveDefault) and the headless CLI renderer
-  // (forceDefaults), so the other scripts keep their untouched fresh-ARW
-  // baselines — same mechanism as the lens default.
-  const baseCurveAllowed = !flags.isTest || flags.baseCurveDefault || flags.forceDefaults;
-  if (baseCurveAllowed && !usedSidecar && kind === 'raw') {
-    // Stage base-2, fix ②: acrlook mode needs its OWN base curve, not
-    // A7C2_BASE_CURVE — see ACRLOOK_BASE_CURVE's doc comment (a real
-    // 5-scene measurement REFUTED the original "flatten it, the Look
-    // supplies enough tone" assumption; Adobe Standard's ToneCurvePV2012 is
-    // a mild near-identity S-curve, not LR's real default brightening).
-    const curve = acrLookAvailable ? ACRLOOK_BASE_CURVE : baseCurveForModel(image.capture?.cameraModel);
+  // Fresh RAW open is NEUTRAL (docs/decisions/0002): no camera-profile
+  // emulation (profile.amount stays 0), no base tone (profile.baseTone stays
+  // 'none'), identity tone curve — looks come from presets / the base-tone
+  // selector. Only the RAW-import CORRECTIONS are seeded: default sharpening
+  // (LR Classic's 40 / 1.0 / 0; JPEGs stay 0 — sharpened in-camera) and
+  // color NR 25 (LR's RAW default; luminance NR stays 0). JPEG opens and
+  // restored sidecars are never touched. Suppressed inside the verify suite
+  // (testFlags.isTest) except for the scripts that opt in (baseCurveDefault)
+  // and the headless CLI renderer (forceDefaults), so the other scripts keep
+  // their untouched fresh-ARW baselines — same mechanism as the lens default.
+  const rawDefaultsAllowed = !flags.isTest || flags.baseCurveDefault || flags.forceDefaults;
+  if (rawDefaultsAllowed && !usedSidecar && kind === 'raw') {
     out = {
       ...out,
       nodes: out.nodes.map((n) =>
@@ -2463,35 +2422,6 @@ export function seedDefaultLook(
               ...n,
               develop: {
                 ...n.develop,
-                // Fitted camera PROFILE (Adobe-Color character — profileFit.ts):
-                // amount 100 on a fresh RAW open, applied FIRST in the Develop
-                // chain (before the base curve). The lattice is resolved from
-                // the camera model at render time; only `amount` is stored.
-                // Dial-able in the Basic panel; 0 removes it entirely.
-                // Stage base-2, fix ②: when the local Adobe Standard DCP +
-                // ACR "Adobe Color" Look are BOTH available for this camera
-                // (`acrLookAvailable`, resolved by the caller — see this
-                // function's own opts doc comment), default straight to the
-                // real thing instead of the builtin approximation — the
-                // exclusive-slot design means this is a plain source swap.
-                // UNLIKE DCP mode's double-tone fix, the base curve seeded
-                // below is NOT flattened for acrlook — see
-                // ACRLOOK_BASE_CURVE's doc comment for why (measured: this
-                // mode's own tone contribution is far too small to replace
-                // it) — `curve` below picks the acrlook-specific fit instead.
-                profile: { ...n.develop.profile, amount: 100, source: acrLookAvailable ? 'acrlook' : n.develop.profile.source },
-                toneCurve: { ...n.develop.toneCurve, rgb: curve.map((p) => [p[0], p[1]] as [number, number]) },
-                // Default RAW sharpening (LR-calibration 2026-07-12): LR
-                // Classic seeds RAW imports with amount 40 / radius 1.0 /
-                // masking 0 (JPEGs get 0 — they were sharpened in-camera),
-                // and with DETAIL_SHARPEN_GAIN aligning the slider scale, our
-                // 40 ≈ LR's 40. Visible/editable in the Detail section like
-                // every other piece of the default look.
-                // Default color NR (manual-noise-reduction pack): LR
-                // Classic also seeds RAW imports with Color 25 (Detail 50 /
-                // Smoothness 50 — the sub-slider defaults already reproduce
-                // today's fixed formula, so only `amount` needs to move);
-                // Luminance NR stays 0, same as LR.
                 detail: {
                   ...n.develop.detail,
                   sharpen: { ...n.develop.detail.sharpen, amount: 40, radius: 1.0, masking: 0 },
@@ -4605,51 +4535,7 @@ export const useAppStore = create<AppState>((set, get) => {
       // Fresh-open default-look seeding (WB Kelvin resolution, embedded lens
       // profile auto-on, base curve + default sharpen/color-NR) — pure
       // helper, see its doc comment for the per-piece gating.
-      // Stage base-2, fix ②: gate the local-file DISCOVERY probe itself
-      // (not just whether it's USED as the default) under SILVERBOX_TEST —
-      // "auto-discovery must be OFF unless a new env var opts in" (the
-      // brief's own wording, mirroring SILVERBOX_TEST_BASE_CURVE_DEFAULT's
-      // gate shape) — so verify:golden/develop stay machine-independent
-      // regardless of what's installed locally. Deliberately does NOT
-      // include `forceDefaults` the way baseCurveAllowed/autoDefaultAllowed
-      // do — base curve/lens-profile defaults are static, machine-
-      // independent tables; THIS discovery reads real local files, and CLI
-      // render (forceDefaults) is exactly the mechanism verify:golden/
-      // develop's own headless renders use, so it must stay off there too.
-      // `acrLookAvailableSync` never blocks (module-cache read + background
-      // warm-up — see its own doc comment), so this adds no latency when allowed.
-      // CONDUCTOR HOLD (stage base-2 landing review; RE-VERIFIED, still
-      // held, stage base-3): production auto-default stays DISABLED — the
-      // 5-scene near-neutral table is still not clean on re-measurement.
-      // The stage-base-2 attribution (CameraCalibration/AnalogBalance
-      // composition) has since COLLAPSED: the locally-installed Adobe
-      // Standard DCP carries neither tag at all (verified directly), so
-      // there was nothing for dcp/pipeline.ts to parse — that was never the
-      // real cause. Stage base-3's diagnosis (docs/research/lr-base-gap.md's
-      // own addendum): WB gain and illuminant-fraction are both essentially
-      // exact for DSC03298; the actual mechanism is the DCP's own
-      // ProfileHueSatMap/LookTable being numerically unstable on this
-      // scene's unusually large fraction of DARK near-neutral content (a
-      // shadowed stone bridge) — confirmed by ablation, but a damping fix at
-      // the renderDcpPixel level turned out to be INERT in the shipped
-      // product, because bakeDcpLattice bakes into profileFit.ts's shared
-      // uniform 17³ lattice and real dark pixels are reached almost entirely
-      // by trilinear interpolation toward the lattice's (trivial) black
-      // corner, not by evaluating renderDcpPixel near black at all — a real
-      // fix needs a denser lattice or a differently-positioned correction,
-      // out of that diagnostic pass's scope (implemented, measured
-      // ineffective, and reverted rather than shipped inert). DSC07349 also
-      // still regresses ~30-40% in ALL THREE modes (builtin/dcp/acrlook
-      // alike — a pre-existing, separately unresolved finding). Until the
-      // near-black HueSatMap/LookTable lead is actually closed and the
-      // 5-scene table is clean, acrlook stays a user-selectable option in
-      // the Inspector, never the seeded default. The test env-var gate below
-      // is kept so harnesses can exercise the seeded path deliberately.
-      const acrLookAutoAllowed = window.silverbox.testFlags.isTest && window.silverbox.testFlags.acrLookAutoDefault;
-      const acrLookAvailable = acrLookAutoAllowed
-        ? acrLookAvailableSync(image.capture?.cameraMake, image.capture?.cameraModel)
-        : false;
-      const seeded = seedDefaultLook(graph, image, { usedSidecar, kind, testFlags: window.silverbox.testFlags, acrLookAvailable });
+      const seeded = seedDefaultLook(graph, image, { usedSidecar, kind, testFlags: window.silverbox.testFlags });
       graph = seeded.graph;
       const wbModel = seeded.wbModel;
       // Linked-look validation at open (linked-looks-stage-d.md semantics
@@ -6053,6 +5939,24 @@ export const useAppStore = create<AppState>((set, get) => {
       };
     });
     void get().refreshDcpProfile();
+  },
+  setDevelopBaseTone(nodeId, baseTone) {
+    set((s) => {
+      const node = s.graph.nodes.find((n) => n.id === nodeId);
+      if (!node || node.kind !== DEVELOP_KIND) return {};
+      const develop = structuredClone(node.develop ?? defaultDevelopParams());
+      if (develop.profile.baseTone === baseTone) return {};
+      develop.profile.baseTone = baseTone;
+      return {
+        // discrete choice: never coalesce (each pick is its own undo step)
+        ...pushHistory(s, null, { label: 'Change base tone' }),
+        graph: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => (n.id === nodeId ? forkLinkedFamilies({ ...n, develop }, ['profile.baseTone']) : n)),
+        },
+        graphDirty: true,
+      };
+    });
   },
 
   // --- "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-gap.md) -----

@@ -244,6 +244,16 @@ Both new keys are additive with no schema version bump —
 an older Silverbox build round-trips them verbatim without acting on `'dcp'`
 mode (forward-compat, same posture as `disabled`).
 
+**`profile.baseTone`** (docs/decisions/0001 + 0002): the named display
+transform that maps the neutral decode into display range — one of `'none'`
+(default, omittable), `'reinhard'`, `'sigmoid'`, `'agx'`, `'aces'`. It is
+independent of `amount`/`source` and applies later in the Develop chain
+(after the Basic tone stage, before the tone curve; `engine/color/baseTone.ts`).
+Absent or unrecognized values sanitize to `'none'` (rule 7), so docs written
+before this field render exactly as before — their default look lives in
+their stored `toneCurve` points instead. Each id's math is frozen forever; a
+changed formula ships under a new id. Additive, no schema version bump.
+
 ### 4.2 Edges and ports
 
 An edge is `{ id, from, to, port? }` (serialized field names — internally

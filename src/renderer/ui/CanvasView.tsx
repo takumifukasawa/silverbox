@@ -75,6 +75,7 @@ import { cpuRgb2hsl } from '../engine/graph/developOps';
 import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
 import { parsePresetFile } from '../engine/graph/presetDoc';
 import { isTextEntry } from './textEntry';
+import type { BaseToneId } from '../engine/color/baseTone';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
 declare global {
@@ -272,6 +273,8 @@ declare global {
       setToneCurvePoints(nodeId: string, channel: 'rgb' | 'r' | 'g' | 'b', points: [number, number][]): void;
       /** DCP camera-profile mode (docs/brief-bank/dcp-double-tone-fix.md) — drives the SAME store actions the inspector's source select / file picker do. */
       setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp'): void;
+      /** Verify-only wrapper around appStore's setDevelopBaseTone (a string enum — can't ride updateNodeParam's numeric `value`). */
+      setDevelopBaseTone(nodeId: string, baseTone: BaseToneId): void;
       setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
       /** DCP bake status + rev (`dcpProfileRev` ticks once each bake lands) — verify waits on this before asserting the tone-curve flatten. */
       dcpProfileState(): { status: string; error: string | null; rev: number };
@@ -1716,6 +1719,9 @@ export function CanvasView() {
       },
       setDevelopProfileSource(nodeId, source) {
         useAppStore.getState().setDevelopProfileSource(nodeId, source);
+      },
+      setDevelopBaseTone(nodeId, baseTone) {
+        useAppStore.getState().setDevelopBaseTone(nodeId, baseTone);
       },
       setDevelopProfileDcpPath(nodeId, dcpPath) {
         useAppStore.getState().setDevelopProfileDcpPath(nodeId, dcpPath);

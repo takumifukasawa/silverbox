@@ -7,6 +7,7 @@
 import { BLEND_KIND, BLEND_PARAM_DEFS, CUSTOM_KIND, OPS, isOpKind, packBlendUniform, type OpKind } from './ops';
 import { compileDevelop, defaultDevelopParams, profileDomain, profileSource, type DevelopParams, type PassSpec } from './developNode';
 import { profileForModel, PROFILE_LATTICE_N } from '../color/profileFit';
+import { sanitizeBaseTone } from '../color/baseTone';
 import { bakeWbCorrectedLattice } from '../color/wbCorrectedProfile';
 import {
   createDefaultCustomShaderParams,
@@ -1190,6 +1191,8 @@ export function mergeDevelopParams(raw: unknown): DevelopParams {
   // quietly to 'builtin' rather than rejecting the doc (sidecar-spec.md rule
   // 7), same posture as `rating`/`flag`.
   if (base.profile.source !== 'dcp' && base.profile.source !== 'acrlook') base.profile.source = 'builtin';
+  // profile.baseTone is likewise a closed enum (engine/color/baseTone.ts)
+  base.profile.baseTone = sanitizeBaseTone(base.profile.baseTone);
   return base;
 }
 

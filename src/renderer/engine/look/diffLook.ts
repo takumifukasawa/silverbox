@@ -162,6 +162,7 @@ const EFFECTS_KEYS: (keyof EffectsParams)[] = [
 
 function diffDevelop(out: string[], id: string, a: DevelopParams, b: DevelopParams): void {
   for (const k of BASIC_KEYS) numPush(out, `${id}: basic.${k}`, a.basic[k], b.basic[k]);
+  strPush(out, `${id}: profile.baseTone`, a.profile.baseTone ?? 'none', b.profile.baseTone ?? 'none');
 
   diffCurve(out, id, 'rgb', a.toneCurve.rgb, b.toneCurve.rgb);
   diffCurve(out, id, 'r', a.toneCurve.r, b.toneCurve.r);

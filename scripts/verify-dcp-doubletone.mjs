@@ -12,9 +12,11 @@
  * NOT the headless CLI — the CLI renders sidecars, it never runs the
  * interactive source-switch/dcpPath-choose flow the flatten lives on.
  *
- * SILVERBOX_TEST_BASE_CURVE_DEFAULT=1 so the base-curve seeding actually
- * fires inside the suite (same gate verify-basecurve.mjs opts into) — without
- * the seed there is nothing for the flatten to match.
+ * Since decision 0002 (2026-10-07) fresh opens no longer seed the base curve,
+ * so the flatten only matters for OLD docs that still carry the pre-0002
+ * seed. Each case therefore builds a genuine old doc first (openOldDoc: open,
+ * write the seed points, save, reopen) instead of relying on a fresh-open
+ * seed.
  *
  * Fixtures: scripts/fixtures/build-dcp-fixture.mjs — the tone-CARRYING
  * fixture (buildFixtureDcp, carries a ProfileToneCurve) and a tone-LESS
@@ -112,6 +114,14 @@ try {
     await page.waitForFunction(() => window.__debug?.imageState().status === 'ready', { timeout: 120_000 });
   };
   const devId = () => page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.kind === 'Develop')?.id ?? null);
+  /** A restored pre-0002 doc: its toneCurve.rgb still holds the old fresh-open seed. */
+  const openOldDoc = async (p) => {
+    await openImage(p);
+    await page.evaluate(([id, pts]) => window.__debug.setToneCurvePoints(id, 'rgb', pts), [await devId(), SEED_POINTS]);
+    await page.keyboard.press('Meta+s');
+    await page.waitForFunction(() => !window.__debug.graphDirty(), { timeout: 10_000 });
+    await openImage(p);
+  };
   const devCurve = () =>
     page.evaluate(() => window.__debug.graphState().nodes.find((n) => n.kind === 'Develop')?.develop?.toneCurve?.rgb ?? null);
   const devChannel = (ch) =>
@@ -141,10 +151,10 @@ try {
 
   // === 1A. tone-carrying DCP, trigger path A (dcpPath first, then source) ====
   console.log('verify-dcp-doubletone (1A. tone-carrying DCP flattens the seed — path A: dcpPath, then source→dcp):');
-  await openImage(PHOTO_PATH_FIRST);
+  await openOldDoc(PHOTO_PATH_FIRST);
   const idA = await devId();
-  check('fresh ARW seeded the base curve into toneCurve.rgb', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
-  check('fresh open is not dirty (the seed IS the default look)', (await graphDirty()) === false, await graphDirty());
+  check('old doc reopened with the seed in toneCurve.rgb', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
+  check('reopened old doc is not dirty', (await graphDirty()) === false, await graphDirty());
   // dcpPath set while source is still builtin: refreshDcpProfile early-returns
   // (idle), no bake, no flatten yet — the curve stays the seed.
   await setDcpPath(idA, toneCarryingDcp);
@@ -160,9 +170,9 @@ try {
 
   // === 1B. tone-carrying DCP, trigger path B (source first, then dcpPath) ====
   console.log('verify-dcp-doubletone (1B. same flatten — path B: source→dcp first, then dcpPath chosen):');
-  await openImage(PHOTO_SOURCE_FIRST);
+  await openOldDoc(PHOTO_SOURCE_FIRST);
   const idB = await devId();
-  check('fresh ARW seeded the base curve (path B photo)', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
+  check('old doc carries the seed (path B photo)', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
   // source→dcp with NO path yet: refreshDcpProfile hits its idle guard (no
   // path), no bake, no flatten — the seed stays.
   await setSource(idB, 'dcp');
@@ -174,9 +184,9 @@ try {
 
   // === 2. tone-LESS DCP: base curve MUST be kept =============================
   console.log('verify-dcp-doubletone (2. tone-less DCP keeps the base curve — it is the only tone):');
-  await openImage(PHOTO_TONELESS);
+  await openOldDoc(PHOTO_TONELESS);
   const idT = await devId();
-  check('fresh ARW seeded the base curve (tone-less photo)', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
+  check('old doc carries the seed (tone-less photo)', pointsEqual(await devCurve(), SEED_POINTS), await devCurve());
   await setDcpPath(idT, tonelessDcp);
   const revT = await dcpRev();
   await setSource(idT, 'dcp');
@@ -203,7 +213,7 @@ try {
 
   // === 4. one ⌘Z restores the base curve after a flatten ====================
   console.log('verify-dcp-doubletone (4. one ⌘Z restores the base curve):');
-  await openImage(PHOTO_UNDO);
+  await openOldDoc(PHOTO_UNDO);
   const idU = await devId();
   await setDcpPath(idU, toneCarryingDcp);
   const revU = await dcpRev();

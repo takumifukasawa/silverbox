@@ -1,46 +1,49 @@
 # Base tone as its own Develop stage
 
 - 開始: 2026-10-06
-- 状態: 計画中（ユーザーの最終 GO 待ち）
-- 関連: docs/decisions/0001-base-tone-separate-stage.md, COLOR.md "Default rendering", docs/brief-bank/dcp-profile.md "Layering decision", docs/sidecar-spec.md
+- 状態: 進行中（2026-10-07 GO）
+- 関連: docs/decisions/0001-base-tone-separate-stage.md, docs/decisions/0002-neutral-default-base-tone.md, COLOR.md "Default rendering", docs/brief-bank/dcp-profile.md "Layering decision", docs/sidecar-spec.md
 
 ## 目的（何ができれば完了か）
 
-A fresh RAW open renders exactly as today, but the base tone comes from a
-named `develop.baseTone` stage and the user tone curve is flat in every
-profile mode. Profile-source switching no longer edits the user's curve.
+`develop.profile.baseTone` (decisions 0001 + 0002) exists as a named display
+transform stage between the Basic tone stage and the user tone curve; a fresh
+RAW open is neutral (baseTone none, profile amount 0, identity curve); the
+user can pick a base tone in the Inspector and presets carry it.
 
 ## 受け入れ条件（検査で確認できる形に）
 
-- [ ] `harness check` passes; `npm run verify` suite green.
-- [ ] Fresh-open render of the 5 Italy scenes is byte-identical (or within
-      float noise) before/after, in builtin and acrlook modes
-      (`verify:golden`, `verify:basecurve`, `verify:acrlook`).
-- [ ] Every existing sidecar without `baseTone` renders unchanged
-      (golden renders of restored docs).
-- [ ] Fresh open: `toneCurve.rgb` is identity in all modes.
-- [ ] Switching builtin ↔ acrlook ↔ DCP changes only `baseTone`; a
-      user-edited curve is never touched (the `curvePointsEqual`
-      flatten/swap paths are deleted).
-- [ ] GPU (WGSL) and CPU-mirror paths agree (existing parity checks).
-- [ ] sidecar-spec.md documents the field; `verify:sidecar-spec` round-trips it.
+- [ ] `harness check` passes; `npm run verify` has no NEW failures vs the
+      2026-10-07 baseline (`test-artifacts/logs/verify-baseline-2026-10-07.log`);
+      scripts that asserted the old seeded look are updated to the new default
+      with the reason in their own comments.
+- [ ] Unit tests: each base tone's WGSL and CPU mirror agree; `none` emits no
+      pass; values above 1.0 roll off (not clamp) for every non-none id.
+- [ ] Old docs (no `baseTone` key) sanitize to 'none' and render unchanged.
+- [ ] Unknown `baseTone` string sanitizes quietly to 'none' (sidecar-spec rule 7).
+- [ ] Fresh RAW open: profile.amount 0, baseTone 'none', toneCurve identity,
+      sharpen 40 / color NR 25 / lens profile kept.
+- [ ] Inspector shows a base-tone selector; preset save/apply with the
+      basic-tone family round-trips it.
+- [ ] sidecar-spec.md + COLOR.md "Default rendering" describe the new model.
 
 ## タスク分解（依存順）
 
 | # | タスク | 状態 | 備考 |
 |---|---|---|---|
-| 1 | Schema: `develop.baseTone` (stored points or id — decide in task), sanitize default = none, sidecar-spec.md | 未着手 | absent = none keeps old docs identical |
-| 2 | Engine: apply baseTone after tone stage, before user toneCurve; compose into the existing toneCurve LUT (base first, user on top) — WGSL + CPU mirror | 未着手 | no extra pass needed |
-| 3 | Store: seedDefaultLook writes baseTone instead of toneCurve; source switching sets baseTone; delete curve flatten/swap juggling | 未着手 | appStore.ts `curvePointsEqual` sites |
-| 4 | UI: show base tone as a named, removable setting (Basic/Profile area) | 未着手 | UX → pause for user hand-test |
-| 5 | Verify: fresh-open identity, old-doc identity, switch-doesn't-touch-curve E2E | 未着手 | |
-| 6 | COLOR.md "Default rendering" + DESIGN/ROADMAP sync | 未着手 | |
+| 1 | Schema: `profile.baseTone` enum, default 'none', sanitize post-pass | 済 | developNode.ts / graphDoc.ts |
+| 2 | Engine: BASETONE pass (WGSL) + CPU mirror, after tone, before toneCurve; formulas from `scripts/drt-compare/drts.mjs` | 済 | unit tests |
+| 3 | Store: seedDefaultLook seeds neutral (no profile amount, no curve) | 済 | keeps old-doc juggling paths |
+| 4 | UI: base-tone selector in the Inspector profile area | 済（手触りの確認待ち） | UX → pause for user hand-test |
+| 5 | Verify: update scripts that pinned the old seed; full suite vs baseline | 未着手 | |
+| 6 | Docs: sidecar-spec.md, COLOR.md, tech-debt (slider calibration / auto-tone fit against old seed) | 済 | |
 
 ## 決定ログ（日付・決めたこと・理由・落選案）
 
-- 2026-10-06: layering decided (decision 0001, provisional). Content of the
-  base tone (A7C2 LR-fit vs generic tone mapper) deliberately out of scope
-  — phase 1 keeps current curves.
+- 2026-10-06: layering decided (decision 0001).
+- 2026-10-07: GO. Content decided (decision 0002): neutral fresh open, named
+  DRT ids (none/reinhard/sigmoid/agx/aces), LR Like not shipped. Field lives
+  in `profile` so presets/diff/linked-looks pick it up via the basic-tone family.
 
 ## 進捗ログ（セッションごとに 1〜3 行）
 
@@ -53,16 +56,17 @@ profile mode. Profile-source switching no longer edits the user's curve.
   (headroom capped by sensor saturation ≈1.41 = baseline +0.5 EV, no 1.0 clamp);
   so presets must set the base-tone STAGE, not just toneCurve, to get roll-off.
 
+- 2026-10-07: tasks 1-4 + 6 implemented (baseTone.ts engine + CPU mirror, sanitize,
+  neutral seedDefaultLook, Inspector select, setDevelopBaseTone action, diffLook
+  line, verify-basetone 20/20, unit 379 incl. 22 new). Removed dead acrlook
+  auto-default plumbing (acrLookAvailableSync). Undo: base-tone picks never
+  coalesce (found by verify-basetone).
+
 ## 未確定事項（人間の判断待ち）
 
-- Final GO on decision 0001 (user said "1 な気がする").
 - Offer a render-identical migration for old docs whose toneCurve equals
   the old seed? (default: no — old docs just keep rendering as stored)
-- User direction 2026-10-07: default base tone probably NONE (fully neutral),
-  looks via presets; wants to compare DRT patterns first. Implies presets must
-  be able to set `baseTone` (and a "preset applied on open" setting, like LR's
-  raw defaults, is the proposed mitigation for dull thumbnails).
-- User direction 2026-10-07 (tentative): the LR-fitted tone (comparison label
-  "LR Like", = A7C2 curve) probably does NOT need to ship as a product option.
-- What the base tone contains long-term (handoff A/B/C; B-2 = generic
-  LR-independent tone mapper, not yet rendered for comparison).
+- "Preset applied on open" setting (LR raw-defaults style) to soften the
+  neutral default for culling — not in this plan's scope yet.
+- Which base tones to keep long-term after hand-testing (reinhard / sigmoid /
+  agx / aces); strength variants if wanted.

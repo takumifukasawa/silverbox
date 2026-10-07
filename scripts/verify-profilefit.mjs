@@ -3,9 +3,10 @@
  * "Default rendering").
  *
  * The profile is a fitted residual 3D transform (engine/color/profileFit.ts)
- * applied FIRST in the Develop chain, amount 0..100, seeded to 100 on fresh
- * RAW opens under the default-look gate (rides SILVERBOX_TEST_BASE_CURVE_DEFAULT
- * like the base curve). This proves: the 17³ storage-buffer trilinear GPU pass
+ * applied FIRST in the Develop chain, amount 0..100. Until 2026-10-07 fresh
+ * RAW opens seeded amount 100; decision 0002 made fresh opens neutral, so a
+ * fresh RAW now stays at 0 and the profile is an explicit user/preset choice.
+ * This proves: the 17³ storage-buffer trilinear GPU pass
  * mirrors the CPU (1/255), the amount slider dials identity → T, the identity
  * invariant (amount 0 = bit-exact no-op) holds, and the seeding gate/JPEG/
  * restored-doc rules match the base curve.
@@ -17,9 +18,9 @@
  *     bit-exact.
  *  3. The slider dials: amount 100 moves the render off neutral; amount 50
  *     moves it LESS than 100 (monotone blend).
- *  4. Seeding (flagged): a fresh ARW seeds develop.profile.amount 100,
- *     graphDirty false; a JPEG stays 0; a sidecar round-trips (saved-with →
- *     reopens with 100; saved-without → not re-seeded).
+ *  4. Fresh-open defaults (flagged): a fresh ARW stays at amount 0 (decision
+ *     0002), graphDirty false; a JPEG stays 0; a sidecar round-trips (a
+ *     user-set 100 reopens at 100; set back to 0 → not re-seeded).
  *  5. Unflagged (plain SILVERBOX_TEST): a fresh ARW is NOT seeded — baseline
  *     protection for the other scripts.
  */
@@ -121,7 +122,7 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '' }, async ({ openImage, gpu
 });
 
 // === seeding run (flagged: profile seeding fires like the base curve) =========
-console.log('\nverify-profilefit (fresh RAW seeds amount 100):');
+console.log('\nverify-profilefit (fresh RAW stays neutral; amount round-trips):');
 if (existsSync(SIDECAR)) unlinkSync(SIDECAR);
 await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openImage, profileAmount, pageErrors }) => {
   const graphDirty = () => page.evaluate(() => window.__debug.graphDirty());
@@ -131,15 +132,16 @@ await withApp({ SILVERBOX_TEST_BASE_CURVE_DEFAULT: '1' }, async ({ page, openIma
   };
 
   await openImage(ARW_PATH);
-  check('fresh ARW seeds develop.profile.amount = 100', (await profileAmount()) === 100, await profileAmount());
-  check('graphDirty stays false (the profile IS the default look)', (await graphDirty()) === false, await graphDirty());
+  check('fresh ARW keeps develop.profile.amount = 0 (decision 0002)', (await profileAmount()) === 0, await profileAmount());
+  check('graphDirty stays false on a fresh open', (await graphDirty()) === false, await graphDirty());
 
   // JPEG: no profile
   await openImage(JPG_PATH);
   check('JPEG open keeps profile amount 0 (no default-look profile)', (await profileAmount()) === 0, await profileAmount());
 
-  // sidecar round-trip: saved-with reopens with 100
+  // sidecar round-trip: a user-set 100 reopens with 100
   await openImage(ARW_PATH);
+  await page.evaluate(() => window.__debug.updateNodeParam('dev', 'profile.amount', 100));
   await saveSidecar();
   await openImage(ARW_PATH);
   check('saved profile reopens at amount 100', (await profileAmount()) === 100, await profileAmount());
