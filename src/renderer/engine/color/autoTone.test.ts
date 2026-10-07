@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   autoToneQuantile,
+  baseToneLuma,
   neutralLumaSample,
   solveAutoTone,
   AUTO_TONE_EV_MIN,
@@ -155,3 +156,58 @@ describe('neutralLumaSample + solveAutoTone', () => {
  * bounded, at the cost of under-matching LR's more aggressive blacks on
  * the fit scenes themselves.
  */
+
+describe('solveAutoTone reads through the base tone (tech-debt #1)', () => {
+  const identityProfile = defaultDevelopParams().profile;
+  const unityWb: [number, number, number] = [1, 1, 1];
+  /** A dark-ish gradient so every percentile sits in a different place. */
+  function rampImage(lo: number, hi: number, n = 64): PreparedImage {
+    const img = grayImage(0, n, 1);
+    for (let i = 0; i < n; i++) {
+      const v = lo * Math.pow(hi / lo, i / (n - 1));
+      img.data[i * 4] = v;
+      img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v;
+    }
+    return img;
+  }
+
+  it("'none' is the identity: same patch as the old one-argument call", () => {
+    const sample = neutralLumaSample(rampImage(1e-4, 0.8), identityProfile, null, unityWb);
+    expect(solveAutoTone(sample, 'none')).toEqual(solveAutoTone(sample));
+    expect(baseToneLuma('none', 0.123)).toBe(0.123);
+  });
+
+  // Every base tone brightens a mid-dark gray (0.05 linear) — so a frame
+  // sitting there needs LESS exposure push. In the deep toe the S-curves
+  // (sigmoid/agx/aces) darken instead, so there auto-tone lifts shadows a
+  // bit MORE than none; that's the intended "read what the display shows".
+  it('a frame the base tone brightens gets no more EV than none', () => {
+    const sample = neutralLumaSample(grayImage(0.05), identityProfile, null, unityWb);
+    const none = solveAutoTone(sample, 'none');
+    for (const id of ['reinhard', 'sigmoid', 'agx', 'aces'] as const) {
+      expect(baseToneLuma(id, 0.05), id).toBeGreaterThan(0.05);
+      const p = solveAutoTone(sample, id);
+      expect(p.ev, id).toBeLessThan(none.ev);
+      for (const v of Object.values(p)) expect(Number.isFinite(v), id).toBe(true);
+    }
+  });
+
+  it('deep-toe darkening (agx) gets more shadow lift than none', () => {
+    const sample = neutralLumaSample(rampImage(1e-4, 0.8), identityProfile, null, unityWb);
+    expect(baseToneLuma('agx', 1e-3)).toBeLessThan(1e-3);
+    expect(solveAutoTone(sample, 'agx').shadows).toBeGreaterThan(solveAutoTone(sample, 'none').shadows);
+  });
+
+  it('baseToneLuma is monotone on the gray axis for every tone', () => {
+    for (const id of ['reinhard', 'sigmoid', 'agx', 'aces'] as const) {
+      let prev = -1;
+      for (let i = 0; i <= 40; i++) {
+        const y = 1e-4 * Math.pow(1.41 / 1e-4, i / 40);
+        const v = baseToneLuma(id, y);
+        expect(v, `${id} @ ${y}`).toBeGreaterThanOrEqual(prev);
+        prev = v;
+      }
+    }
+  });
+});

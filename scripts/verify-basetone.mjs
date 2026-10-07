@@ -13,6 +13,7 @@
  *     neutral render.
  *  3. Sidecar round-trip: baseTone survives save + reopen with the same render.
  *  4. Undo restores the previous base tone.
+ *  5. Auto tone reads through the base tone (tech-debt #1).
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -124,6 +125,25 @@ try {
   await page.evaluate(() => window.__debug.undo());
   const afterUndo = await devOf(page);
   check("undo restores the previous base tone ('agx')", afterUndo?.profile?.baseTone === 'agx', afterUndo?.profile);
+
+  console.log('verify-basetone (5. auto tone reads through the base tone):');
+  const basicKeys = ['ev', 'contrast', 'blacks', 'whites', 'highlights', 'shadows'];
+  const autoWith = async (id) => {
+    await setTone(id);
+    await page.locator('[data-testid="toolbar-auto-tone"]').click();
+    const d = await devOf(page);
+    return Object.fromEntries(basicKeys.map((k) => [k, d?.basic?.[k]]));
+  };
+  // basic-tone is still all zero here (only the base tone has changed); undo
+  // returns it to zero before the second run.
+  const autoNone = await autoWith('none');
+  await page.evaluate(() => window.__debug.undo());
+  const autoAgx = await autoWith('agx');
+  check(
+    'auto tone gives a different patch under agx than under none',
+    basicKeys.some((k) => Math.abs((autoNone[k] ?? 0) - (autoAgx[k] ?? 0)) > 1e-6),
+    { autoNone, autoAgx }
+  );
 } finally {
   await app.close();
   if (existsSync(SIDECAR)) unlinkSync(SIDECAR);

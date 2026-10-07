@@ -63,7 +63,7 @@ import {
   type ProjectPhoto,
 } from '../engine/graph/projectDoc';
 import { defaultDevelopParams, identityCurvePoints, profileSource, type CurvePoints, type DevelopParams } from '../engine/graph/developNode';
-import type { BaseToneId } from '../engine/color/baseTone';
+import { sanitizeBaseTone, type BaseToneId } from '../engine/color/baseTone';
 import { PROFILE_LATTICE_N, profileForModel } from '../engine/color/profileFit';
 import { neutralLumaSample, solveAutoTone } from '../engine/color/autoTone';
 import { parseDcp, bakeDcpLattice, cameraFromWorkingMatrix, decodeAcrLookTable, type Mat3 as DcpMat3, type ParsedDcp } from '../engine/color/dcp';
@@ -6823,7 +6823,7 @@ export const useAppStore = create<AppState>((set, get) => {
     // see autoTone.ts's file header).
     const profileLattice = profileSource(develop.profile) === 'builtin' ? profileForModel(s.image.capture?.cameraModel ?? null) : null;
     const sample = neutralLumaSample(s.image, develop.profile, profileLattice, wbGains);
-    const patch = solveAutoTone(sample);
+    const patch = solveAutoTone(sample, sanitizeBaseTone(develop.profile.baseTone));
     s.updateNodeParamsBatch(
       node.id,
       [

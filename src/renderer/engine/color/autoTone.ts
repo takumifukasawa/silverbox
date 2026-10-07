@@ -53,6 +53,15 @@
  *    file's well-posedness note below: driving the curve too is the
  *    degeneracy the look-extraction note warns about.
  *
+ * BASE TONE (docs/decisions/0001, 0002; tech-debt #1): the base tone runs
+ * AFTER the tone pass, so it changes what each slider value looks like on
+ * screen. solveAutoTone() takes the doc's base tone and reads every
+ * percentile through it (baseToneLuma: the gray-axis response of
+ * applyBaseToneCpu), so the pivots compare against what the display shows.
+ * For 'none' the mapping is the identity, so the LR-calibrated solve is
+ * unchanged. The gray-axis read ignores per-channel hue effects — a
+ * starting point, same posture as the simplification below.
+ *
  * v1-INHERITED SIMPLIFICATION (still true): steps 3-5 read percentiles
  * scaled by the step-2 EV gain only — they do NOT compose sequentially
  * through the tone pass's own contrast→highlights→shadows→whites→blacks
@@ -68,6 +77,7 @@ import { applyProfileCpu } from './profileFit';
 import { srgbEncode } from './srgb';
 import { WORKING_LUMA } from './workingSpace';
 import { isIdentityProfile, type ProfileParams } from '../graph/developNode';
+import { applyBaseToneCpu, type BaseToneId } from './baseTone';
 
 // --- step 1: sampling --------------------------------------------------------
 
@@ -141,6 +151,13 @@ export interface AutoToneBasicPatch {
 }
 
 const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
+/** Linear luma a gray input of linear luma `y` shows as after base tone `id` (identity for 'none'). */
+export function baseToneLuma(id: BaseToneId, y: number): number {
+  if (id === 'none') return y;
+  const [r, g, b] = applyBaseToneCpu(id, [y, y, y]);
+  return Math.max(0, WORKING_LUMA[0] * r + WORKING_LUMA[1] * g + WORKING_LUMA[2] * b);
+}
 
 // --- step 2: exposure — a SMALL, shadow-region-relative nudge, never the
 // primary lift (see file header's v2 note). Driven by p10 (the shadow-mass
@@ -219,9 +236,9 @@ export const AUTO_TONE_WHITE_GAIN = 55;
 /**
  * Steps 2–5 of the solve (see file header for the full method + the v2
  * allocation-model note). `sortedLinearLuma` is neutralLumaSample()'s
- * output.
+ * output; `baseTone` is the doc's profile.baseTone (see file header).
  */
-export function solveAutoTone(sortedLinearLuma: Float64Array): AutoToneBasicPatch {
+export function solveAutoTone(sortedLinearLuma: Float64Array, baseTone: BaseToneId = 'none'): AutoToneBasicPatch {
   if (sortedLinearLuma.length === 0) {
     return { ev: 0, contrast: 0, blacks: 0, whites: 0, highlights: 0, shadows: 0 };
   }
@@ -229,7 +246,9 @@ export function solveAutoTone(sortedLinearLuma: Float64Array): AutoToneBasicPatc
   // Step 2: exposure — small, shadow-region-relative nudge (see const docs
   // above). Solved first so steps 4/5 read percentiles already EV-shifted,
   // same "one gain shared by the rest of the solve" shape v1 used.
-  const p10Raw = Math.max(1e-6, autoToneQuantile(sortedLinearLuma, AUTO_TONE_P10_PERCENTILE));
+  const shown = (y: number) => baseToneLuma(baseTone, y);
+  const p10Lin = autoToneQuantile(sortedLinearLuma, AUTO_TONE_P10_PERCENTILE);
+  const p10Raw = Math.max(1e-6, shown(p10Lin));
   const ev = clamp(AUTO_TONE_EV_GAIN * Math.log2(AUTO_TONE_EV_SHADOW_TARGET_LINEAR / p10Raw), AUTO_TONE_EV_MIN, AUTO_TONE_EV_MAX);
   const gain = Math.pow(2, ev);
 
@@ -237,10 +256,10 @@ export function solveAutoTone(sortedLinearLuma: Float64Array): AutoToneBasicPatc
   const contrast = AUTO_TONE_CONTRAST;
 
   // Post-EV percentiles shared by steps 4/5.
-  const p0_5 = autoToneQuantile(sortedLinearLuma, AUTO_TONE_BLACK_PERCENTILE) * gain;
-  const p10 = p10Raw * gain;
-  const p90 = autoToneQuantile(sortedLinearLuma, AUTO_TONE_P90_PERCENTILE) * gain;
-  const p99_5 = autoToneQuantile(sortedLinearLuma, AUTO_TONE_WHITE_PERCENTILE) * gain;
+  const p0_5 = shown(autoToneQuantile(sortedLinearLuma, AUTO_TONE_BLACK_PERCENTILE) * gain);
+  const p10 = shown(p10Lin * gain);
+  const p90 = shown(autoToneQuantile(sortedLinearLuma, AUTO_TONE_P90_PERCENTILE) * gain);
+  const p99_5 = shown(autoToneQuantile(sortedLinearLuma, AUTO_TONE_WHITE_PERCENTILE) * gain);
   const ys0_5 = srgbEncode(clamp(p0_5, 0, 1));
   const ys10 = srgbEncode(clamp(p10, 0, 1));
   const ys90 = srgbEncode(clamp(p90, 0, 1));

@@ -5,4 +5,4 @@
 
 | # | 内容 | 影響範囲 | 起票日 | 状態 |
 |---|---|---|---|---|
-| 1 | Basic スライダー（highlights/shadows/whites）の応答曲線と auto-tone v2 は、A7C2 ベースカーブがトーン段の直後にある前提で LR に合わせて調整されている（2026-09-02）。既定がベーストーンなし（決定 0002）になり、選ぶベーストーンごとに効き方が変わる。auto-tone の解（`neutralLumaSample` → solve）もベーストーンの段を見ていない（最終レビューで 2 体が独立に指摘） | `developNode.ts` TONE_WGSL / cpuDevelopTone の帯域定数、`autoTone.ts` | 2026-10-07 | 未着手 |
+| 1 | Basic スライダー（highlights/shadows/whites）の応答曲線と auto-tone v2 は、A7C2 ベースカーブがトーン段の直後にある前提で LR に合わせて調整されている（2026-09-02）。既定がベーストーンなし（決定 0002）になり、選ぶベーストーンごとに効き方が変わる。auto-tone の解（`neutralLumaSample` → solve）もベーストーンの段を見ていない（最終レビューで 2 体が独立に指摘） | `developNode.ts` TONE_WGSL / cpuDevelopTone の帯域定数、`autoTone.ts` | 2026-10-07 | auto-tone 側は返済済（solveAutoTone がベーストーン越しの輝度で判断。'none' は従来と同一）。スライダー側は「スライダーはトーン段で効き、ベーストーンはその後の表示変換」という 0001 の設計どおりで、再調整しない方針（ユーザー 2026-10-07: 効き方そのものは変わらない）。手触り確認で違和感が出たら再開 |
