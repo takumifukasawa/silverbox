@@ -49,7 +49,7 @@ profile mode. Profile-source switching no longer edits the user's curve.
   (`scripts/drt-compare/`, custom-shader node after a neutral Develop; +1 EV
   pre-gain; 5 Italy scenes). Mean vs LR (Δ EV / saturation ratio): none −1.39/0.37,
   Reinhard −0.57/0.63, Sigmoid −0.82/0.70, AgX −0.21/0.66, ACES −1.31/0.58,
-  B-1 (A7C2) −0.23/0.80. Facts found: custom nodes DO receive values >1.0
+  LR風カーブ (A7C2, 旧称 B-1) −0.23/0.80. Facts found: custom nodes DO receive values >1.0
   (headroom capped by sensor saturation ≈1.41 = baseline +0.5 EV, no 1.0 clamp);
   so presets must set the base-tone STAGE, not just toneCurve, to get roll-off.
 
