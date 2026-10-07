@@ -14,6 +14,8 @@
  *  3. Sidecar round-trip: baseTone survives save + reopen with the same render.
  *  4. Undo restores the previous base tone.
  *  5. Auto tone reads through the base tone (tech-debt #1).
+ * Section 1 also checks the hover preview: hovering a row renders it without
+ * touching the doc; Escape restores the render.
  */
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -78,10 +80,25 @@ console.log('verify-basetone (1. fresh RAW open is neutral):');
     check('default color NR 25 still seeded', dev?.detail?.noiseColor?.amount === 25, dev?.detail?.noiseColor);
     await page.locator('.react-flow__node[data-id="dev"]').click();
     const select = page.locator('[data-testid="base-tone-select"]');
-    check('the Inspector shows the base-tone selector set to None', (await select.inputValue()) === 'none', await select.inputValue());
-    await select.selectOption('sigmoid');
+    const shown = await select.getAttribute('data-value');
+    check('the Inspector shows the base-tone selector set to None', shown === 'none', shown);
+    // Hover preview: hovering a row changes the render but not the doc.
+    const before = await page.evaluate(() => window.__debug.readbackMean());
+    await select.click();
+    await page.locator('[data-testid="base-tone-option-agx"]').hover();
+    await page.waitForTimeout(400);
+    const hovered = await page.evaluate(() => window.__debug.readbackMean());
+    const docWhileHover = await devOf(page);
+    check('hovering AgX previews it (render changes)', Math.abs(lum(hovered) - lum(before)) > 0.01, { before, hovered });
+    check('hovering does not write the doc', docWhileHover?.profile?.baseTone === 'none', docWhileHover?.profile);
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(400);
+    check('Escape closes the list and restores the render', meansMatch(await page.evaluate(() => window.__debug.readbackMean()), before, 1e-6), null);
+    await select.click();
+    await page.locator('[data-testid="base-tone-option-sigmoid"]').click();
     const picked = await devOf(page);
     check("choosing Sigmoid in the Inspector writes profile.baseTone 'sigmoid'", picked?.profile?.baseTone === 'sigmoid', picked?.profile);
+    check('the list closes after a click', (await page.locator('[data-testid="base-tone-list"]').count()) === 0, null);
   } finally {
     await app.close();
   }

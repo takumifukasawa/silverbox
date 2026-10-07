@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../store/appStore';
 import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
 import { parsePresetFile } from '../engine/graph/presetDoc';
-import { BASE_TONE_IDS, BASE_TONE_LABELS, sanitizeBaseTone } from '../engine/color/baseTone';
+import { BASE_TONE_IDS, BASE_TONE_LABELS, sanitizeBaseTone, type BaseToneId } from '../engine/color/baseTone';
 import {
   BLEND_KIND,
   BLEND_PARAM_DEFS,
@@ -266,23 +266,99 @@ function BwSection({ node, params }: { node: GraphNode; params: DevelopParams })
  */
 function BaseToneSelect({ nodeId, profile }: { nodeId: string; profile: ProfileParams }) {
   const setDevelopBaseTone = useAppStore((s) => s.setDevelopBaseTone);
+  const previewBaseTone = useAppStore((s) => s.previewBaseTone);
   const dcpToneActive = useAppStore((s) => s.dcpHasToneCurve && s.dcpProfileStatus === 'ready');
   const value = sanitizeBaseTone(profile.baseTone);
+  const [open, setOpen] = useState(false);
+  // Keyboard highlight while open; hovering a row moves it too.
+  const [active, setActive] = useState<BaseToneId>(value);
   // A tone-carrying DCP already maps tone inside the profile lattice; a base
   // tone on top applies tone twice. Allowed (a deliberate stack is legal), but
   // never silent.
   const doubleTone = profile.source === 'dcp' && dcpToneActive && value !== 'none';
+  // Hover preview: a plain row list instead of a native <select> (an OS-drawn
+  // popup gives no hover events), same reason as PresetsMenu. Hovering only
+  // swaps the RENDER (previewLook); the doc and history change on click.
+  const close = () => {
+    setOpen(false);
+    previewBaseTone(null);
+  };
+  useEffect(() => () => previewBaseTone(null), [previewBaseTone]);
+  const hover = (id: BaseToneId) => {
+    setActive(id);
+    previewBaseTone(id === value ? null : { nodeId, baseTone: id });
+  };
+  const commit = (id: BaseToneId) => {
+    close();
+    setDevelopBaseTone(nodeId, id);
+  };
+  const onKeyDown = (ev: React.KeyboardEvent) => {
+    if (!open) {
+      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        setActive(value);
+        setOpen(true);
+      }
+      return;
+    }
+    const i = BASE_TONE_IDS.indexOf(active);
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      close();
+    } else if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
+      ev.preventDefault();
+      const n = BASE_TONE_IDS.length;
+      hover(BASE_TONE_IDS[(i + (ev.key === 'ArrowDown' ? 1 : n - 1)) % n]!);
+    } else if (ev.key === 'Enter' || ev.key === ' ') {
+      ev.preventDefault();
+      commit(active);
+    }
+  };
   return (
     <>
       <div className="param-row">
         <span className="param-label">Base tone</span>
-        <select data-testid="base-tone-select" value={value} onChange={(ev) => setDevelopBaseTone(nodeId, sanitizeBaseTone(ev.target.value))}>
-          {BASE_TONE_IDS.map((id) => (
-            <option key={id} value={id}>
-              {BASE_TONE_LABELS[id]}
-            </option>
-          ))}
-        </select>
+        <span className="base-tone-menu">
+          <button
+            type="button"
+            className="base-tone-button"
+            data-testid="base-tone-select"
+            data-value={value}
+            aria-haspopup="listbox"
+            aria-expanded={open}
+            title="Hover a choice to preview it; click to apply"
+            onClick={() => {
+              if (open) close();
+              else {
+                setActive(value);
+                setOpen(true);
+              }
+            }}
+            onKeyDown={onKeyDown}
+          >
+            {BASE_TONE_LABELS[value]}
+          </button>
+          {open && (
+            <>
+              <div className="add-node-menu-backdrop" onClick={close} />
+              <div className="base-tone-list" role="listbox" data-testid="base-tone-list" onMouseLeave={() => previewBaseTone(null)}>
+                {BASE_TONE_IDS.map((id) => (
+                  <div
+                    key={id}
+                    role="option"
+                    aria-selected={id === value}
+                    data-testid={`base-tone-option-${id}`}
+                    className={`preset-row${id === value ? ' preset-row--selected' : ''}${id === active ? ' base-tone-row--active' : ''}`}
+                    onMouseEnter={() => hover(id)}
+                    onClick={() => commit(id)}
+                  >
+                    {BASE_TONE_LABELS[id]}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </span>
       </div>
       {doubleTone && (
         <div className="dcp-profile-error" data-testid="base-tone-dcp-hint">
@@ -503,7 +579,6 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         </div>
       )}
       <Section title="Profile">
-        <BaseToneSelect nodeId={node.id} profile={params.profile} />
         <DcpSourceControls nodeId={node.id} profile={params.profile} />
         <ParamSlider
           nodeId={node.id}
@@ -535,6 +610,12 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         {DEVELOP_BASIC_DEFS.map((def) => (
           <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
         ))}
+      </Section>
+      {/* Inspector order follows the processing order: Profile → Basic →
+          Base tone → Tone curve (docs/decisions/0001). Base tone rides the
+          basic-tone preset family, hence that badge. */}
+      <Section title="Base Tone" badge={familyBadge('basic-tone')}>
+        <BaseToneSelect nodeId={node.id} profile={params.profile} />
       </Section>
       <Section title="Tone Curve" badge={familyBadge('curves')}>
         <ToneCurveEditor nodeId={node.id} params={params} />

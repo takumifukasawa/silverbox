@@ -324,6 +324,52 @@ button:disabled {
   color: #fff;
 }
 
+/* Base tone list (Inspector): same rows as the preset list, so hovering a
+   choice can preview it. */
+.base-tone-menu {
+  position: relative;
+  display: inline-flex;
+}
+
+.base-tone-button {
+  min-width: 120px;
+  text-align: left;
+  background: #1b1b1b;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 3px 22px 3px 6px;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  position: relative;
+}
+
+.base-tone-button::after {
+  content: '▾';
+  position: absolute;
+  right: 6px;
+  color: #888;
+}
+
+.base-tone-list {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  z-index: 21;
+  min-width: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #1b1b1b;
+  border: 1px solid #555;
+  border-radius: 3px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.base-tone-row--active:not(.preset-row--selected) {
+  background: #333;
+}
+
 .preset-row--empty {
   color: #777;
   cursor: default;

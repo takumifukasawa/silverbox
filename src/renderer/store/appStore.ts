@@ -1529,6 +1529,12 @@ interface AppState {
   setDevelopProfileSource(nodeId: string, source: 'builtin' | 'dcp' | 'acrlook'): void;
   /** Named display transform for this Develop node (engine/color/baseTone.ts; docs/decisions/0002). */
   setDevelopBaseTone(nodeId: string, baseTone: BaseToneId): void;
+  /**
+   * Base-tone hover preview (Inspector's Base tone list): renders the doc
+   * with this node's baseTone swapped, through the same transient previewLook
+   * the preset hover preview uses. No history, no dirty flag. null clears.
+   */
+  previewBaseTone(p: { nodeId: string; baseTone: BaseToneId } | null): void;
   setDevelopProfileDcpPath(nodeId: string, dcpPath: string): void;
 
   // --- "Adobe Color (local)" mode (stage base-2, fix ②, docs/research/lr-base-gap.md) -----
@@ -5958,6 +5964,23 @@ export const useAppStore = create<AppState>((set, get) => {
           nodes: s.graph.nodes.map((n) => (n.id === nodeId ? forkLinkedFamilies({ ...n, develop }, ['profile.baseTone']) : n)),
         },
         graphDirty: true,
+      };
+    });
+  },
+
+  previewBaseTone(p) {
+    set((s) => {
+      if (!p) return s.previewLook ? { previewLook: null } : {};
+      return {
+        previewLook: {
+          ...s.graph,
+          nodes: s.graph.nodes.map((n) => {
+            if (n.id !== p.nodeId || n.kind !== DEVELOP_KIND) return n;
+            const develop = structuredClone(n.develop ?? defaultDevelopParams());
+            develop.profile.baseTone = p.baseTone;
+            return { ...n, develop };
+          }),
+        },
       };
     });
   },
