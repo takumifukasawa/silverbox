@@ -45,11 +45,22 @@ profile mode. Profile-source switching no longer edits the user's curve.
 ## 進捗ログ（セッションごとに 1〜3 行）
 
 - 2026-10-06: plan written; nothing implemented.
+- 2026-10-07: output-DRT candidates rendered for the base-tone CONTENT question
+  (`scripts/drt-compare/`, custom-shader node after a neutral Develop; +1 EV
+  pre-gain; 5 Italy scenes). Mean vs LR (Δ EV / saturation ratio): none −1.39/0.37,
+  Reinhard −0.57/0.63, Sigmoid −0.82/0.70, AgX −0.21/0.66, ACES −1.31/0.58,
+  B-1 (A7C2) −0.23/0.80. Facts found: custom nodes DO receive values >1.0
+  (headroom capped by sensor saturation ≈1.41 = baseline +0.5 EV, no 1.0 clamp);
+  so presets must set the base-tone STAGE, not just toneCurve, to get roll-off.
 
 ## 未確定事項（人間の判断待ち）
 
 - Final GO on decision 0001 (user said "1 な気がする").
 - Offer a render-identical migration for old docs whose toneCurve equals
   the old seed? (default: no — old docs just keep rendering as stored)
+- User direction 2026-10-07: default base tone probably NONE (fully neutral),
+  looks via presets; wants to compare DRT patterns first. Implies presets must
+  be able to set `baseTone` (and a "preset applied on open" setting, like LR's
+  raw defaults, is the proposed mitigation for dull thumbnails).
 - What the base tone contains long-term (handoff A/B/C; B-2 = generic
   LR-independent tone mapper, not yet rendered for comparison).
