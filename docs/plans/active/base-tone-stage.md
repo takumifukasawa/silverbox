@@ -69,6 +69,11 @@ user can pick a base tone in the Inspector and presets carry it.
   sidecar-spec forward-compat caveat; orphaned Inspector comment. Accepted,
   not fixed: auto-tone ignores the base tone (tech-debt #1, needs a refit).
 
+- 2026-10-07: keep/strength comparison artifact "ベーストーン候補" (claude.ai
+  artifact 4QN3YMNCffZQ13Vwo2vx3s; `scripts/drt-compare/run-variants.mjs`):
+  5 shipped ids via the real engine (matches the custom-shader renders within
+  ~1-2/255) + Sigmoid soft (c 1.2) / strong (c 1.9) + AgX Punchy (Blender look).
+
 ## 未確定事項（人間の判断待ち）
 
 - Offer a render-identical migration for old docs whose toneCurve equals

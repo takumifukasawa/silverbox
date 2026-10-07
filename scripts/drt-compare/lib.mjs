@@ -21,7 +21,7 @@ export function sidecar({ rgb = ID, profile = { amount: 0, source: 'builtin', dc
   edges.push({ id: 'e2', from: last, to: 'out' });
   return { schemaVersion: 4, createdAt: new Date().toISOString(), graph: { nodes, edges } };
 }
-export function render(jobs, outDir) {
+export function render(jobs, outDir, { maxDim = 2048, quality = 92 } = {}) {
   const work = join(outDir, '..', 'work');
   rmSync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true }); mkdirSync(outDir, { recursive: true });
@@ -33,7 +33,7 @@ export function render(jobs, outDir) {
     inputs.push(p);
   }
   const ud = mkdtempSync(join(tmpdir(), 'sb-drt-ud-'));
-  const r = spawnSync(join(root, 'node_modules/.bin/electron'), [root, '--render', '--json', '--max-dim', '2048', '--quality', '92', '--out', outDir, ...inputs],
+  const r = spawnSync(join(root, 'node_modules/.bin/electron'), [root, '--render', '--json', '--max-dim', String(maxDim), '--quality', String(quality), '--out', outDir, ...inputs],
     { env: { ...process.env, SILVERBOX_USER_DATA: ud }, encoding: 'utf8', timeout: 900_000 });
   for (const l of r.stdout.split('\n').filter(Boolean)) { const j = JSON.parse(l); if (j.error) console.log('ERR', j.input, j.error); }
   console.error(r.stderr.split('\n').filter((l) => /error|warn/i.test(l)).slice(-15).join('\n'));
