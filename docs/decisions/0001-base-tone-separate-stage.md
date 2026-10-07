@@ -38,6 +38,13 @@ the seeded points act today, so a fresh open renders identically and the
 right after the tone stage) stays valid. The user tone curve always opens
 flat, in every profile mode.
 
+- Why sliders come BEFORE the base tone (not "make it viewable first, then
+  adjust"): the viewer always shows the end of the chain, so the order never
+  changes what the user looks at — only what values the sliders compute on.
+  Before the base tone, values above display white still exist, so Exposure
+  −1 brings a 150%-white cloud back to 75% with its detail (camera-like);
+  after it, the cloud is already squeezed to 100% and darkening only yields
+  flat grey (JPEG-like). Same split as Lightroom and Capture One.
 - The stage is recorded in the document (not resolved from code at render
   time), so a sidecar renders the same forever. A doc WITHOUT the field
   means "no base tone" — every existing sidecar renders unchanged (its
