@@ -7,9 +7,8 @@
 
 ## いま何をしているか（1〜3 行）
 
-agent-harness を導入して main に push した（`14b1845`）。このセッションは main で終わっている。
-開発の本線は 2026-09-04 から止まっており、再開点は「RAW を開いた時のデフォルト描画をどうするか」という設計方針の決定（下の「未確定事項」）。
-本線の作業ブランチは `wip/localtone-stage1`（main より 27 コミット先行。base-match の調査記録もそちらにある。ハーネスはまだ入っていない）。
+ベーストーン（決定 0001 + 0002）を `wip/localtone-stage1` に実装済み（`fa57aba`, `fd781ac`、未 push）。RAW を開いた直後は完全ニュートラル、見た目は Inspector の「Base tone」（None / Reinhard / Sigmoid / AgX / ACES）とプリセットで作る。
+**いまはユーザーの手触り確認待ち**（UX の変更なので次の実装に進まない）。計画: `docs/plans/active/base-tone-stage.md`。
 
 ## 状態
 
@@ -24,13 +23,10 @@ agent-harness を導入して main に push した（`14b1845`）。このセッ
 
 ## NEXT（依存順。順序制約があれば明記）
 
-- **2026-10-06 追加**: レイヤ構造を決定（暫定）— ベーストーンを独立段にし、ユーザーのトーンカーブは常に平らから始める（`docs/decisions/0001-base-tone-separate-stage.md`、LR / Resolve と同じ分け方）。計画は `docs/plans/active/base-tone-stage.md`（最終 GO 待ち。フェーズ 1 は見た目を変えないリファクタなので、下の A/B/C とは独立に進められる）。
-
-0. 本線の作業に戻るときは `git switch wip/localtone-stage1`。ハーネスをそちらでも効かせたいなら先に `git merge main`（main 側の差分はハーネス導入のみ。`.gitignore` と `.claude/settings.json` は wip 側で未変更なので衝突しない見込み）。
-1. **設計方針の決定**（ユーザー判断。下記）。これが 2〜4 を全部ゲートしている。
-2. ~~判断材料として 5 シーンの 3 枚並べを作る~~ **済（2026-10-05）**: `test-artifacts/default-look-compare-2026-10-05.html`（gitignore。再生成は sidecar 3 種を CLI `--render` で描く。構成は下の「比較結果」）。
-3. 方針に従って `seedDefaultLook` が `toneCurve` に書く初期値を決める（base curve と調整用トーンカーブは同じフィールド `developNode.ts` の `toneCurve`）。acrlook の base curve refit（base-5r の Curve A/B）は B を選ぶと不要になりうる。
-4. localtone の `wip/localtone-stage1` → main マージ判断（比較ページの再目視が前提）。
+1. **ユーザーの手触り確認**: アプリで RAW を開き（ニュートラルで暗めなのが仕様）、Inspector の Profile → Base tone を切り替えて見比べる。結果次第で、残すベーストーンの種類・強さ違いの版・「開いたときに当てるプリセット」設定（計画の未確定事項）を決める。
+2. 確認が済んだら計画を `docs/plans/completed/` へ移す。
+3. localtone の `wip/localtone-stage1` → main マージ判断（比較ページの再目視が前提。ベーストーン導入で既定の見た目が変わったので、見直しが要る）。
+4. 既知の負債: スライダー応答と auto-tone は旧ベースカーブ前提の調整（`docs/tech-debt.md` #1）。
 
 ## 比較結果（2026-10-05、判断材料）
 
