@@ -74,10 +74,13 @@ user can pick a base tone in the Inspector and presets carry it.
   5 shipped ids via the real engine (matches the custom-shader renders within
   ~1-2/255) + Sigmoid soft (c 1.2) / strong (c 1.9) + AgX Punchy (Blender look).
 
+## 決定ログ追記
+
+- 2026-10-07: No render-identical migration for old docs whose toneCurve
+  equals the old seed. Old docs keep rendering as stored (user: 「作らないでok」).
+
 ## 未確定事項（人間の判断待ち）
 
-- Offer a render-identical migration for old docs whose toneCurve equals
-  the old seed? (default: no — old docs just keep rendering as stored)
 - "Preset applied on open" setting (LR raw-defaults style) to soften the
   neutral default for culling — not in this plan's scope yet.
 - Which base tones to keep long-term after hand-testing (reinhard / sigmoid /
