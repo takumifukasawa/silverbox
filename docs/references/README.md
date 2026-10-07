@@ -4,6 +4,7 @@
 
 | ファイル | 元 | 取得日 | 何に使うか |
 |---|---|---|---|
+| [display-transforms.md](display-transforms.md) | AgX (Wrensch / Sobotka), ACES fit (Narkowicz), Reinhard 2002 | 2026-10-07 | base tone の出どころとライセンス。同梱すべき表示は THIRD_PARTY_NOTICES.md |
 
 - 元 URL と取得日を必ず書く（腐敗の検知に使う）。
 - 全文コピーではなく、このプロジェクトが依存している部分の抜粋にする。

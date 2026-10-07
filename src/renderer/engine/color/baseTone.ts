@@ -10,6 +10,10 @@
  * formulas match scripts/drt-compare/drts.mjs (the comparison the user chose
  * from, 2026-10-07).
  *
+ * Third-party math (THIRD_PARTY_NOTICES.md): `agx` is Benjamin Wrensch's
+ * minimal AgX (MIT — its notice must ship with the app); `aces` is Krzysztof
+ * Narkowicz's ACES fit (CC0).
+ *
  * Each transform starts with the same +1 EV pre-gain (darktable-style: the
  * neutral decode sits ~1.4 EV under LR's default); 'none' has no gain and
  * emits no pass.

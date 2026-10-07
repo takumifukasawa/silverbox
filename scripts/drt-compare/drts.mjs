@@ -33,14 +33,11 @@ let y = x * 0.6;
 return clamp((y * (2.51 * y + vec3f(0.03))) / (y * (2.43 * y + vec3f(0.59)) + vec3f(0.14)), vec3f(0.0), vec3f(1.0));`,
 };
 
-// Strength variants (2026-10-07 comparison). Sigmoid: contrast c with s / norm
-// re-solved so 0.18 → 0.18 and the 2.83 peak → 1 (same constraints as the
-// shipped 'sigmoid', c = 1.5). AgX Punchy: Blender's look (power 1.35,
-// saturation 1.4) applied after the AgX contrast curve, before the outset.
-const sigmoidSrc = (c, s, gW) => PRE + `
-let c = ${c}; let s = ${s}; let gW = ${gW};
-let xc = pow(x, vec3f(c));
-return (xc / (xc + vec3f(pow(s, c)))) / gW;`;
+// Variant (2026-10-07 comparison): AgX Punchy — the "punchy" look values
+// (power 1.35, saturation 1.4) from Benjamin Wrensch's minimal AgX (MIT,
+// THIRD_PARTY_NOTICES.md), applied after the AgX contrast curve, before the
+// outset. Our own Sigmoid strength variants were dropped at the user's request
+// (only third-party-defined variants are compared).
 const agxPunchy = DRTS.agx.replace(
   'v = agxInv * v;',
   `let lw = vec3f(0.2126, 0.7152, 0.0722);
@@ -50,7 +47,5 @@ v = vec3f(lum) + 1.4 * (v - vec3f(lum));
 v = agxInv * v;`
 );
 export const DRT_VARIANTS = {
-  sigmoid_soft: sigmoidSrc(1.2, 0.7699738, 0.8266417),
-  sigmoid_strong: sigmoidSrc(1.9, 0.4062021, 0.9755946),
   agx_punchy: agxPunchy,
 };
