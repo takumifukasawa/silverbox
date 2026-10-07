@@ -11,3 +11,7 @@ Checked 2026-10-07. Used by `src/renderer/engine/color/baseTone.ts` and
 | `aces` | Krzysztof Narkowicz, "ACES Filmic Tone Mapping Curve" — https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/ | "free to use under public domain CC0 or MIT license" — taken as CC0 | rational fit a/b/c/d/e and the ×0.6 input scale ("for the original ACES curve") |
 | `reinhard` | Reinhard et al. 2002, "Photographic Tone Reproduction for Digital Images" (extended operator) | a published formula, no code | white point 2.83 is our choice (pre-gained sensor peak) |
 | `sigmoid` | our own log-logistic `x^c / (x^c + s^c)`, normalized; same idea as darktable's sigmoid module (GPL) but no darktable code is used | ours | c = 1.5 and the 0.18 → 0.18 / 2.83 → 1 constraints are our choices |
+
+User decision 2026-10-07: shipping `agx` is acceptable — the only values
+without an explicit grant (Sobotka's) reach us as numeric parameters through
+Wrensch's MIT-licensed publication.
