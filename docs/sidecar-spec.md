@@ -246,7 +246,8 @@ mode (forward-compat, same posture as `disabled`).
 
 **`profile.baseTone`** (docs/decisions/0001 + 0002): the named display
 transform that maps the neutral decode into display range — one of `'none'`
-(default, omittable), `'reinhard'`, `'sigmoid'`, `'agx'`, `'aces'`. It is
+(default, omittable), `'reinhard'`, `'sigmoid'`, `'agx'`, `'agx_punchy'`,
+`'aces'`. It is
 independent of `amount`/`source` and applies later in the Develop chain
 (after the Basic tone stage, before the tone curve; `engine/color/baseTone.ts`).
 Absent or unrecognized values sanitize to `'none'` (rule 7), so docs written

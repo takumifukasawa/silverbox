@@ -5,8 +5,9 @@ are reproduced here as their terms require.
 
 ## Minimal AgX implementation — Benjamin Wrensch (MIT)
 
-Used in `src/renderer/engine/color/baseTone.ts` (base tone `agx`: the inset /
-outset matrices, the log2 range and the 6th-order contrast polynomial).
+Used in `src/renderer/engine/color/baseTone.ts` (base tones `agx` and
+`agx_punchy`: the inset / outset matrices, the log2 range, the 6th-order
+contrast polynomial, and the Punchy look's power 1.35 / saturation 1.4).
 Source: https://iolite-engine.com/blog_posts/minimal_agx_implementation
 Its author notes that all values used to derive it are sourced from Troy
 Sobotka's AgX OCIO config (https://github.com/sobotka/AgX).

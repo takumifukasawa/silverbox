@@ -5,7 +5,7 @@
  * GPU-vs-CPU agreement is covered by verify-basetone.mjs.
  */
 import { describe, expect, it } from 'vitest';
-import { applyBaseToneCpu, BASE_TONE_IDS, baseToneWgslBody, sanitizeBaseTone, type BaseToneId } from './baseTone';
+import { applyBaseToneCpu, BASE_TONE_IDS, baseToneWgslBody, sanitizeBaseTone, sigmoidCurve, type BaseToneId } from './baseTone';
 import { compileDevelop, defaultDevelopParams, type DevelopParams } from '../graph/developNode';
 import { mergeDevelopParams } from '../graph/graphDoc';
 import { pickDevelopFamilies } from '../graph/presetFamilies';
@@ -55,9 +55,58 @@ describe('base tone — display mapping', () => {
     expect(b - a).toBeGreaterThan(0.01);
   });
 
-  it.each(TONES)('%s brightens the neutral decode (includes the +1 EV pre-gain)', (id) => {
+  // agx_punchy is a contrast look (power 1.35) and sits darker than AgX in
+  // the midtones by design; it gets its own checks below.
+  it.each(TONES.filter((id) => id !== 'agx_punchy'))('%s brightens the neutral decode (includes the +1 EV pre-gain)', (id) => {
     // a typical neutral-decode midtone sits well under display mid-grey
     expect(applyBaseToneCpu(id, grey(0.05))[1]).toBeGreaterThan(0.05);
+  });
+
+  it('agx_punchy: darker midtones and more saturation than agx', () => {
+    expect(applyBaseToneCpu('agx_punchy', grey(0.05))[1]).toBeLessThan(applyBaseToneCpu('agx', grey(0.05))[1]);
+    const sat = ([r, g, b]: [number, number, number]) => (Math.max(r, g, b) - Math.min(r, g, b)) / Math.max(r, g, b);
+    const color: [number, number, number] = [0.12, 0.06, 0.03];
+    expect(sat(applyBaseToneCpu('agx_punchy', color))).toBeGreaterThan(sat(applyBaseToneCpu('agx', color)));
+  });
+
+  describe('sigmoid (darktable sigmoid defaults)', () => {
+    const G = 0.1845;
+    it('hits the darktable targets: black 0.0152 %, grey → grey, white → 1', () => {
+      expect(sigmoidCurve(0)).toBeCloseTo(0.000152, 9);
+      expect(sigmoidCurve(G)).toBeCloseTo(G, 9);
+      expect(sigmoidCurve(1e9)).toBeCloseTo(1, 6);
+    });
+    // The exponent is solved as if the black target were 0 (darktable makes
+    // the same simplification), so the small black lift shifts the slope by
+    // under 1 %.
+    it('slope at grey ≈ contrast · (1 − grey) = 1.5 · 0.8155 (within 1 %)', () => {
+      const d = 1e-6;
+      const slope = (sigmoidCurve(G + d) - sigmoidCurve(G - d)) / (2 * d);
+      expect(Math.abs(slope / (1.5 * (1 - G)) - 1)).toBeLessThan(0.01);
+    });
+    it('includes the +1 EV pre-gain: input grey/2 lands on grey', () => {
+      const out = applyBaseToneCpu('sigmoid', grey(G / 2));
+      for (const v of out) expect(v).toBeCloseTo(G, 6);
+    });
+    it('preserves hexcone hue: (mid − min)/(max − min) is unchanged', () => {
+      const hue = ([r, g, b]: [number, number, number]) => {
+        const s = [r, g, b].sort((p, q) => p - q);
+        return (s[1]! - s[0]!) / (s[2]! - s[0]!);
+      };
+      for (const c of [[0.9, 0.4, 0.05], [0.02, 0.3, 1.2], [0.5, 0.45, 0.1]] as [number, number, number][]) {
+        const out = applyBaseToneCpu('sigmoid', c);
+        expect(hue(out)).toBeCloseTo(hue(c), 9);
+        // channel order is kept, too
+        expect(out.map((v, i) => [v, i]).sort((p, q) => p[0]! - q[0]!).map((p) => p[1])).toEqual(
+          c.map((v, i) => [v, i]).sort((p, q) => p[0]! - q[0]!).map((p) => p[1])
+        );
+      }
+    });
+    it('desaturates a negative channel toward the mean instead of clipping it', () => {
+      const out = applyBaseToneCpu('sigmoid', [0.3, 0.1, -0.05]);
+      expect(Math.min(...out)).toBeCloseTo(sigmoidCurve(0), 9);
+      for (const v of out) expect(Number.isFinite(v)).toBe(true);
+    });
   });
 
   it('runs after the Basic tone stage and before the user tone curve', () => {

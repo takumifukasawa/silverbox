@@ -105,7 +105,8 @@ A neutral decode renders dark and flat (sRGB encoding only, no roll-off;
 space between the Basic tone stage and the user tone curve, so it can roll
 off values above 1.0 (headroom up to sensor saturation ≈1.41 after the
 baseline gain) — the tone curve itself acts in clamped display space and
-cannot. Ids: `reinhard`, `sigmoid` (Resolve DaVinci-DRT-like), `agx`, `aces`;
+cannot. Ids: `reinhard`, `sigmoid` (darktable sigmoid defaults, hue-preserving),
+`agx`, `agx_punchy` (Wrensch's Punchy look), `aces`;
 each adds its own +1 EV pre-gain. Looks beyond that come from presets.
 Comparison: the "デフォルト描画 比較" artifact / `scripts/drt-compare/`.
 

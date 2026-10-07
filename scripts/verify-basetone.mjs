@@ -28,7 +28,9 @@ const ARW_PATH = process.env.SILVERBOX_TEST_ARW ?? 'test-assets/test.ARW';
 ensureTestProjectEnv();
 const SIDECAR = lookPathFor(ARW_PATH);
 const GPU_CPU_TOLERANCE = 1 / 255;
-const TONES = ['reinhard', 'sigmoid', 'agx', 'aces'];
+const TONES = ['reinhard', 'sigmoid', 'agx', 'agx_punchy', 'aces'];
+// agx_punchy is a contrast look that darkens midtones by design (baseTone.test.ts).
+const BRIGHTENING = new Set(['reinhard', 'sigmoid', 'agx', 'aces']);
 
 if (process.env.SILVERBOX_SKIP_BUILD !== '1') {
   console.log('building…');
@@ -101,7 +103,8 @@ try {
     const g = await gpuMean();
     const c = await cpuMean();
     check(`${id}: GPU matches CPU reference (within 1/255)`, meansMatch(g, c), { g, c });
-    check(`${id}: brightens the neutral decode`, lum(g) > lum(neutral) + 0.01, { neutral: lum(neutral), g: lum(g) });
+    if (BRIGHTENING.has(id)) check(`${id}: brightens the neutral decode`, lum(g) > lum(neutral) + 0.01, { neutral: lum(neutral), g: lum(g) });
+    else check(`${id}: changes the render`, Math.abs(lum(g) - lum(neutral)) > 0.005, { neutral: lum(neutral), g: lum(g) });
   }
   await setTone('none');
   check("back to 'none' restores the exact neutral render", meansMatch(await gpuMean(), neutral, 1e-6), null);

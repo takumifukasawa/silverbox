@@ -78,10 +78,16 @@ user can pick a base tone in the Inspector and presets carry it.
 
 - 2026-10-07: No render-identical migration for old docs whose toneCurve
   equals the old seed. Old docs keep rendering as stored (user: 「作らないでok」).
+- 2026-10-07: own strength variants dropped; `agx_punchy` added (Wrensch MIT);
+  `sigmoid` re-based on darktable sigmoid defaults with our own hexcone hue
+  preservation (no GPL code). Unreleased, so changing `sigmoid` in place is
+  safe. Auto tone now reads through the base tone (tech-debt #1).
+- 2026-10-07: "Adobe Color (local)" hidden from the Source picker behind a
+  flag (decision 0003).
 
 ## 未確定事項（人間の判断待ち）
 
 - "Preset applied on open" setting (LR raw-defaults style) to soften the
   neutral default for culling — not in this plan's scope yet.
 - Which base tones to keep long-term after hand-testing (reinhard / sigmoid /
-  agx / aces); strength variants if wanted.
+  agx / agx_punchy / aces).

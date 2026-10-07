@@ -22,7 +22,9 @@ user prefers a Resolve-style neutral default with looks supplied by presets.
   profile, default sharpen 40 / color NR 25.
 - `profile.baseTone` is a closed enum of NAMED display transforms, applied
   in linear working space between the Basic tone stage and the user tone
-  curve (0001): `none`, `reinhard`, `sigmoid`, `agx`, `aces`. Each id's math
+  curve (0001): `none`, `reinhard`, `sigmoid`, `agx`, `aces` (+ `agx_punchy`,
+  2026-10-07; `sigmoid` re-based on darktable defaults before release — see
+  docs/references/display-transforms.md). Each id's math
   is a forever contract (a sidecar must render the same forever): never
   change the formula under an existing id — add a new id instead.
 - Each transform includes its own +1 EV pre-gain (darktable-style; the
