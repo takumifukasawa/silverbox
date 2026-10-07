@@ -47,7 +47,7 @@ CLI は `bash .harness/bin/harness <cmd>`（以下 `harness` と略す。PATH �
    - `files_scope`: 触ってよい範囲。
    - `depends_on`: 先に終わっていなければならないタスク id。
    - `model`: そのエージェントで有効なモデル名。設計余地あり（データモデル・状態遷移）→ 上位、決まった型で足す・テスト追加 → 下位。**Claude / Codex ともタスク単位で指定できる**（Claude はサブエージェント起動時に、Codex は `codex exec --model <MODEL>` で）。`inherit` は「起動時に指定しない」の意味で、Claude Code ではサブエージェント既定（`CLAUDE_CODE_SUBAGENT_MODEL`、未設定なら Claude Code の既定）になり、メインセッションと同じモデルになるとは限らない。**分解案をユーザーに提示するとき、この `model` も一緒に示す**（合意の対象）。
-7. **検査を用意する**: 各タスクの `acceptance` が `.harness/checks.sh` の検査で判定できるかを確認し、足りなければ検査を登録する（テスト実行、テスト件数 > 0、変更ファイルが `files_scope` 内、依存方向、フラグ OFF で既存挙動）。seed 直後の `checks.sh` は docs の存在確認 1 件しか無い。**このままだと検査は常に pass し、完了判定が空洞化する。**
+7. **検査を用意する**: 各タスクの `acceptance` が `.harness/checks.sh` の検査で判定できるかを確認し、足りなければ検査を登録する（テスト実行、テスト件数 > 0、変更ファイルが `files_scope` 内、依存方向、フラグ OFF で既存挙動）。seed 直後の `checks.sh` にはプロダクトの検査が 0 件（`harness check` が NOTE を出す）。**このままだと検査は常に pass し、完了判定が空洞化する。**
 8. **分解案をユーザーに提示して合意**を取る。合意したら `phase: "iterate"`、`current_task` を最初のタスクに、`progress.total` をタスク数に。`docs/plans/active/<slug>.md` を作り、`progress.plan` にそのパスを入れ、`docs/handoff.md` から参照する。
 
 ## 2. 反復フェーズ（1 セッション = 1 タスク）
