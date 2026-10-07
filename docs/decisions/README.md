@@ -6,6 +6,7 @@
 |---|---|---|---|
 | [0001](0001-base-tone-separate-stage.md) | Base tone is its own stage; user tone curve always starts flat | 採用 | 2026-10-06 |
 | [0002](0002-neutral-default-base-tone.md) | Fresh RAW opens are neutral; base tones are named display transforms | 採用 | 2026-10-07 |
+| [0003](0003-hide-acrlook-source.md) | Hide "Adobe Color (local)" from the profile Source picker (reversible) | 採用 | 2026-10-07 |
 
 ## テンプレート
 

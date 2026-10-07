@@ -54,6 +54,7 @@ import { ColorWheel } from './ColorWheel';
 import { createDefaultCustomShaderParams } from '../engine/graph/customShaderNode';
 import { ShaderEditor } from './ShaderEditor';
 import { ToneCurveEditor } from './ToneCurveEditor';
+import { showAcrLookOption } from './profileSourceOptions';
 
 /**
  * Common parameter row (UI spec §6): label / range / number in a grid;
@@ -336,12 +337,12 @@ function DcpSourceControls({ nodeId, profile }: { nodeId: string; profile: Profi
         >
           <option value="builtin">Built-in</option>
           <option value="dcp">DCP file…</option>
-          {/* Hidden entirely (not just disabled) when the local files aren't
-              present, per the brief — never a dead option; if the CURRENT
-              doc already names 'acrlook' (e.g. a sidecar from another
-              machine) it's kept selectable so the user isn't silently
-              bounced to a different mode without an explanation. */}
-          {(acrLookAvailable || source === 'acrlook') && <option value="acrlook">Adobe Color (local)</option>}
+          {/* Hidden for new choices (decision 0003, flag in
+              profileSourceOptions.ts) and whenever the local files aren't
+              present — never a dead option; if the CURRENT doc already
+              names 'acrlook' (e.g. an older sidecar) it's kept selectable
+              so the user isn't silently bounced to a different mode. */}
+          {showAcrLookOption(acrLookAvailable, source) && <option value="acrlook">Adobe Color (local)</option>}
         </select>
       </div>
       {source === 'dcp' && (
