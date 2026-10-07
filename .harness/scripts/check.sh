@@ -31,6 +31,7 @@ if [ ! -f "$CHECKS" ]; then
 fi
 
 pass=0; fail=0; skipped=0
+product=0    # seed 以外の検査（プロダクトの検査）の実行件数。0 なら pass は何も保証しない（決定 0012）
 failed_names=()
 timings=""   # "<秒>\t<表示名>" の行を貯める。遅い順の要約に使う（配列だと空のとき set -u で落ちる）
 
@@ -45,6 +46,10 @@ check() {
   if [ "$FAST" = 1 ] && [ "$speed" != "fast" ]; then
     skipped=$((skipped + 1)); return
   fi
+  case "$name" in
+    "docs index exists"|"doctor: FAIL 0") ;;   # seed（checks.seed.sh）の検査。名前を変えたら tests/seed.sh が落ちる
+    *) product=$((product + 1)) ;;
+  esac
   printf '── %s\n' "$name"
   local start=$SECONDS sec
   if (cd "$ROOT" && bash -c "$cmd"); then
@@ -73,6 +78,12 @@ if [ -n "$timings" ]; then
     echo "  遅い順（上位 5 件）:"
     printf '%s\n' "$slow"
   fi
+fi
+# seed の検査しか無いと pass は常に空振りする（決定 0012）。pre-commit（--fast）では毎回うるさいので出さない。
+if [ "$FAST" = 0 ] && [ "$product" -eq 0 ]; then
+  echo "  NOTE: プロダクトの検査が 0 件。この pass は何も保証しない。"
+  echo "    テスト・lint・型検査など「緑なら完了」と言えるコマンドを .harness/checks.sh に"
+  echo "    check \"<表示名>\" \"<コマンド>\" の形で登録する（例は同ファイル冒頭のコメント）。"
 fi
 if [ "$fail" -gt 0 ]; then
   printf '  failed: %s\n' "${failed_names[@]}"
