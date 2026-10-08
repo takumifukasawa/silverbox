@@ -6,6 +6,7 @@
  * this one file so both sides stay in sync.
  */
 import type { DeltaEStats } from './color/deltaE';
+import { DEFAULT_PANEL_LAYOUT, type PanelLayout } from './panelLayout';
 
 export const IPC = {
   ping: 'app:ping',
@@ -1204,6 +1205,10 @@ export interface Settings {
    * only surfaces if a future caller ever opens the dialog without one.
    */
   publishFamilies: string[];
+  /** Panel sizes and the node editor's collapsed state (shared/panelLayout.ts). */
+  panelLayout: PanelLayout;
+  /** Test-mode twin of panelLayout, so verify runs never see the user's layout. */
+  panelLayoutTest?: PanelLayout;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -1232,6 +1237,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // checked the same way, on the rare occasion its own per-look default
   // (the look's current `includes`) isn't available.
   publishFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
+  panelLayout: DEFAULT_PANEL_LAYOUT,
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

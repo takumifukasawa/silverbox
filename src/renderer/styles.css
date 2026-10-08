@@ -1870,7 +1870,7 @@ button:disabled {
 }
 
 .inspector {
-  flex: 0 0 340px;
+  flex: 0 0 var(--inspector-w, 340px);
   background: #232323;
   border-left: 1px solid #111;
   overflow-y: auto;
@@ -2382,7 +2382,7 @@ button:disabled {
 }
 
 .node-editor {
-  flex: 0 0 260px;
+  flex: 0 0 var(--node-editor-h, 260px);
   background: #1a1a1a;
   border-top: 1px solid #111;
   position: relative;
@@ -2824,15 +2824,74 @@ button:disabled {
 }
 .pixel-loupe-readout {
   display: flex;
-  gap: 8px;
-  align-items: center;
+  flex-wrap: wrap;
+  align-content: center;
+  column-gap: 10px;
+  row-gap: 4px;
   height: 36px;
   padding: 0 8px;
+  white-space: nowrap;
   font: 11px/1 ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
   color: #e7e6e2;
 }
 .pixel-loupe-xy {
-  margin-left: auto;
+  flex-basis: 100%;
   color: #9b9da1;
+}
+
+/* Panel layout (PanelSplitters.tsx / panelLayout.ts): drag handles for the
+   Inspector width and the node editor height; sizes live in CSS variables
+   set on .app-layout. */
+.panel-splitter--vertical {
+  flex: 0 0 5px;
+  margin: 0 -2px;
+  z-index: 10;
+  cursor: col-resize;
+  background: transparent;
+  touch-action: none;
+}
+.panel-splitter--vertical:hover,
+body.panel-dragging .panel-splitter--vertical:active {
+  background: #4a6fa5;
+}
+.node-editor-bar {
+  flex: 0 0 22px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  background: #222;
+  border-top: 1px solid #111;
+  cursor: row-resize;
+  user-select: none;
+  touch-action: none;
+}
+.node-editor-bar:hover {
+  background: #2a2a2a;
+}
+.node-editor-bar-toggle {
+  background: none;
+  border: none;
+  padding: 0 4px;
+  font-size: 11px;
+  color: #aaa;
+  cursor: pointer;
+}
+.node-editor-bar-toggle:hover {
+  color: #ddd;
+}
+.node-editor-bar-grip {
+  flex: 0 0 36px;
+  height: 3px;
+  margin: 0 auto;
+  border-radius: 2px;
+  background: #444;
+}
+.app-layout--nodes-collapsed .node-editor {
+  display: none;
+}
+/* keep the cursor and stop text selection while a panel drag is in flight */
+body.panel-dragging {
+  user-select: none;
 }

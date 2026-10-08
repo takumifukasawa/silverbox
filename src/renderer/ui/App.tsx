@@ -4,6 +4,7 @@ import { CanvasView } from './CanvasView';
 import { Filmstrip } from './Filmstrip';
 import { InspectorPanel } from './InspectorPanel';
 import { NodeEditorPanel } from './NodeEditorPanel';
+import { InspectorSplitter, NodeEditorBar, usePanelLayout } from './PanelSplitters';
 import { ExportDialog } from './ExportDialog';
 import { SettingsDialog } from './SettingsDialog';
 import { SidecarDiffDialog } from './SidecarDiffDialog';
@@ -499,8 +500,18 @@ export function App() {
 
   const folderDir = useAppStore((s) => s.folderDir);
 
+  const [panels, setPanels] = usePanelLayout();
+
   return (
-    <div className="app-layout">
+    <div
+      className={`app-layout${panels.nodeEditorCollapsed ? ' app-layout--nodes-collapsed' : ''}`}
+      style={
+        {
+          '--inspector-w': `${panels.inspectorWidth}px`,
+          '--node-editor-h': `${panels.nodeEditorHeight}px`,
+        } as React.CSSProperties
+      }
+    >
       <Toolbar />
       <div className="main-row">
         {/* .canvas-column wraps CanvasView + the filmstrip as a vertical pair
@@ -515,8 +526,10 @@ export function App() {
           <CanvasView />
           {folderDir !== null && <Filmstrip key={folderDir} />}
         </div>
+        <InspectorSplitter width={panels.inspectorWidth} onChange={setPanels} />
         <InspectorPanel />
       </div>
+      <NodeEditorBar height={panels.nodeEditorHeight} collapsed={panels.nodeEditorCollapsed} onChange={setPanels} />
       <NodeEditorPanel />
       <ExportDialog />
       <SettingsDialog />

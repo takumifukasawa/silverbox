@@ -129,6 +129,7 @@
     "verify:localtone": "node scripts/verify-localtone.mjs",
     "verify:basetone": "node scripts/verify-basetone.mjs",
     "verify:loupe": "node scripts/verify-loupe.mjs",
+    "verify:panels": "node scripts/verify-panels.mjs",
     "fit:basecurve": "node scripts/fit-base-curve.mjs",
     "fit:profile": "node scripts/fit-profile.mjs",
     "verify": "node scripts/run-verify.mjs",

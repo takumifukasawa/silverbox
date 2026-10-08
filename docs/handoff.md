@@ -3,30 +3,31 @@
 <!-- 最終更新は絶対日付で。session-handoff が更新し、session-catchup が最初に読む。
      長期タスクの機械可読な進行状態は .harness/state/ に置き、ここには人間向けの要約だけ書く。 -->
 
-最終更新: 2026-10-07
+最終更新: 2026-10-08
 
 ## いま何をしているか（1〜3 行）
 
-ベーストーン（決定 0001 + 0002）を `wip/localtone-stage1` に実装済み（`fa57aba`, `fd781ac`、未 push）。RAW を開いた直後は完全ニュートラル、見た目は Inspector の「Base tone」（None / Reinhard / Sigmoid / AgX / ACES）とプリセットで作る。
+`wip/localtone-stage1`（未 push）で、ベーストーンの仕上げと手触りフィードバックへの対応をしている。ベーストーン: None / Reinhard / Sigmoid（darktable 既定値準拠＋自前の色相保持）/ AgX / AgX Punchy / ACES。Inspector では Profile 直下の独立セクションにあり、ホバーでプレビューできる。2026-10-08 にスポイトのルーペとパネルのリサイズ（ノード欄の折りたたみ含む）を追加。
 **いまはユーザーの手触り確認待ち**（UX の変更なので次の実装に進まない）。計画: `docs/plans/active/base-tone-stage.md`。
 
 ## 状態
 
 | 項目 | 状態 | 出典 |
 |---|---|---|
-| localtone stage 1e-r（LLF ベースの局所トーン） | 検証済み・main 未マージ | `wip/localtone-stage1`（`caaca8e`）、`npm run verify:localtone` |
-| base-match（LR デフォルト描画への自動一致） | base-10 で打ち止め。bridge の彩度と sunset の色は自動一致の到達限界として記録 | `wip/localtone-stage1` の `docs/research/lr-base-gap.md` |
-| acrlook プロファイルモード（Adobe Color LookTable 再実装） | 実装済み・自動デフォルト化は conductor hold で無効 | `wip/localtone-stage1` の `appStore.ts`（seedDefaultLook 周辺） |
-| auto-tone v2 | 検証済み・park（ユーザーは「多少雑でもいい」） | `718bbe1`, `d011f05` |
-| look-extraction stage 2 | blocked（stage 1 の Italy 参照での目視 OK 待ち） | `docs/brief-bank/look-extraction-mode2-stage2.md` |
+| ベーストーン（決定 0001 + 0002） | 実装済み・手触り確認待ち。auto tone はベーストーン越しに輝度を読む（tech-debt #1 の auto tone 部分は返済済み） | `docs/plans/active/base-tone-stage.md`、`npm run verify:basetone` |
+| Adobe Color (local) | Source の選択肢から非表示（フラグで戻せる） | `docs/decisions/0003-hide-acrlook-source.md` |
+| スポイトのルーペ（WB / ColorKey 共通） | 実装済み・手触り確認待ち | `src/renderer/ui/PixelLoupe.tsx`、`npm run verify:loupe` |
+| パネルのリサイズ・ノード欄の折りたたみ | 実装済み・手触り確認待ち。サイズは settings.json の `panelLayout` に保存 | `src/renderer/ui/PanelSplitters.tsx`、`npm run verify:panels` |
+| localtone stage 1e-r（LLF ベースの局所トーン） | 検証済み・main 未マージ | `wip/localtone-stage1`、`npm run verify:localtone` |
+| base-match（LR デフォルト描画への自動一致） | 打ち止め（方針 B: 自前のニュートラル既定＋ベーストーン） | `docs/research/lr-base-gap.md` |
 | agent-harness | 導入済み | `bash .harness/bin/harness doctor` / `check` |
 
 ## NEXT（依存順。順序制約があれば明記）
 
-1. **ユーザーの手触り確認**: アプリで RAW を開き（ニュートラルで暗めなのが仕様）、Inspector の Profile → Base tone を切り替えて見比べる。結果次第で、残すベーストーンの種類・強さ違いの版・「開いたときに当てるプリセット」設定（計画の未確定事項）を決める。
-2. 確認が済んだら計画を `docs/plans/completed/` へ移す。
-3. localtone の `wip/localtone-stage1` → main マージ判断（比較ページの再目視が前提。ベーストーン導入で既定の見た目が変わったので、見直しが要る）。
-4. 既知の負債: スライダー応答と auto-tone は旧ベースカーブ前提の調整（`docs/tech-debt.md` #1）。
+1. **ユーザーの手触り確認**: ベーストーンの各候補、ベーストーン選択時の auto tone、スポイトのルーペ、パネルのドラッグとノード欄の折りたたみ。
+2. ベーストーンの計画を `docs/plans/completed/` へ移す（残す候補の確定後）。
+3. localtone の `wip/localtone-stage1` → main マージ判断（マージするとベーストーンも一緒に入る）。
+4. 保留: LR のパラメトリックトーンカーブ（範囲別スライダー）。ユーザーが欲しいと言うまで着手しない。
 
 ## 比較結果（2026-10-05、判断材料）
 
@@ -44,10 +45,8 @@
 
 ## 未確定事項（人間の判断待ち）
 
-- **デフォルト描画の方針**（ユーザーは B に傾いているが未確定）
-  - A: LR の Adobe Color デフォルトを追い続ける（base-1..10 で収穫逓減が確定）
-  - B: 自前の素直なニュートラルデフォルト。look はすべて手動。demosaic・as-shot WB・カメラ行列・素のトーンカーブは「補正」なので残す
-  - C: B + 既存の acrlook を「Lightroom に合わせる」オプトインモードとして残す（B を選べばほぼタダで付く）
+- 長期的に残すベーストーンの種類。
+- 「開いたときに当てるプリセット」設定（LR の raw defaults 相当）を作るか。
 - look-extraction stage 2 の GO/NO-GO。
 - GO 待ちのブリーフ: store-split リファクタ、grain-quality。linked-looks は設計のみ（明示 GO まで実装しない）。
 

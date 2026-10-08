@@ -10,6 +10,7 @@
  * §9 ("documents outlive versions") applies to this document too.
  */
 import { app } from 'electron';
+import { sanitizePanelLayout } from '../../shared/panelLayout';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -125,6 +126,10 @@ export function sanitizeSettings(raw: unknown): Settings {
   result.sharedLookFamilies = Array.isArray(src.sharedLookFamilies)
     ? src.sharedLookFamilies.filter((id): id is string => typeof id === 'string')
     : DEFAULT_SETTINGS.sharedLookFamilies;
+  // Panel layout: lenient per field (shared/panelLayout.ts); sizes are
+  // clamped against the live window in the renderer, not here.
+  result.panelLayout = sanitizePanelLayout(src.panelLayout);
+  if (src.panelLayoutTest !== undefined) result.panelLayoutTest = sanitizePanelLayout(src.panelLayoutTest);
   return result as unknown as Settings;
 }
 
