@@ -586,6 +586,14 @@ function DevelopInspector({ node }: { node: GraphNode }) {
           value={params.profile.amount}
         />
       </Section>
+      {/* Base tone sits with Profile, above Basic: it is the look you pick
+          first and rarely revisit (LR puts its profile picker at the top of
+          Basic, too), even though it runs after the Basic sliders
+          (docs/decisions/0001). It rides the basic-tone preset family, hence
+          that badge. */}
+      <Section title="Base Tone" badge={familyBadge('basic-tone')}>
+        <BaseToneSelect nodeId={node.id} profile={params.profile} />
+      </Section>
       <Section title="Basic" badge={basicBadge}>
         <div className="wb-eyedropper-row">
           <button
@@ -610,12 +618,6 @@ function DevelopInspector({ node }: { node: GraphNode }) {
         {DEVELOP_BASIC_DEFS.map((def) => (
           <ParamSlider key={def.key} nodeId={node.id} def={def} value={basic[def.key.split('.')[1]!] ?? def.default} />
         ))}
-      </Section>
-      {/* Inspector order follows the processing order: Profile → Basic →
-          Base tone → Tone curve (docs/decisions/0001). Base tone rides the
-          basic-tone preset family, hence that badge. */}
-      <Section title="Base Tone" badge={familyBadge('basic-tone')}>
-        <BaseToneSelect nodeId={node.id} profile={params.profile} />
       </Section>
       <Section title="Tone Curve" badge={familyBadge('curves')}>
         <ToneCurveEditor nodeId={node.id} params={params} />

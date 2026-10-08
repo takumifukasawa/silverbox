@@ -84,6 +84,9 @@ user can pick a base tone in the Inspector and presets carry it.
   safe. Auto tone now reads through the base tone (tech-debt #1).
 - 2026-10-07: "Adobe Color (local)" hidden from the Source picker behind a
   flag (decision 0003).
+- 2026-10-08: Base Tone is its own Inspector section with hover preview,
+  placed directly under Profile (above Basic): picked first, rarely revisited
+  (user chose this over processing-order placement after Basic).
 
 ## 未確定事項（人間の判断待ち）
 
