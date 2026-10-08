@@ -589,9 +589,9 @@ function DevelopInspector({ node }: { node: GraphNode }) {
       {/* Base tone sits with Profile, above Basic: it is the look you pick
           first and rarely revisit (LR puts its profile picker at the top of
           Basic, too), even though it runs after the Basic sliders
-          (docs/decisions/0001). It rides the basic-tone preset family, hence
-          that badge. */}
-      <Section title="Base Tone" badge={familyBadge('basic-tone')}>
+          (docs/decisions/0001). It rides the basic-tone preset family, whose
+          fork badge stays on Basic only (one badge per family). */}
+      <Section title="Base Tone">
         <BaseToneSelect nodeId={node.id} profile={params.profile} />
       </Section>
       <Section title="Basic" badge={basicBadge}>
