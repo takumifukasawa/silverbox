@@ -2807,3 +2807,32 @@ button:disabled {
   border-color: #6a9fe8;
 }
 
+
+/* Eyedropper loupe (PixelLoupe.tsx): follows the cursor, never takes the
+   pointer so the click still lands on the canvas. */
+.pixel-loupe {
+  position: absolute;
+  z-index: 20;
+  pointer-events: none;
+  border: 1px solid #000;
+  background: #1b1c1e;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+.pixel-loupe-grid {
+  display: block;
+  image-rendering: pixelated;
+}
+.pixel-loupe-readout {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  height: 36px;
+  padding: 0 8px;
+  font: 11px/1 ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  color: #e7e6e2;
+}
+.pixel-loupe-xy {
+  margin-left: auto;
+  color: #9b9da1;
+}

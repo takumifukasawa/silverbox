@@ -75,6 +75,8 @@ import { cpuRgb2hsl } from '../engine/graph/developOps';
 import { isDevelopFamily, isKnownFamilyId, type PresetFamilyId } from '../engine/graph/presetFamilies';
 import { parsePresetFile } from '../engine/graph/presetDoc';
 import { isTextEntry } from './textEntry';
+import { PixelLoupe, type LoupePoint } from './PixelLoupe';
+import { localToImagePixel } from './loupeGeometry';
 import type { BaseToneId } from '../engine/color/baseTone';
 import type { ExportColorSpace, ExportMetadataPolicy, Settings } from '../../../shared/ipc';
 
@@ -2369,6 +2371,25 @@ export function CanvasView() {
     if (spotHoverPos !== null) setSpotHoverPos(null);
   };
 
+  // Eyedropper loupe (PixelLoupe): follows the pointer while the WB or
+  // ColorKey eyedropper is armed. Same container-local mapping as the pick
+  // handlers, so the outlined cell is exactly the pixel a click samples.
+  const eyedropperArmed = wbPicking || colorKeyPicking;
+  const [loupe, setLoupe] = useState<{ point: LoupePoint; bounds: { w: number; h: number } } | null>(null);
+  useEffect(() => {
+    if (!eyedropperArmed) setLoupe(null);
+  }, [eyedropperArmed]);
+  const handleLoupePointerMove = (ev: React.PointerEvent<HTMLCanvasElement>) => {
+    const container = containerRef.current;
+    if (!eyedropperArmed || !container) return;
+    const rect = container.getBoundingClientRect();
+    const localX = ev.clientX - rect.left;
+    const localY = ev.clientY - rect.top;
+    const { x, y } = localToImagePixel(localX, localY, view);
+    setLoupe({ point: { ix: x, iy: y, localX, localY }, bounds: { w: rect.width, h: rect.height } });
+  };
+  const handleLoupePointerLeave = () => setLoupe(null);
+
   const handleSpotPointerDown = (ev: React.PointerEvent<HTMLCanvasElement>) => {
     if (!spotMode || !outputDims) return;
     ev.preventDefault();
@@ -2645,8 +2666,8 @@ export function CanvasView() {
             style={{ transform: `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})` }}
             onClick={wbPicking ? handleWbPick : colorKeyPicking ? handleColorKeyPick : undefined}
             onPointerDown={maskDrawMode !== null ? handleMaskDrawPointerDown : spotMode ? handleSpotPointerDown : undefined}
-            onPointerMove={spotMode ? handleSpotPointerMove : undefined}
-            onPointerLeave={spotMode ? handleSpotPointerLeave : undefined}
+            onPointerMove={spotMode ? handleSpotPointerMove : eyedropperArmed ? handleLoupePointerMove : undefined}
+            onPointerLeave={spotMode ? handleSpotPointerLeave : eyedropperArmed ? handleLoupePointerLeave : undefined}
             data-testid="canvas-view-canvas"
           />
           {!overlayVisible && drawGesture && outputDims && (
@@ -2705,6 +2726,9 @@ export function CanvasView() {
               canvasWidth={outputDims.width}
               canvasHeight={outputDims.height}
             />
+          )}
+          {!overlayVisible && eyedropperArmed && loupe && (
+            <PixelLoupe source={canvasRef.current} point={loupe.point} bounds={loupe.bounds} />
           )}
           {!overlayVisible && compareMode && (
             <div className="compare-pane-badge" data-testid="compare-pane-badge-main">

@@ -168,6 +168,7 @@ const ALL_SCRIPTS = [
   { name: 'develop-thumbnails', file: 'verify-develop-thumbnails.mjs' },
   { name: 'autotone', file: 'verify-autotone.mjs' },
   { name: 'basetone', file: 'verify-basetone.mjs' },
+  { name: 'loupe', file: 'verify-loupe.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];
 
