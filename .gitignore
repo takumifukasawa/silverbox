@@ -13,3 +13,34 @@ tone-experiments-out/
 .harness/conflicts/
 .harness/source.local
 .harness/private-patterns.local
+.harness/installed
+# >>> agent-harness managed (do not commit; restore with: harness install)
+/.harness/bin/harness
+/.harness/bin/harness.cmd
+/.harness/scripts/check.sh
+/.harness/scripts/doctor.sh
+/.harness/scripts/gc.sh
+/.harness/scripts/seed-case.sh
+/.harness/scripts/session-start.sh
+/.harness/state-template/progress.json
+/.harness/state-template/stages.json
+/.agents/skills/harness-maintain/SKILL.md
+/.claude/skills/harness-maintain/SKILL.md
+/.agents/skills/harness/SKILL.md
+/.claude/skills/harness/SKILL.md
+/.agents/skills/session-catchup/SKILL.md
+/.claude/skills/session-catchup/SKILL.md
+/.agents/skills/session-handoff/SKILL.md
+/.claude/skills/session-handoff/SKILL.md
+/.agents/skills/task-orchestrate/SKILL.md
+/.claude/skills/task-orchestrate/SKILL.md
+/.harness/adapters/claude.settings.fragment.json
+/.harness/scripts/push-gate.sh
+/.claude/agents/implementer.md
+/.claude/agents/reviewer.md
+/.agents/skills/role-implementer/SKILL.md
+/.agents/skills/role-reviewer/SKILL.md
+/.codex/hooks.json
+/.harness/scripts/codex-deny.sh
+/.githooks/pre-commit
+# <<< agent-harness managed

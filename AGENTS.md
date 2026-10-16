@@ -1,4 +1,4 @@
-<!-- harness:begin v=0.11.2 -->
+<!-- harness:begin v=1.2.0 -->
 # エージェント運用の共通ルール（agent-harness 管理領域）
 
 このブロックは agent-harness が管理する。直したい場合は直してよいが、`harness diff` で差分を確認し上流へ戻すこと（詳細: `.agents/skills/harness-maintain/SKILL.md`）。
@@ -27,7 +27,7 @@
 
 ## セッションの入口と出口
 
-- 開始時: `.agents/skills/session-catchup/SKILL.md` の手順で現在地を掴む。全 doc を頭から読まない。
+- 開始時: `.agents/skills/session-catchup/SKILL.md` の手順で現在地を掴む。全 doc を頭から読まない。スキルや `.harness/scripts/` が無ければ配布物が未インストール（clone 直後など。コミットしない）なので、`harness install` を回す。
 - 終了時・`/clear` 前・長い区切り: `.agents/skills/session-handoff/SKILL.md` の手順で `docs/handoff.md` を更新し、`harness status` の結果を報告する。
 
 ## 検証と報告
@@ -54,7 +54,7 @@
 
 ## やらないこと
 
-- 破壊的な git 操作（`push --force`、履歴の書き換え、ブランチ削除）を指示なしに行わない。
+- 破壊的な git 操作（`push --force`、push 済みの履歴の書き換え、ブランチ削除）を指示なしに行わない。push していないコミットは書き換えてよい（push 前のレビューで直すときなど）。
 - 秘密情報・個人情報をコミットしない。
 - ハーネス管理ファイル（`.harness/manifest.json` に `managed` と記録されているもの）を黙って改変したまま放置しない。
 <!-- harness:end -->

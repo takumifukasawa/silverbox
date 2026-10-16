@@ -15,7 +15,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PROJECT_DIR:-.}/.harness/scripts/session-start.sh\" || true",
+            "command": "f=\"${CLAUDE_PROJECT_DIR:-.}/.harness/scripts/session-start.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; else echo \"[harness] ハーネスの配布物が入っていない（clone 直後など。lockfile 方式でコミットしない）。harness install を回す。harness が無ければ: curl -fsSL https://raw.githubusercontent.com/takumifukasawa/agent-harness/main/bin/harness | bash -s -- install\"; fi; true",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"${CLAUDE_PROJECT_DIR:-.}/.harness/scripts/push-gate.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; fi; exit 0",
             "timeout": 10
           }
         ]
