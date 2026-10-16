@@ -1,16 +1,16 @@
 {
-  "harness_version": "0.11.0",
+  "harness_version": "0.11.2",
   "source": "https://github.com/takumifukasawa/agent-harness.git",
   "source_ref": "",
-  "installed_at": "2026-10-07",
+  "installed_at": "2026-10-16",
   "agents": "claude,codex",
   "files": [
-    {"path":".harness/bin/harness","src":"@self","ownership":"managed","sha256":"b4eda1281ddace78fbb3560c04ee87f89738a67e","source_sha256":""},
+    {"path":".harness/bin/harness","src":"@self","ownership":"managed","sha256":"fbb67beed19f018ed6c5c37f45eec85441e477b5","source_sha256":""},
     {"path":".harness/bin/harness.cmd","src":"@self-cmd","ownership":"managed","sha256":"59de6078cfcf46f4941194220ffd48aa2e8400c5","source_sha256":""},
     {"path":".harness/scripts/check.sh","src":"scripts/check.sh","ownership":"managed","sha256":"ff67b3dd7f1851f944f4ade3b35ec74623b77e5e","source_sha256":""},
-    {"path":".harness/scripts/doctor.sh","src":"scripts/doctor.sh","ownership":"managed","sha256":"9b4bed632b756dd1e22bccc6c01d69193bfd268f","source_sha256":""},
+    {"path":".harness/scripts/doctor.sh","src":"scripts/doctor.sh","ownership":"managed","sha256":"0324a6c014d80650711843770378adcdaf9b11dc","source_sha256":""},
     {"path":".harness/scripts/gc.sh","src":"scripts/gc.sh","ownership":"managed","sha256":"e199af2046e82446176fe68495ee22a0963db20e","source_sha256":""},
-    {"path":".harness/scripts/seed-case.sh","src":"scripts/seed-case.sh","ownership":"managed","sha256":"05cb5a9d78140135fa60f63bb7ad6e82a1b65652","source_sha256":""},
+    {"path":".harness/scripts/seed-case.sh","src":"scripts/seed-case.sh","ownership":"managed","sha256":"b36bce8103f2736197cf6fbdf7f45af44db9afd0","source_sha256":""},
     {"path":".harness/scripts/session-start.sh","src":"scripts/session-start.sh","ownership":"managed","sha256":"c2b68ba5a93a87cc1105a1d7a7f5878cb7a3fe03","source_sha256":""},
     {"path":".harness/checks.sh","src":"checks.seed.sh","ownership":"seed","sha256":"-","source_sha256":"-"},
     {"path":".harness/state-template/progress.json","src":"state-template/progress.json","ownership":"managed","sha256":"c75de299892fc60a643b68a503007faf0d1f706a","source_sha256":""},
@@ -39,7 +39,7 @@
     {"path":"docs/rules/README.md","src":"docs-template/rules/README.md","ownership":"seed","sha256":"-","source_sha256":"-"},
     {"path":"docs/spec/README.md","src":"docs-template/spec/README.md","ownership":"seed","sha256":"-","source_sha256":"-"},
     {"path":"docs/tech-debt.md","src":"docs-template/tech-debt.md","ownership":"seed","sha256":"-","source_sha256":"-"},
-    {"path":"AGENTS.md","src":"AGENTS.core.md","ownership":"merge","sha256":"314d9b225f617b24a3faee8923c663af25cd1f30","source_sha256":"-"},
+    {"path":"AGENTS.md","src":"AGENTS.core.md","ownership":"merge","sha256":"f5c0f9bcb8099ed686ba8af21a7018d998421ff4","source_sha256":"-"},
     {"path":"CLAUDE.md","src":"adapters/claude/CLAUDE.md.template","ownership":"managed","sha256":"fcaf5d8406e36b729c4fb77c017027bc2d5eab1e","source_sha256":""},
     {"path":".harness/adapters/claude.settings.fragment.json","src":"adapters/claude/settings.fragment.json","ownership":"managed","sha256":"d7fc64fe34e903c597c345ba2add34206badab37","source_sha256":""},
     {"path":".claude/agents/implementer.md","src":"docs-template/roles/implementer.md","ownership":"generated","sha256":"59ed5c16870b57f91896c320818d2c06cb8cb287","source_sha256":"e0ceaf17e20f6a8f683e6f0a9490993f4576866b"},
@@ -47,7 +47,7 @@
     {"path":".agents/skills/role-implementer/SKILL.md","src":"docs-template/roles/implementer.md","ownership":"generated","sha256":"7fd09c08d45744f39d77edcc31ce5d2920b25e00","source_sha256":"e0ceaf17e20f6a8f683e6f0a9490993f4576866b"},
     {"path":".agents/skills/role-reviewer/SKILL.md","src":"docs-template/roles/reviewer.md","ownership":"generated","sha256":"7a5326a71c9b37e2b66a1c1bc6ca439fb3215bbb","source_sha256":"8ce7658a4d82d774b1768e8188664bff5a5f2257"},
     {"path":".codex/hooks.json","src":"adapters/codex/hooks.json","ownership":"managed","sha256":"0bed6c2dec668ee3022fb0efb16ee9bf6b22711c","source_sha256":""},
-    {"path":".harness/scripts/codex-deny.sh","src":"adapters/codex/deny.sh","ownership":"managed","sha256":"52084c968588891398635e41640ba6199f627ec7","source_sha256":""},
+    {"path":".harness/scripts/codex-deny.sh","src":"adapters/codex/deny.sh","ownership":"managed","sha256":"ef2c5e9cc24ac4ba4363ec2577ee807f81c388b8","source_sha256":""},
     {"path":".githooks/pre-commit","src":"@pre-commit","ownership":"managed","sha256":"581e80a3b67f04d1bb187f30db213f3ca6753fd3","source_sha256":""}
   ]
 }

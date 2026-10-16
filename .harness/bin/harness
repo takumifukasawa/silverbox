@@ -207,15 +207,23 @@ resolve_source() {
     info "fetching $src" >&2
     git clone --quiet "$src" "$cache" >&2 || die "clone に失敗: $src"
   else
-    git -C "$cache" fetch --quiet --tags origin >&2 || die "fetch に失敗: $src"
+    git -C "$cache" fetch --quiet --force --tags origin >&2 || die "fetch に失敗: $src"
   fi
+  # キャッシュはハーネスの持ち物なので、ローカルのブランチより origin を正とする。pull --ff-only は
+  # source の履歴が作り直されると失敗し、以前は || true で握りつぶして古い版を黙って配っていた。
+  local fix="直し方: キャッシュを消してやり直す（rm -rf ${cache}）"
   if [ -n "$ref" ]; then
-    git -C "$cache" checkout --quiet "$ref" >&2 || die "ref が見つからない: $ref"
-    git -C "$cache" pull --quiet --ff-only origin "$ref" >/dev/null 2>&1 || true
+    if git -C "$cache" show-ref --verify --quiet "refs/remotes/origin/${ref}"; then
+      git -C "$cache" checkout --quiet --force -B "$ref" "origin/${ref}" >&2 ||
+        die "source のキャッシュを origin/${ref} に合わせられない: ${cache}。${fix}"
+    else
+      git -C "$cache" checkout --quiet --force "$ref" >&2 || die "ref が見つからない: ${ref}"
+    fi
   else
     local def
     def="$(git -C "$cache" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|origin/||' || echo main)"
-    git -C "$cache" checkout --quiet "$def" >&2 && git -C "$cache" pull --quiet --ff-only origin "$def" >&2 || true
+    git -C "$cache" checkout --quiet --force -B "$def" "origin/${def}" >&2 ||
+      die "source のキャッシュを origin/${def} に合わせられない: ${cache}。${fix}"
   fi
   echo "$cache"
 }

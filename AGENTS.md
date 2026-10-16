@@ -1,4 +1,4 @@
-<!-- harness:begin v=0.11.0 -->
+<!-- harness:begin v=0.11.2 -->
 # エージェント運用の共通ルール（agent-harness 管理領域）
 
 このブロックは agent-harness が管理する。直したい場合は直してよいが、`harness diff` で差分を確認し上流へ戻すこと（詳細: `.agents/skills/harness-maintain/SKILL.md`）。
