@@ -7,30 +7,25 @@
 
 ## いま何をしているか（1〜3 行）
 
-`wip/localtone-stage1`（未 push）で、ベーストーンの仕上げと手触りフィードバックへの対応をしている。ベーストーン: None / Reinhard / Sigmoid（darktable 既定値準拠＋自前の色相保持）/ AgX / AgX Punchy / ACES。Inspector では Profile 直下の独立セクションにあり、ホバーでプレビューできる。2026-10-08 にスポイトのルーペとパネルのリサイズ（ノード欄の折りたたみ含む）を追加。
-**いまはユーザーの手触り確認待ち**（UX の変更なので次の実装に進まない）。計画: `docs/plans/active/base-tone-stage.md`。
+2026-11-24 に `wip/localtone-stage1` を main へマージした（localtone stage 1e-r、ベーストーン 6 種、スポイトのルーペ、パネルのリサイズ・ノード欄の折りたたみ）。手触り確認はすべて OK。ベーストーンの計画は `docs/plans/completed/base-tone-stage.md`。
+**次はマージ後の優先順位付け**（下の「未確定事項」から選ぶ。ユーザーの判断待ち）。
 
 ## 状態
 
 | 項目 | 状態 | 出典 |
 |---|---|---|
-| ベーストーン（決定 0001 + 0002） | 実装済み・手触り確認待ち。auto tone はベーストーン越しに輝度を読む（tech-debt #1 の auto tone 部分は返済済み） | `docs/plans/active/base-tone-stage.md`、`npm run verify:basetone` |
+| ベーストーン（決定 0001 + 0002） | main 済み。None / Reinhard / Sigmoid / AgX / AgX Punchy / ACES の 6 種すべて残す（2026-11-24 ユーザー決定） | `docs/plans/completed/base-tone-stage.md`、`npm run verify:basetone` |
 | Adobe Color (local) | Source の選択肢から非表示（フラグで戻せる） | `docs/decisions/0003-hide-acrlook-source.md` |
-| スポイトのルーペ（WB / ColorKey 共通） | 実装済み・手触り確認待ち | `src/renderer/ui/PixelLoupe.tsx`、`npm run verify:loupe` |
-| パネルのリサイズ・ノード欄の折りたたみ | 実装済み・手触り確認待ち。サイズは settings.json の `panelLayout` に保存 | `src/renderer/ui/PanelSplitters.tsx`、`npm run verify:panels` |
-| localtone stage 1e-r（LLF ベースの局所トーン） | 検証済み・main 未マージ | `wip/localtone-stage1`、`npm run verify:localtone` |
+| スポイトのルーペ（WB / ColorKey 共通） | main 済み・手触り OK | `src/renderer/ui/PixelLoupe.tsx`、`npm run verify:loupe` |
+| パネルのリサイズ・ノード欄の折りたたみ | main 済み・手触り OK。サイズは settings.json の `panelLayout` に保存 | `src/renderer/ui/PanelSplitters.tsx`、`npm run verify:panels` |
+| localtone stage 1e-r（LLF ベースの局所トーン） | main 済み | `npm run verify:localtone` |
 | base-match（LR デフォルト描画への自動一致） | 打ち止め（方針 B: 自前のニュートラル既定＋ベーストーン） | `docs/research/lr-base-gap.md` |
 | agent-harness | 導入済み | `bash .harness/bin/harness doctor` / `check` |
 
 ## NEXT（依存順。順序制約があれば明記）
 
-1. **ユーザーの手触り確認**: 2026-11-24 にベーストーンと auto tone は OK。ルーペの RGB 表示が拡大表示に被る件、ノード欄の折りたたみが分かりにくい件は `e74a46e` で修正済み → この 2 つの再確認待ち。
-2. ベーストーンの計画を `docs/plans/completed/` へ移す（残す候補の確定後）。
-3. localtone の `wip/localtone-stage1` → main マージ判断（マージするとベーストーンも一緒に入る）。
-   2026-11-24 ユーザー合意: 手触り確認で致命的な問題が無ければ、ベーストーン候補の確定（2）を待たずにマージしてよい。候補の削減は main 上で別作業。つまり 3 は 2 に依存しない。
-4. 保留: LR のパラメトリックトーンカーブ（範囲別スライダー）。ユーザーが欲しいと言うまで着手しない。
-
-2026-11-24 ユーザー合意: 下の「未確定事項」はマージが済むまで全て保留。マージ後に優先順位を付け直す。
+1. 下の「未確定事項」の優先順位をユーザーと決める（2026-11-24 合意: マージまで保留していたもの）。
+2. 保留: LR のパラメトリックトーンカーブ（範囲別スライダー）。ユーザーが欲しいと言うまで着手しない。
 
 ## 比較結果（2026-10-05、判断材料）
 
@@ -48,7 +43,6 @@
 
 ## 未確定事項（人間の判断待ち）
 
-- 長期的に残すベーストーンの種類。
 - 「開いたときに当てるプリセット」設定（LR の raw defaults 相当）を作るか。
 - look-extraction stage 2 の GO/NO-GO。
 - GO 待ちのブリーフ: store-split リファクタ、grain-quality。linked-looks は設計のみ（明示 GO まで実装しない）。

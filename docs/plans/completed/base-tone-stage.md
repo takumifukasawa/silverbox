@@ -1,7 +1,7 @@
 # Base tone as its own Develop stage
 
 - 開始: 2026-10-06
-- 状態: 進行中（2026-10-07 GO）
+- 状態: 完了（2026-11-24。手触り確認 OK、6 種すべて残す、main へマージ）
 - 関連: docs/decisions/0001-base-tone-separate-stage.md, docs/decisions/0002-neutral-default-base-tone.md, COLOR.md "Default rendering", docs/brief-bank/dcp-profile.md "Layering decision", docs/sidecar-spec.md
 
 ## 目的（何ができれば完了か）
@@ -92,5 +92,5 @@ user can pick a base tone in the Inspector and presets carry it.
 
 - "Preset applied on open" setting (LR raw-defaults style) to soften the
   neutral default for culling — not in this plan's scope yet.
-- Which base tones to keep long-term after hand-testing (reinhard / sigmoid /
-  agx / agx_punchy / aces).
+- ~~Which base tones to keep long-term~~ — 2026-11-24 user: keep all six
+  (none / reinhard / sigmoid / agx / agx_punchy / aces).
