@@ -91,6 +91,30 @@ try {
     { got, expected }
   );
   check('RGB readout equals the displayed pixel at the outlined cell', got.rgb === expected.rgbAtLoupePixel, { got, expected });
+  // Widest readout ("R 255" x3 + a 4-digit coordinate) must stay inside its
+  // own box, below the magnified grid (it once wrapped onto the grid).
+  const readout = await page.evaluate(() => {
+    const root = document.querySelector('[data-testid="pixel-loupe"]');
+    const grid = root.querySelector('.pixel-loupe-grid').getBoundingClientRect();
+    const box = root.getBoundingClientRect();
+    const spans = [...root.querySelectorAll('.pixel-loupe-readout span')];
+    const worst = ['R 255', 'G 255', 'B 255', '8191, 5463'];
+    spans.forEach((s, i) => (s.textContent = worst[i] ?? s.textContent));
+    const rects = spans.map((s) => s.getBoundingClientRect());
+    return {
+      gridBottom: grid.bottom,
+      boxBottom: box.bottom,
+      boxRight: box.right,
+      spanTop: Math.min(...rects.map((r) => r.top)),
+      spanBottom: Math.max(...rects.map((r) => r.bottom)),
+      spanRight: Math.max(...rects.map((r) => r.right)),
+    };
+  });
+  check(
+    'widest RGB readout stays below the magnified grid and inside the loupe',
+    readout.spanTop >= readout.gridBottom && readout.spanBottom <= readout.boxBottom && readout.spanRight <= readout.boxRight,
+    readout
+  );
   const lb = await loupe.boundingBox();
   check('the loupe does not cover the cursor', !(at.x >= lb.x && at.x <= lb.x + lb.width && at.y >= lb.y && at.y <= lb.y + lb.height), lb);
   await page.mouse.move(at.x + 5, at.y);

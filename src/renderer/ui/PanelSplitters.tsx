@@ -1,7 +1,7 @@
 /**
  * Drag handles for the panel layout (panelLayout.ts): a vertical splitter
  * between the canvas and the Inspector, and the node editor's header bar
- * (its height handle, with a "Nodes" button that collapses it).
+ * (its height handle, with a Show/Hide nodes button that collapses it).
  *
  * Double-click a handle to restore its default size.
  */
@@ -181,9 +181,10 @@ export function NodeEditorBar({
         className="node-editor-bar-toggle"
         data-testid="node-editor-toggle"
         aria-expanded={!collapsed}
+        title={collapsed ? 'Show the node graph' : 'Hide the node graph'}
         onClick={() => onChange({ nodeEditorCollapsed: !collapsed }, true)}
       >
-        {collapsed ? '▸' : '▾'} Nodes
+        {collapsed ? '▸ Show nodes' : '▾ Hide nodes'}
       </button>
       <span className="node-editor-bar-grip" aria-hidden="true" />
     </div>
