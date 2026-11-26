@@ -21,6 +21,6 @@
 
 check fast "docs index exists" "test -f docs/README.md || { echo 'docs/README.md が無い。docs の索引。agent-harness の docs-template/README.md から作る。'; exit 1; }"
 check fast "no personal paths staged" "bash scripts/check-no-personal-paths.sh"
-check fast on "src/ shared/ scripts/ vitest.config.ts package.json package-lock.json tsconfig*.json" "unit tests (vitest)" "npx vitest run || { echo 'Unit tests failed. Fix the failing test or the code under test; never skip/delete tests to go green.'; exit 1; }"
+check      on "src/ shared/ scripts/ vitest.config.ts package.json package-lock.json tsconfig*.json" "unit tests (vitest)" "npx vitest run || { echo 'Unit tests failed. Fix the failing test or the code under test; never skip/delete tests to go green.'; exit 1; }"
 check      "typecheck"         "npm run -s typecheck || { echo 'tsc reported errors (node + web projects). Fix the types; do not add ts-ignore to pass.'; exit 1; }"
 check      on ".harness/ AGENTS.md CLAUDE.md .claude/ .agents/ .codex/ .githooks/ .gitignore docs/" "doctor: FAIL 0"    "bash .harness/bin/harness doctor || { echo 'doctor が FAIL を報告した。上の FAIL 行の「→」に従って直す。'; exit 1; }"
