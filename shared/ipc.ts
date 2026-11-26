@@ -1209,6 +1209,15 @@ export interface Settings {
   panelLayout: PanelLayout;
   /** Test-mode twin of panelLayout, so verify runs never see the user's layout. */
   panelLayoutTest?: PanelLayout;
+  /**
+   * Preset slug applied when a RAW with no look file is opened
+   * (docs/decisions/0004, LR's raw defaults); '' = none, the neutral
+   * default. Also what "Reset all edits" returns to and what the CLI
+   * renders. A slug that no longer resolves opens neutral.
+   */
+  rawOpenPreset: string;
+  /** Test-mode twin of rawOpenPreset, so verify runs never see the user's choice. */
+  rawOpenPresetTest?: string;
 }
 
 /** Defaults for a fresh install / a settings.json that fails to parse. */
@@ -1238,6 +1247,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // (the look's current `includes`) isn't available.
   publishFamilies: ['basic-tone', 'wb', 'curves', 'hsl', 'bw', 'grading', 'effects', 'detail'],
   panelLayout: DEFAULT_PANEL_LAYOUT,
+  rawOpenPreset: '',
 };
 
 /** EXIF fields copied from the decode metadata into the exported JPEG. */

@@ -1,7 +1,7 @@
 # 0004: Preset applied when a RAW is opened (LR raw-defaults style)
 
 - 日付: 2026-11-26
-- 状態: 仮採用（ユーザー「いったん ok」2026-11-26。設計の問い Q1〜Q9 を推奨どおり。未実装）
+- 状態: 仮採用・実装済み（ユーザー「いったん ok」2026-11-26。設計の問い Q1〜Q9 を推奨どおり。2026-11-26 実装、手触り確認待ち）
 
 ## 背景
 
@@ -50,6 +50,18 @@ defaults. Chosen on 2026-11-24 as the next feature after the localtone merge.
   CPU for every cell.
 - **Reset to bare neutral.** Diverges from LR and makes reset undo the
   user's chosen starting point.
+
+## 実装メモ
+
+- Setting `rawOpenPreset` (slug, '' = none) + test twin `rawOpenPresetTest`
+  (`shared/ipc.ts`). One helper, `withRawOpenPreset` in `appStore.ts`, layers
+  it onto `seedDefaultLook`'s output for every "as a fresh open would" path:
+  open, Reset all edits, apply-to-selection and repair sheet on a photo with
+  no look yet, and the linked-look baseline. The CLI goes through the same
+  open path. Covered by `npm run verify:rawopenpreset` and
+  `src/renderer/store/rawOpenPreset.test.ts`.
+- Not changed: the Inspector's per-node "Reset develop" still resets that
+  node to bare neutral (Q6 named only Reset all edits). Open question.
 
 ## 影響・やり直す条件
 

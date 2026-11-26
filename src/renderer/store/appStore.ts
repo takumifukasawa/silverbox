@@ -821,12 +821,13 @@ interface AppState {
    * the graph with exactly what a FRESH OPEN of this same image would produce —
    * defaultGraphDoc() run through the same seedDefaultLook() call
    * openImageByPath makes (same testFlags, `usedSidecar: false` so the default
-   * look seeds in), as ONE undo entry (⌘Z restores everything, including any
-   * added nodes). Confirm-free — undo is the safety net, same reasoning as
-   * every other one-undo-entry action here. No-op without a ready image.
+   * look seeds in, then the preset-on-open for a RAW), as ONE undo entry (⌘Z
+   * restores everything, including any added nodes). Confirm-free — undo is
+   * the safety net, same reasoning as every other one-undo-entry action
+   * here. No-op without a ready image.
    * Rating is metadata on the sidecar wrapper, not `graph` — never touched.
    */
-  resetAllEdits(): void;
+  resetAllEdits(): Promise<void>;
   /**
    * "Reset Develop" (Develop inspector button, per-node — distinct from
    * `resetAllEdits`'s whole-photo scope): writes the FRESH-OPEN seeded
@@ -2444,6 +2445,69 @@ export function seedDefaultLook(
   return { graph: out, wbModel };
 }
 
+/** The preset-on-open slug in effect (docs/decisions/0004); '' = none. Verify runs read the test twin. */
+export function rawOpenPresetSlug(settings: Pick<Settings, 'rawOpenPreset' | 'rawOpenPresetTest'>, isTest: boolean): string {
+  return (isTest ? settings.rawOpenPresetTest : settings.rawOpenPreset) ?? '';
+}
+
+/**
+ * Apply the preset-on-open to a freshly seeded graph, the same way the
+ * Presets menu applies it (applyParsedPreset): a whole-look preset replaces
+ * the look (geometry kept), a scoped one merges only its known families.
+ */
+export function applyPresetOnFreshGraph(graph: GraphDoc, preset: ParsedPreset): GraphDoc {
+  if (!preset.includes) return mergeLookWithCurrentGeometry(graph, preset.look);
+  const families = new Set(preset.includes.filter(isKnownFamilyId));
+  return structuredClone(mergeScopedLook(graph, preset.look, families, chainScope(graph, null)));
+}
+
+/** Slugs already reported missing this session: a deleted default preset is announced once, not on every open. */
+const reportedMissingOpenPresets = new Set<string>();
+
+/**
+ * Read + parse the preset-on-open, or null for none. A slug that no longer
+ * reads or parses falls back to neutral; `onMissing` fires once per slug
+ * per session. The setting itself is left as is, so restoring the file
+ * brings it back.
+ */
+async function loadRawOpenPreset(settings: Settings, onMissing: (slug: string) => void): Promise<ParsedPreset | null> {
+  const slug = rawOpenPresetSlug(settings, window.silverbox.testFlags.isTest);
+  if (!slug) return null;
+  let parsed: ParsedPreset | null = null;
+  try {
+    const text = await window.silverbox.presetRead(slug);
+    if (text) parsed = parsePresetFile(text);
+  } catch (err) {
+    console.warn(`preset-on-open "${slug}" could not be read:`, err);
+  }
+  if (parsed) {
+    reportedMissingOpenPresets.delete(slug);
+    return parsed;
+  }
+  if (!reportedMissingOpenPresets.has(slug)) {
+    reportedMissingOpenPresets.add(slug);
+    onMissing(slug);
+  }
+  return null;
+}
+
+/**
+ * The preset-on-open layered onto an already seeded fresh graph: RAW only,
+ * a no-op for None. Every "as a fresh open would" path (open, Reset all
+ * edits, apply-to-selection / repair sheet on a photo with no look yet, the
+ * linked-look baseline) goes through this so they cannot drift.
+ */
+async function withRawOpenPreset(
+  graph: GraphDoc,
+  kind: 'raw' | 'jpg',
+  settings: Settings,
+  onMissing: (slug: string) => void
+): Promise<GraphDoc> {
+  if (kind !== 'raw') return graph;
+  const preset = await loadRawOpenPreset(settings, onMissing);
+  return preset ? applyPresetOnFreshGraph(graph, preset) : graph;
+}
+
 /**
  * Shared body of addLocalAdjustment()/addLocalAdjustmentWithShape(): one
  * undo entry builds Develop D (defaults) + Mask M (`shape`, or the default
@@ -3788,6 +3852,13 @@ export const useAppStore = create<AppState>((set, get) => {
     }, NOTICE_AUTO_EXPIRE_MS);
   };
 
+  /** withRawOpenPreset's once-per-slug report when the preset-on-open no longer resolves. */
+  const reportMissingOpenPreset = (slug: string): void =>
+    raiseNotice('projectNotice', {
+      kind: 'error',
+      message: `preset "${slug}" (Settings › Preset on RAW open) was not found — opened with the neutral default`,
+    });
+
   /**
    * Global-undo jump (docs/brief-bank/global-undo.md, decision 1): make
    * `target` the open photo, awaiting the SAME `openImageByPath` every other
@@ -4544,7 +4615,9 @@ export const useAppStore = create<AppState>((set, get) => {
       // profile auto-on, base curve + default sharpen/color-NR) — pure
       // helper, see its doc comment for the per-piece gating.
       const seeded = seedDefaultLook(graph, image, { usedSidecar, kind, testFlags: window.silverbox.testFlags });
-      graph = seeded.graph;
+      graph = usedSidecar
+        ? seeded.graph
+        : await session.guard(withRawOpenPreset(seeded.graph, kind, get().settings, reportMissingOpenPreset));
       const wbModel = seeded.wbModel;
       // Linked-look validation at open (linked-looks-stage-d.md semantics
       // 5-belt/6/7): only a genuinely loaded sidecar could carry a `link` at
@@ -6761,20 +6834,24 @@ export const useAppStore = create<AppState>((set, get) => {
     if (nextGraph) revalidateShaders(nextGraph);
   },
 
-  resetAllEdits() {
+  async resetAllEdits() {
     const s = get();
     if (s.imageStatus !== 'ready' || !s.image) return;
     const kind = isRawFileName(s.fileName ?? '') ? 'raw' : 'jpg';
-    // The exact same two calls openImageByPath makes for a sidecar-less open
-    // of this image: defaultGraphDoc() (its own `!sidecar` branch) through
+    // The exact same calls openImageByPath makes for a sidecar-less open of
+    // this image: defaultGraphDoc() (its own `!sidecar` branch) through
     // seedDefaultLook with `usedSidecar: false` (its default-look gate) and
-    // the real testFlags — see openImageByPath's own call for the precedent
-    // this mirrors.
-    const { graph } = seedDefaultLook(defaultGraphDoc(), s.image, {
+    // the real testFlags, then the preset-on-open (decision 0004: reset
+    // returns to it, like LR's reset returns to raw defaults).
+    const seeded = seedDefaultLook(defaultGraphDoc(), s.image, {
       usedSidecar: false,
       kind,
       testFlags: window.silverbox.testFlags,
-    });
+    }).graph;
+    const imagePath = s.imagePath;
+    const graph = await withRawOpenPreset(seeded, kind, s.settings, reportMissingOpenPreset);
+    // the preset read awaited: drop the reset if another photo opened meanwhile
+    if (get().imagePath !== imagePath || get().imageStatus !== 'ready') return;
     set((s2) => ({
       ...pushHistory(s2, null, { kind: 'reset-all', label: 'Reset all edits' }),
       graph,
@@ -7174,11 +7251,16 @@ export const useAppStore = create<AppState>((set, get) => {
           const bytes = await window.silverbox.readFile(photoPath);
           const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
           const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
-          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
-            usedSidecar: false,
+          baseGraph = await withRawOpenPreset(
+            seedDefaultLook(defaultGraphDoc(), image, {
+              usedSidecar: false,
+              kind,
+              testFlags: window.silverbox.testFlags,
+            }).graph,
             kind,
-            testFlags: window.silverbox.testFlags,
-          }).graph;
+            s.settings,
+            reportMissingOpenPreset
+          );
           const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
           meta = {
             source: {
@@ -7520,9 +7602,14 @@ export const useAppStore = create<AppState>((set, get) => {
         baseGraph = s.graph;
         const kind: 'raw' | 'jpg' = isRawFileName(s.fileName ?? '') ? 'raw' : 'jpg';
         freshDevelop =
-          seedDefaultLook(defaultGraphDoc(), s.image!, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags }).graph.nodes.find(
-            (n) => n.kind === DEVELOP_KIND
-          )?.develop ?? defaultDevelopParams();
+          (
+            await withRawOpenPreset(
+              seedDefaultLook(defaultGraphDoc(), s.image!, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags }).graph,
+              kind,
+              s.settings,
+              reportMissingOpenPreset
+            )
+          ).nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
       } else {
         let existingText: string | null = null;
         try {
@@ -7542,8 +7629,13 @@ export const useAppStore = create<AppState>((set, get) => {
           errorCount++;
           continue;
         }
-        const seeded = seedDefaultLook(defaultGraphDoc(), image, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags });
-        freshDevelop = seeded.graph.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
+        const seeded = await withRawOpenPreset(
+          seedDefaultLook(defaultGraphDoc(), image, { usedSidecar: false, kind, testFlags: window.silverbox.testFlags }).graph,
+          kind,
+          s.settings,
+          reportMissingOpenPreset
+        );
+        freshDevelop = seeded.nodes.find((n) => n.kind === DEVELOP_KIND)?.develop ?? defaultDevelopParams();
         if (existingText !== null) {
           let parsedLook: SidecarDoc;
           try {
@@ -7567,7 +7659,7 @@ export const useAppStore = create<AppState>((set, get) => {
           // No look yet — same fresh-seed baseline IS the current graph, no
           // separate decode (mirrors applyPresetToSelection's own "seed it
           // exactly like a fresh open would" branch).
-          baseGraph = seeded.graph;
+          baseGraph = seeded;
           const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
           meta = {
             source: {
@@ -9100,11 +9192,16 @@ export const useAppStore = create<AppState>((set, get) => {
           const bytes = await window.silverbox.readFile(photoPath);
           const kind: 'raw' | 'jpg' = isRawFileName(photoPath) ? 'raw' : 'jpg';
           const image = await loadImage(bytes, kind, undefined, s.settings.baselineExposureEV);
-          baseGraph = seedDefaultLook(defaultGraphDoc(), image, {
-            usedSidecar: false,
+          baseGraph = await withRawOpenPreset(
+            seedDefaultLook(defaultGraphDoc(), image, {
+              usedSidecar: false,
+              kind,
+              testFlags: window.silverbox.testFlags,
+            }).graph,
             kind,
-            testFlags: window.silverbox.testFlags,
-          }).graph;
+            s.settings,
+            reportMissingOpenPreset
+          );
           const fingerprint = (await computeFingerprintCached(photoPath)) ?? undefined;
           meta = {
             source: {

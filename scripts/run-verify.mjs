@@ -169,6 +169,7 @@ const ALL_SCRIPTS = [
   { name: 'autotone', file: 'verify-autotone.mjs' },
   { name: 'basetone', file: 'verify-basetone.mjs' },
   { name: 'loupe', file: 'verify-loupe.mjs' },
+  { name: 'rawopenpreset', file: 'verify-rawopenpreset.mjs' },
   { name: 'panels', file: 'verify-panels.mjs' },
   { name: 'ms14', file: 'verify-ms14-package.mjs', exclusive: true },
 ];

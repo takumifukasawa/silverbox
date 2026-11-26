@@ -130,6 +130,10 @@ export function sanitizeSettings(raw: unknown): Settings {
   // clamped against the live window in the renderer, not here.
   result.panelLayout = sanitizePanelLayout(src.panelLayout);
   if (src.panelLayoutTest !== undefined) result.panelLayoutTest = sanitizePanelLayout(src.panelLayoutTest);
+  result.rawOpenPreset = typeof src.rawOpenPreset === 'string' ? src.rawOpenPreset : DEFAULT_SETTINGS.rawOpenPreset;
+  if (src.rawOpenPresetTest !== undefined) {
+    result.rawOpenPresetTest = typeof src.rawOpenPresetTest === 'string' ? src.rawOpenPresetTest : '';
+  }
   return result as unknown as Settings;
 }
 

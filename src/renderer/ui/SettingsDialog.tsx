@@ -1,4 +1,4 @@
-import { useAppStore } from '../store/appStore';
+import { rawOpenPresetSlug, useAppStore } from '../store/appStore';
 
 /**
  * Settings dialog (UX pack C §4): the app-preferences that used to hide in
@@ -15,8 +15,14 @@ export function SettingsDialog() {
   const setOpen = useAppStore((s) => s.setSettingsDialogOpen);
   const settings = useAppStore((s) => s.settings);
   const updateSettings = useAppStore((s) => s.updateSettings);
+  const presets = useAppStore((s) => s.presets);
 
   if (!open) return null;
+
+  const isTest = !!window.silverbox?.testFlags?.isTest;
+  const openPreset = rawOpenPresetSlug(settings, isTest);
+  const openPresetField = isTest ? 'rawOpenPresetTest' : 'rawOpenPreset';
+  const openPresetMissing = openPreset !== '' && !presets.some((p) => p.slug === openPreset);
 
   return (
     <div className="export-dialog-backdrop" data-testid="settings-dialog-backdrop" onClick={() => setOpen(false)}>
@@ -34,6 +40,26 @@ export function SettingsDialog() {
             />
             Autosave sidecar
           </label>
+          <label
+            className="export-dialog-row"
+            title="Preset applied when a RAW with no saved edits is opened (like Lightroom's raw defaults). Also what Reset all edits returns to, and what the CLI renders. Photos you have already edited keep their own look."
+          >
+            Preset on RAW open
+            <select
+              value={openPreset}
+              data-testid="settings-raw-open-preset"
+              onChange={(ev) => void updateSettings({ [openPresetField]: ev.target.value })}
+            >
+              <option value="">None (neutral)</option>
+              {presets.map((p) => (
+                <option key={p.slug} value={p.slug}>
+                  {p.name}
+                </option>
+              ))}
+              {openPresetMissing && <option value={openPreset}>{openPreset} (missing)</option>}
+            </select>
+          </label>
+          <span className="toolbar-dim">unedited RAWs only; applies from the next open</span>
           <label className="export-dialog-row" title="Baseline exposure applied to RAW decodes (EV) — the linear first stage of the default look; the per-camera base curve is the second. Re-decodes the open image immediately (round-10 fix); will be calibrated against Lightroom.">
             Baseline exposure (EV)
             <input
